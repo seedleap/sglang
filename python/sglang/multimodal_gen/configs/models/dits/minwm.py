@@ -36,7 +36,7 @@ class MinWMVideoArchConfig(DiTArchConfig):
             r"^blocks\.(\d+)\.self_attn\.norm_q\.(.*)$": r"blocks.\1.norm_q.\2",
             r"^blocks\.(\d+)\.self_attn\.norm_k\.(.*)$": r"blocks.\1.norm_k.\2",
             r"^blocks\.(\d+)\.self_attn\.prope_o\.(.*)$": r"blocks.\1.prope_o.\2",
-            r"^blocks\.(\d+)\.norm3\.(.*)$": r"blocks.\1.self_attn_residual_norm.norm.\2",
+            r"^blocks\.(\d+)\.norm3\.(.*)$": r"blocks.\1.norm3.\2",
             r"^blocks\.(\d+)\.cross_attn\.q\.(.*)$": r"blocks.\1.attn2.to_q.\2",
             r"^blocks\.(\d+)\.cross_attn\.k\.(.*)$": r"blocks.\1.attn2.to_k.\2",
             r"^blocks\.(\d+)\.cross_attn\.v\.(.*)$": r"blocks.\1.attn2.to_v.\2",
