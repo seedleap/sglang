@@ -111,6 +111,7 @@ class CausalSelfAttentionKVCache:
         current_chunk_start: int,
         cache_head_start: int | None = None,
         recent_window_tokens: int | None = None,
+        sink_protected_rewrite: bool = False,
         debug_name: str = "causal KV cache",
     ) -> CausalAttentionKVView:
         """write fresh kv into the cache, returns the part of view visible to the current chunk
@@ -124,6 +125,12 @@ class CausalSelfAttentionKVCache:
                 tokens plus the current chunk. A positive value keeps sink tokens,
                 up to that many tokens before the current chunk, and the current
                 chunk. Negative values are invalid.
+            sink_protected_rewrite: when rewriting an already-cached range
+                (``current_chunk_end <= global_end`` with ``current_chunk_start
+                > 0``, e.g. a prompt-switch recache replay), keep the sink
+                tokens untouched: the write starts at
+                ``max(local_start, sink_tokens)``. The attention view still
+                covers the full window including the preserved sink tokens.
 
         """
         num_new_tokens = key.shape[1]
@@ -151,12 +158,15 @@ class CausalSelfAttentionKVCache:
         # the global position of the start of the buffer
         window_start = global_end_index - local_end_index_prev
 
+        write_start_index: int | None = None
         if current_chunk_end <= global_end_index:
             # the window stays as previous
             # cache layout:
             # [sink tokens, recent window tokens, current chunk tokens, uninitialized tokens (optional)]
             local_start_index = current_chunk_start - window_start
             local_end_index = local_start_index + num_new_tokens
+            if sink_protected_rewrite and current_chunk_start > 0:
+                write_start_index = max(local_start_index, sink_tokens)
 
             # the local end and global end remains unchanged (since the chunk hasn't proceed)
             updated_local_end = local_end_index_prev
@@ -268,9 +278,13 @@ class CausalSelfAttentionKVCache:
         attn_start_index = max(0, updated_local_end - self.attention_window_size)
 
         # write fresh kv and return visible view
+        if write_start_index is None:
+            write_start_index = local_start_index
+        write_offset = write_start_index - local_start_index
         if cache_head_slice is None:
-            self.k[:, local_start_index:local_end_index] = key
-            self.v[:, local_start_index:local_end_index] = value
+            if write_start_index < local_end_index:
+                self.k[:, write_start_index:local_end_index] = key[:, write_offset:]
+                self.v[:, write_start_index:local_end_index] = value[:, write_offset:]
             visible_k, visible_v = self._visible_attention_kv(
                 local_start_index=local_start_index,
                 updated_local_end=updated_local_end,
@@ -278,8 +292,13 @@ class CausalSelfAttentionKVCache:
                 recent_window_tokens=recent_window_tokens,
             )
         else:
-            self.k[:, local_start_index:local_end_index, cache_head_slice, :] = key
-            self.v[:, local_start_index:local_end_index, cache_head_slice, :] = value
+            if write_start_index < local_end_index:
+                self.k[:, write_start_index:local_end_index, cache_head_slice, :] = (
+                    key[:, write_offset:]
+                )
+                self.v[:, write_start_index:local_end_index, cache_head_slice, :] = (
+                    value[:, write_offset:]
+                )
             visible_k, visible_v = self._visible_attention_kv(
                 local_start_index=local_start_index,
                 updated_local_end=updated_local_end,
