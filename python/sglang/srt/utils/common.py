@@ -3444,6 +3444,12 @@ class Withable(Generic[T]):
             self._value = None
 
 
+def _get_flags():
+    from sglang.srt.runtime_context import get_flags
+
+    return get_flags()
+
+
 def require_mlp_tp_gather(server_args: ServerArgs):
     """
     Check if the input of MLP is obtained by all-gather rather than all-reduce. This only happens when each MLP TP group contains multiple attention DP groups.
@@ -3456,7 +3462,7 @@ def require_mlp_tp_gather(server_args: ServerArgs):
             server_args.moe_dense_tp_size is None
         ):  # TODO(ch-wan): some MoE models do not have dense layers
             return True
-        elif not server_args.enable_dp_lm_head:
+        elif not _get_flags().enable_dp_lm_head:
             return True
         elif get_moe_a2a_backend().is_none():
             return True
