@@ -48,7 +48,7 @@ def _cpu_sdpa_shim(q, k, v, *args, **kwargs):
     return out.transpose(1, 2)
 
 
-def _import_minwm(minwm_repo: str, patch_cpu_attention: bool):
+def _import_minwm(minwm_repo: str, patch_sdpa_shim: bool):
     sys.path.insert(0, minwm_repo)
     import wan.modules.causal_model as causal_model_mod  # noqa: PLC0415
     import wan.modules.model as model_mod  # noqa: PLC0415
@@ -56,9 +56,15 @@ def _import_minwm(minwm_repo: str, patch_cpu_attention: bool):
     from wan.modules.prope import add_prope_parameters  # noqa: PLC0415
     from wan_utils import camera_trajectory  # noqa: PLC0415
 
-    if patch_cpu_attention:
-        # minWM's attention() casts to bf16 and flash_attention() is CUDA-only;
-        # neither works for fp32 CPU parity runs.
+    if patch_sdpa_shim:
+        # Self-attention goes through causal_model.py's attention() wrapper,
+        # which already falls back to SDPA when flash_attn is unavailable.
+        # Cross-attention (WanT2VCrossAttention, defined in model.py and
+        # reused verbatim by the causal model) calls flash_attention()
+        # DIRECTLY with no such fallback -- it hard-asserts
+        # FLASH_ATTN_2_AVAILABLE. Patch both call sites so a flash_attn-less
+        # environment (or an explicit --force-sdpa correctness run) works
+        # end to end.
         causal_model_mod.attention = _cpu_sdpa_shim
         model_mod.flash_attention = _cpu_sdpa_shim
 
@@ -152,7 +158,7 @@ def build_minwm_model(CausalWanModel, add_prope_parameters, cfg: dict, seed: int
     return model.eval()
 
 
-def build_sglang_model(cfg: dict):
+def build_sglang_model(cfg: dict, force_sdpa: bool = False):
     import os
 
     from sglang.multimodal_gen.configs.models.dits.minwm import (
@@ -182,6 +188,13 @@ def build_sglang_model(cfg: dict):
         from torch import _dynamo as _torch_dynamo
 
         _torch_dynamo.config.disable = True
+    elif force_sdpa:
+        # First-pass correctness run: force SDPA on both stacks so the
+        # comparison isolates model-logic divergence from
+        # kernel-implementation divergence (FlashAttention vs SDPA use
+        # different reduction orders). Re-run with FA enabled separately
+        # for the perf-tuned (M4) comparison.
+        global_force_attn_backend(AttentionBackendEnum.TORCH_SDPA)
 
     arch = MinWMVideoArchConfig(
         num_attention_heads=cfg["num_heads"],
@@ -314,14 +327,15 @@ def sigma_for(timestep_value, sigmas, ts):
 @torch.no_grad()
 def run_parity(args):
     CausalWanModel, add_prope_parameters, camera_trajectory = _import_minwm(
-        args.minwm_repo, patch_cpu_attention=not torch.cuda.is_available()
+        args.minwm_repo,
+        patch_sdpa_shim=not torch.cuda.is_available() or args.force_sdpa,
     )
     cfg = TINY if args.mode == "tiny" else FULL
     device = torch.device(args.device)
     dtype = {"fp32": torch.float32, "bf16": torch.bfloat16}[args.dtype]
 
     minwm_model = build_minwm_model(CausalWanModel, add_prope_parameters, cfg, seed=0)
-    sglang_model = build_sglang_model(cfg)
+    sglang_model = build_sglang_model(cfg, force_sdpa=args.force_sdpa)
 
     if args.mode == "checkpoint":
         state = torch.load(args.checkpoint, map_location="cpu", weights_only=True)
@@ -329,11 +343,27 @@ def run_parity(args):
             if isinstance(state, dict) and key in state:
                 state = state[key]
                 break
-        state = {
-            k[len("model.") :] if k.startswith("model.") else k: v
-            for k, v in state.items()
-        }
-        minwm_model.load_state_dict(state)
+        # Checkpoint keys are prefixed "model." (WanDiffusionWrapper.model =
+        # CausalWanModel), sometimes with an old FSDP1 wrapper segment
+        # ("model._fsdp_wrapped_module."). minwm_model here IS the unwrapped
+        # CausalWanModel, so strip both down to nothing (mirrors minWM's own
+        # inference_base.py::_load_generator_state_dict, which strips to
+        # "model." only because it loads into the wrapper).
+        fsdp_prefix = "model._fsdp_wrapped_module."
+        model_prefix = "model."
+        fixed_state = {}
+        for k, v in state.items():
+            if k.startswith(fsdp_prefix):
+                k = k[len(fsdp_prefix) :]
+            elif k.startswith(model_prefix):
+                k = k[len(model_prefix) :]
+            fixed_state[k] = v
+        missing, unexpected = minwm_model.load_state_dict(fixed_state, strict=False)
+        if missing or unexpected:
+            raise SystemExit(
+                "minWM reference checkpoint load mismatch:\n"
+                f"  missing: {missing}\n  unexpected: {unexpected}"
+            )
 
     sync_weights(minwm_model, sglang_model)
     minwm_model = minwm_model.to(device=device, dtype=dtype)
@@ -527,7 +557,7 @@ def run_parity(args):
 def run_camera_probe(args):
     import numpy as np
 
-    _, _, camera_trajectory = _import_minwm(args.minwm_repo, patch_cpu_attention=False)
+    _, _, camera_trajectory = _import_minwm(args.minwm_repo, patch_sdpa_shim=False)
     from sglang.multimodal_gen.runtime.utils.minwm_camera import advance_camera_chunk
 
     cases = ["w*12", "w*6,l*6", "i*3,w*4,k*3,d*2", "j*5,s*4,u*3"]
@@ -572,6 +602,11 @@ def main():
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--tolerance", type=float, default=None)
     parser.add_argument("--prompt-switch-block", type=int, default=-1)
+    parser.add_argument(
+        "--force-sdpa",
+        action="store_true",
+        help="force SDPA attention on both stacks (isolates model-logic diffs from kernel diffs)",
+    )
     parser.add_argument(
         "--no-camera",
         action="store_true",
