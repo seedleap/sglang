@@ -36,6 +36,7 @@ from sglang.multimodal_gen.configs.pipeline_configs import (
     HeliosT2VConfig,
     HunyuanConfig,
     LingBotWorldCausalDMDConfig,
+    MinWMCausalDMDConfig,
     WanI2V480PConfig,
     WanI2V720PConfig,
     WanT2V480PConfig,
@@ -131,6 +132,9 @@ from sglang.multimodal_gen.configs.sample.ltx_2 import (
     LTX2SamplingParams,
     LTX23HQSamplingParams,
     LTX23SamplingParams,
+)
+from sglang.multimodal_gen.configs.sample.minwm import (
+    MinWMSamplingParams,
 )
 from sglang.multimodal_gen.configs.sample.mova import (
     MOVA_360P_SamplingParams,
@@ -763,6 +767,11 @@ def _register_configs():
             "IPostYellow/lingbot-world-fast-diffusers",
             "robbyant/lingbot-world-fast-diffusers",
         ],
+    )
+    register_configs(
+        sampling_param_cls=MinWMSamplingParams,
+        pipeline_config_cls=MinWMCausalDMDConfig,
+        model_detectors=[lambda hf_id: "minwm" in hf_id.lower()],
     )
     register_configs(
         sampling_param_cls=FastWanT2V480PConfig,
