@@ -454,18 +454,43 @@ class MinWMCausalTransformer3DModel(BaseDiT, LayerwiseOffloadableModuleMixin):
         )
 
         # minWM rope frequency table: [t, h, w] split of the head dim.
+        self.register_buffer("freqs", self._build_freqs_table(), persistent=False)
+
+        self.__post_init__()
+        self.layer_names = ["blocks"]
+
+    def _build_freqs_table(self) -> torch.Tensor:
         d = self.hidden_size // self.num_attention_heads
-        self.freqs = torch.cat(
+        max_seq_len = self.config.arch_config.rope_max_seq_len
+        return torch.cat(
             [
-                minwm_rope_params(arch.rope_max_seq_len, d - 4 * (d // 6)),
-                minwm_rope_params(arch.rope_max_seq_len, 2 * (d // 6)),
-                minwm_rope_params(arch.rope_max_seq_len, 2 * (d // 6)),
+                minwm_rope_params(max_seq_len, d - 4 * (d // 6)),
+                minwm_rope_params(max_seq_len, 2 * (d // 6)),
+                minwm_rope_params(max_seq_len, 2 * (d // 6)),
             ],
             dim=1,
         )
 
-        self.__post_init__()
-        self.layer_names = ["blocks"]
+    def post_load_weights(self) -> None:
+        """Re-materialize the RoPE freqs buffer.
+
+        Two failure modes, both requiring an unconditional rebuild (not just
+        an ``is_meta`` check): (1) under meta-device construction, nothing in
+        the checkpoint's state dict populates this deterministically-computed
+        buffer, so it stays on the meta device; (2) the generic full-state-
+        dict materialization casts every param/buffer to the model's target
+        ``param_dtype`` (e.g. bf16), which silently discards the imaginary
+        part of this complex128 table (`torch.Tensor.to` on a complex tensor
+        with a real target dtype truncates to the real component -- no error,
+        no meta flag, just a numerically-broken rope table). This must run
+        after any such cast, which it does: ``post_load_weights`` is the last
+        dtype-relevant step in the load path.
+        """
+        super().post_load_weights()
+        device = next(self.parameters()).device
+        self.register_buffer(
+            "freqs", self._build_freqs_table().to(device=device), persistent=False
+        )
 
     def forward(
         self,

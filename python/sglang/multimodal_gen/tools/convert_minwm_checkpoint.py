@@ -55,7 +55,7 @@ TRANSFORMER_CONFIG = {
     "ffn_dim": 8960,
     "freq_dim": 256,
     "text_dim": 4096,
-    "qk_norm": True,
+    "qk_norm": "rms_norm_across_heads",
     "cross_attn_norm": True,
     "eps": 1e-6,
     "rope_max_seq_len": 1024,
