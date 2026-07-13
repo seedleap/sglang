@@ -31,7 +31,15 @@ sglang serve \
   --host 0.0.0.0 --port 30000
 ```
 
-镜像：不需要自建，直接用 `lmsysorg/sglang:dev`，容器启动时内联 `pip install -e "python[diffusion]"` 即可（跟官方 Docker 安装文档 Method 3 一致）。`--shm-size` 用 `emptyDir{medium: Memory, sizeLimit: 32Gi}` 挂 `/dev/shm`。
+镜像：不需要自建，容器启动时内联 `pip install -e "python[diffusion]"` 即可（跟官方 Docker 安装文档 Method 3 一致）。`--shm-size` 用 `emptyDir{medium: Memory, sizeLimit: 32Gi}` 挂 `/dev/shm`。
+
+**⚠ 但不要直接写 `lmsysorg/sglang:dev`**——这是一个浮动 tag（跟着上游 `dev` 分支持续重新构建），不是固定版本。这次部署图省事直接用了 `:dev`，本次会话实测拉到的 digest 是：
+
+```
+lmsysorg/sglang@sha256:44abe1937f1f55f38fc175399a885d0db3a16adac9fe903f8643491b30e40b09
+```
+
+这个坑不只是"下次可能拉到不一样的镜像"这么简单，它还污染了这次的排查方法论：**本次会话全程是靠读本地 checkout 的仓库源码（`d9a7e0e663` 这个 commit）来推断远端容器里实际在跑的行为**（比如 `camera_actions` Script/State 模式消费逻辑、`interactive_kv_window` 自适应窗口、`output_pace` 限速机制），但从未确认过 `:dev` 镜像里打包的代码版本跟本地 checkout 是不是同一个 commit——如果不是，读代码得出的所有结论都可能对不上容器里实际跑的东西。**下次部署务必固定成一个具体 tag 或 digest**（比如对应某次 release，或者干脆自建镜像固定到某个 commit），部署时把用到的 digest 记下来，方便排查时对照。
 
 ## 3. 各区域/账号的 spot 可得性实测数据
 
