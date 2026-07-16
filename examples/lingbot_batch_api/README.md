@@ -4,6 +4,12 @@ This directory exposes the existing SGLang LingBot realtime engine through a
 small synchronous HTTP adapter. It deliberately has no server-side queue,
 database, scheduler, or job state service.
 
+For the two-stage ownership transfer from consuming an existing SGLang service
+to operating the complete Spot-backed stack, see
+[`HANDOFF.zh-CN.md`](HANDOFF.zh-CN.md). Codex sessions should also read
+[`CODEX_CONTEXT.zh-CN.md`](CODEX_CONTEXT.zh-CN.md) before operating the live
+batch or serving environments.
+
 ## Architecture
 
 ```text
