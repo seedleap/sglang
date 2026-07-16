@@ -1,8 +1,10 @@
 import json
+import sys
 from types import SimpleNamespace
 import urllib.request
 
 from run_t2i_video_batch import (
+    _make_s3_client,
     build_runtime_inputs,
     collect_upload_results,
     parse_s3_uri,
@@ -89,6 +91,23 @@ def test_build_runtime_inputs_writes_messages_and_presigned_image_urls(tmp_path)
     assert image_urls == {
         "img001": "https://signed.example.com/bucket/t2i/images/img001.png?ttl=604800"
     }
+
+
+def test_make_s3_client_forces_sigv4_presigned_urls(monkeypatch):
+    calls = []
+
+    class FakeBoto3:
+        def client(self, service_name, **kwargs):
+            calls.append((service_name, kwargs))
+            return object()
+
+    monkeypatch.setitem(sys.modules, "boto3", FakeBoto3())
+
+    _make_s3_client()
+
+    assert calls[0][0] == "s3"
+    assert calls[0][1]["region_name"] == "us-east-2"
+    assert calls[0][1]["config"].signature_version == "s3v4"
 
 
 def test_run_benchmark_forwards_request_video_dimensions_to_runner(tmp_path, monkeypatch):

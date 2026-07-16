@@ -21,6 +21,7 @@ from t2i_video_batch import (
 
 DEFAULT_PRESIGN_SECONDS = 7 * 24 * 60 * 60
 DEFAULT_RUN_SCRIPT = "/opt/bench/run_capacity_smoke_720p.sh"
+DEFAULT_S3_REGION = "us-east-2"
 
 
 @dataclass(frozen=True)
@@ -255,8 +256,14 @@ def _load_request() -> dict[str, Any]:
 
 def _make_s3_client() -> Any:
     import boto3
+    from botocore.config import Config
 
-    return boto3.client("s3")
+    region_name = os.environ.get("SGLANG_VIDEO_S3_REGION") or DEFAULT_S3_REGION
+    return boto3.client(
+        "s3",
+        region_name=region_name,
+        config=Config(signature_version="s3v4"),
+    )
 
 
 def cleanup_work_dir(work_dir: Path) -> None:
