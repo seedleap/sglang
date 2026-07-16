@@ -14,6 +14,9 @@ server_cache_root=${SERVER_CACHE_ROOT:-${results_root}/server-cache}
 resume=${RESUME:-false}
 stream_upload=${STREAM_UPLOAD:-false}
 upload_workers=${UPLOAD_WORKERS:-16}
+width=${SGLANG_VIDEO_WIDTH:-${WIDTH:-1280}}
+height=${SGLANG_VIDEO_HEIGHT:-${HEIGHT:-720}}
+fps=${SGLANG_VIDEO_FPS:-${FPS:-24}}
 
 mkdir -p "${results_root}"
 server_pids=()
@@ -129,9 +132,9 @@ python3 /opt/bench/benchmark_evalset.py \
   --image-urls "${image_urls_path}" \
   --urls "${urls_csv}" \
   --gpu-count "${gpu_total}" \
-  --width 1280 \
-  --height 720 \
-  --fps 24 \
+  --width "${width}" \
+  --height "${height}" \
+  --fps "${fps}" \
   --warmup-chunks 3 \
   --output-dir "${results_root}/cases" \
   --output "${results_root}/cases/summary.json" \

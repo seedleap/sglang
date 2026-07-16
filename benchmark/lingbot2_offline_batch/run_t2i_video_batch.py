@@ -105,7 +105,19 @@ def benchmark_run_script() -> Path:
     return Path(__file__).with_name("run_capacity_smoke_720p.sh")
 
 
-def run_benchmark(runtime: RuntimeInputs) -> dict[str, Any]:
+def _video_env(request: dict[str, Any]) -> dict[str, str]:
+    video = request.get("video") if isinstance(request.get("video"), dict) else {}
+    env: dict[str, str] = {}
+    if video.get("width") not in (None, ""):
+        env["SGLANG_VIDEO_WIDTH"] = str(video["width"])
+    if video.get("height") not in (None, ""):
+        env["SGLANG_VIDEO_HEIGHT"] = str(video["height"])
+    if video.get("fps") not in (None, ""):
+        env["SGLANG_VIDEO_FPS"] = str(video["fps"])
+    return env
+
+
+def run_benchmark(runtime: RuntimeInputs, *, request: dict[str, Any]) -> dict[str, Any]:
     env = os.environ.copy()
     env.update(
         {
@@ -116,6 +128,7 @@ def run_benchmark(runtime: RuntimeInputs) -> dict[str, Any]:
             "RESUME": env.get("RESUME", "false"),
         }
     )
+    env.update(_video_env(request))
     completed = subprocess.run(
         ["bash", str(benchmark_run_script())],
         env=env,
@@ -274,7 +287,7 @@ def main() -> None:
 
     report: dict[str, Any]
     try:
-        benchmark_summary = run_benchmark(runtime)
+        benchmark_summary = run_benchmark(runtime, request=request)
         upload_results = collect_upload_results(cases, benchmark_summary, s3_client)
         callback_payload = build_callback_progress_payload(request, cases, upload_results)
         report = {

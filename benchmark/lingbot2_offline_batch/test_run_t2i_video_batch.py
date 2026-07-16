@@ -1,4 +1,5 @@
 import json
+from types import SimpleNamespace
 import urllib.request
 
 from run_t2i_video_batch import (
@@ -6,6 +7,7 @@ from run_t2i_video_batch import (
     collect_upload_results,
     parse_s3_uri,
     post_callback,
+    run_benchmark,
     upload_report,
 )
 from t2i_video_batch import build_case_records
@@ -87,6 +89,38 @@ def test_build_runtime_inputs_writes_messages_and_presigned_image_urls(tmp_path)
     assert image_urls == {
         "img001": "https://signed.example.com/bucket/t2i/images/img001.png?ttl=604800"
     }
+
+
+def test_run_benchmark_forwards_request_video_dimensions_to_runner(tmp_path, monkeypatch):
+    request = _request()
+    request["video"].update({"width": 1024, "height": 576, "fps": 12})
+    cases = build_case_records(request, _rows())
+    runtime = build_runtime_inputs(
+        request=request,
+        cases=cases,
+        work_dir=tmp_path,
+        s3_client=FakeS3Client(),
+    )
+    captured = {}
+
+    def fake_run(command, env, check):
+        captured["command"] = command
+        captured["env"] = env
+        captured["check"] = check
+        summary_path = runtime.results_root / "cases" / "summary.json"
+        summary_path.parent.mkdir(parents=True, exist_ok=True)
+        summary_path.write_text('{"results":[]}\n', encoding="utf-8")
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr("run_t2i_video_batch.subprocess.run", fake_run)
+
+    summary = run_benchmark(runtime, request=request)
+
+    assert summary == {"results": []}
+    assert captured["check"] is False
+    assert captured["env"]["SGLANG_VIDEO_WIDTH"] == "1024"
+    assert captured["env"]["SGLANG_VIDEO_HEIGHT"] == "576"
+    assert captured["env"]["SGLANG_VIDEO_FPS"] == "12"
 
 
 def test_collect_upload_results_uploads_successes_and_reports_failures(tmp_path):
