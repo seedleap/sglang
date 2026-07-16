@@ -1,0 +1,52 @@
+{
+  "ranked_by_node_videos_per_hour": [
+    {
+      "topology": "2x4gpu",
+      "server_startup_sec": 131.0,
+      "warmup_wall_sec": 20.723722493999958,
+      "measured_wall_sec": 94.48437404799995,
+      "requested_videos": 8,
+      "successful_videos": 8,
+      "failed_videos": 0,
+      "failure_rate": 0.0,
+      "total_generated_video_seconds": 39.0,
+      "node_videos_per_hour": 304.8123066928403,
+      "videos_per_gpu_hour": 38.10153833660504,
+      "generated_seconds_per_gpu_hour": 185.74499939094954,
+      "aggregate_realtime_factor": 0.4127666653132212,
+      "request_persisted_end_to_end_sec": {
+        "mean": 23.49282073362498,
+        "p50": 23.446893437000085,
+        "p95": 23.792227677999904,
+        "max": 23.792227677999904
+      },
+      "perspective_p50_sec": {
+        "third_person": 23.446893437000085
+      }
+    },
+    {
+      "topology": "1x8gpu",
+      "server_startup_sec": 220.0,
+      "warmup_wall_sec": 31.403943021000032,
+      "measured_wall_sec": 110.89651799900003,
+      "requested_videos": 8,
+      "successful_videos": 8,
+      "failed_videos": 0,
+      "failure_rate": 0.0,
+      "total_generated_video_seconds": 39.0,
+      "node_videos_per_hour": 259.70157151606594,
+      "videos_per_gpu_hour": 32.46269643950824,
+      "generated_seconds_per_gpu_hour": 158.2556451426027,
+      "aggregate_realtime_factor": 0.35167921142800596,
+      "request_persisted_end_to_end_sec": {
+        "mean": 13.860637429875013,
+        "p50": 13.864979785000003,
+        "p95": 14.014018265000004,
+        "max": 14.014018265000004
+      },
+      "perspective_p50_sec": {
+        "third_person": 13.864979785000003
+      }
+    }
+  ]
+}

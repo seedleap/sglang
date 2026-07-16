@@ -1,0 +1,60 @@
+                        seed: 5252
+[07-15 06:58:06] [LingBotWorldCausalDMDDenoisingStage] finished in 0.9579 seconds
+[07-15 06:58:07] [CausalVaeDecodingStage] finished in 0.3848 seconds
+[07-15 06:58:07] Pixel data generated successfully in [92m2.02[0;0m seconds
+[07-15 06:58:07] Sampling params:
+                        seed: 5252
+[07-15 06:58:07] realtime chunk timing: session_id=473d65bc284545f49d4730138b84542d request_id=473d65bc284545f49d4730138b84542d_157686c928624e1f9e3c63829b89fa25 chunk_idx=0 event_id=None condition_kinds=['camera_actions'] request_prepare=0.48ms scheduler_forward=2023.16ms output_pace=0.00ms header_pack=0.01ms header_write=0.03ms raw_payload_build=2.17ms raw_write=11.56ms ws_write=11.59ms chunk_total=2038.30ms batches=1 frames=9 frame_shape=(720, 1280, 3) raw_bytes=24883200 ws_payload_bytes=24883531 content_type=application/x-raw-rgb
+[07-15 06:58:08] [LingBotWorldCausalDMDDenoisingStage] finished in 1.0680 seconds
+[07-15 06:58:08] [CausalVaeDecodingStage] finished in 0.4611 seconds
+[07-15 06:58:08] Pixel data generated successfully in [92m1.61[0;0m seconds
+[07-15 06:58:08] Sampling params:
+                        seed: 5252
+[07-15 06:58:08] realtime chunk timing: session_id=473d65bc284545f49d4730138b84542d request_id=473d65bc284545f49d4730138b84542d_ebb7ca17e0144e64b7e7591f2587ccda chunk_idx=1 event_id=1 condition_kinds=['camera_actions'] request_prepare=0.45ms scheduler_forward=1614.33ms output_pace=0.00ms header_pack=0.03ms header_write=0.08ms raw_payload_build=3.18ms raw_write=18.66ms ws_write=18.74ms chunk_total=1638.01ms batches=1 frames=12 frame_shape=(720, 1280, 3) raw_bytes=33177600 ws_payload_bytes=33177941 content_type=application/x-raw-rgb
+[07-15 06:58:10] [LingBotWorldCausalDMDDenoisingStage] finished in 1.2390 seconds
+[07-15 06:58:10] [CausalVaeDecodingStage] finished in 0.4793 seconds
+[07-15 06:58:10] Pixel data generated successfully in [92m1.79[0;0m seconds
+[07-15 06:58:10] Sampling params:
+                        seed: 5252
+[07-15 06:58:10] realtime chunk timing: session_id=473d65bc284545f49d4730138b84542d request_id=473d65bc284545f49d4730138b84542d_de92846712e24cc485986d8c683ad050 chunk_idx=2 event_id=1 condition_kinds=['camera_actions'] request_prepare=0.71ms scheduler_forward=1793.81ms output_pace=0.00ms header_pack=0.01ms header_write=0.03ms raw_payload_build=2.96ms raw_write=11.57ms ws_write=11.60ms chunk_total=1809.96ms batches=1 frames=12 frame_shape=(720, 1280, 3) raw_bytes=33177600 ws_payload_bytes=33177941 content_type=application/x-raw-rgb
+[07-15 06:58:12] [LingBotWorldCausalDMDDenoisingStage] finished in 1.3971 seconds
+[07-15 06:58:12] [CausalVaeDecodingStage] finished in 0.4976 seconds
+[07-15 06:58:12] Pixel data generated successfully in [92m1.97[0;0m seconds
+[07-15 06:58:12] Sampling params:
+                        seed: 5252
+[07-15 06:58:12] realtime chunk timing: session_id=473d65bc284545f49d4730138b84542d request_id=473d65bc284545f49d4730138b84542d_0c0e6d5a726f46eba52a8fae0716324a chunk_idx=3 event_id=1 condition_kinds=['camera_actions'] request_prepare=0.42ms scheduler_forward=1974.39ms output_pace=0.00ms header_pack=0.01ms header_write=0.03ms raw_payload_build=3.11ms raw_write=5.96ms ws_write=5.99ms chunk_total=1984.81ms batches=1 frames=12 frame_shape=(720, 1280, 3) raw_bytes=33177600 ws_payload_bytes=33177941 content_type=application/x-raw-rgb
+[07-15 06:58:14] [LingBotWorldCausalDMDDenoisingStage] finished in 1.5572 seconds
+[07-15 06:58:14] [CausalVaeDecodingStage] finished in 0.5246 seconds
+[07-15 06:58:14] Pixel data generated successfully in [92m2.16[0;0m seconds
+[07-15 06:58:14] Sampling params:
+                        seed: 5252
+[07-15 06:58:14] realtime chunk timing: session_id=473d65bc284545f49d4730138b84542d request_id=473d65bc284545f49d4730138b84542d_31d5b8f4128b45b7944edf2b9a18c739 chunk_idx=4 event_id=1 condition_kinds=['camera_actions'] request_prepare=0.43ms scheduler_forward=2156.03ms output_pace=0.00ms header_pack=0.01ms header_write=0.03ms raw_payload_build=2.98ms raw_write=6.69ms ws_write=6.73ms chunk_total=2167.05ms batches=1 frames=12 frame_shape=(720, 1280, 3) raw_bytes=33177600 ws_payload_bytes=33177941 content_type=application/x-raw-rgb
+[07-15 06:58:16] [LingBotWorldCausalDMDDenoisingStage] finished in 1.7240 seconds
+[07-15 06:58:17] [CausalVaeDecodingStage] finished in 0.5540 seconds
+[07-15 06:58:17] Pixel data generated successfully in [92m2.35[0;0m seconds
+[07-15 06:58:17] Sampling params:
+                        seed: 5252
+[07-15 06:58:17] realtime chunk timing: session_id=473d65bc284545f49d4730138b84542d request_id=473d65bc284545f49d4730138b84542d_510462ebb0924a0783e0c6c1671f55e2 chunk_idx=5 event_id=1 condition_kinds=['camera_actions'] request_prepare=0.42ms scheduler_forward=2353.95ms output_pace=0.00ms header_pack=0.01ms header_write=0.03ms raw_payload_build=2.72ms raw_write=6.98ms ws_write=7.01ms chunk_total=2365.00ms batches=1 frames=12 frame_shape=(720, 1280, 3) raw_bytes=33177600 ws_payload_bytes=33177941 content_type=application/x-raw-rgb
+[07-15 06:58:19] [LingBotWorldCausalDMDDenoisingStage] finished in 1.9004 seconds
+[07-15 06:58:19] [CausalVaeDecodingStage] finished in 0.5682 seconds
+[07-15 06:58:19] Pixel data generated successfully in [92m2.54[0;0m seconds
+[07-15 06:58:19] Sampling params:
+                        seed: 5252
+[07-15 06:58:19] realtime chunk timing: session_id=473d65bc284545f49d4730138b84542d request_id=473d65bc284545f49d4730138b84542d_a9b6647e18624805aa52ad41746fcf03 chunk_idx=6 event_id=1 condition_kinds=['camera_actions'] request_prepare=0.44ms scheduler_forward=2542.14ms output_pace=0.00ms header_pack=0.01ms header_write=0.03ms raw_payload_build=2.86ms raw_write=6.73ms ws_write=6.76ms chunk_total=2553.10ms batches=1 frames=12 frame_shape=(720, 1280, 3) raw_bytes=33177600 ws_payload_bytes=33177941 content_type=application/x-raw-rgb
+[07-15 06:58:21] [LingBotWorldCausalDMDDenoisingStage] finished in 2.0737 seconds
+[07-15 06:58:22] [CausalVaeDecodingStage] finished in 0.5823 seconds
+[07-15 06:58:22] Pixel data generated successfully in [92m2.73[0;0m seconds
+[07-15 06:58:22] Sampling params:
+                        seed: 5252
+[07-15 06:58:22] realtime chunk timing: session_id=473d65bc284545f49d4730138b84542d request_id=473d65bc284545f49d4730138b84542d_45a24eb52d124ff1bfd4d837c6d3f479 chunk_idx=7 event_id=1 condition_kinds=['camera_actions'] request_prepare=0.44ms scheduler_forward=2729.38ms output_pace=0.00ms header_pack=0.01ms header_write=0.03ms raw_payload_build=2.97ms raw_write=2.81ms ws_write=2.84ms chunk_total=2736.48ms batches=1 frames=12 frame_shape=(720, 1280, 3) raw_bytes=33177600 ws_payload_bytes=33177941 content_type=application/x-raw-rgb
+[07-15 06:58:24] [LingBotWorldCausalDMDDenoisingStage] finished in 2.0838 seconds
+[07-15 06:58:25] [CausalVaeDecodingStage] finished in 0.5901 seconds
+[07-15 06:58:25] Pixel data generated successfully in [92m2.76[0;0m seconds
+[07-15 06:58:25] Sampling params:
+                        seed: 5252
+[07-15 06:58:25] realtime chunk timing: session_id=473d65bc284545f49d4730138b84542d request_id=473d65bc284545f49d4730138b84542d_92b96becc91247319f148df610fdb976 chunk_idx=8 event_id=1 condition_kinds=['camera_actions'] request_prepare=0.42ms scheduler_forward=2762.92ms output_pace=0.00ms header_pack=0.01ms header_write=0.03ms raw_payload_build=2.95ms raw_write=7.38ms ws_write=7.41ms chunk_total=2774.60ms batches=1 frames=12 frame_shape=(720, 1280, 3) raw_bytes=33177600 ws_payload_bytes=33177941 content_type=application/x-raw-rgb
+[07-15 06:58:27] [LingBotWorldCausalDMDDenoisingStage] finished in 2.0924 seconds
+[07-15 06:58:27] [CausalVaeDecodingStage] finished in 0.5883 seconds
+[07-15 06:58:27] Pixel data generated successfully in [92m2.76[0;0m seconds
+[07-15 06:58:27] realtime chunk timing: session_id=473d65bc284545f49d4730138b84542d request_id=473d65bc284545f49d4730138b84542d_bd534a8f16b549c49a9f4e05c68b7b01 chunk_idx=9 event_id=1 condition_kinds=['camera_actions'] request_prepare=0.44ms scheduler_forward=2756.08ms output_pace=0.00ms header_pack=0.02ms header_write=0.03ms raw_payload_build=2.91ms raw_write=7.19ms ws_write=7.23ms chunk_total=2766.75ms batches=1 frames=12 frame_shape=(720, 1280, 3) raw_bytes=33177600 ws_payload_bytes=33177941 content_type=application/x-raw-rgb
+[07-15 06:58:27] generation reached max chunks, session_id=473d65bc284545f49d4730138b84542d, max_chunks=10

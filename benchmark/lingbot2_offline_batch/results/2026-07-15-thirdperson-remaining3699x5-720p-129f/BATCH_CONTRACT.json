@@ -1,0 +1,33 @@
+{
+  "dataset": "game_view_standard_v2_third_person_remaining_20260715",
+  "owner": "codex/chenshengdong",
+  "status": "queued_after codex-lingbot2-tpv1000x5-a15000-19999-720p",
+  "images": 3699,
+  "cases_per_image": 5,
+  "cases": 18495,
+  "action_source": "generated; no trajs.jsonl dependency",
+  "action_seed": 20260715,
+  "action_pattern": "57 movement + 15 noop + 57 camera",
+  "action_combinations": "one key from wasd x one key from ijkl (16 pairs)",
+  "action_sampling": "fixed-seed deterministic shuffled 16-pair schedule, cycled globally; each image receives 5 consecutive pairs without replacement",
+  "pair_count_min": 1155,
+  "pair_count_max": 1156,
+  "video": {
+    "width": 1280,
+    "height": 720,
+    "fps": 24,
+    "frames": 129,
+    "duration_seconds": 5.375
+  },
+  "shards": 75,
+  "shard_size_min": 246,
+  "shard_size_max": 247,
+  "kubernetes_job": "codex-lingbot2-tpvremain3699x5-720p",
+  "s3_prefix": "s3://leap-world-us-east-2/world-model/eval/lingbot2/eval_results/minWM/third_person_remaining_3699x5_720p_129f_20260715/",
+  "fsx_prefix": "/fsx/world-model/eval/lingbot2/eval_sets/minWM/third_person_remaining_3699x5_720p_129f_20260715/",
+  "video_action_manifest": "s3://leap-world-us-east-2/world-model/eval/lingbot2/eval_results/minWM/third_person_remaining_3699x5_720p_129f_20260715/metadata/video_action_manifest.jsonl",
+  "video_action_manifest_rows": 18495,
+  "video_action_manifest_schema": "one row per video with generated 129-frame camera_actions, movement_key, camera_key, action_seed, action_pattern, segments, and quantized 32-latent actions",
+  "upload_mode": "stream each atomically completed MP4 immediately; 16 PUT workers per node; retry and checkpoint enabled",
+  "output_key_pattern": "videos/{image_id}-action-{00..04}.mp4"
+}

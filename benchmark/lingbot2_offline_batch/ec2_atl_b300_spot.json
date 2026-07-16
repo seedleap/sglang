@@ -1,0 +1,57 @@
+{
+  "ImageId": "ami-07869df7a188bb1aa",
+  "InstanceType": "p6-b300.48xlarge",
+  "MinCount": 1,
+  "MaxCount": 1,
+  "SubnetId": "subnet-0e791e7cdccab06be",
+  "SecurityGroupIds": [
+    "sg-0337d193dc418a33e"
+  ],
+  "IamInstanceProfile": {
+    "Name": "AmazonSSMManagedInstanceCore"
+  },
+  "BlockDeviceMappings": [
+    {
+      "DeviceName": "/dev/sda1",
+      "Ebs": {
+        "DeleteOnTermination": true,
+        "Encrypted": true,
+        "VolumeSize": 600,
+        "VolumeType": "gp3",
+        "Iops": 3000,
+        "Throughput": 125
+      }
+    }
+  ],
+  "InstanceMarketOptions": {
+    "MarketType": "spot",
+    "SpotOptions": {
+      "SpotInstanceType": "one-time",
+      "InstanceInterruptionBehavior": "terminate"
+    }
+  },
+  "MetadataOptions": {
+    "HttpEndpoint": "enabled",
+    "HttpTokens": "required"
+  },
+  "TagSpecifications": [
+    {
+      "ResourceType": "instance",
+      "Tags": [
+        {"Key": "Name", "Value": "codex-lingbot2-b300-offline-batch-atl2"},
+        {"Key": "seedleap.ai/owner", "Value": "chenshengdong"},
+        {"Key": "seedleap.ai/task", "Value": "lingbot2-b300-offline-batch"},
+        {"Key": "managed-by", "Value": "codex"}
+      ]
+    },
+    {
+      "ResourceType": "volume",
+      "Tags": [
+        {"Key": "Name", "Value": "codex-lingbot2-b300-offline-batch-atl2"},
+        {"Key": "seedleap.ai/owner", "Value": "chenshengdong"},
+        {"Key": "seedleap.ai/task", "Value": "lingbot2-b300-offline-batch"},
+        {"Key": "managed-by", "Value": "codex"}
+      ]
+    }
+  ]
+}

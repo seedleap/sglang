@@ -1,0 +1,265 @@
+{
+  "config": {
+    "urls": [
+      "ws://127.0.0.1:30000/v1/realtime_video/generate",
+      "ws://127.0.0.1:30100/v1/realtime_video/generate",
+      "ws://127.0.0.1:30200/v1/realtime_video/generate",
+      "ws://127.0.0.1:30300/v1/realtime_video/generate"
+    ],
+    "gpu_count": 8,
+    "size": "832x480",
+    "fps": 25.0,
+    "chunks": 11,
+    "frames_per_chunk": 9,
+    "nominal_video_seconds": 5.16,
+    "videos": 8,
+    "perspective_mode": "third_person",
+    "warmup_chunks_per_server": 3,
+    "steps": 4,
+    "output_format": "raw-to-H.264-MP4",
+    "upscaling": false,
+    "frame_interpolation": false,
+    "distinct_perspective_conditioning_frames": true
+  },
+  "summary": {
+    "server_startup_sec": 186.0,
+    "warmup_wall_sec": 24.42689506299996,
+    "measured_wall_sec": 32.53874026799997,
+    "requested_videos": 8,
+    "successful_videos": 8,
+    "failed_videos": 0,
+    "failure_rate": 0.0,
+    "total_generated_video_seconds": 41.28,
+    "node_videos_per_hour": 885.0988010842937,
+    "videos_per_gpu_hour": 110.6373501355367,
+    "generated_seconds_per_gpu_hour": 570.8887266993694,
+    "aggregate_realtime_factor": 1.2686416148874875,
+    "request_persisted_end_to_end_sec": {
+      "mean": 16.048396408125015,
+      "p50": 16.04581572899997,
+      "p95": 16.374378137999997,
+      "max": 16.374378137999997
+    },
+    "perspective_p50_sec": {
+      "third_person": 16.04581572899997
+    }
+  },
+  "results": [
+    {
+      "work_item": {
+        "index": 0,
+        "perspective": "third_person",
+        "seed": 1000,
+        "action": "w"
+      },
+      "url": "ws://127.0.0.1:30000/v1/realtime_video/generate",
+      "output": "/results/4x2gpu/videos/video-00-third_person.mp4",
+      "chunks": 11,
+      "frames": 129,
+      "video_seconds": 5.16,
+      "generation_delivery_sec": 15.731281791000015,
+      "persisted_end_to_end_sec": 16.147309194999934,
+      "scheduler_generated_fps": 8.270291062956789,
+      "delivered_and_persisted_fps": 7.9889471640231715,
+      "realtime_factor": 0.3195578865609269,
+      "media": {
+        "frames": 129,
+        "duration_sec": 5.16,
+        "width": 832,
+        "height": 480,
+        "avg_frame_rate": "25/1",
+        "bytes": 2366645
+      },
+      "success": true
+    },
+    {
+      "work_item": {
+        "index": 1,
+        "perspective": "third_person",
+        "seed": 1001,
+        "action": "a"
+      },
+      "url": "ws://127.0.0.1:30100/v1/realtime_video/generate",
+      "output": "/results/4x2gpu/videos/video-01-third_person.mp4",
+      "chunks": 11,
+      "frames": 129,
+      "video_seconds": 5.16,
+      "generation_delivery_sec": 15.51772121700003,
+      "persisted_end_to_end_sec": 15.928150262000031,
+      "scheduler_generated_fps": 8.386425692367702,
+      "delivered_and_persisted_fps": 8.09886885031194,
+      "realtime_factor": 0.3239547540124776,
+      "media": {
+        "frames": 129,
+        "duration_sec": 5.16,
+        "width": 832,
+        "height": 480,
+        "avg_frame_rate": "25/1",
+        "bytes": 2081709
+      },
+      "success": true
+    },
+    {
+      "work_item": {
+        "index": 2,
+        "perspective": "third_person",
+        "seed": 1002,
+        "action": "d"
+      },
+      "url": "ws://127.0.0.1:30200/v1/realtime_video/generate",
+      "output": "/results/4x2gpu/videos/video-02-third_person.mp4",
+      "chunks": 11,
+      "frames": 129,
+      "video_seconds": 5.16,
+      "generation_delivery_sec": 15.880040910999924,
+      "persisted_end_to_end_sec": 16.374378137999997,
+      "scheduler_generated_fps": 8.25652841781874,
+      "delivered_and_persisted_fps": 7.87816177889711,
+      "realtime_factor": 0.3151264711558844,
+      "media": {
+        "frames": 129,
+        "duration_sec": 5.16,
+        "width": 832,
+        "height": 480,
+        "avg_frame_rate": "25/1",
+        "bytes": 3108471
+      },
+      "success": true
+    },
+    {
+      "work_item": {
+        "index": 3,
+        "perspective": "third_person",
+        "seed": 1003,
+        "action": "s"
+      },
+      "url": "ws://127.0.0.1:30300/v1/realtime_video/generate",
+      "output": "/results/4x2gpu/videos/video-03-third_person.mp4",
+      "chunks": 11,
+      "frames": 129,
+      "video_seconds": 5.16,
+      "generation_delivery_sec": 15.585100327999953,
+      "persisted_end_to_end_sec": 15.944322263000004,
+      "scheduler_generated_fps": 8.353299229424335,
+      "delivered_and_persisted_fps": 8.090654332756067,
+      "realtime_factor": 0.3236261733102427,
+      "media": {
+        "frames": 129,
+        "duration_sec": 5.16,
+        "width": 832,
+        "height": 480,
+        "avg_frame_rate": "25/1",
+        "bytes": 1932425
+      },
+      "success": true
+    },
+    {
+      "work_item": {
+        "index": 4,
+        "perspective": "third_person",
+        "seed": 1004,
+        "action": "w"
+      },
+      "url": "ws://127.0.0.1:30100/v1/realtime_video/generate",
+      "output": "/results/4x2gpu/videos/video-04-third_person.mp4",
+      "chunks": 11,
+      "frames": 129,
+      "video_seconds": 5.16,
+      "generation_delivery_sec": 15.419841436999945,
+      "persisted_end_to_end_sec": 15.811308015999998,
+      "scheduler_generated_fps": 8.441303494307029,
+      "delivered_and_persisted_fps": 8.158717790423191,
+      "realtime_factor": 0.3263487116169277,
+      "media": {
+        "frames": 129,
+        "duration_sec": 5.16,
+        "width": 832,
+        "height": 480,
+        "avg_frame_rate": "25/1",
+        "bytes": 2211447
+      },
+      "success": true
+    },
+    {
+      "work_item": {
+        "index": 5,
+        "perspective": "third_person",
+        "seed": 1005,
+        "action": "a"
+      },
+      "url": "ws://127.0.0.1:30300/v1/realtime_video/generate",
+      "output": "/results/4x2gpu/videos/video-05-third_person.mp4",
+      "chunks": 11,
+      "frames": 129,
+      "video_seconds": 5.16,
+      "generation_delivery_sec": 15.521490260000064,
+      "persisted_end_to_end_sec": 15.876707517,
+      "scheduler_generated_fps": 8.388061642499512,
+      "delivered_and_persisted_fps": 8.125110314079485,
+      "realtime_factor": 0.3250044125631794,
+      "media": {
+        "frames": 129,
+        "duration_sec": 5.16,
+        "width": 832,
+        "height": 480,
+        "avg_frame_rate": "25/1",
+        "bytes": 1919594
+      },
+      "success": true
+    },
+    {
+      "work_item": {
+        "index": 6,
+        "perspective": "third_person",
+        "seed": 1006,
+        "action": "d"
+      },
+      "url": "ws://127.0.0.1:30000/v1/realtime_video/generate",
+      "output": "/results/4x2gpu/videos/video-06-third_person.mp4",
+      "chunks": 11,
+      "frames": 129,
+      "video_seconds": 5.16,
+      "generation_delivery_sec": 15.669982139000012,
+      "persisted_end_to_end_sec": 16.1498943470001,
+      "scheduler_generated_fps": 8.295819935691318,
+      "delivered_and_persisted_fps": 7.987668354249154,
+      "realtime_factor": 0.31950673416996617,
+      "media": {
+        "frames": 129,
+        "duration_sec": 5.16,
+        "width": 832,
+        "height": 480,
+        "avg_frame_rate": "25/1",
+        "bytes": 3180395
+      },
+      "success": true
+    },
+    {
+      "work_item": {
+        "index": 7,
+        "perspective": "third_person",
+        "seed": 1007,
+        "action": "s"
+      },
+      "url": "ws://127.0.0.1:30200/v1/realtime_video/generate",
+      "output": "/results/4x2gpu/videos/video-07-third_person.mp4",
+      "chunks": 11,
+      "frames": 129,
+      "video_seconds": 5.16,
+      "generation_delivery_sec": 15.750995191000015,
+      "persisted_end_to_end_sec": 16.155101527000056,
+      "scheduler_generated_fps": 8.261816318688355,
+      "delivered_and_persisted_fps": 7.985093735523854,
+      "realtime_factor": 0.3194037494209542,
+      "media": {
+        "frames": 129,
+        "duration_sec": 5.16,
+        "width": 832,
+        "height": 480,
+        "avg_frame_rate": "25/1",
+        "bytes": 2224752
+      },
+      "success": true
+    }
+  ]
+}

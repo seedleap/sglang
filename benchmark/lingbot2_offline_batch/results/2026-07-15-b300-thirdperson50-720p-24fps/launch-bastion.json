@@ -1,0 +1,40 @@
+{
+  "ImageId": "ami-0d001f8052688dc45",
+  "InstanceType": "t3.small",
+  "MinCount": 1,
+  "MaxCount": 1,
+  "UserData": "I2Nsb3VkLWNvbmZpZwpzc2hfYXV0aG9yaXplZF9rZXlzOgogIC0gc3NoLWVkMjU1MTkgQUFBQUMzTnphQzFsWkRJMU5URTVBQUFBSUlyWWNZZ1FiUVV4d1c0WXRmTGt1bXNKbGxtMFA1YklIL210QzJMTEhra3AgY2hlbnNoZW5nZG9uZ0BzZE1hY0Jvb2stUHJvLTIubG9jYWwK",
+  "SubnetId": "subnet-027a408f623c6bd8a",
+  "SecurityGroupIds": ["sg-0e12753e54a231405"],
+  "BlockDeviceMappings": [
+    {
+      "DeviceName": "/dev/sda1",
+      "Ebs": {
+        "DeleteOnTermination": true,
+        "Encrypted": true,
+        "VolumeSize": 16,
+        "VolumeType": "gp3"
+      }
+    }
+  ],
+  "MetadataOptions": {"HttpEndpoint": "enabled", "HttpTokens": "required"},
+  "TagSpecifications": [
+    {
+      "ResourceType": "instance",
+      "Tags": [
+        {"Key": "Name", "Value": "codex-lingbot2-b300-720p-bastion-20260715"},
+        {"Key": "Owner", "Value": "codex"},
+        {"Key": "Task", "Value": "lingbot2-b300-720p"},
+        {"Key": "Expires", "Value": "2026-07-16"}
+      ]
+    },
+    {
+      "ResourceType": "volume",
+      "Tags": [
+        {"Key": "Owner", "Value": "codex"},
+        {"Key": "Task", "Value": "lingbot2-b300-720p"},
+        {"Key": "Expires", "Value": "2026-07-16"}
+      ]
+    }
+  ]
+}

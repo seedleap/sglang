@@ -1,0 +1,14 @@
+{
+  "topology": "8x1gpu",
+  "phase": "concurrent_warmup",
+  "server_startup_sec": 181.0,
+  "result": "failed",
+  "error_type": "CUDAOutOfMemoryError",
+  "requested_allocation_mib": 366.0,
+  "gpu_total_gib": 79.18,
+  "gpu_free_mib": 54.12,
+  "process_memory_in_use_gib": 79.12,
+  "pytorch_allocated_gib": 71.96,
+  "pytorch_reserved_unallocated_gib": 1.37,
+  "note": "All eight single-GPU services became healthy, then the first concurrent generation warmup failed. No steady-state throughput is reported."
+}

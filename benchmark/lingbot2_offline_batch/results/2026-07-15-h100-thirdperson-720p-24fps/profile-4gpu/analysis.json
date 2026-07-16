@@ -1,0 +1,11 @@
+[
+  {
+    "window": 0,
+    "wall_ms": 22613.022122,
+    "busy_pct": 94.50960275322018,
+    "SMs Active [Throughput %]": 84.53644048308709,
+    "Tensor Active [Throughput %]": 57.15482865974731,
+    "DRAM Read Bandwidth [Throughput %]": 14.375166387327587,
+    "DRAM Write Bandwidth [Throughput %]": 7.667656514644296
+  }
+]
