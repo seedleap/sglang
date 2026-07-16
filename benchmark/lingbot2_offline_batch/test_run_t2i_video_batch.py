@@ -15,6 +15,35 @@ from run_t2i_video_batch import (
 from t2i_video_batch import build_case_records
 
 
+def _traj(traj_id: str, first_key: str, last_key: str | None = None) -> dict:
+    last_key = last_key or first_key
+    return {
+        "traj_id": traj_id,
+        "fps": 24,
+        "num_frames": 129,
+        "traj_type": "test_traj",
+        "condition_inputs": {
+            "camera_actions": (
+                [[first_key] for _ in range(64)]
+                + [[last_key] for _ in range(65)]
+            )
+        },
+        "segments": [
+            {"key": first_key, "start_frame": 0, "end_frame": 63, "num_frames": 64},
+            {"key": last_key, "start_frame": 64, "end_frame": 128, "num_frames": 65},
+        ],
+    }
+
+
+def _trajs() -> tuple[dict, ...]:
+    return (
+        _traj("traj-0", "w", "a"),
+        _traj("traj-1", "a", "s"),
+        _traj("traj-2", "s", "d"),
+        _traj("traj-3", "d", "w"),
+    )
+
+
 class FakeS3Client:
     def __init__(self) -> None:
         self.uploads = []
@@ -50,7 +79,7 @@ def _request() -> dict:
             "report_s3_uri": "s3://bucket/t2i/reports/sglang_video_report.json",
         },
         "video": {
-            "videos_per_image": 5,
+            "videos_per_image": 1,
             "fps": 24,
             "width": 1280,
             "height": 704,
@@ -72,7 +101,7 @@ def _rows() -> list[dict]:
 
 
 def test_build_runtime_inputs_writes_messages_and_presigned_image_urls(tmp_path):
-    cases = build_case_records(_request(), _rows())
+    cases = build_case_records(_request(), _rows(), action_trajectories=_trajs())
 
     runtime = build_runtime_inputs(
         request=_request(),
@@ -86,7 +115,7 @@ def test_build_runtime_inputs_writes_messages_and_presigned_image_urls(tmp_path)
         for line in runtime.messages_path.read_text(encoding="utf-8").splitlines()
     ]
     image_urls = json.loads(runtime.image_urls_path.read_text(encoding="utf-8"))
-    assert len(message_rows) == 5
+    assert len(message_rows) == 1
     assert message_rows[0]["sample_id"] == cases[0]["sample_id"]
     assert image_urls == {
         "img001": "https://signed.example.com/bucket/t2i/images/img001.png?ttl=604800"
@@ -113,7 +142,7 @@ def test_make_s3_client_forces_sigv4_presigned_urls(monkeypatch):
 def test_run_benchmark_forwards_request_video_dimensions_to_runner(tmp_path, monkeypatch):
     request = _request()
     request["video"].update({"width": 1024, "height": 576, "fps": 12})
-    cases = build_case_records(request, _rows())
+    cases = build_case_records(request, _rows(), action_trajectories=_trajs())
     runtime = build_runtime_inputs(
         request=request,
         cases=cases,
@@ -143,7 +172,20 @@ def test_run_benchmark_forwards_request_video_dimensions_to_runner(tmp_path, mon
 
 
 def test_collect_upload_results_uploads_successes_and_reports_failures(tmp_path):
-    cases = build_case_records(_request(), _rows())
+    cases = build_case_records(
+        _request(),
+        _rows()
+        + [
+            {
+                "item_id": "img002",
+                "image_uri": "s3://bucket/t2i/images/img002.png",
+                "image_prompt": "A red robot.",
+                "video_prompt": "A red robot.",
+                "video_prompt_source": "image_prompt_fallback",
+            }
+        ],
+        action_trajectories=_trajs(),
+    )
     successful_output = tmp_path / "video.mp4"
     successful_output.write_bytes(b"mp4")
     summary = {
@@ -175,6 +217,8 @@ def test_collect_upload_results_uploads_successes_and_reports_failures(tmp_path)
     ]
     assert results[0]["status"] == "succeeded"
     assert results[0]["video_uri"] == cases[0]["video_s3_uri"]
+    assert results[0]["traj_id"] == cases[0]["traj_id"]
+    assert results[0]["action_source"] == "trajs.jsonl"
     assert results[1]["status"] == "failed"
     assert results[1]["error"] == "RuntimeError: boom"
 

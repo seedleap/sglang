@@ -17,7 +17,11 @@ from prepare_capacity_smoke_720p import (
     WIDTH,
     quantize_actions,
 )
-from thirdperson_actions import ACTION_SEED, build_action_trajectory, combo_schedule
+from thirdperson_actions import (
+    ACTION_SEED,
+    build_action_trajectory,
+    validate_action_trajectories,
+)
 
 
 def _safe_id(value: str) -> str:
@@ -41,7 +45,7 @@ def _output_config(request: dict[str, Any]) -> dict[str, Any]:
 
 
 def videos_per_image(request: dict[str, Any]) -> int:
-    return int(_video_config(request).get("videos_per_image") or 5)
+    return int(_video_config(request).get("videos_per_image") or 1)
 
 
 def action_seed(request: dict[str, Any]) -> int:
@@ -56,10 +60,15 @@ def video_dimensions(request: dict[str, Any]) -> tuple[int, int]:
 def build_case_records(
     request: dict[str, Any],
     manifest_rows: list[dict[str, Any]],
+    *,
+    action_trajectories: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None = None,
 ) -> list[dict[str, Any]]:
     per_image = videos_per_image(request)
     seed = action_seed(request)
-    max_cases_per_image = len(combo_schedule(seed))
+    if action_trajectories is None:
+        raise ValueError("action_trajectories is required")
+    trajectory_pool = validate_action_trajectories(action_trajectories)
+    max_cases_per_image = len(trajectory_pool)
     if per_image <= 0 or per_image > max_cases_per_image:
         raise ValueError(
             f"videos_per_image must be between 1 and {max_cases_per_image}"
@@ -78,13 +87,22 @@ def build_case_records(
         item_stem = _safe_id(item_id)
         for case_slot in range(per_image):
             case_index = image_index * per_image + case_slot
-            trajectory = build_action_trajectory(case_index, seed)
+            trajectory = build_action_trajectory(
+                case_index,
+                seed,
+                trajectories=trajectory_pool,
+                validate=False,
+            )
             video_actions, latent_keys = quantize_actions(trajectory)
             movement_key = trajectory["movement_key"]
             ending_movement_key = trajectory["ending_movement_key"]
             movement_pair = trajectory["movement_pair"]
             camera_key = trajectory["camera_key"]
-            action_suffix = f"{movement_key}{ending_movement_key}"
+            traj_id = str(trajectory["traj_id"])
+            traj_type = str(trajectory.get("traj_type") or "")
+            action_source = str(trajectory.get("action_source") or "")
+            action_index = int(trajectory["action_index"])
+            action_suffix = _safe_id(traj_id)
             case_id = f"{item_stem}-action-{case_slot:02d}-{action_suffix}"
             sample_id = f"{job_id}/TPV/{case_id}"
             video_s3_uri = f"{video_s3_prefix}/{item_stem}/{case_slot:02d}_{action_suffix}.mp4"
@@ -101,6 +119,10 @@ def build_case_records(
                 "ending_movement_key": ending_movement_key,
                 "movement_pair": movement_pair,
                 "camera_key": camera_key,
+                "traj_id": traj_id,
+                "traj_type": traj_type,
+                "action_source": action_source,
+                "action_index": action_index,
                 "action_id": trajectory["action_id"],
                 "action_seed": trajectory["action_seed"],
                 "action_pattern": trajectory["action_pattern"],
@@ -119,6 +141,10 @@ def build_case_records(
                     "ending_movement_key": ending_movement_key,
                     "movement_pair": movement_pair,
                     "camera_key": camera_key,
+                    "traj_id": traj_id,
+                    "traj_type": traj_type,
+                    "action_source": action_source,
+                    "action_index": action_index,
                     "action_seed": trajectory["action_seed"],
                     "action_pattern": trajectory["action_pattern"],
                     "source_segments": trajectory.get("segments", []),
@@ -186,6 +212,10 @@ def build_callback_progress_payload(
                 or case["ending_movement_key"],
                 "movement_pair": result.get("movement_pair") or case["movement_pair"],
                 "camera_key": result.get("camera_key") or case["camera_key"],
+                "traj_id": result.get("traj_id") or case["traj_id"],
+                "traj_type": result.get("traj_type") or case["traj_type"],
+                "action_source": result.get("action_source") or case["action_source"],
+                "action_index": result.get("action_index", case["action_index"]),
                 "action_seed": result.get("action_seed") or case["action_seed"],
                 "action_pattern": result.get("action_pattern") or case["action_pattern"],
                 "status": status or "running",

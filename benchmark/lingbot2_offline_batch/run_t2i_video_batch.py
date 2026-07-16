@@ -56,6 +56,17 @@ def read_jsonl_uri(uri: str, s3_client: Any) -> list[dict[str, Any]]:
     return [json.loads(line) for line in text.splitlines() if line.strip()]
 
 
+def read_action_trajectories(request: dict[str, Any], s3_client: Any) -> list[dict[str, Any]]:
+    input_config = request.get("input") if isinstance(request.get("input"), dict) else {}
+    uri = (
+        str(input_config.get("action_trajs_uri") or "").strip()
+        or os.environ.get("SGLANG_VIDEO_ACTION_TRAJS_URI", "").strip()
+    )
+    if not uri:
+        raise ValueError("input.action_trajs_uri or SGLANG_VIDEO_ACTION_TRAJS_URI is required")
+    return read_jsonl_uri(uri, s3_client)
+
+
 def _presigned_image_url(image_uri: str, s3_client: Any, expires_in: int) -> str:
     if not image_uri.startswith("s3://"):
         return image_uri
@@ -178,6 +189,10 @@ def collect_upload_results(
                     "ending_movement_key": case["ending_movement_key"],
                     "movement_pair": case["movement_pair"],
                     "camera_key": case["camera_key"],
+                    "traj_id": case["traj_id"],
+                    "traj_type": case["traj_type"],
+                    "action_source": case["action_source"],
+                    "action_index": case["action_index"],
                     "action_seed": case["action_seed"],
                     "action_pattern": case["action_pattern"],
                 }
@@ -191,6 +206,10 @@ def collect_upload_results(
                     "ending_movement_key": case["ending_movement_key"],
                     "movement_pair": case["movement_pair"],
                     "camera_key": case["camera_key"],
+                    "traj_id": case["traj_id"],
+                    "traj_type": case["traj_type"],
+                    "action_source": case["action_source"],
+                    "action_index": case["action_index"],
                     "action_seed": case["action_seed"],
                     "action_pattern": case["action_pattern"],
                     "error": row.get("error") or "benchmark failed",
@@ -208,6 +227,10 @@ def collect_upload_results(
                 "ending_movement_key": case["ending_movement_key"],
                 "movement_pair": case["movement_pair"],
                 "camera_key": case["camera_key"],
+                "traj_id": case["traj_id"],
+                "traj_type": case["traj_type"],
+                "action_source": case["action_source"],
+                "action_index": case["action_index"],
                 "action_seed": case["action_seed"],
                 "action_pattern": case["action_pattern"],
                 "error": "missing benchmark result",
@@ -290,7 +313,12 @@ def main() -> None:
         str(request.get("input", {}).get("video_manifest_uri")),
         s3_client,
     )
-    cases = build_case_records(request, manifest_rows)
+    action_trajectories = read_action_trajectories(request, s3_client)
+    cases = build_case_records(
+        request,
+        manifest_rows,
+        action_trajectories=action_trajectories,
+    )
     runtime = build_runtime_inputs(
         request=request,
         cases=cases,

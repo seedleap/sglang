@@ -4,6 +4,35 @@ from t2i_video_batch import (
 )
 
 
+def _traj(traj_id: str, first_key: str, last_key: str | None = None) -> dict:
+    last_key = last_key or first_key
+    return {
+        "traj_id": traj_id,
+        "fps": 24,
+        "num_frames": 129,
+        "traj_type": "test_traj",
+        "condition_inputs": {
+            "camera_actions": (
+                [[first_key] for _ in range(64)]
+                + [[last_key] for _ in range(65)]
+            )
+        },
+        "segments": [
+            {"key": first_key, "start_frame": 0, "end_frame": 63, "num_frames": 64},
+            {"key": last_key, "start_frame": 64, "end_frame": 128, "num_frames": 65},
+        ],
+    }
+
+
+def _trajs() -> tuple[dict, ...]:
+    return (
+        _traj("traj-0", "w", "a"),
+        _traj("traj-1", "a", "s"),
+        _traj("traj-2", "s", "d"),
+        _traj("traj-3", "d", "w"),
+    )
+
+
 def _request() -> dict:
     return {
         "schema_version": "sglang-video-batch.v1",
@@ -19,7 +48,7 @@ def _request() -> dict:
             "report_s3_uri": "s3://bucket/t2i/reports/sglang_video_report.json",
         },
         "video": {
-            "videos_per_image": 5,
+            "videos_per_image": 1,
             "frames": 129,
             "fps": 24,
             "width": 1280,
@@ -41,7 +70,7 @@ def _request() -> dict:
     }
 
 
-def test_build_case_records_expands_each_t2i_image_to_five_prompted_cases():
+def test_build_case_records_expands_each_t2i_image_to_one_random_traj_case():
     rows = [
         {
             "item_id": "img001",
@@ -61,27 +90,26 @@ def test_build_case_records_expands_each_t2i_image_to_five_prompted_cases():
         },
     ]
 
-    cases = build_case_records(_request(), rows)
+    cases = build_case_records(_request(), rows, action_trajectories=_trajs())
 
-    assert len(cases) == 10
-    assert [case["case_index"] for case in cases] == list(range(10))
-    first_image_pairs = {
-        (case["movement_key"], case["ending_movement_key"]) for case in cases[:5]
-    }
-    assert len(first_image_pairs) == 5
+    assert len(cases) == 2
+    assert [case["case_index"] for case in cases] == [0, 1]
     assert all(case["camera_key"] == "" for case in cases)
     assert all(case["metadata"]["camera_key"] == "" for case in cases)
     assert cases[0]["image_id"] == "img001"
     assert cases[0]["image_uri"] == "s3://bucket/t2i/images/img001.png"
     assert cases[0]["messages"][0]["content"] == "A quiet workshop with warm practical lighting."
     assert cases[0]["metadata"]["video_prompt_source"] == "image_prompt_fallback"
-    assert cases[5]["messages"][0]["content"] == "The camera slowly orbits around the red robot."
-    assert cases[5]["metadata"]["video_prompt_source"] == "explicit"
+    assert cases[1]["messages"][0]["content"] == "The camera slowly orbits around the red robot."
+    assert cases[1]["metadata"]["video_prompt_source"] == "explicit"
     assert cases[0]["video_s3_uri"].startswith("s3://bucket/t2i/videos/img001/")
     assert cases[0]["video_s3_uri"].endswith(
-        f"_{cases[0]['movement_key']}{cases[0]['ending_movement_key']}.mp4"
+        f"_{cases[0]['traj_id']}.mp4"
     )
-    assert cases[0]["action_pattern"] == "57 movement + 15 noop + 57 movement"
+    assert cases[0]["traj_id"] == "traj-1"
+    assert cases[0]["metadata"]["traj_id"] == "traj-1"
+    assert cases[0]["metadata"]["action_source"] == "trajs.jsonl"
+    assert cases[0]["action_pattern"] == "trajs.jsonl:test_traj"
     assert len(cases[0]["messages"][1]["controls"][0]["actions"]) == 128
     assert cases[0]["messages"][1]["controls"][0]["action_keys"] == ["w", "a", "s", "d"]
     assert all(
@@ -106,6 +134,7 @@ def test_build_case_records_defaults_to_1280x704_video_size():
                 "video_prompt_source": "image_prompt_fallback",
             }
         ],
+        action_trajectories=_trajs(),
     )
 
     target = cases[0]["messages"][1]
@@ -113,7 +142,7 @@ def test_build_case_records_defaults_to_1280x704_video_size():
     assert target["output"]["height"] == 704
 
 
-def test_callback_progress_payload_groups_five_videos_per_image():
+def test_callback_progress_payload_groups_one_video_per_image():
     cases = build_case_records(
         _request(),
         [
@@ -125,6 +154,7 @@ def test_callback_progress_payload_groups_five_videos_per_image():
                 "video_prompt_source": "image_prompt_fallback",
             }
         ],
+        action_trajectories=_trajs(),
     )
     results = [
         {
@@ -134,6 +164,9 @@ def test_callback_progress_payload_groups_five_videos_per_image():
             "movement_key": case["movement_key"],
             "ending_movement_key": case["ending_movement_key"],
             "camera_key": case["camera_key"],
+            "traj_id": case["traj_id"],
+            "traj_type": case["traj_type"],
+            "action_source": case["action_source"],
             "action_seed": case["action_seed"],
             "action_pattern": case["action_pattern"],
         }
@@ -145,12 +178,12 @@ def test_callback_progress_payload_groups_five_videos_per_image():
     assert payload["status"] == "succeeded"
     assert payload["stage"] == "sglang_video_generation"
     assert payload["summary"]["video_status"] == "succeeded"
-    assert payload["summary"]["video_succeeded_count"] == 5
+    assert payload["summary"]["video_succeeded_count"] == 1
     assert payload["items"][0]["item_id"] == "img001"
     assert payload["items"][0]["metadata"]["video_status"] == "succeeded"
-    assert len(payload["items"][0]["metadata"]["videos"]) == 5
+    assert len(payload["items"][0]["metadata"]["videos"]) == 1
     assert payload["items"][0]["metadata"]["videos"][0]["video_uri"].startswith(
         "s3://bucket/t2i/videos/img001/"
     )
     assert payload["items"][0]["metadata"]["videos"][0]["camera_key"] == ""
-    assert payload["items"][0]["metadata"]["videos"][0]["ending_movement_key"] in "wasd"
+    assert payload["items"][0]["metadata"]["videos"][0]["traj_id"] == cases[0]["traj_id"]
