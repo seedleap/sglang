@@ -91,3 +91,11 @@ These values can be overridden in a manifest. Keep the uploader on the
 FSx-adjacent GPU host; do not route MP4 bytes through a developer laptop.
 Generated presigned URL files, expanded requests, videos, and HTML galleries
 are intentionally ignored by Git and should be distributed through S3.
+
+`publish_actual_video_actions.py` publishes the strict actual-only manifest for
+each of the three logical TPV batches. It intersects successful generation and
+successful S3 upload records, enriches each row with the original action
+trajectory and measured output metadata, and writes only under the LingBot2
+`video_action_manifests/` namespace. For the active 3,699-image batch it merges
+completed S3 shard summaries with live FSx progress; once no inference pod is
+available it can still reproduce all completed shards from S3 summaries.

@@ -17,6 +17,7 @@ results/**/torch_compile_cache/
 # Large visual QA/runtime payloads are published to S3 instead.
 results/**/videos/
 results/**/priority-thirdperson50/
+results/actual_video_actions/
 results/**/*.jsonl
 results/**/*.jsonl.gz
 results/**/*.jpg
