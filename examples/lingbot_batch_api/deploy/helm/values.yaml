@@ -1,0 +1,75 @@
+replicaCount: 4
+
+apiImage:
+  repository: REPLACE_WITH_ECR_REPOSITORY/lingbot-batch-api
+  tag: latest
+  pullPolicy: IfNotPresent
+
+sglangImage:
+  repository: REPLACE_WITH_ECR_REPOSITORY/sglang-lingbot
+  tag: latest
+  pullPolicy: IfNotPresent
+
+model:
+  id: robbyant/lingbot-world-v2-14b-causal-fast-diffusers
+  revision: 59cccf49f2d2dd27418ae7a04b82b10868d455c2
+
+api:
+  existingSecret: lingbot-batch-api-key
+  secretKey: api-key
+  outputBucket: leap-world-us-east-2
+  outputPrefix: world-model/eval/platform/eval_results/minWM/lingbot_api
+  retryAfterSeconds: 5
+
+serviceAccount:
+  create: true
+  name: lingbot-batch-api
+  roleArn: REPLACE_WITH_IRSA_ROLE_ARN
+
+service:
+  port: 80
+
+ingress:
+  enabled: false
+  className: alb
+  certificateArn: REPLACE_WITH_ACM_CERTIFICATE_ARN
+  host: lingbot-api.example.com
+
+autoscaling:
+  enabled: true
+  minReplicas: 4
+  maxReplicas: 32
+  targetApiCpuUtilization: 50
+
+resources:
+  api:
+    requests:
+      cpu: "1"
+      memory: 2Gi
+    limits:
+      cpu: "4"
+      memory: 8Gi
+  sglang:
+    requests:
+      cpu: "32"
+      memory: 260Gi
+      nvidia.com/gpu: "2"
+    limits:
+      cpu: "44"
+      memory: 380Gi
+      nvidia.com/gpu: "2"
+
+nodeSelector:
+  karpenter.sh/capacity-type: spot
+  node.kubernetes.io/instance-type: p6-b300.48xlarge
+
+tolerations:
+  - key: nvidia.com/gpu
+    operator: Exists
+    effect: NoSchedule
+
+fsx:
+  existingClaim: xacct-fsx-pvc
+  mountPath: /fsx
+
+terminationGracePeriodSeconds: 120

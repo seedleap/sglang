@@ -1,0 +1,140 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: codex-lingbot2-thirdperson-720p-h100
+  namespace: default
+  labels:
+    app: codex-lingbot2-thirdperson-720p-h100
+    seedleap.ai/owner: chenshengdong
+    seedleap.ai/task: lingbot2-thirdperson-720p-h100
+  annotations:
+    seedleap.ai/code-git-ref: d9a7e0e6630ea8aea135191115a13e6451618a6f
+    seedleap.ai/model-revision: 59cccf49f2d2dd27418ae7a04b82b10868d455c2
+    seedleap.ai/benchmark-contract: 8-videos-117-frames-24fps-1280x720-third-person-topology-sweep
+spec:
+  restartPolicy: Never
+  terminationGracePeriodSeconds: 30
+  nodeSelector:
+    karpenter.sh/nodepool: minwm-test-h100-spot
+    node.kubernetes.io/instance-type: p5.48xlarge
+  tolerations:
+    - key: seedleap.ai/workload
+      operator: Equal
+      value: wan22-ti2v
+      effect: NoSchedule
+  containers:
+    - name: benchmark
+      image: lmsysorg/sglang:dev@sha256:8f78575e03ab59a39191a4a6f718bbbe1726fa940f72a86a187a3f1628ada9a7
+      imagePullPolicy: IfNotPresent
+      workingDir: /workspace
+      command: [/bin/bash, -lc]
+      args:
+        - |
+          set -euo pipefail
+          rm -rf /workspace/sglang
+          git clone --filter=blob:none "https://x-access-token:${GITHUB_TOKEN}@github.com/seedleap/sglang.git" /workspace/sglang
+          cd /workspace/sglang
+          git checkout --detach "${CODE_GIT_REF}"
+          test "$(git rev-parse HEAD)" = "${CODE_GIT_REF}"
+          python3 -m pip install -e "python[diffusion]" --root-user-action=ignore
+          python3 -m pip install \
+            --force-reinstall \
+            --no-deps \
+            --index-url https://flashinfer.ai/whl/cu130 \
+            'flashinfer-jit-cache==0.6.12+cu130'
+          command -v ffmpeg
+          command -v ffprobe
+          command -v nsys || true
+          set +e
+          /opt/bench/run_topologies.sh
+          benchmark_status=$?
+          set -e
+          echo "${benchmark_status}" > /results/benchmark-exit-code
+          touch /results/benchmark-finished
+          sleep infinity
+      env:
+        - name: CODE_GIT_REF
+          value: d9a7e0e6630ea8aea135191115a13e6451618a6f
+        - name: MODEL_ID
+          value: robbyant/lingbot-world-v2-14b-causal-fast-diffusers
+        - name: MODEL_REVISION
+          value: 59cccf49f2d2dd27418ae7a04b82b10868d455c2
+        - name: GPU_TOTAL
+          value: "8"
+        - name: VIDEOS
+          value: "8"
+        - name: TOPOLOGIES
+          value: "8 4 2"
+        - name: CHUNKS
+          value: "10"
+        - name: WARMUP_CHUNKS
+          value: "3"
+        - name: FRAMES_PER_CHUNK
+          value: "9"
+        - name: SIZE
+          value: 1280x720
+        - name: FPS
+          value: "24"
+        - name: PERSPECTIVE_MODE
+          value: third_person
+        - name: FIRST_FRAME_THIRD_PERSON
+          value: https://www.nasa.gov/wp-content/uploads/2023/03/107427main_image_feature_261_ajhfull.jpg?w=1041
+        - name: RESULTS_ROOT
+          value: /results
+        - name: GITHUB_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: github-token
+              key: token
+        - name: HF_HUB_ENABLE_HF_TRANSFER
+          value: "1"
+        - name: HF_HOME
+          value: /cache/huggingface
+        - name: PIP_CACHE_DIR
+          value: /cache/pip
+      resources:
+        requests:
+          cpu: "160"
+          memory: 1200Gi
+          nvidia.com/gpu: "8"
+        limits:
+          cpu: "180"
+          memory: 1600Gi
+          nvidia.com/gpu: "8"
+      securityContext:
+        capabilities:
+          add: [SYS_ADMIN]
+      volumeMounts:
+        - name: benchmark-scripts
+          mountPath: /opt/bench
+          readOnly: true
+        - name: results
+          mountPath: /results
+        - name: cache
+          mountPath: /cache
+    - name: result-server
+      image: busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662
+      imagePullPolicy: IfNotPresent
+      command: [httpd, -f, -p, "18082", -h, /results]
+      resources:
+        requests:
+          cpu: 100m
+          memory: 64Mi
+        limits:
+          cpu: "1"
+          memory: 256Mi
+      volumeMounts:
+        - name: results
+          mountPath: /results
+          readOnly: true
+  volumes:
+    - name: benchmark-scripts
+      configMap:
+        name: codex-lingbot2-thirdperson-720p-h100
+        defaultMode: 0555
+    - name: results
+      emptyDir:
+        sizeLimit: 80Gi
+    - name: cache
+      emptyDir:
+        sizeLimit: 350Gi

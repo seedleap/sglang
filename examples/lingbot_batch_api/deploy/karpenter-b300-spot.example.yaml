@@ -1,0 +1,28 @@
+# This NodePool intentionally references an existing, cluster-specific
+# EC2NodeClass. Copy this file and replace the nodeClassRef name before apply.
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: lingbot-b300-spot
+spec:
+  template:
+    metadata:
+      labels:
+        workload.seedleap.ai/lingbot-batch: "true"
+    spec:
+      nodeClassRef:
+        group: karpenter.k8s.aws
+        kind: EC2NodeClass
+        name: REPLACE_WITH_EXISTING_B300_NODE_CLASS
+      requirements:
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: [spot]
+        - key: node.kubernetes.io/instance-type
+          operator: In
+          values: [p6-b300.48xlarge]
+  limits:
+    nvidia.com/gpu: 64
+  disruption:
+    consolidationPolicy: WhenEmptyOrUnderutilized
+    consolidateAfter: 10m
