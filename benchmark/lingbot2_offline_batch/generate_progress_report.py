@@ -377,19 +377,20 @@ document.querySelector('#shards').innerHTML = DATA.shards.map(s => `<tr>
 </tr>`).join('');
 
 function segmentHtml(s, i) {{
-  const kind = s.key === null ? 'none' : i === 0 ? 'move' : 'camera';
+  const kind = s.key === null ? 'none' : s.kind === 'movement' || i === 0 ? 'move' : 'camera';
   const label = s.key === null ? 'none' : s.key;
   return `<div class="segment ${{kind}}" style="flex:${{s.num_frames}}">${{esc(label)}} · ${{s.num_frames}}f</div>`;
 }}
 
 function card(x) {{
   const detail = x.segments.map(s => `${{s.key ?? 'none'}}: ${{s.start_frame}}–${{s.end_frame}} (${{s.num_frames}}f)`).join(' · ');
+  const ending = x.ending_movement_key || x.camera_key || '';
   return `<article>
     <video controls playsinline preload="metadata" src="${{esc(x.url)}}"></video>
     <div class="body">
       <div class="title-row">
         <strong>${{esc(x.sample_id)}}</strong>
-        <span class="badge">${{esc(x.movement_key)}} → none → ${{esc(x.camera_key)}}</span>
+        <span class="badge">${{esc(x.movement_key)}} → none → ${{esc(ending)}}</span>
       </div>
       <div class="meta">
         <span>case #${{x.case_index}}</span>
@@ -478,6 +479,10 @@ def main() -> None:
                 item["case_index"] = case["case_index"]
                 item["case_id"] = case["case_id"]
                 item["movement_key"] = case["movement_key"]
+                item["ending_movement_key"] = case.get(
+                    "ending_movement_key", case.get("camera_key", "")
+                )
+                item["movement_pair"] = case.get("movement_pair", "")
                 item["camera_key"] = case["camera_key"]
                 all_results.append(item)
 
@@ -512,6 +517,8 @@ def main() -> None:
                 "trajectory": metadata["trajectory"],
                 "segments": metadata["source_segments"],
                 "movement_key": row["movement_key"],
+                "ending_movement_key": row.get("ending_movement_key", ""),
+                "movement_pair": row.get("movement_pair", ""),
                 "camera_key": row["camera_key"],
                 "latent_actions": metadata.get("latent_camera_actions", []),
                 "width": row["media"]["width"],

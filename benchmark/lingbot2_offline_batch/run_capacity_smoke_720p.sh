@@ -15,7 +15,7 @@ resume=${RESUME:-false}
 stream_upload=${STREAM_UPLOAD:-false}
 upload_workers=${UPLOAD_WORKERS:-16}
 width=${SGLANG_VIDEO_WIDTH:-${WIDTH:-1280}}
-height=${SGLANG_VIDEO_HEIGHT:-${HEIGHT:-720}}
+height=${SGLANG_VIDEO_HEIGHT:-${HEIGHT:-704}}
 fps=${SGLANG_VIDEO_FPS:-${FPS:-24}}
 
 mkdir -p "${results_root}"

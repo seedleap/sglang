@@ -17,7 +17,7 @@ from prepare_capacity_smoke_720p import (
     WIDTH,
     quantize_actions,
 )
-from thirdperson_actions import ACTION_SEED, build_action_trajectory
+from thirdperson_actions import ACTION_SEED, build_action_trajectory, combo_schedule
 
 
 def _safe_id(value: str) -> str:
@@ -58,9 +58,12 @@ def build_case_records(
     manifest_rows: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     per_image = videos_per_image(request)
-    if per_image <= 0 or per_image > 16:
-        raise ValueError("videos_per_image must be between 1 and 16")
     seed = action_seed(request)
+    max_cases_per_image = len(combo_schedule(seed))
+    if per_image <= 0 or per_image > max_cases_per_image:
+        raise ValueError(
+            f"videos_per_image must be between 1 and {max_cases_per_image}"
+        )
     width, height = video_dimensions(request)
     video_s3_prefix = str(_required(_output_config(request), "video_s3_prefix")).rstrip("/")
     job_id = str(request.get("generation_job_id") or "sglang-video")
@@ -78,10 +81,13 @@ def build_case_records(
             trajectory = build_action_trajectory(case_index, seed)
             video_actions, latent_keys = quantize_actions(trajectory)
             movement_key = trajectory["movement_key"]
+            ending_movement_key = trajectory["ending_movement_key"]
+            movement_pair = trajectory["movement_pair"]
             camera_key = trajectory["camera_key"]
-            case_id = f"{item_stem}-action-{case_slot:02d}-{movement_key}{camera_key}"
+            action_suffix = f"{movement_key}{ending_movement_key}"
+            case_id = f"{item_stem}-action-{case_slot:02d}-{action_suffix}"
             sample_id = f"{job_id}/TPV/{case_id}"
-            video_s3_uri = f"{video_s3_prefix}/{item_stem}/{case_slot:02d}_{movement_key}{camera_key}.mp4"
+            video_s3_uri = f"{video_s3_prefix}/{item_stem}/{case_slot:02d}_{action_suffix}.mp4"
             case = {
                 "schema_version": 1,
                 "sample_id": sample_id,
@@ -92,6 +98,8 @@ def build_case_records(
                 "image_uri": image_uri,
                 "video_s3_uri": video_s3_uri,
                 "movement_key": movement_key,
+                "ending_movement_key": ending_movement_key,
+                "movement_pair": movement_pair,
                 "camera_key": camera_key,
                 "action_id": trajectory["action_id"],
                 "action_seed": trajectory["action_seed"],
@@ -108,6 +116,8 @@ def build_case_records(
                     "trajectory": trajectory["action_id"],
                     "action_id": trajectory["action_id"],
                     "movement_key": movement_key,
+                    "ending_movement_key": ending_movement_key,
+                    "movement_pair": movement_pair,
                     "camera_key": camera_key,
                     "action_seed": trajectory["action_seed"],
                     "action_pattern": trajectory["action_pattern"],
@@ -172,6 +182,9 @@ def build_callback_progress_payload(
             {
                 "video_uri": result.get("video_uri") or case["video_s3_uri"],
                 "movement_key": result.get("movement_key") or case["movement_key"],
+                "ending_movement_key": result.get("ending_movement_key")
+                or case["ending_movement_key"],
+                "movement_pair": result.get("movement_pair") or case["movement_pair"],
                 "camera_key": result.get("camera_key") or case["camera_key"],
                 "action_seed": result.get("action_seed") or case["action_seed"],
                 "action_pattern": result.get("action_pattern") or case["action_pattern"],
@@ -184,7 +197,12 @@ def build_callback_progress_payload(
     for image_id in sorted(expected_by_item):
         videos = sorted(
             videos_by_item.get(image_id, []),
-            key=lambda item: (item["movement_key"], item["camera_key"], item["video_uri"]),
+            key=lambda item: (
+                item["movement_key"],
+                item["ending_movement_key"],
+                item["camera_key"],
+                item["video_uri"],
+            ),
         )
         item_failed = any(video["status"] in {"failed", "rejected"} for video in videos)
         item_succeeded = len(videos) == expected_by_item[image_id] and all(

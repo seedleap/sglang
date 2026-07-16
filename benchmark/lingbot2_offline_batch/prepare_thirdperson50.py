@@ -10,17 +10,14 @@ import random
 from pathlib import Path
 
 
-ACTION_KEYS = ["w", "a", "s", "d", "i", "j", "k", "l"]
-MOVEMENT_KEYS = ACTION_KEYS[:4]
-CAMERA_KEYS = ACTION_KEYS[4:]
+ACTION_KEYS = ["w", "a", "s", "d"]
+MOVEMENT_KEYS = tuple(ACTION_KEYS)
 GENERATED_LATENT_FRAMES = 20
 VIDEO_ACTION_FRAMES = GENERATED_LATENT_FRAMES * 4
 OUTPUT_VIDEO_FRAMES = VIDEO_ACTION_FRAMES + 1
 ACTION_SEGMENTS = 10
 ACTION_FRAMES_PER_SEGMENT = VIDEO_ACTION_FRAMES // ACTION_SEGMENTS
 ACTION_SEGMENT_SECONDS = 0.5
-SINGLE_SEGMENTS = 6
-COMBO_SEGMENTS = 4
 
 
 def parse_args() -> argparse.Namespace:
@@ -34,23 +31,18 @@ def parse_args() -> argparse.Namespace:
 
 
 def build_action_plan(sample_id: str, base_seed: int) -> tuple[list[list[int]], list[dict]]:
-    """Create ten reproducible 0.5-second actions with an exact 60/40 mix."""
+    """Create ten reproducible 0.5-second single-movement actions."""
     seed_material = f"{base_seed}:{sample_id}".encode()
     sample_seed = int.from_bytes(hashlib.sha256(seed_material).digest()[:8], "big")
     rng = random.Random(sample_seed)
 
-    action_kinds = ["single"] * SINGLE_SEGMENTS + ["combo"] * COMBO_SEGMENTS
-    rng.shuffle(action_kinds)
     video_actions: list[list[int]] = []
     plan: list[dict] = []
     previous_keys: tuple[str, ...] | None = None
 
-    for segment_index, kind in enumerate(action_kinds):
+    for segment_index in range(ACTION_SEGMENTS):
         while True:
-            if kind == "single":
-                keys = (rng.choice(ACTION_KEYS),)
-            else:
-                keys = (rng.choice(MOVEMENT_KEYS), rng.choice(CAMERA_KEYS))
+            keys = (rng.choice(MOVEMENT_KEYS),)
             if keys != previous_keys:
                 break
         previous_keys = keys
@@ -61,7 +53,7 @@ def build_action_plan(sample_id: str, base_seed: int) -> tuple[list[list[int]], 
                 "segment": segment_index,
                 "start_sec": segment_index * ACTION_SEGMENT_SECONDS,
                 "end_sec": (segment_index + 1) * ACTION_SEGMENT_SECONDS,
-                "kind": kind,
+                "kind": "movement",
                 "keys": list(keys),
             }
         )
@@ -106,7 +98,7 @@ def main() -> None:
                     "group": "TP50",
                     "image_id": sample_id,
                     "duration_tier": "5s",
-                    "complexity": "mixed_single_combo",
+                    "complexity": "single_movement_only",
                     "motion_pattern": "randomized_keyboard_0.5s",
                     "purpose": "third-person data synthesis preview",
                     "view": {"tier": "tpv", "sub": "dataset_label"},
@@ -173,10 +165,8 @@ def main() -> None:
                 "action_seed": args.action_seed,
                 "action_segments_per_video": ACTION_SEGMENTS,
                 "action_segment_seconds": ACTION_SEGMENT_SECONDS,
-                "single_segments_per_video": SINGLE_SEGMENTS,
-                "combo_segments_per_video": COMBO_SEGMENTS,
                 "single_keys": ACTION_KEYS,
-                "combo_rule": "one from wasd plus one from ijkl",
+                "action_rule": "one movement key from wasd per segment",
             },
             indent=2,
         )

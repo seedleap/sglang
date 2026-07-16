@@ -53,7 +53,7 @@ def _request() -> dict:
             "videos_per_image": 5,
             "fps": 24,
             "width": 1280,
-            "height": 720,
+            "height": 704,
             "action_seed": 20260715,
         },
     }

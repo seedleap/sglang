@@ -23,7 +23,7 @@ def _request() -> dict:
             "frames": 129,
             "fps": 24,
             "width": 1280,
-            "height": 720,
+            "height": 704,
             "model": "lingbot2",
             "action_seed": 20260715,
         },
@@ -66,9 +66,11 @@ def test_build_case_records_expands_each_t2i_image_to_five_prompted_cases():
     assert len(cases) == 10
     assert [case["case_index"] for case in cases] == list(range(10))
     first_image_pairs = {
-        (case["movement_key"], case["camera_key"]) for case in cases[:5]
+        (case["movement_key"], case["ending_movement_key"]) for case in cases[:5]
     }
     assert len(first_image_pairs) == 5
+    assert all(case["camera_key"] == "" for case in cases)
+    assert all(case["metadata"]["camera_key"] == "" for case in cases)
     assert cases[0]["image_id"] == "img001"
     assert cases[0]["image_uri"] == "s3://bucket/t2i/images/img001.png"
     assert cases[0]["messages"][0]["content"] == "A quiet workshop with warm practical lighting."
@@ -76,8 +78,39 @@ def test_build_case_records_expands_each_t2i_image_to_five_prompted_cases():
     assert cases[5]["messages"][0]["content"] == "The camera slowly orbits around the red robot."
     assert cases[5]["metadata"]["video_prompt_source"] == "explicit"
     assert cases[0]["video_s3_uri"].startswith("s3://bucket/t2i/videos/img001/")
-    assert cases[0]["action_pattern"] == "57 movement + 15 noop + 57 camera"
+    assert cases[0]["video_s3_uri"].endswith(
+        f"_{cases[0]['movement_key']}{cases[0]['ending_movement_key']}.mp4"
+    )
+    assert cases[0]["action_pattern"] == "57 movement + 15 noop + 57 movement"
     assert len(cases[0]["messages"][1]["controls"][0]["actions"]) == 128
+    assert cases[0]["messages"][1]["controls"][0]["action_keys"] == ["w", "a", "s", "d"]
+    assert all(
+        len(action) == 4
+        for action in cases[0]["messages"][1]["controls"][0]["actions"]
+    )
+
+
+def test_build_case_records_defaults_to_1280x704_video_size():
+    request = _request()
+    request["video"].pop("width")
+    request["video"].pop("height")
+
+    cases = build_case_records(
+        request,
+        [
+            {
+                "item_id": "img001",
+                "image_uri": "s3://bucket/t2i/images/img001.png",
+                "image_prompt": "A quiet workshop.",
+                "video_prompt": "A quiet workshop.",
+                "video_prompt_source": "image_prompt_fallback",
+            }
+        ],
+    )
+
+    target = cases[0]["messages"][1]
+    assert target["output"]["width"] == 1280
+    assert target["output"]["height"] == 704
 
 
 def test_callback_progress_payload_groups_five_videos_per_image():
@@ -99,6 +132,7 @@ def test_callback_progress_payload_groups_five_videos_per_image():
             "status": "succeeded",
             "video_uri": case["video_s3_uri"],
             "movement_key": case["movement_key"],
+            "ending_movement_key": case["ending_movement_key"],
             "camera_key": case["camera_key"],
             "action_seed": case["action_seed"],
             "action_pattern": case["action_pattern"],
@@ -118,3 +152,5 @@ def test_callback_progress_payload_groups_five_videos_per_image():
     assert payload["items"][0]["metadata"]["videos"][0]["video_uri"].startswith(
         "s3://bucket/t2i/videos/img001/"
     )
+    assert payload["items"][0]["metadata"]["videos"][0]["camera_key"] == ""
+    assert payload["items"][0]["metadata"]["videos"][0]["ending_movement_key"] in "wasd"
