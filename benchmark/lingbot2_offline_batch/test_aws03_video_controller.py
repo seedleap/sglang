@@ -1,4 +1,7 @@
+import json
+
 from aws03_video_controller import (
+    _env_config,
     active_gpu_requests,
     can_start_job,
     process_one_message,
@@ -131,6 +134,103 @@ def test_render_job_manifest_can_match_existing_b300_batch_runtime_shape():
     assert pod["tolerations"] == [{"operator": "Exists"}]
     assert any(volume["name"] == "shm" for volume in pod["volumes"])
     assert any(mount["mountPath"] == "/dev/shm" for mount in container["volumeMounts"])
+
+
+def test_render_job_manifest_can_target_b300_and_h100_spot_demand_with_preferred_affinity():
+    manifest = render_job_manifest(
+        _request(),
+        {
+            "namespace": "default",
+            "job_image": "lmsysorg/sglang:dev@sha256:test",
+            "service_account": "sglang-video-job",
+            "fsx_claim_name": "fsx-claim",
+            "placement_profiles": [
+                {
+                    "name": "b300-capacity-block",
+                    "weight": 80,
+                    "node_selector": {
+                        "eks.amazonaws.com/capacityType": "CAPACITY_BLOCK",
+                        "eks.amazonaws.com/nodegroup": "wan22-cb-p6b300-0715-20c",
+                        "node.kubernetes.io/instance-type": "p6-b300.48xlarge",
+                    },
+                },
+                {
+                    "name": "h100-spot",
+                    "weight": 100,
+                    "node_selector": {
+                        "eks.amazonaws.com/capacityType": "SPOT",
+                        "node.kubernetes.io/instance-type": "p5.48xlarge",
+                        "seedleap.ai/workload": "wan22-ti2v",
+                    },
+                },
+                {
+                    "name": "h100-demand",
+                    "weight": 40,
+                    "node_selector": {
+                        "eks.amazonaws.com/capacityType": "ON_DEMAND",
+                        "node.kubernetes.io/instance-type": "p5.48xlarge",
+                        "seedleap.ai/workload": "wan22-ti2v",
+                    },
+                },
+            ],
+            "ttl_seconds_after_finished": "3600",
+        },
+    )
+
+    assert manifest["spec"]["ttlSecondsAfterFinished"] == 3600
+    pod = manifest["spec"]["template"]["spec"]
+    assert "nodeSelector" not in pod
+    affinity = pod["affinity"]["nodeAffinity"]
+    required_terms = affinity["requiredDuringSchedulingIgnoredDuringExecution"][
+        "nodeSelectorTerms"
+    ]
+    assert len(required_terms) == 3
+    required_keys = {
+        tuple((item["key"], tuple(item["values"])) for item in term["matchExpressions"])
+        for term in required_terms
+    }
+    assert any(
+        ("node.kubernetes.io/instance-type", ("p6-b300.48xlarge",)) in keys
+        for keys in required_keys
+    )
+    assert any(
+        ("node.kubernetes.io/instance-type", ("p5.48xlarge",)) in keys
+        and ("eks.amazonaws.com/capacityType", ("SPOT",)) in keys
+        for keys in required_keys
+    )
+    preferred = affinity["preferredDuringSchedulingIgnoredDuringExecution"]
+    weights_by_capacity = {
+        expression["values"][0]: item["weight"]
+        for item in preferred
+        for expression in item["preference"]["matchExpressions"]
+        if expression["key"] == "eks.amazonaws.com/capacityType"
+    }
+    assert weights_by_capacity["SPOT"] > weights_by_capacity["ON_DEMAND"]
+
+
+def test_env_config_reads_placement_profiles_and_job_ttl(monkeypatch):
+    placement_profiles = [
+        {
+            "name": "h100-spot",
+            "weight": 100,
+            "node_selector": {
+                "eks.amazonaws.com/capacityType": "SPOT",
+                "node.kubernetes.io/instance-type": "p5.48xlarge",
+            },
+        }
+    ]
+
+    monkeypatch.setenv("SGLANG_VIDEO_JOB_IMAGE", "lmsysorg/sglang:dev@sha256:test")
+    monkeypatch.setenv(
+        "SGLANG_VIDEO_JOB_PLACEMENT_PROFILES_JSON",
+        json.dumps(placement_profiles),
+    )
+    monkeypatch.setenv("SGLANG_VIDEO_JOB_TTL_SECONDS_AFTER_FINISHED", "900")
+
+    config = _env_config()
+
+    assert config["placement_profiles"] == placement_profiles
+    assert config["ttl_seconds_after_finished"] == "900"
 
 
 class FakeSQS:

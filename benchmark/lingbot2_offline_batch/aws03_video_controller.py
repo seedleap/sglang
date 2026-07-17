@@ -87,6 +87,79 @@ def _configured_resources(config: dict[str, Any], gpu_per_pod: int) -> dict[str,
     return {"limits": limits, "requests": requests}
 
 
+def _node_selector_term(selector: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "matchExpressions": [
+            {
+                "key": str(key),
+                "operator": "In",
+                "values": [str(item) for item in value]
+                if isinstance(value, list)
+                else [str(value)],
+            }
+            for key, value in sorted(selector.items())
+            if value not in (None, "")
+        ],
+    }
+
+
+def _placement_profile_term(profile: dict[str, Any]) -> dict[str, Any] | None:
+    raw_term = profile.get("node_selector_term")
+    if isinstance(raw_term, dict):
+        return raw_term
+    selector = profile.get("node_selector")
+    if isinstance(selector, dict) and selector:
+        return _node_selector_term(selector)
+    return None
+
+
+def _placement_profiles_affinity(profiles: list[dict[str, Any]]) -> dict[str, Any]:
+    required_terms: list[dict[str, Any]] = []
+    preferred_terms: list[dict[str, Any]] = []
+    for profile in profiles:
+        if not isinstance(profile, dict):
+            continue
+        term = _placement_profile_term(profile)
+        if not term:
+            continue
+        required_terms.append(term)
+        weight = _int_or_default(profile.get("weight"), 0)
+        if weight > 0:
+            preferred_terms.append(
+                {
+                    "weight": min(weight, 100),
+                    "preference": term,
+                }
+            )
+
+    if not required_terms:
+        return {}
+
+    node_affinity: dict[str, Any] = {
+        "requiredDuringSchedulingIgnoredDuringExecution": {
+            "nodeSelectorTerms": required_terms,
+        },
+    }
+    if preferred_terms:
+        node_affinity["preferredDuringSchedulingIgnoredDuringExecution"] = preferred_terms
+    return {"nodeAffinity": node_affinity}
+
+
+def _configured_affinity(config: dict[str, Any]) -> dict[str, Any]:
+    affinity = config.get("affinity") if isinstance(config.get("affinity"), dict) else {}
+    profiles = (
+        config.get("placement_profiles")
+        if isinstance(config.get("placement_profiles"), list)
+        else []
+    )
+    profile_affinity = _placement_profiles_affinity(profiles)
+    if not profile_affinity:
+        return dict(affinity)
+    merged = dict(affinity)
+    merged["nodeAffinity"] = profile_affinity["nodeAffinity"]
+    return merged
+
+
 def render_job_manifest(request: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
     """Render a Kubernetes Job manifest for one SGLang t2i video batch."""
     limits = _limits(request)
@@ -153,12 +226,36 @@ def render_job_manifest(request: dict[str, Any], config: dict[str, Any]) -> dict
     }
     if config.get("node_selector"):
         pod_spec["nodeSelector"] = config["node_selector"]
+    affinity = _configured_affinity(config)
+    if affinity:
+        pod_spec["affinity"] = affinity
     if config.get("priority_class_name"):
         pod_spec["priorityClassName"] = config["priority_class_name"]
     if config.get("scheduler_name"):
         pod_spec["schedulerName"] = config["scheduler_name"]
     if config.get("tolerations"):
         pod_spec["tolerations"] = config["tolerations"]
+
+    job_spec: dict[str, Any] = {
+        "parallelism": parallelism,
+        "completions": parallelism,
+        "backoffLimit": _int_or_default(config.get("backoff_limit"), 0),
+        "activeDeadlineSeconds": timeout_seconds,
+        "template": {
+            "metadata": {
+                "labels": {
+                    "app.kubernetes.io/name": "sglang-video-batch",
+                    "app.kubernetes.io/component": "t2i-video-job",
+                },
+            },
+            "spec": {
+                **pod_spec,
+            },
+        },
+    }
+    ttl_seconds = config.get("ttl_seconds_after_finished")
+    if ttl_seconds not in (None, ""):
+        job_spec["ttlSecondsAfterFinished"] = _int_or_default(ttl_seconds, 0)
 
     return {
         "apiVersion": "batch/v1",
@@ -174,23 +271,7 @@ def render_job_manifest(request: dict[str, Any], config: dict[str, Any]) -> dict
                 ),
             },
         },
-        "spec": {
-            "parallelism": parallelism,
-            "completions": parallelism,
-            "backoffLimit": _int_or_default(config.get("backoff_limit"), 0),
-            "activeDeadlineSeconds": timeout_seconds,
-            "template": {
-                "metadata": {
-                    "labels": {
-                        "app.kubernetes.io/name": "sglang-video-batch",
-                        "app.kubernetes.io/component": "t2i-video-job",
-                    },
-                },
-                "spec": {
-                    **pod_spec,
-                },
-            },
-        },
+        "spec": job_spec,
     }
 
 
@@ -337,6 +418,8 @@ def _env_config() -> dict[str, Any]:
         "args": _json_env("SGLANG_VIDEO_JOB_ARGS_JSON", []),
         "extra_env": _json_env("SGLANG_VIDEO_JOB_EXTRA_ENV_JSON", []),
         "node_selector": _json_env("SGLANG_VIDEO_JOB_NODE_SELECTOR_JSON", {}),
+        "affinity": _json_env("SGLANG_VIDEO_JOB_AFFINITY_JSON", {}),
+        "placement_profiles": _json_env("SGLANG_VIDEO_JOB_PLACEMENT_PROFILES_JSON", []),
         "tolerations": _json_env("SGLANG_VIDEO_JOB_TOLERATIONS_JSON", []),
         "security_context": _json_env("SGLANG_VIDEO_JOB_SECURITY_CONTEXT_JSON", {}),
         "request_cpu": os.environ.get("SGLANG_VIDEO_JOB_REQUEST_CPU", ""),
@@ -346,6 +429,10 @@ def _env_config() -> dict[str, Any]:
         "shm_size": os.environ.get("SGLANG_VIDEO_JOB_SHM_SIZE", ""),
         "priority_class_name": os.environ.get("SGLANG_VIDEO_JOB_PRIORITY_CLASS_NAME", ""),
         "scheduler_name": os.environ.get("SGLANG_VIDEO_JOB_SCHEDULER_NAME", ""),
+        "ttl_seconds_after_finished": os.environ.get(
+            "SGLANG_VIDEO_JOB_TTL_SECONDS_AFTER_FINISHED",
+            "",
+        ),
     }
 
 
