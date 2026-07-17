@@ -2,6 +2,7 @@ import json
 
 from aws03_video_controller import (
     _env_config,
+    _scale_fallback_nodegroups,
     active_gpu_requests,
     backend_free_gpus,
     can_start_job,
@@ -370,6 +371,7 @@ def _backend_config() -> dict:
                 "name": "h100-spot",
                 "node_selector": {
                     "eks.amazonaws.com/capacityType": "SPOT",
+                    "eks.amazonaws.com/nodegroup": "sglang-h100-spot",
                     "node.kubernetes.io/instance-type": "p5.48xlarge",
                     "seedleap.ai/workload": "sglang-video",
                 },
@@ -433,6 +435,36 @@ def test_choose_backend_prefers_b300_when_free_and_uses_h100_when_b300_is_full()
     assert selected["name"] == "h100-spot"
 
 
+def test_choose_backend_can_use_b200_as_fallback_when_b300_is_full():
+    config = {
+        **_backend_config(),
+        "backends": [
+            _backend_config()["backends"][0],
+            {
+                "name": "b200-spot",
+                "node_selector": {
+                    "eks.amazonaws.com/capacityType": "SPOT",
+                    "eks.amazonaws.com/nodegroup": "sglang-b200-spot",
+                    "node.kubernetes.io/instance-type": "p6-b200.48xlarge",
+                    "seedleap.ai/workload": "sglang-video",
+                },
+                "scale_nodegroup": True,
+            },
+        ],
+    }
+    b300 = _node("b300-a", config["backends"][0]["node_selector"])
+    b200 = _node("b200-a", config["backends"][1]["node_selector"])
+
+    selected = choose_backend(
+        config,
+        [b300, b200],
+        [_gpu_pod("training", "b300-a", 8)],
+        requested_gpus=8,
+    )
+
+    assert selected["name"] == "b200-spot"
+
+
 def test_choose_backend_does_not_double_count_h100_pods_and_inflight_state():
     config = _backend_config()
     h100_selector = config["backends"][1]["node_selector"]
@@ -485,6 +517,77 @@ def test_choose_backend_does_not_use_h100_demand_by_default():
     state = {"inflight": [{"backend": "h100-spot", "requested_gpus": 8}]}
 
     assert choose_backend(config, [], [], requested_gpus=8, state=state) is None
+
+
+def test_choose_backend_applies_one_gpu_cap_across_b200_and_h100_fallbacks():
+    config = {
+        **_backend_config(),
+        "h100_max_active_gpus": 8,
+        "backends": [
+            {
+                "name": "b200-spot",
+                "node_selector": {
+                    "eks.amazonaws.com/capacityType": "SPOT",
+                    "eks.amazonaws.com/nodegroup": "sglang-b200-spot",
+                    "node.kubernetes.io/instance-type": "p6-b200.48xlarge",
+                },
+            },
+            {
+                "name": "h100-spot",
+                "node_selector": {
+                    "eks.amazonaws.com/capacityType": "SPOT",
+                    "eks.amazonaws.com/nodegroup": "sglang-h100-spot",
+                    "node.kubernetes.io/instance-type": "p5.48xlarge",
+                },
+            },
+        ],
+    }
+    state = {"inflight": [{"backend": "b200-spot", "requested_gpus": 8}]}
+
+    assert choose_backend(config, [], [], requested_gpus=8, state=state) is None
+
+
+def test_scale_fallback_nodegroups_scales_each_backend_nodegroup_independently():
+    config = {
+        **_backend_config(),
+        "backends": [
+            {
+                "name": "b200-spot",
+                "node_selector": {
+                    "eks.amazonaws.com/capacityType": "SPOT",
+                    "eks.amazonaws.com/nodegroup": "sglang-b200-spot",
+                    "node.kubernetes.io/instance-type": "p6-b200.48xlarge",
+                },
+                "scale_nodegroup": True,
+                "max_nodes": 2,
+            },
+            {
+                "name": "h100-spot",
+                "node_selector": {
+                    "eks.amazonaws.com/capacityType": "SPOT",
+                    "eks.amazonaws.com/nodegroup": "sglang-h100-spot",
+                    "node.kubernetes.io/instance-type": "p5.48xlarge",
+                },
+                "scale_nodegroup": True,
+                "max_nodes": 4,
+            },
+        ],
+    }
+    eks = FakeEks()
+    state = {
+        "inflight": [
+            {"backend": "b200-spot", "requested_gpus": 8},
+            {"backend": "h100-spot", "requested_gpus": 16},
+        ]
+    }
+
+    _scale_fallback_nodegroups(eks, config, state)
+
+    updates = {
+        item["nodegroupName"]: item["scalingConfig"]["desiredSize"]
+        for item in eks.updates
+    }
+    assert updates == {"sglang-b200-spot": 1, "sglang-h100-spot": 2}
 
 
 def test_controller_tick_starts_multiple_messages_up_to_h100_gpu_cap_and_scales_nodes():

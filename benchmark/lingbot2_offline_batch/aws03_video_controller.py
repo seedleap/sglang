@@ -11,7 +11,8 @@ from typing import Any
 
 
 TERMINAL_POD_PHASES = {"Succeeded", "Failed"}
-H100_BACKEND_NAMES = {"h100", "h100-spot"}
+FALLBACK_GPU_BACKEND_NAMES = {"h100", "h100-spot", "b200", "b200-spot"}
+FALLBACK_GPU_INSTANCE_TYPES = {"p5.48xlarge", "p6-b200.48xlarge"}
 B300_BACKEND_NAMES = {"b300", "b300-capacity-block"}
 DEFAULT_CONTAINER_COMMAND = [
     "python3",
@@ -127,9 +128,10 @@ def _is_h100_backend(backend: dict[str, Any]) -> bool:
     name = _backend_name(backend).lower()
     selector = backend.get("node_selector") if isinstance(backend.get("node_selector"), dict) else {}
     return (
-        name in H100_BACKEND_NAMES
+        name in FALLBACK_GPU_BACKEND_NAMES
         or "h100" in name
-        or selector.get("node.kubernetes.io/instance-type") == "p5.48xlarge"
+        or "b200" in name
+        or selector.get("node.kubernetes.io/instance-type") in FALLBACK_GPU_INSTANCE_TYPES
     )
 
 
@@ -163,11 +165,39 @@ def _backend_gpu_requests(pods: list[dict[str, Any]], backend_name: str) -> int:
     return total
 
 
+def _fallback_backend_names(config: dict[str, Any]) -> set[str]:
+    backends = config.get("backends") if isinstance(config.get("backends"), list) else []
+    return {
+        _backend_name(backend)
+        for backend in backends
+        if isinstance(backend, dict) and _is_h100_backend(backend) and _backend_name(backend)
+    }
+
+
+def _fallback_gpu_requests(
+    pods: list[dict[str, Any]],
+    backend_names: set[str],
+) -> int:
+    return sum(_backend_gpu_requests(pods, name) for name in backend_names)
+
+
 def _inflight_backend_gpus(state: dict[str, Any], backend_name: str, gpu_per_pod: int) -> int:
     return sum(
         _int_or_default(item.get("requested_gpus"), gpu_per_pod)
         for item in state.get("inflight", [])
         if item.get("backend") == backend_name
+    )
+
+
+def _fallback_inflight_gpus(
+    state: dict[str, Any],
+    backend_names: set[str],
+    gpu_per_pod: int,
+) -> int:
+    return sum(
+        _int_or_default(item.get("requested_gpus"), gpu_per_pod)
+        for item in state.get("inflight", [])
+        if str(item.get("backend") or "") in backend_names
     )
 
 
@@ -179,7 +209,7 @@ def choose_backend(
     requested_gpus: int,
     state: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
-    """Pick B300 when it has free GPUs; otherwise pick H100 Spot within cap."""
+    """Pick B300 when it has free GPUs; otherwise pick fallback Spot GPUs within cap."""
     backends = config.get("backends") if isinstance(config.get("backends"), list) else []
     state = state or {"inflight": []}
     for backend in backends:
@@ -192,17 +222,17 @@ def choose_backend(
     h100_max_gpus = _int_or_default(config.get("h100_max_active_gpus"), 32)
     allow_h100_demand = str(config.get("allow_h100_demand") or "").lower() in {"1", "true", "yes"}
     gpu_per_pod = _int_or_default(config.get("gpu_per_pod"), requested_gpus)
+    fallback_names = _fallback_backend_names(config)
+    fallback_active = max(
+        _fallback_gpu_requests(pods, fallback_names),
+        _fallback_inflight_gpus(state, fallback_names, gpu_per_pod),
+    )
     for backend in backends:
         if not isinstance(backend, dict) or not _is_h100_backend(backend):
             continue
         if _is_demand_backend(backend) and not allow_h100_demand:
             continue
-        name = _backend_name(backend)
-        active = max(
-            _backend_gpu_requests(pods, name),
-            _inflight_backend_gpus(state, name, gpu_per_pod),
-        )
-        if active + requested_gpus <= h100_max_gpus:
+        if fallback_active + requested_gpus <= h100_max_gpus:
             return backend
     return None
 
@@ -636,15 +666,58 @@ def _render_for_backend(
     )
 
 
-def _scale_h100_nodegroup(eks_client: Any, config: dict[str, Any], desired_gpus: int) -> None:
+def _backend_scale_target(
+    backend: dict[str, Any],
+    config: dict[str, Any],
+) -> dict[str, Any] | None:
+    if not _is_h100_backend(backend):
+        return None
+    selector = backend.get("node_selector") if isinstance(backend.get("node_selector"), dict) else {}
+    should_scale = bool(
+        backend.get("scale_nodegroup")
+        or backend.get("scale_nodegroup_name")
+        or backend.get("nodegroup_name")
+        or selector.get("eks.amazonaws.com/nodegroup")
+    )
+    if not should_scale:
+        return None
+    cluster_name = str(
+        backend.get("scale_cluster_name")
+        or backend.get("cluster_name")
+        or config.get("h100_cluster_name")
+        or ""
+    ).strip()
+    nodegroup_name = str(
+        backend.get("scale_nodegroup_name")
+        or backend.get("nodegroup_name")
+        or selector.get("eks.amazonaws.com/nodegroup")
+        or config.get("h100_nodegroup_name")
+        or ""
+    ).strip()
+    if not cluster_name or not nodegroup_name:
+        return None
+    return {
+        "cluster_name": cluster_name,
+        "nodegroup_name": nodegroup_name,
+        "node_gpus": max(
+            1,
+            _int_or_default(backend.get("node_gpus") or config.get("h100_node_gpus"), 8),
+        ),
+        "max_nodes": _int_or_default(backend.get("max_nodes") or config.get("h100_max_nodes"), 4),
+    }
+
+
+def _scale_nodegroup(
+    eks_client: Any,
+    *,
+    cluster_name: str,
+    nodegroup_name: str,
+    node_gpus: int,
+    max_nodes: int,
+    desired_gpus: int,
+) -> None:
     if eks_client is None:
         return
-    cluster_name = str(config.get("h100_cluster_name") or "").strip()
-    nodegroup_name = str(config.get("h100_nodegroup_name") or "").strip()
-    if not cluster_name or not nodegroup_name:
-        return
-    node_gpus = max(1, _int_or_default(config.get("h100_node_gpus"), 8))
-    max_nodes = _int_or_default(config.get("h100_max_nodes"), 4)
     desired_nodes = min(max_nodes, (max(0, desired_gpus) + node_gpus - 1) // node_gpus)
     eks_client.update_nodegroup_config(
         clusterName=cluster_name,
@@ -653,12 +726,46 @@ def _scale_h100_nodegroup(eks_client: Any, config: dict[str, Any], desired_gpus:
     )
 
 
-def _h100_inflight_gpus(state: dict[str, Any]) -> int:
-    return sum(
-        _int_or_default(item.get("requested_gpus"), 8)
-        for item in state.get("inflight", [])
-        if "h100" in str(item.get("backend", "")).lower()
-    )
+def _scale_fallback_nodegroups(
+    eks_client: Any,
+    config: dict[str, Any],
+    state: dict[str, Any],
+) -> None:
+    if eks_client is None:
+        return
+    backends = config.get("backends") if isinstance(config.get("backends"), list) else []
+    targets: dict[tuple[str, str], dict[str, Any]] = {}
+    for backend in backends:
+        if not isinstance(backend, dict):
+            continue
+        target = _backend_scale_target(backend, config)
+        if target is None:
+            continue
+        key = (target["cluster_name"], target["nodegroup_name"])
+        targets.setdefault(
+            key,
+            {
+                **target,
+                "backend_names": set(),
+            },
+        )
+        targets[key]["backend_names"].add(_backend_name(backend))
+        targets[key]["max_nodes"] = max(targets[key]["max_nodes"], target["max_nodes"])
+
+    for target in targets.values():
+        desired_gpus = sum(
+            _int_or_default(item.get("requested_gpus"), target["node_gpus"])
+            for item in state.get("inflight", [])
+            if str(item.get("backend") or "") in target["backend_names"]
+        )
+        _scale_nodegroup(
+            eks_client,
+            cluster_name=target["cluster_name"],
+            nodegroup_name=target["nodegroup_name"],
+            node_gpus=target["node_gpus"],
+            max_nodes=target["max_nodes"],
+            desired_gpus=desired_gpus,
+        )
 
 
 def reconcile_inflight_jobs(
@@ -734,7 +841,7 @@ def reconcile_inflight_jobs(
         remaining.append(item)
 
     state["inflight"] = remaining
-    _scale_h100_nodegroup(eks_client, config, _h100_inflight_gpus(state))
+    _scale_fallback_nodegroups(eks_client, config, state)
     return {
         "completed": completed,
         "restarted": restarted,
@@ -828,7 +935,7 @@ def controller_tick(
                 "requested_gpus": requested_gpus,
             }
         )
-        _scale_h100_nodegroup(eks_client, config, _h100_inflight_gpus(state))
+        _scale_fallback_nodegroups(eks_client, config, state)
         started += 1
 
     return {

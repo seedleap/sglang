@@ -65,9 +65,10 @@ Scheduling policy:
 
 - Prefer a B300 capacity-block backend when a matching Ready node has at least
   one full 8-GPU slot free.
-- If B300 exists but is full, fall back to H100 Spot.
-- H100 is capped independently by `SGLANG_VIDEO_H100_MAX_ACTIVE_GPUS`; production
-  default should be `32`, which means at most four `p5.48xlarge` 8-GPU Jobs.
+- If B300 exists but is full, fall back to the configured H100/B200 Spot backends.
+- The fallback GPU backends are capped together by
+  `SGLANG_VIDEO_H100_MAX_ACTIVE_GPUS`; production default should be `32`, which
+  means at most four 8-GPU Jobs.
 - If neither backend has capacity, the controller changes message visibility and
   leaves the message in SQS for a later attempt.
 
@@ -94,7 +95,6 @@ SGLANG_VIDEO_H100_MAX_ACTIVE_GPUS=32
 SGLANG_VIDEO_H100_NODE_GPUS=8
 SGLANG_VIDEO_H100_MAX_NODES=4
 SGLANG_VIDEO_H100_EKS_CLUSTER_NAME=leap-world-aws03-usw2
-SGLANG_VIDEO_H100_NODEGROUP_NAME=sglang-h100-spot
 SGLANG_VIDEO_ALLOW_H100_DEMAND=false
 ```
 
@@ -111,12 +111,25 @@ Use `SGLANG_VIDEO_BACKENDS_JSON` to make backend choice explicit. Example:
     }
   },
   {
-    "name": "h100-spot",
+    "name": "b200-spot",
     "scale_nodegroup": true,
+    "max_nodes": 2,
     "node_selector": {
       "eks.amazonaws.com/capacityType": "SPOT",
+      "eks.amazonaws.com/nodegroup": "minwm-spot-p6-b200-0703",
+      "node.kubernetes.io/instance-type": "p6-b200.48xlarge",
+      "seedleap.ai/workload": "wan22-ti2v"
+    }
+  },
+  {
+    "name": "h100-spot",
+    "scale_nodegroup": true,
+    "max_nodes": 4,
+    "node_selector": {
+      "eks.amazonaws.com/capacityType": "SPOT",
+      "eks.amazonaws.com/nodegroup": "sglang-spot-p5-h100",
       "node.kubernetes.io/instance-type": "p5.48xlarge",
-      "seedleap.ai/workload": "sglang-video"
+      "seedleap.ai/workload": "wan22-ti2v"
     }
   }
 ]
@@ -124,4 +137,4 @@ Use `SGLANG_VIDEO_BACKENDS_JSON` to make backend choice explicit. Example:
 
 Apply `k8s-aws03-video-controller-rbac.yaml` with the controller deployment.
 The service account also needs AWS IAM permissions for SQS receive/delete/change
-visibility and `eks:UpdateNodegroupConfig` on the H100 Spot nodegroup.
+visibility and `eks:UpdateNodegroupConfig` on the configured fallback nodegroups.
