@@ -173,6 +173,9 @@ def _backend_gpu_requests(pods: list[dict[str, Any]], backend_name: str) -> int:
     for pod in pods:
         if _labels(pod).get("sglang.seedleap.io/backend") != backend_name:
             continue
+        metadata = _metadata(pod)
+        if metadata.get("deletionTimestamp"):
+            continue
         status = pod.get("status") if isinstance(pod.get("status"), dict) else {}
         if status.get("phase") in TERMINAL_POD_PHASES:
             continue
@@ -671,6 +674,38 @@ def _read_job_status(batch_client: Any, namespace: str, job_name: str) -> dict[s
         return {"failed": 1}
 
 
+def _list_jobs_for_generation(
+    batch_client: Any,
+    namespace: str,
+    generation_job_id: str,
+) -> list[dict[str, Any]]:
+    if not generation_job_id:
+        return []
+    response = batch_client.list_namespaced_job(
+        namespace=namespace,
+        label_selector=f"sglang.seedleap.io/generation-job-id={generation_job_id}",
+    )
+    response = _object_to_dict(response)
+    items = response.get("items", []) if isinstance(response, dict) else response.items
+    return [_object_to_dict(item) for item in items]
+
+
+def _existing_job_for_request(
+    batch_client: Any,
+    namespace: str,
+    request: dict[str, Any],
+) -> dict[str, Any] | None:
+    generation_job_id = str(request.get("generation_job_id") or "").strip()
+    jobs = _list_jobs_for_generation(batch_client, namespace, generation_job_id)
+    if not jobs:
+        return None
+    jobs.sort(key=lambda job: str(_metadata(job).get("creationTimestamp") or ""), reverse=True)
+    for job in jobs:
+        if not _job_failed(_job_status(job)):
+            return job
+    return jobs[0]
+
+
 def _render_for_backend(
     request: dict[str, Any],
     config: dict[str, Any],
@@ -753,6 +788,7 @@ def _scale_fallback_nodegroups(
     eks_client: Any,
     config: dict[str, Any],
     state: dict[str, Any],
+    pods: list[dict[str, Any]] | None = None,
 ) -> None:
     if eks_client is None:
         return
@@ -776,11 +812,16 @@ def _scale_fallback_nodegroups(
         targets[key]["max_nodes"] = max(targets[key]["max_nodes"], target["max_nodes"])
 
     for target in targets.values():
-        desired_gpus = sum(
+        inflight_gpus = sum(
             _int_or_default(item.get("requested_gpus"), target["node_gpus"])
             for item in state.get("inflight", [])
             if str(item.get("backend") or "") in target["backend_names"]
         )
+        pod_gpus = sum(
+            _backend_gpu_requests(pods or [], backend_name)
+            for backend_name in target["backend_names"]
+        )
+        desired_gpus = max(inflight_gpus, pod_gpus)
         _scale_nodegroup(
             eks_client,
             cluster_name=target["cluster_name"],
@@ -868,7 +909,7 @@ def reconcile_inflight_jobs(
         remaining.append(item)
 
     state["inflight"] = remaining
-    _scale_fallback_nodegroups(eks_client, config, state)
+    _scale_fallback_nodegroups(eks_client, config, state, pods=pods)
     return {
         "completed": completed,
         "restarted": restarted,
@@ -923,9 +964,45 @@ def controller_tick(
 
     nodes = _list_nodes(core_client)
     pods = _list_capacity_pods(core_client, config)
-    started = deferred = 0
+    started = deferred = adopted = completed_existing = 0
     for message in messages:
         request = _decode_request(message)
+        namespace = config.get("namespace", "default")
+        existing_job = _existing_job_for_request(batch_client, namespace, request)
+        if existing_job is not None:
+            status = _job_status(existing_job)
+            if _job_succeeded(status):
+                sqs_client.delete_message(
+                    QueueUrl=queue_url,
+                    ReceiptHandle=message["ReceiptHandle"],
+                )
+                completed_existing += 1
+                continue
+            if not _job_failed(status):
+                labels = _labels(existing_job)
+                metadata = _metadata(existing_job)
+                backend_name = str(labels.get("sglang.seedleap.io/backend") or "")
+                job_name = str(metadata.get("name") or "")
+                if job_name and not any(
+                    item.get("job_name") == job_name for item in state.get("inflight", [])
+                ):
+                    state["inflight"].append(
+                        {
+                            "request": request,
+                            "receipt_handle": message["ReceiptHandle"],
+                            "message_id": message.get("MessageId", ""),
+                            "job_name": job_name,
+                            "backend": backend_name,
+                            "attempts": 1,
+                            "started_at": now,
+                            "last_renewed_at": now,
+                            "requested_gpus": requested_gpus,
+                        }
+                    )
+                _scale_fallback_nodegroups(eks_client, config, state, pods=pods)
+                adopted += 1
+                continue
+
         backend = choose_backend(
             config,
             nodes,
@@ -962,15 +1039,17 @@ def controller_tick(
                 "requested_gpus": requested_gpus,
             }
         )
-        _scale_fallback_nodegroups(eks_client, config, state)
+        _scale_fallback_nodegroups(eks_client, config, state, pods=pods)
         started += 1
 
     return {
-        "status": "started" if started else "deferred",
+        "status": "started" if started else "adopted" if adopted else "deferred",
         **renew_result,
         **reconcile_result,
         "started": started,
         "deferred": deferred,
+        "adopted": adopted,
+        "completed_existing": completed_existing,
         "inflight": len(state.get("inflight", [])),
     }
 

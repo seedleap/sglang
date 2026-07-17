@@ -314,6 +314,17 @@ class FakeBatchV1:
     def read_namespaced_job_status(self, name, namespace):
         return self.jobs.get(name, {"status": {}})
 
+    def list_namespaced_job(self, namespace, label_selector=None):
+        if not label_selector:
+            return {"items": list(self.jobs.values())}
+        key, _, expected = label_selector.partition("=")
+        items = []
+        for job in self.jobs.values():
+            labels = job.get("metadata", {}).get("labels", {})
+            if labels.get(key) == expected:
+                items.append(job)
+        return {"items": items}
+
     def delete_namespaced_job(self, name, namespace, **kwargs):
         self.deleted.append({"namespace": namespace, "name": name, **kwargs})
 
@@ -595,6 +606,73 @@ def test_scale_fallback_nodegroups_scales_each_backend_nodegroup_independently()
         for item in eks.updates
     }
     assert updates == {"sglang-b200-spot": 1, "sglang-h100-spot": 2}
+
+
+def test_scale_fallback_nodegroups_counts_existing_backend_pods_after_restart():
+    config = _backend_config()
+    eks = FakeEks()
+    state = {"inflight": []}
+    pods = [
+        {
+            "metadata": {"labels": {"sglang.seedleap.io/backend": "h100-spot"}},
+            "status": {"phase": "Pending"},
+            "spec": {"containers": [{"resources": {"requests": {"nvidia.com/gpu": "8"}}}]},
+        }
+    ]
+
+    _scale_fallback_nodegroups(eks, config, state, pods=pods)
+
+    assert eks.updates[-1]["nodegroupName"] == "sglang-h100-spot"
+    assert eks.updates[-1]["scalingConfig"]["desiredSize"] == 1
+
+
+def test_controller_tick_adopts_existing_job_after_restart_and_scales_nodes():
+    config = _backend_config()
+    request = _request()
+    existing_job = render_job_manifest(
+        request,
+        {
+            **config,
+            "placement_profiles": [config["backends"][1]],
+            "selected_backend": "h100-spot",
+        },
+    )
+    batch = FakeBatchV1()
+    batch.jobs[existing_job["metadata"]["name"]] = existing_job
+    sqs = FakeSQS(request)
+    eks = FakeEks()
+    core = FakeCoreV1(
+        [
+            {
+                "metadata": {"labels": {"sglang.seedleap.io/backend": "h100-spot"}},
+                "status": {"phase": "Pending"},
+                "spec": {
+                    "containers": [
+                        {"resources": {"requests": {"nvidia.com/gpu": "8"}}}
+                    ]
+                },
+            }
+        ],
+        [],
+    )
+    state = {"inflight": []}
+
+    result = controller_tick(
+        sqs_client=sqs,
+        queue_url="https://sqs.us-west-2.amazonaws.com/123/video",
+        core_client=core,
+        batch_client=batch,
+        eks_client=eks,
+        config=config,
+        state=state,
+        now=1000.0,
+    )
+
+    assert result["adopted"] == 1
+    assert result["started"] == 0
+    assert batch.created == []
+    assert state["inflight"][0]["job_name"] == existing_job["metadata"]["name"]
+    assert eks.updates[-1]["scalingConfig"]["desiredSize"] == 1
 
 
 def test_controller_tick_starts_multiple_messages_up_to_h100_gpu_cap_and_scales_nodes():
