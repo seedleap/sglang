@@ -72,15 +72,34 @@ def test_render_job_manifest_uses_controller_infra_defaults():
 
     assert manifest["kind"] == "Job"
     assert manifest["metadata"]["namespace"] == "default"
-    assert manifest["spec"]["parallelism"] == 4
-    assert manifest["spec"]["completions"] == 4
+    assert manifest["spec"]["parallelism"] == 1
+    assert manifest["spec"]["completions"] == 1
     pod = manifest["spec"]["template"]["spec"]
     assert pod["serviceAccountName"] == "sglang-video-job"
     container = pod["containers"][0]
     assert container["image"] == "lmsysorg/sglang:dev@sha256:test"
     assert container["resources"]["requests"]["nvidia.com/gpu"] == 8
+    assert container["resources"]["limits"]["nvidia.com/gpu"] == 8
     assert container["env"][0]["name"] == "SGLANG_VIDEO_BATCH_REQUEST_JSON"
     assert container["volumeMounts"][0]["mountPath"] == "/fsx"
+
+
+def test_render_job_manifest_ignores_request_gpu_limits_and_uses_controller_config():
+    manifest = render_job_manifest(
+        _request(),
+        {
+            "namespace": "default",
+            "job_image": "lmsysorg/sglang:dev@sha256:test",
+            "gpu_per_pod": 2,
+            "job_parallelism": 3,
+        },
+    )
+
+    container = manifest["spec"]["template"]["spec"]["containers"][0]
+    assert manifest["spec"]["parallelism"] == 3
+    assert manifest["spec"]["completions"] == 3
+    assert container["resources"]["requests"]["nvidia.com/gpu"] == 2
+    assert container["resources"]["limits"]["nvidia.com/gpu"] == 2
 
 
 def test_render_job_manifest_can_match_existing_b300_batch_runtime_shape():
@@ -229,6 +248,9 @@ def test_env_config_reads_placement_profiles_and_job_ttl(monkeypatch):
 
     config = _env_config()
 
+    assert config["max_active_gpus"] == "8"
+    assert config["gpu_per_pod"] == "8"
+    assert config["job_parallelism"] == "1"
     assert config["placement_profiles"] == placement_profiles
     assert config["ttl_seconds_after_finished"] == "900"
 
@@ -293,6 +315,8 @@ def test_process_one_message_creates_job_and_deletes_sqs_message_when_capacity_a
     )
 
     assert result["status"] == "started"
+    assert result["requested_gpus"] == 8
+    assert result["max_active_gpus"] == 8
     assert len(batch.created) == 1
     assert batch.created[0]["body"]["metadata"]["name"].startswith("sglang-video-")
     assert sqs.deleted[0]["ReceiptHandle"] == "receipt-1"
@@ -324,6 +348,8 @@ def test_process_one_message_defers_without_deleting_when_gpu_cap_is_exceeded():
     )
 
     assert result["status"] == "deferred"
+    assert result["requested_gpus"] == 8
+    assert result["max_active_gpus"] == 8
     assert batch.created == []
     assert sqs.deleted == []
     assert sqs.visibility_changes[0]["VisibilityTimeout"] == 120

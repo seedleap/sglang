@@ -59,10 +59,6 @@ def _safe_name(value: str, fallback: str) -> str:
     return (safe or fallback)[:48].rstrip("-") or fallback
 
 
-def _limits(request: dict[str, Any]) -> dict[str, Any]:
-    return request.get("limits") if isinstance(request.get("limits"), dict) else {}
-
-
 def _metadata_name(request: dict[str, Any]) -> str:
     raw = str(
         request.get("generation_job_id")
@@ -162,11 +158,10 @@ def _configured_affinity(config: dict[str, Any]) -> dict[str, Any]:
 
 def render_job_manifest(request: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
     """Render a Kubernetes Job manifest for one SGLang t2i video batch."""
-    limits = _limits(request)
-    gpu_per_pod = _int_or_default(limits.get("gpu_per_pod") or config.get("gpu_per_pod"), 8)
-    parallelism = _int_or_default(limits.get("job_parallelism") or config.get("job_parallelism"), 1)
+    gpu_per_pod = _int_or_default(config.get("gpu_per_pod"), 8)
+    parallelism = _int_or_default(config.get("job_parallelism"), 1)
     timeout_seconds = _int_or_default(
-        limits.get("timeout_seconds") or config.get("timeout_seconds"),
+        config.get("timeout_seconds"),
         21600,
     )
     fsx_mount_path = str(config.get("fsx_mount_path") or "/fsx")
@@ -309,16 +304,6 @@ def _decode_request(message: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
-def _effective_limit(
-    request: dict[str, Any],
-    config: dict[str, Any],
-    key: str,
-    default: int,
-) -> int:
-    limits = _limits(request)
-    return _int_or_default(limits.get(key) or config.get(key), default)
-
-
 def _already_exists(error: Exception) -> bool:
     return getattr(error, "status", None) == 409 or "AlreadyExists" in str(error)
 
@@ -353,9 +338,9 @@ def process_one_message(
     request = _decode_request(message)
     pods = _list_controller_pods(core_client, config)
     active_gpus = active_gpu_requests(pods)
-    max_active_gpus = _effective_limit(request, config, "max_active_gpus", 32)
-    gpu_per_pod = _effective_limit(request, config, "gpu_per_pod", 8)
-    parallelism = _effective_limit(request, config, "job_parallelism", 4)
+    max_active_gpus = _int_or_default(config.get("max_active_gpus"), 8)
+    gpu_per_pod = _int_or_default(config.get("gpu_per_pod"), 8)
+    parallelism = _int_or_default(config.get("job_parallelism"), 1)
     if not can_start_job(
         active_gpus=active_gpus,
         max_active_gpus=max_active_gpus,
@@ -374,7 +359,10 @@ def process_one_message(
             "max_active_gpus": max_active_gpus,
         }
 
-    manifest = render_job_manifest(request, {**config, **{"gpu_per_pod": gpu_per_pod}})
+    manifest = render_job_manifest(
+        request,
+        {**config, **{"gpu_per_pod": gpu_per_pod, "job_parallelism": parallelism}},
+    )
     namespace = manifest["metadata"]["namespace"]
     try:
         batch_client.create_namespaced_job(namespace=namespace, body=manifest)
@@ -402,9 +390,9 @@ def _env_config() -> dict[str, Any]:
         "fsx_claim_name": os.environ.get("SGLANG_VIDEO_FSX_CLAIM", "fsx-claim"),
         "fsx_mount_path": os.environ.get("SGLANG_VIDEO_FSX_MOUNT", "/fsx"),
         "work_dir_prefix": os.environ.get("SGLANG_VIDEO_WORK_DIR_PREFIX", "/fsx/sglang-video"),
-        "max_active_gpus": os.environ.get("SGLANG_VIDEO_MAX_ACTIVE_GPUS", "32"),
+        "max_active_gpus": os.environ.get("SGLANG_VIDEO_MAX_ACTIVE_GPUS", "8"),
         "gpu_per_pod": os.environ.get("SGLANG_VIDEO_GPU_PER_POD", "8"),
-        "job_parallelism": os.environ.get("SGLANG_VIDEO_JOB_PARALLELISM", "4"),
+        "job_parallelism": os.environ.get("SGLANG_VIDEO_JOB_PARALLELISM", "1"),
         "timeout_seconds": os.environ.get("SGLANG_VIDEO_TIMEOUT_SECONDS", "21600"),
         "defer_visibility_timeout": os.environ.get(
             "SGLANG_VIDEO_DEFER_VISIBILITY_TIMEOUT",
