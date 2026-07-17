@@ -53,3 +53,75 @@ contract, see [`examples/lingbot_batch_api`](../../examples/lingbot_batch_api/RE
 It pairs one synchronous HTTP adapter with each SGLang instance, returns 429
 instead of building a server-side queue, and lets HPA/Karpenter resize B300 Spot
 capacity while callers provide backpressure.
+
+## aws03 SQS video controller
+
+`aws03_video_controller.py` consumes one SQS message per SGLang video batch. It
+does not delete a message when the Kubernetes Job is created. Instead, the
+message is dynamically renewed until the Job succeeds, so H100 Spot interruption,
+pod failure, or controller restart does not lose work.
+
+Scheduling policy:
+
+- Prefer a B300 capacity-block backend when a matching Ready node has at least
+  one full 8-GPU slot free.
+- If B300 exists but is full, fall back to H100 Spot.
+- H100 is capped independently by `SGLANG_VIDEO_H100_MAX_ACTIVE_GPUS`; production
+  default should be `32`, which means at most four `p5.48xlarge` 8-GPU Jobs.
+- If neither backend has capacity, the controller changes message visibility and
+  leaves the message in SQS for a later attempt.
+
+The controller tracks inflight messages in memory. While a Job is pending or
+running it calls `ChangeMessageVisibility` every
+`SGLANG_VIDEO_MESSAGE_RENEW_INTERVAL_SECONDS`, extending the lease to
+`SGLANG_VIDEO_MESSAGE_VISIBILITY_SECONDS`. If the controller crashes, renewal
+stops and the message becomes visible again after the last visibility timeout.
+The replacement Job resumes from S3 checkpoints written by the runner under:
+
+```text
+<output_prefix>/video_state/cases/<case_id>.json
+```
+
+Important controller environment variables:
+
+```text
+SGLANG_VIDEO_SQS_MAX_MESSAGES=10
+SGLANG_VIDEO_MESSAGE_VISIBILITY_SECONDS=900
+SGLANG_VIDEO_MESSAGE_RENEW_INTERVAL_SECONDS=60
+SGLANG_VIDEO_MESSAGE_MAX_LEASE_SECONDS=28800
+SGLANG_VIDEO_MAX_JOB_ATTEMPTS=5
+SGLANG_VIDEO_H100_MAX_ACTIVE_GPUS=32
+SGLANG_VIDEO_H100_NODE_GPUS=8
+SGLANG_VIDEO_H100_MAX_NODES=4
+SGLANG_VIDEO_H100_EKS_CLUSTER_NAME=leap-world-aws03-usw2
+SGLANG_VIDEO_H100_NODEGROUP_NAME=sglang-h100-spot
+SGLANG_VIDEO_ALLOW_H100_DEMAND=false
+```
+
+Use `SGLANG_VIDEO_BACKENDS_JSON` to make backend choice explicit. Example:
+
+```json
+[
+  {
+    "name": "b300-capacity-block",
+    "node_selector": {
+      "eks.amazonaws.com/capacityType": "CAPACITY_BLOCK",
+      "eks.amazonaws.com/nodegroup": "wan22-cb-p6b300-0715-20c",
+      "node.kubernetes.io/instance-type": "p6-b300.48xlarge"
+    }
+  },
+  {
+    "name": "h100-spot",
+    "scale_nodegroup": true,
+    "node_selector": {
+      "eks.amazonaws.com/capacityType": "SPOT",
+      "node.kubernetes.io/instance-type": "p5.48xlarge",
+      "seedleap.ai/workload": "sglang-video"
+    }
+  }
+]
+```
+
+Apply `k8s-aws03-video-controller-rbac.yaml` with the controller deployment.
+The service account also needs AWS IAM permissions for SQS receive/delete/change
+visibility and `eks:UpdateNodegroupConfig` on the H100 Spot nodegroup.

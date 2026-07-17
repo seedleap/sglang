@@ -3,9 +3,14 @@ import json
 from aws03_video_controller import (
     _env_config,
     active_gpu_requests,
+    backend_free_gpus,
     can_start_job,
+    choose_backend,
+    controller_tick,
     process_one_message,
     render_job_manifest,
+    reconcile_inflight_jobs,
+    renew_inflight_messages,
 )
 
 
@@ -256,19 +261,23 @@ def test_env_config_reads_placement_profiles_and_job_ttl(monkeypatch):
 
 
 class FakeSQS:
-    def __init__(self, request: dict):
-        self.request = request
+    def __init__(self, request: dict | list[dict]):
+        self.requests = request if isinstance(request, list) else [request]
         self.deleted = []
         self.visibility_changes = []
 
     def receive_message(self, **kwargs):
+        max_messages = int(kwargs.get("MaxNumberOfMessages") or 1)
+        messages = [
+            {
+                "Body": json.dumps(request),
+                "ReceiptHandle": f"receipt-{index + 1}",
+                "MessageId": f"message-{index + 1}",
+            }
+            for index, request in enumerate(self.requests[:max_messages])
+        ]
         return {
-            "Messages": [
-                {
-                    "Body": __import__("json").dumps(self.request),
-                    "ReceiptHandle": "receipt-1",
-                }
-            ]
+            "Messages": messages
         }
 
     def delete_message(self, **kwargs):
@@ -279,24 +288,98 @@ class FakeSQS:
 
 
 class FakeCoreV1:
-    def __init__(self, pods):
+    def __init__(self, pods, nodes=None):
         self.pods = pods
+        self.nodes = nodes or []
         self.calls = []
 
     def list_namespaced_pod(self, **kwargs):
         self.calls.append(kwargs)
         return {"items": self.pods}
 
+    def list_node(self, **kwargs):
+        return {"items": self.nodes}
+
 
 class FakeBatchV1:
     def __init__(self):
         self.created = []
+        self.deleted = []
+        self.jobs = {}
 
     def create_namespaced_job(self, namespace, body):
         self.created.append({"namespace": namespace, "body": body})
 
+    def read_namespaced_job_status(self, name, namespace):
+        return self.jobs.get(name, {"status": {}})
 
-def test_process_one_message_creates_job_and_deletes_sqs_message_when_capacity_available():
+    def delete_namespaced_job(self, name, namespace, **kwargs):
+        self.deleted.append({"namespace": namespace, "name": name, **kwargs})
+
+
+class FakeEks:
+    def __init__(self):
+        self.updates = []
+
+    def update_nodegroup_config(self, **kwargs):
+        self.updates.append(kwargs)
+        return {"update": {"status": "InProgress"}}
+
+
+def _node(name: str, selector: dict, gpus: int = 8, ready: bool = True) -> dict:
+    conditions = [{"type": "Ready", "status": "True" if ready else "False"}]
+    return {
+        "metadata": {"name": name, "labels": selector},
+        "status": {"allocatable": {"nvidia.com/gpu": str(gpus)}, "conditions": conditions},
+    }
+
+
+def _gpu_pod(name: str, node_name: str, gpus: int = 8, phase: str = "Running") -> dict:
+    return {
+        "metadata": {"name": name},
+        "status": {"phase": phase},
+        "spec": {
+            "nodeName": node_name,
+            "containers": [{"resources": {"requests": {"nvidia.com/gpu": str(gpus)}}}],
+        },
+    }
+
+
+def _backend_config() -> dict:
+    return {
+        "namespace": "default",
+        "job_image": "lmsysorg/sglang:dev@sha256:test",
+        "service_account": "sglang-video-job",
+        "fsx_claim_name": "fsx-claim",
+        "gpu_per_pod": 8,
+        "job_parallelism": 1,
+        "max_active_gpus": 40,
+        "h100_max_active_gpus": 32,
+        "h100_node_gpus": 8,
+        "h100_cluster_name": "leap-world-aws03-usw2",
+        "h100_nodegroup_name": "sglang-h100-spot",
+        "backends": [
+            {
+                "name": "b300-capacity-block",
+                "node_selector": {
+                    "eks.amazonaws.com/capacityType": "CAPACITY_BLOCK",
+                    "node.kubernetes.io/instance-type": "p6-b300.48xlarge",
+                },
+            },
+            {
+                "name": "h100-spot",
+                "node_selector": {
+                    "eks.amazonaws.com/capacityType": "SPOT",
+                    "node.kubernetes.io/instance-type": "p5.48xlarge",
+                    "seedleap.ai/workload": "sglang-video",
+                },
+                "scale_nodegroup": True,
+            },
+        ],
+    }
+
+
+def test_process_one_message_creates_job_without_deleting_sqs_message_when_capacity_available():
     sqs = FakeSQS(_request())
     core = FakeCoreV1([])
     batch = FakeBatchV1()
@@ -319,7 +402,239 @@ def test_process_one_message_creates_job_and_deletes_sqs_message_when_capacity_a
     assert result["max_active_gpus"] == 8
     assert len(batch.created) == 1
     assert batch.created[0]["body"]["metadata"]["name"].startswith("sglang-video-")
+    assert sqs.deleted == []
+
+
+def test_backend_free_gpus_subtracts_gpu_pods_on_matching_nodes():
+    b300_selector = {
+        "eks.amazonaws.com/capacityType": "CAPACITY_BLOCK",
+        "node.kubernetes.io/instance-type": "p6-b300.48xlarge",
+    }
+    nodes = [_node("b300-a", b300_selector), _node("b300-b", b300_selector)]
+    pods = [_gpu_pod("training", "b300-a", 8)]
+
+    assert backend_free_gpus(nodes, pods, b300_selector) == 8
+
+
+def test_choose_backend_prefers_b300_when_free_and_uses_h100_when_b300_is_full():
+    config = _backend_config()
+    b300 = _node("b300-a", config["backends"][0]["node_selector"])
+    h100 = _node("h100-a", config["backends"][1]["node_selector"])
+
+    assert choose_backend(config, [b300], [], requested_gpus=8)["name"] == "b300-capacity-block"
+
+    selected = choose_backend(
+        config,
+        [b300, h100],
+        [_gpu_pod("other-job", "b300-a", 8)],
+        requested_gpus=8,
+    )
+
+    assert selected["name"] == "h100-spot"
+
+
+def test_choose_backend_does_not_double_count_h100_pods_and_inflight_state():
+    config = _backend_config()
+    h100_selector = config["backends"][1]["node_selector"]
+    h100_pods = [
+        {
+            "metadata": {"labels": {"sglang.seedleap.io/backend": "h100-spot"}},
+            "status": {"phase": "Running"},
+            "spec": {"containers": [{"resources": {"requests": {"nvidia.com/gpu": "16"}}}]},
+        }
+    ]
+    state = {
+        "inflight": [
+            {"backend": "h100-spot", "requested_gpus": 8},
+            {"backend": "h100-spot", "requested_gpus": 8},
+        ]
+    }
+
+    selected = choose_backend(
+        config,
+        [_node("h100-a", h100_selector)],
+        h100_pods,
+        requested_gpus=8,
+        state=state,
+    )
+
+    assert selected["name"] == "h100-spot"
+
+
+def test_choose_backend_does_not_use_h100_demand_by_default():
+    config = {
+        **_backend_config(),
+        "h100_max_active_gpus": 8,
+        "backends": [
+            {
+                "name": "h100-spot",
+                "node_selector": {
+                    "eks.amazonaws.com/capacityType": "SPOT",
+                    "node.kubernetes.io/instance-type": "p5.48xlarge",
+                },
+            },
+            {
+                "name": "h100-demand",
+                "node_selector": {
+                    "eks.amazonaws.com/capacityType": "ON_DEMAND",
+                    "node.kubernetes.io/instance-type": "p5.48xlarge",
+                },
+            },
+        ],
+    }
+    state = {"inflight": [{"backend": "h100-spot", "requested_gpus": 8}]}
+
+    assert choose_backend(config, [], [], requested_gpus=8, state=state) is None
+
+
+def test_controller_tick_starts_multiple_messages_up_to_h100_gpu_cap_and_scales_nodes():
+    requests = [{**_request(), "generation_job_id": f"gen_t2i_{index}"} for index in range(5)]
+    config = _backend_config()
+    b300 = _node("b300-a", config["backends"][0]["node_selector"])
+    core = FakeCoreV1([_gpu_pod("busy", "b300-a", 8)], [b300])
+    batch = FakeBatchV1()
+    sqs = FakeSQS(requests)
+    eks = FakeEks()
+
+    state = {"inflight": []}
+    result = controller_tick(
+        sqs_client=sqs,
+        queue_url="https://sqs.us-west-2.amazonaws.com/123/video",
+        core_client=core,
+        batch_client=batch,
+        eks_client=eks,
+        config={**config, "sqs_max_messages": 10},
+        state=state,
+        now=1000.0,
+    )
+
+    assert result["started"] == 4
+    assert result["deferred"] == 1
+    assert len(batch.created) == 4
+    assert all(
+        job["body"]["metadata"]["labels"]["sglang.seedleap.io/backend"] == "h100-spot"
+        for job in batch.created
+    )
+    assert sqs.deleted == []
+    assert sqs.visibility_changes[-1]["ReceiptHandle"] == "receipt-5"
+    assert sqs.visibility_changes[-1]["VisibilityTimeout"] > 0
+    assert eks.updates[-1]["scalingConfig"]["desiredSize"] == 4
+    assert len(state["inflight"]) == 4
+
+
+def test_renew_inflight_messages_extends_visibility_without_deleting():
+    sqs = FakeSQS(_request())
+    state = {
+        "inflight": [
+            {
+                "receipt_handle": "receipt-1",
+                "job_name": "sglang-video-gen",
+                "started_at": 1000.0,
+                "last_renewed_at": 1000.0,
+            }
+        ]
+    }
+
+    renew_inflight_messages(
+        sqs_client=sqs,
+        queue_url="https://sqs.us-west-2.amazonaws.com/123/video",
+        config={
+            "message_visibility_seconds": 900,
+            "message_renew_interval_seconds": 60,
+            "message_max_lease_seconds": 28800,
+        },
+        state=state,
+        now=1061.0,
+    )
+
+    assert sqs.visibility_changes == [
+        {
+            "QueueUrl": "https://sqs.us-west-2.amazonaws.com/123/video",
+            "ReceiptHandle": "receipt-1",
+            "VisibilityTimeout": 900,
+        }
+    ]
+    assert sqs.deleted == []
+    assert state["inflight"][0]["last_renewed_at"] == 1061.0
+
+
+def test_reconcile_recreates_failed_h100_job_under_same_message_receipt():
+    config = _backend_config()
+    b300 = _node("b300-a", config["backends"][0]["node_selector"])
+    h100 = _node("h100-a", config["backends"][1]["node_selector"])
+    core = FakeCoreV1([_gpu_pod("busy", "b300-a", 8)], [b300, h100])
+    batch = FakeBatchV1()
+    batch.jobs["sglang-video-old"] = {"status": {"failed": 1}}
+    sqs = FakeSQS(_request())
+    eks = FakeEks()
+    state = {
+        "inflight": [
+            {
+                "request": _request(),
+                "receipt_handle": "receipt-1",
+                "message_id": "message-1",
+                "job_name": "sglang-video-old",
+                "backend": "h100-spot",
+                "attempts": 1,
+                "started_at": 1000.0,
+                "last_renewed_at": 1000.0,
+            }
+        ]
+    }
+
+    result = reconcile_inflight_jobs(
+        sqs_client=sqs,
+        queue_url="https://sqs.us-west-2.amazonaws.com/123/video",
+        core_client=core,
+        batch_client=batch,
+        eks_client=eks,
+        config=config,
+        state=state,
+        now=1100.0,
+    )
+
+    assert result["restarted"] == 1
+    assert sqs.deleted == []
+    assert batch.deleted[0]["name"] == "sglang-video-old"
+    assert len(batch.created) == 1
+    assert state["inflight"][0]["attempts"] == 2
+    assert state["inflight"][0]["job_name"].startswith("sglang-video-")
+
+
+def test_reconcile_deletes_message_only_after_job_succeeds():
+    config = _backend_config()
+    batch = FakeBatchV1()
+    batch.jobs["sglang-video-done"] = {"status": {"succeeded": 1}}
+    sqs = FakeSQS(_request())
+    state = {
+        "inflight": [
+            {
+                "request": _request(),
+                "receipt_handle": "receipt-1",
+                "message_id": "message-1",
+                "job_name": "sglang-video-done",
+                "backend": "b300-capacity-block",
+                "attempts": 1,
+                "started_at": 1000.0,
+                "last_renewed_at": 1000.0,
+            }
+        ]
+    }
+
+    result = reconcile_inflight_jobs(
+        sqs_client=sqs,
+        queue_url="https://sqs.us-west-2.amazonaws.com/123/video",
+        core_client=FakeCoreV1([], []),
+        batch_client=batch,
+        eks_client=FakeEks(),
+        config=config,
+        state=state,
+        now=1100.0,
+    )
+
+    assert result["completed"] == 1
     assert sqs.deleted[0]["ReceiptHandle"] == "receipt-1"
+    assert state["inflight"] == []
 
 
 def test_process_one_message_defers_without_deleting_when_gpu_cap_is_exceeded():

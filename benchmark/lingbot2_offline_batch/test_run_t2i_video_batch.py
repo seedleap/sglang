@@ -6,11 +6,13 @@ import urllib.request
 from run_t2i_video_batch import (
     _make_s3_client,
     build_runtime_inputs,
+    case_checkpoint_s3_uri,
     collect_upload_results,
     parse_s3_uri,
     post_callback,
     read_action_trajectories,
     run_benchmark,
+    split_completed_cases,
     upload_report,
 )
 from t2i_video_batch import build_case_records
@@ -49,6 +51,7 @@ class FakeS3Client:
     def __init__(self) -> None:
         self.uploads = []
         self.objects = []
+        self.existing = set()
 
     def generate_presigned_url(self, operation, Params, ExpiresIn):
         assert operation == "get_object"
@@ -66,6 +69,14 @@ class FakeS3Client:
 
     def put_object(self, **kwargs):
         self.objects.append(kwargs)
+
+    def head_object(self, **kwargs):
+        key = (kwargs["Bucket"], kwargs["Key"])
+        if key not in self.existing:
+            error = Exception("Not Found")
+            error.response = {"Error": {"Code": "404"}}
+            raise error
+        return {"ContentLength": 1024}
 
 
 def _request() -> dict:
@@ -244,6 +255,82 @@ def test_collect_upload_results_uploads_successes_and_reports_failures(tmp_path)
     assert results[0]["action_source"] == "trajs.jsonl"
     assert results[1]["status"] == "failed"
     assert results[1]["error"] == "RuntimeError: boom"
+
+
+def test_split_completed_cases_skips_existing_video_outputs_and_reports_resume_success(tmp_path):
+    cases = build_case_records(
+        _request(),
+        _rows()
+        + [
+            {
+                "item_id": "img002",
+                "image_uri": "s3://bucket/t2i/images/img002.png",
+                "image_prompt": "A red robot.",
+                "video_prompt": "A red robot.",
+                "video_prompt_source": "image_prompt_fallback",
+            }
+        ],
+        action_trajectories=_trajs(),
+    )
+    fake_s3 = FakeS3Client()
+    bucket, key = parse_s3_uri(cases[0]["video_s3_uri"])
+    fake_s3.existing.add((bucket, key))
+    checkpoint_bucket, checkpoint_key = parse_s3_uri(case_checkpoint_s3_uri(_request(), cases[0]))
+    fake_s3.existing.add((checkpoint_bucket, checkpoint_key))
+
+    pending, resumed_results = split_completed_cases(cases, _request(), fake_s3)
+
+    assert [case["case_id"] for case in pending] == [cases[1]["case_id"]]
+    assert resumed_results == [
+        {
+            "case_id": cases[0]["case_id"],
+            "status": "succeeded",
+            "video_uri": cases[0]["video_s3_uri"],
+            "movement_key": cases[0]["movement_key"],
+            "ending_movement_key": cases[0]["ending_movement_key"],
+            "movement_pair": cases[0]["movement_pair"],
+            "camera_key": cases[0]["camera_key"],
+            "traj_id": cases[0]["traj_id"],
+            "traj_type": cases[0]["traj_type"],
+            "action_source": cases[0]["action_source"],
+            "action_index": cases[0]["action_index"],
+            "action_seed": cases[0]["action_seed"],
+            "action_pattern": cases[0]["action_pattern"],
+            "resumed": True,
+        }
+    ]
+
+
+def test_collect_upload_results_writes_case_checkpoint_after_success(tmp_path):
+    cases = build_case_records(_request(), _rows(), action_trajectories=_trajs())
+    successful_output = tmp_path / "video.mp4"
+    successful_output.write_bytes(b"mp4")
+    fake_s3 = FakeS3Client()
+
+    collect_upload_results(
+        cases,
+        {
+            "results": [
+                {
+                    "sample_id": cases[0]["sample_id"],
+                    "success": True,
+                    "output": str(successful_output),
+                }
+            ]
+        },
+        fake_s3,
+        request=_request(),
+    )
+
+    checkpoint_uri = case_checkpoint_s3_uri(_request(), cases[0])
+    bucket, key = parse_s3_uri(checkpoint_uri)
+    assert any(
+        obj["Bucket"] == bucket
+        and obj["Key"] == key
+        and b'"status": "succeeded"' in obj["Body"]
+        and b'"video_uri":' in obj["Body"]
+        for obj in fake_s3.objects
+    )
 
 
 def test_upload_report_writes_report_to_requested_s3_uri():

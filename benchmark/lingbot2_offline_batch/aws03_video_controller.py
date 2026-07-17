@@ -11,6 +11,8 @@ from typing import Any
 
 
 TERMINAL_POD_PHASES = {"Succeeded", "Failed"}
+H100_BACKEND_NAMES = {"h100", "h100-spot"}
+B300_BACKEND_NAMES = {"b300", "b300-capacity-block"}
 DEFAULT_CONTAINER_COMMAND = [
     "python3",
     "/opt/bench/run_t2i_video_batch.py",
@@ -40,6 +42,169 @@ def active_gpu_requests(pods: list[dict[str, Any]]) -> int:
         containers = spec.get("containers") if isinstance(spec.get("containers"), list) else []
         total += sum(_gpu_request(container) for container in containers)
     return total
+
+
+def _metadata(value: dict[str, Any]) -> dict[str, Any]:
+    return value.get("metadata") if isinstance(value.get("metadata"), dict) else {}
+
+
+def _labels(value: dict[str, Any]) -> dict[str, Any]:
+    metadata = _metadata(value)
+    return metadata.get("labels") if isinstance(metadata.get("labels"), dict) else {}
+
+
+def _node_name(node: dict[str, Any]) -> str:
+    return str(_metadata(node).get("name") or "")
+
+
+def _pod_node_name(pod: dict[str, Any]) -> str:
+    spec = pod.get("spec") if isinstance(pod.get("spec"), dict) else {}
+    return str(spec.get("nodeName") or "")
+
+
+def _node_ready(node: dict[str, Any]) -> bool:
+    status = node.get("status") if isinstance(node.get("status"), dict) else {}
+    conditions = status.get("conditions") if isinstance(status.get("conditions"), list) else []
+    return any(
+        condition.get("type") == "Ready" and condition.get("status") == "True"
+        for condition in conditions
+        if isinstance(condition, dict)
+    )
+
+
+def _node_allocatable_gpus(node: dict[str, Any]) -> int:
+    status = node.get("status") if isinstance(node.get("status"), dict) else {}
+    allocatable = status.get("allocatable") if isinstance(status.get("allocatable"), dict) else {}
+    return _int_or_default(allocatable.get("nvidia.com/gpu"), 0)
+
+
+def _matches_selector(labels: dict[str, Any], selector: dict[str, Any]) -> bool:
+    for key, expected in selector.items():
+        if expected in (None, ""):
+            continue
+        values = [str(item) for item in expected] if isinstance(expected, list) else [str(expected)]
+        if str(labels.get(str(key))) not in values:
+            return False
+    return True
+
+
+def _pod_gpu_requests_on_node(pods: list[dict[str, Any]], node_name: str) -> int:
+    total = 0
+    for pod in pods:
+        status = pod.get("status") if isinstance(pod.get("status"), dict) else {}
+        if status.get("phase") in TERMINAL_POD_PHASES:
+            continue
+        if _pod_node_name(pod) != node_name:
+            continue
+        spec = pod.get("spec") if isinstance(pod.get("spec"), dict) else {}
+        containers = spec.get("containers") if isinstance(spec.get("containers"), list) else []
+        total += sum(_gpu_request(container) for container in containers)
+    return total
+
+
+def backend_free_gpus(
+    nodes: list[dict[str, Any]],
+    pods: list[dict[str, Any]],
+    selector: dict[str, Any],
+) -> int:
+    """Return currently free GPUs on Ready nodes matching a backend selector."""
+    total = 0
+    for node in nodes:
+        if not _node_ready(node) or not _matches_selector(_labels(node), selector):
+            continue
+        total += max(
+            0,
+            _node_allocatable_gpus(node) - _pod_gpu_requests_on_node(pods, _node_name(node)),
+        )
+    return total
+
+
+def _backend_name(value: dict[str, Any]) -> str:
+    return str(value.get("name") or "").strip()
+
+
+def _is_h100_backend(backend: dict[str, Any]) -> bool:
+    name = _backend_name(backend).lower()
+    selector = backend.get("node_selector") if isinstance(backend.get("node_selector"), dict) else {}
+    return (
+        name in H100_BACKEND_NAMES
+        or "h100" in name
+        or selector.get("node.kubernetes.io/instance-type") == "p5.48xlarge"
+    )
+
+
+def _is_b300_backend(backend: dict[str, Any]) -> bool:
+    name = _backend_name(backend).lower()
+    selector = backend.get("node_selector") if isinstance(backend.get("node_selector"), dict) else {}
+    return (
+        name in B300_BACKEND_NAMES
+        or "b300" in name
+        or selector.get("node.kubernetes.io/instance-type") == "p6-b300.48xlarge"
+    )
+
+
+def _is_demand_backend(backend: dict[str, Any]) -> bool:
+    name = _backend_name(backend).lower()
+    selector = backend.get("node_selector") if isinstance(backend.get("node_selector"), dict) else {}
+    return "demand" in name or selector.get("eks.amazonaws.com/capacityType") == "ON_DEMAND"
+
+
+def _backend_gpu_requests(pods: list[dict[str, Any]], backend_name: str) -> int:
+    total = 0
+    for pod in pods:
+        if _labels(pod).get("sglang.seedleap.io/backend") != backend_name:
+            continue
+        status = pod.get("status") if isinstance(pod.get("status"), dict) else {}
+        if status.get("phase") in TERMINAL_POD_PHASES:
+            continue
+        spec = pod.get("spec") if isinstance(pod.get("spec"), dict) else {}
+        containers = spec.get("containers") if isinstance(spec.get("containers"), list) else []
+        total += sum(_gpu_request(container) for container in containers)
+    return total
+
+
+def _inflight_backend_gpus(state: dict[str, Any], backend_name: str, gpu_per_pod: int) -> int:
+    return sum(
+        _int_or_default(item.get("requested_gpus"), gpu_per_pod)
+        for item in state.get("inflight", [])
+        if item.get("backend") == backend_name
+    )
+
+
+def choose_backend(
+    config: dict[str, Any],
+    nodes: list[dict[str, Any]],
+    pods: list[dict[str, Any]],
+    *,
+    requested_gpus: int,
+    state: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Pick B300 when it has free GPUs; otherwise pick H100 Spot within cap."""
+    backends = config.get("backends") if isinstance(config.get("backends"), list) else []
+    state = state or {"inflight": []}
+    for backend in backends:
+        if not isinstance(backend, dict) or not _is_b300_backend(backend):
+            continue
+        selector = backend.get("node_selector") if isinstance(backend.get("node_selector"), dict) else {}
+        if backend_free_gpus(nodes, pods, selector) >= requested_gpus:
+            return backend
+
+    h100_max_gpus = _int_or_default(config.get("h100_max_active_gpus"), 32)
+    allow_h100_demand = str(config.get("allow_h100_demand") or "").lower() in {"1", "true", "yes"}
+    gpu_per_pod = _int_or_default(config.get("gpu_per_pod"), requested_gpus)
+    for backend in backends:
+        if not isinstance(backend, dict) or not _is_h100_backend(backend):
+            continue
+        if _is_demand_backend(backend) and not allow_h100_demand:
+            continue
+        name = _backend_name(backend)
+        active = max(
+            _backend_gpu_requests(pods, name),
+            _inflight_backend_gpus(state, name, gpu_per_pod),
+        )
+        if active + requested_gpus <= h100_max_gpus:
+            return backend
+    return None
 
 
 def can_start_job(
@@ -167,6 +332,10 @@ def render_job_manifest(request: dict[str, Any], config: dict[str, Any]) -> dict
     fsx_mount_path = str(config.get("fsx_mount_path") or "/fsx")
     fsx_claim_name = str(config.get("fsx_claim_name") or "fsx-claim")
     job_name = _metadata_name(request)
+    suffix = _safe_name(str(config.get("job_name_suffix") or ""), "")
+    if suffix:
+        job_name = f"{job_name}-{suffix}"[:63].rstrip("-")
+    selected_backend = str(config.get("selected_backend") or "")
     volume_mounts = [
         {
             "name": "fsx",
@@ -241,6 +410,7 @@ def render_job_manifest(request: dict[str, Any], config: dict[str, Any]) -> dict
                 "labels": {
                     "app.kubernetes.io/name": "sglang-video-batch",
                     "app.kubernetes.io/component": "t2i-video-job",
+                    "sglang.seedleap.io/backend": selected_backend,
                 },
             },
             "spec": {
@@ -264,6 +434,7 @@ def render_job_manifest(request: dict[str, Any], config: dict[str, Any]) -> dict
                 "sglang.seedleap.io/generation-job-id": str(
                     request.get("generation_job_id") or ""
                 ),
+                "sglang.seedleap.io/backend": selected_backend,
             },
         },
         "spec": job_spec,
@@ -288,6 +459,21 @@ def _list_controller_pods(core_client: Any, config: dict[str, Any]) -> list[dict
         namespace=namespace,
         label_selector=label_selector,
     )
+    response = _object_to_dict(response)
+    items = response.get("items", []) if isinstance(response, dict) else response.items
+    return [_object_to_dict(item) for item in items]
+
+
+def _list_capacity_pods(core_client: Any, config: dict[str, Any]) -> list[dict[str, Any]]:
+    namespace = config.get("namespace", "default")
+    response = core_client.list_namespaced_pod(namespace=namespace)
+    response = _object_to_dict(response)
+    items = response.get("items", []) if isinstance(response, dict) else response.items
+    return [_object_to_dict(item) for item in items]
+
+
+def _list_nodes(core_client: Any) -> list[dict[str, Any]]:
+    response = core_client.list_node()
     response = _object_to_dict(response)
     items = response.get("items", []) if isinstance(response, dict) else response.items
     return [_object_to_dict(item) for item in items]
@@ -369,10 +555,6 @@ def process_one_message(
     except Exception as error:
         if not _already_exists(error):
             raise
-    sqs_client.delete_message(
-        QueueUrl=queue_url,
-        ReceiptHandle=message["ReceiptHandle"],
-    )
     return {
         "status": "started",
         "job_name": manifest["metadata"]["name"],
@@ -382,7 +564,300 @@ def process_one_message(
     }
 
 
+def _message_visibility_seconds(config: dict[str, Any]) -> int:
+    return _int_or_default(config.get("message_visibility_seconds"), 900)
+
+
+def renew_inflight_messages(
+    *,
+    sqs_client: Any,
+    queue_url: str,
+    config: dict[str, Any],
+    state: dict[str, Any],
+    now: float,
+) -> dict[str, int]:
+    renewed = expired = 0
+    renew_interval = _int_or_default(config.get("message_renew_interval_seconds"), 60)
+    max_lease = _int_or_default(config.get("message_max_lease_seconds"), 28800)
+    visibility = _message_visibility_seconds(config)
+    remaining = []
+    all_inflight = list(state.get("inflight", []))
+    for item in all_inflight:
+        if now - float(item.get("started_at", now)) > max_lease:
+            sqs_client.change_message_visibility(
+                QueueUrl=queue_url,
+                ReceiptHandle=item["receipt_handle"],
+                VisibilityTimeout=0,
+            )
+            expired += 1
+            continue
+        if now - float(item.get("last_renewed_at", 0)) >= renew_interval:
+            sqs_client.change_message_visibility(
+                QueueUrl=queue_url,
+                ReceiptHandle=item["receipt_handle"],
+                VisibilityTimeout=visibility,
+            )
+            item["last_renewed_at"] = now
+            renewed += 1
+        remaining.append(item)
+    state["inflight"] = remaining
+    return {"renewed": renewed, "expired": expired}
+
+
+def _job_status(job: Any) -> dict[str, Any]:
+    job = _object_to_dict(job)
+    if isinstance(job, dict):
+        return job.get("status") if isinstance(job.get("status"), dict) else {}
+    return _object_to_dict(getattr(job, "status", {})) or {}
+
+
+def _read_job_status(batch_client: Any, namespace: str, job_name: str) -> dict[str, Any]:
+    try:
+        return _job_status(batch_client.read_namespaced_job_status(name=job_name, namespace=namespace))
+    except Exception:
+        return {"failed": 1}
+
+
+def _render_for_backend(
+    request: dict[str, Any],
+    config: dict[str, Any],
+    backend: dict[str, Any],
+    *,
+    attempt: int,
+) -> dict[str, Any]:
+    return render_job_manifest(
+        request,
+        {
+            **config,
+            "placement_profiles": [backend],
+            "selected_backend": _backend_name(backend),
+            "job_name_suffix": f"r{attempt}" if attempt > 1 else "",
+        },
+    )
+
+
+def _scale_h100_nodegroup(eks_client: Any, config: dict[str, Any], desired_gpus: int) -> None:
+    if eks_client is None:
+        return
+    cluster_name = str(config.get("h100_cluster_name") or "").strip()
+    nodegroup_name = str(config.get("h100_nodegroup_name") or "").strip()
+    if not cluster_name or not nodegroup_name:
+        return
+    node_gpus = max(1, _int_or_default(config.get("h100_node_gpus"), 8))
+    max_nodes = _int_or_default(config.get("h100_max_nodes"), 4)
+    desired_nodes = min(max_nodes, (max(0, desired_gpus) + node_gpus - 1) // node_gpus)
+    eks_client.update_nodegroup_config(
+        clusterName=cluster_name,
+        nodegroupName=nodegroup_name,
+        scalingConfig={"desiredSize": desired_nodes},
+    )
+
+
+def _h100_inflight_gpus(state: dict[str, Any]) -> int:
+    return sum(
+        _int_or_default(item.get("requested_gpus"), 8)
+        for item in state.get("inflight", [])
+        if "h100" in str(item.get("backend", "")).lower()
+    )
+
+
+def reconcile_inflight_jobs(
+    *,
+    sqs_client: Any,
+    queue_url: str,
+    core_client: Any,
+    batch_client: Any,
+    eks_client: Any,
+    config: dict[str, Any],
+    state: dict[str, Any],
+    now: float,
+) -> dict[str, int]:
+    namespace = config.get("namespace", "default")
+    max_attempts = _int_or_default(config.get("max_job_attempts"), 5)
+    nodes = _list_nodes(core_client)
+    pods = _list_capacity_pods(core_client, config)
+    completed = restarted = released = failed = 0
+    remaining = []
+    all_inflight = list(state.get("inflight", []))
+
+    for item in all_inflight:
+        status = _read_job_status(batch_client, namespace, item["job_name"])
+        if _int_or_default(status.get("succeeded"), 0) > 0:
+            sqs_client.delete_message(
+                QueueUrl=queue_url,
+                ReceiptHandle=item["receipt_handle"],
+            )
+            completed += 1
+            continue
+
+        if _int_or_default(status.get("failed"), 0) > 0:
+            attempts = _int_or_default(item.get("attempts"), 1)
+            if attempts >= max_attempts:
+                sqs_client.change_message_visibility(
+                    QueueUrl=queue_url,
+                    ReceiptHandle=item["receipt_handle"],
+                    VisibilityTimeout=0,
+                )
+                failed += 1
+                continue
+
+            batch_client.delete_namespaced_job(
+                name=item["job_name"],
+                namespace=namespace,
+                propagation_policy="Background",
+            )
+            requested_gpus = _int_or_default(item.get("requested_gpus"), 8)
+            backend = choose_backend(
+                config,
+                nodes,
+                pods,
+                requested_gpus=requested_gpus,
+                state={"inflight": [candidate for candidate in all_inflight if candidate is not item]},
+            )
+            if backend is None:
+                remaining.append(item)
+                released += 1
+                continue
+            next_attempt = attempts + 1
+            manifest = _render_for_backend(item["request"], config, backend, attempt=next_attempt)
+            batch_client.create_namespaced_job(namespace=namespace, body=manifest)
+            item = {
+                **item,
+                "job_name": manifest["metadata"]["name"],
+                "backend": _backend_name(backend),
+                "attempts": next_attempt,
+                "last_renewed_at": now,
+                "requested_gpus": requested_gpus,
+            }
+            restarted += 1
+
+        remaining.append(item)
+
+    state["inflight"] = remaining
+    _scale_h100_nodegroup(eks_client, config, _h100_inflight_gpus(state))
+    return {
+        "completed": completed,
+        "restarted": restarted,
+        "released": released,
+        "failed": failed,
+    }
+
+
+def controller_tick(
+    *,
+    sqs_client: Any,
+    queue_url: str,
+    core_client: Any,
+    batch_client: Any,
+    eks_client: Any,
+    config: dict[str, Any],
+    state: dict[str, Any],
+    now: float | None = None,
+) -> dict[str, Any]:
+    now = time.time() if now is None else now
+    state.setdefault("inflight", [])
+    renew_result = renew_inflight_messages(
+        sqs_client=sqs_client,
+        queue_url=queue_url,
+        config=config,
+        state=state,
+        now=now,
+    )
+    reconcile_result = reconcile_inflight_jobs(
+        sqs_client=sqs_client,
+        queue_url=queue_url,
+        core_client=core_client,
+        batch_client=batch_client,
+        eks_client=eks_client,
+        config=config,
+        state=state,
+        now=now,
+    )
+
+    gpu_per_pod = _int_or_default(config.get("gpu_per_pod"), 8)
+    parallelism = _int_or_default(config.get("job_parallelism"), 1)
+    requested_gpus = gpu_per_pod * parallelism
+    response = sqs_client.receive_message(
+        QueueUrl=queue_url,
+        MaxNumberOfMessages=min(10, _int_or_default(config.get("sqs_max_messages"), 1)),
+        WaitTimeSeconds=_int_or_default(config.get("sqs_wait_time_seconds"), 20),
+        VisibilityTimeout=_message_visibility_seconds(config),
+    )
+    messages = response.get("Messages", [])
+    if not messages:
+        return {"status": "idle", **renew_result, **reconcile_result, "started": 0, "deferred": 0}
+
+    nodes = _list_nodes(core_client)
+    pods = _list_capacity_pods(core_client, config)
+    started = deferred = 0
+    for message in messages:
+        request = _decode_request(message)
+        backend = choose_backend(
+            config,
+            nodes,
+            pods,
+            requested_gpus=requested_gpus,
+            state=state,
+        )
+        if backend is None:
+            sqs_client.change_message_visibility(
+                QueueUrl=queue_url,
+                ReceiptHandle=message["ReceiptHandle"],
+                VisibilityTimeout=_int_or_default(config.get("defer_visibility_timeout"), 60),
+            )
+            deferred += 1
+            continue
+
+        manifest = _render_for_backend(request, config, backend, attempt=1)
+        namespace = manifest["metadata"]["namespace"]
+        try:
+            batch_client.create_namespaced_job(namespace=namespace, body=manifest)
+        except Exception as error:
+            if not _already_exists(error):
+                raise
+        state["inflight"].append(
+            {
+                "request": request,
+                "receipt_handle": message["ReceiptHandle"],
+                "message_id": message.get("MessageId", ""),
+                "job_name": manifest["metadata"]["name"],
+                "backend": _backend_name(backend),
+                "attempts": 1,
+                "started_at": now,
+                "last_renewed_at": now,
+                "requested_gpus": requested_gpus,
+            }
+        )
+        _scale_h100_nodegroup(eks_client, config, _h100_inflight_gpus(state))
+        started += 1
+
+    return {
+        "status": "started" if started else "deferred",
+        **renew_result,
+        **reconcile_result,
+        "started": started,
+        "deferred": deferred,
+        "inflight": len(state.get("inflight", [])),
+    }
+
+
+def _backend_profiles_from_env(placement_profiles: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    configured = _json_env("SGLANG_VIDEO_BACKENDS_JSON", [])
+    if isinstance(configured, list) and configured:
+        return configured
+    backends: list[dict[str, Any]] = []
+    for profile in placement_profiles:
+        if not isinstance(profile, dict):
+            continue
+        backend = dict(profile)
+        if _is_h100_backend(backend):
+            backend.setdefault("scale_nodegroup", True)
+        backends.append(backend)
+    return backends
+
+
 def _env_config() -> dict[str, Any]:
+    placement_profiles = _json_env("SGLANG_VIDEO_JOB_PLACEMENT_PROFILES_JSON", [])
     return {
         "namespace": os.environ.get("SGLANG_VIDEO_NAMESPACE", "default"),
         "job_image": os.environ["SGLANG_VIDEO_JOB_IMAGE"],
@@ -394,6 +869,28 @@ def _env_config() -> dict[str, Any]:
         "gpu_per_pod": os.environ.get("SGLANG_VIDEO_GPU_PER_POD", "8"),
         "job_parallelism": os.environ.get("SGLANG_VIDEO_JOB_PARALLELISM", "1"),
         "timeout_seconds": os.environ.get("SGLANG_VIDEO_TIMEOUT_SECONDS", "21600"),
+        "sqs_max_messages": os.environ.get("SGLANG_VIDEO_SQS_MAX_MESSAGES", "1"),
+        "sqs_wait_time_seconds": os.environ.get("SGLANG_VIDEO_SQS_WAIT_TIME_SECONDS", "20"),
+        "sqs_visibility_timeout": os.environ.get("SGLANG_VIDEO_SQS_VISIBILITY_TIMEOUT", "300"),
+        "message_visibility_seconds": os.environ.get(
+            "SGLANG_VIDEO_MESSAGE_VISIBILITY_SECONDS",
+            "900",
+        ),
+        "message_renew_interval_seconds": os.environ.get(
+            "SGLANG_VIDEO_MESSAGE_RENEW_INTERVAL_SECONDS",
+            "60",
+        ),
+        "message_max_lease_seconds": os.environ.get(
+            "SGLANG_VIDEO_MESSAGE_MAX_LEASE_SECONDS",
+            "28800",
+        ),
+        "max_job_attempts": os.environ.get("SGLANG_VIDEO_MAX_JOB_ATTEMPTS", "5"),
+        "h100_max_active_gpus": os.environ.get("SGLANG_VIDEO_H100_MAX_ACTIVE_GPUS", "32"),
+        "h100_node_gpus": os.environ.get("SGLANG_VIDEO_H100_NODE_GPUS", "8"),
+        "h100_max_nodes": os.environ.get("SGLANG_VIDEO_H100_MAX_NODES", "4"),
+        "h100_cluster_name": os.environ.get("SGLANG_VIDEO_H100_EKS_CLUSTER_NAME", ""),
+        "h100_nodegroup_name": os.environ.get("SGLANG_VIDEO_H100_NODEGROUP_NAME", ""),
+        "allow_h100_demand": os.environ.get("SGLANG_VIDEO_ALLOW_H100_DEMAND", "false"),
         "defer_visibility_timeout": os.environ.get(
             "SGLANG_VIDEO_DEFER_VISIBILITY_TIMEOUT",
             "60",
@@ -407,7 +904,8 @@ def _env_config() -> dict[str, Any]:
         "extra_env": _json_env("SGLANG_VIDEO_JOB_EXTRA_ENV_JSON", []),
         "node_selector": _json_env("SGLANG_VIDEO_JOB_NODE_SELECTOR_JSON", {}),
         "affinity": _json_env("SGLANG_VIDEO_JOB_AFFINITY_JSON", {}),
-        "placement_profiles": _json_env("SGLANG_VIDEO_JOB_PLACEMENT_PROFILES_JSON", []),
+        "placement_profiles": placement_profiles,
+        "backends": _backend_profiles_from_env(placement_profiles),
         "tolerations": _json_env("SGLANG_VIDEO_JOB_TOLERATIONS_JSON", []),
         "security_context": _json_env("SGLANG_VIDEO_JOB_SECURITY_CONTEXT_JSON", {}),
         "request_cpu": os.environ.get("SGLANG_VIDEO_JOB_REQUEST_CPU", ""),
@@ -431,17 +929,21 @@ def main() -> None:
     queue_url = os.environ["SGLANG_VIDEO_QUEUE_URL"]
     region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
     sqs_client = boto3.client("sqs", region_name=region)
+    eks_client = boto3.client("eks", region_name=region)
     kube_config.load_incluster_config()
     core_client = client.CoreV1Api()
     batch_client = client.BatchV1Api()
     config = _env_config()
+    state: dict[str, Any] = {"inflight": []}
     while True:
-        result = process_one_message(
+        result = controller_tick(
             sqs_client=sqs_client,
             queue_url=queue_url,
             core_client=core_client,
             batch_client=batch_client,
+            eks_client=eks_client,
             config=config,
+            state=state,
         )
         print(json.dumps(result, sort_keys=True), flush=True)
         if result["status"] == "idle":

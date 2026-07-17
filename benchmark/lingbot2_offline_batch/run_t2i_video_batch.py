@@ -159,10 +159,108 @@ def _upload_video(path: Path, s3_uri: str, s3_client: Any) -> None:
     )
 
 
+def _s3_object_exists(s3_uri: str, s3_client: Any) -> bool:
+    bucket, key = parse_s3_uri(s3_uri)
+    try:
+        response = s3_client.head_object(Bucket=bucket, Key=key)
+    except Exception as error:
+        code = str(getattr(error, "response", {}).get("Error", {}).get("Code", ""))
+        if code in {"404", "NoSuchKey", "NotFound"} or "Not Found" in str(error):
+            return False
+        raise
+    return int(response.get("ContentLength") or 0) > 0
+
+
+def _video_state_prefix(request: dict[str, Any]) -> str:
+    output = request.get("output") if isinstance(request.get("output"), dict) else {}
+    configured = str(output.get("video_state_s3_prefix") or "").rstrip("/")
+    if configured:
+        return configured
+    video_prefix = str(output.get("video_s3_prefix") or "").rstrip("/")
+    if video_prefix.endswith("/videos"):
+        return video_prefix[: -len("/videos")] + "/video_state/cases"
+    return video_prefix + "/video_state/cases"
+
+
+def case_checkpoint_s3_uri(request: dict[str, Any], case: dict[str, Any]) -> str:
+    return f"{_video_state_prefix(request)}/{case['case_id']}.json"
+
+
+def _case_result_from_case(case: dict[str, Any], *, resumed: bool = False) -> dict[str, Any]:
+    result = {
+        "case_id": case["case_id"],
+        "status": "succeeded",
+        "video_uri": case["video_s3_uri"],
+        "movement_key": case["movement_key"],
+        "ending_movement_key": case["ending_movement_key"],
+        "movement_pair": case["movement_pair"],
+        "camera_key": case["camera_key"],
+        "traj_id": case["traj_id"],
+        "traj_type": case["traj_type"],
+        "action_source": case["action_source"],
+        "action_index": case["action_index"],
+        "action_seed": case["action_seed"],
+        "action_pattern": case["action_pattern"],
+    }
+    if resumed:
+        result["resumed"] = True
+    return result
+
+
+def _write_case_checkpoint(
+    request: dict[str, Any],
+    case: dict[str, Any],
+    result: dict[str, Any],
+    s3_client: Any,
+) -> None:
+    checkpoint_uri = case_checkpoint_s3_uri(request, case)
+    bucket, key = parse_s3_uri(checkpoint_uri)
+    body = {
+        "case_id": case["case_id"],
+        "status": result["status"],
+        "video_uri": result.get("video_uri") or case["video_s3_uri"],
+        "movement_key": result.get("movement_key"),
+        "ending_movement_key": result.get("ending_movement_key"),
+        "movement_pair": result.get("movement_pair"),
+        "camera_key": result.get("camera_key"),
+        "traj_id": result.get("traj_id"),
+        "traj_type": result.get("traj_type"),
+        "action_source": result.get("action_source"),
+        "action_index": result.get("action_index"),
+        "action_seed": result.get("action_seed"),
+        "action_pattern": result.get("action_pattern"),
+    }
+    s3_client.put_object(
+        Bucket=bucket,
+        Key=key,
+        Body=(json.dumps(body, indent=2, ensure_ascii=False) + "\n").encode("utf-8"),
+        ContentType="application/json",
+    )
+
+
+def split_completed_cases(
+    cases: list[dict[str, Any]],
+    request: dict[str, Any],
+    s3_client: Any,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    pending: list[dict[str, Any]] = []
+    resumed_results: list[dict[str, Any]] = []
+    for case in cases:
+        if _s3_object_exists(case["video_s3_uri"], s3_client):
+            result = _case_result_from_case(case, resumed=True)
+            if not _s3_object_exists(case_checkpoint_s3_uri(request, case), s3_client):
+                _write_case_checkpoint(request, case, result, s3_client)
+            resumed_results.append(result)
+            continue
+        pending.append(case)
+    return pending, resumed_results
+
+
 def collect_upload_results(
     cases: list[dict[str, Any]],
     benchmark_summary: dict[str, Any],
     s3_client: Any,
+    request: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     cases_by_sample_id = {case["sample_id"]: case for case in cases}
     results: list[dict[str, Any]] = []
@@ -177,23 +275,10 @@ def collect_upload_results(
         if row.get("success"):
             output = Path(row["output"])
             _upload_video(output, case["video_s3_uri"], s3_client)
-            results.append(
-                {
-                    "case_id": case["case_id"],
-                    "status": "succeeded",
-                    "video_uri": case["video_s3_uri"],
-                    "movement_key": case["movement_key"],
-                    "ending_movement_key": case["ending_movement_key"],
-                    "movement_pair": case["movement_pair"],
-                    "camera_key": case["camera_key"],
-                    "traj_id": case["traj_id"],
-                    "traj_type": case["traj_type"],
-                    "action_source": case["action_source"],
-                    "action_index": case["action_index"],
-                    "action_seed": case["action_seed"],
-                    "action_pattern": case["action_pattern"],
-                }
-            )
+            result = _case_result_from_case(case)
+            results.append(result)
+            if request is not None:
+                _write_case_checkpoint(request, case, result, s3_client)
         else:
             results.append(
                 {
@@ -320,17 +405,27 @@ def main() -> None:
         manifest_rows,
         action_trajectories=action_trajectories,
     )
+    pending_cases, resumed_results = split_completed_cases(cases, request, s3_client)
     runtime = build_runtime_inputs(
         request=request,
-        cases=cases,
+        cases=pending_cases,
         work_dir=work_dir,
         s3_client=s3_client,
     )
 
     report: dict[str, Any]
     try:
-        benchmark_summary = run_benchmark(runtime, request=request)
-        upload_results = collect_upload_results(cases, benchmark_summary, s3_client)
+        benchmark_summary = (
+            run_benchmark(runtime, request=request)
+            if pending_cases
+            else {"results": []}
+        )
+        upload_results = resumed_results + collect_upload_results(
+            pending_cases,
+            benchmark_summary,
+            s3_client,
+            request=request,
+        )
         callback_payload = build_callback_progress_payload(request, cases, upload_results)
         report = {
             "request": request,
