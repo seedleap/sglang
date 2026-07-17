@@ -674,7 +674,9 @@ def test_reconcile_recreates_failed_h100_job_under_same_message_receipt():
     h100 = _node("h100-a", config["backends"][1]["node_selector"])
     core = FakeCoreV1([_gpu_pod("busy", "b300-a", 8)], [b300, h100])
     batch = FakeBatchV1()
-    batch.jobs["sglang-video-old"] = {"status": {"failed": 1}}
+    batch.jobs["sglang-video-old"] = {
+        "status": {"conditions": [{"type": "Failed", "status": "True"}]}
+    }
     sqs = FakeSQS(_request())
     eks = FakeEks()
     state = {
@@ -709,6 +711,44 @@ def test_reconcile_recreates_failed_h100_job_under_same_message_receipt():
     assert len(batch.created) == 1
     assert state["inflight"][0]["attempts"] == 2
     assert state["inflight"][0]["job_name"].startswith("sglang-video-")
+
+
+def test_reconcile_keeps_inflight_job_when_failed_count_is_not_terminal():
+    config = _backend_config()
+    batch = FakeBatchV1()
+    batch.jobs["sglang-video-pending"] = {"status": {"active": 1, "failed": 1}}
+    sqs = FakeSQS(_request())
+    state = {
+        "inflight": [
+            {
+                "request": _request(),
+                "receipt_handle": "receipt-1",
+                "message_id": "message-1",
+                "job_name": "sglang-video-pending",
+                "backend": "b200-spot",
+                "attempts": 1,
+                "started_at": 1000.0,
+                "last_renewed_at": 1000.0,
+            }
+        ]
+    }
+
+    result = reconcile_inflight_jobs(
+        sqs_client=sqs,
+        queue_url="https://sqs.us-west-2.amazonaws.com/123/video",
+        core_client=FakeCoreV1([], []),
+        batch_client=batch,
+        eks_client=FakeEks(),
+        config=config,
+        state=state,
+        now=1100.0,
+    )
+
+    assert result["restarted"] == 0
+    assert result["failed"] == 0
+    assert batch.deleted == []
+    assert sqs.deleted == []
+    assert state["inflight"][0]["job_name"] == "sglang-video-pending"
 
 
 def test_reconcile_deletes_message_only_after_job_succeeds():

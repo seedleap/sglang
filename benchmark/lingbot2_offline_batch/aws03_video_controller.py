@@ -26,6 +26,23 @@ def _int_or_default(value: Any, default: int) -> int:
     return int(value)
 
 
+def _condition_true(status: dict[str, Any], condition_type: str) -> bool:
+    conditions = status.get("conditions") if isinstance(status.get("conditions"), list) else []
+    return any(
+        condition.get("type") == condition_type and condition.get("status") == "True"
+        for condition in conditions
+        if isinstance(condition, dict)
+    )
+
+
+def _job_succeeded(status: dict[str, Any]) -> bool:
+    return _int_or_default(status.get("succeeded"), 0) > 0 or _condition_true(status, "Complete")
+
+
+def _job_failed(status: dict[str, Any]) -> bool:
+    return _condition_true(status, "Failed")
+
+
 def _gpu_request(container: dict[str, Any]) -> int:
     resources = container.get("resources") if isinstance(container.get("resources"), dict) else {}
     requests = resources.get("requests") if isinstance(resources.get("requests"), dict) else {}
@@ -795,7 +812,7 @@ def reconcile_inflight_jobs(
 
     for item in all_inflight:
         status = _read_job_status(batch_client, namespace, item["job_name"])
-        if _int_or_default(status.get("succeeded"), 0) > 0:
+        if _job_succeeded(status):
             sqs_client.delete_message(
                 QueueUrl=queue_url,
                 ReceiptHandle=item["receipt_handle"],
@@ -803,7 +820,7 @@ def reconcile_inflight_jobs(
             completed += 1
             continue
 
-        if _int_or_default(status.get("failed"), 0) > 0:
+        if _job_failed(status):
             attempts = _int_or_default(item.get("attempts"), 1)
             if attempts >= max_attempts:
                 sqs_client.change_message_visibility(
