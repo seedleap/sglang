@@ -142,6 +142,32 @@ def test_build_case_records_defaults_to_1280x704_video_size():
     assert target["output"]["height"] == 704
 
 
+def test_build_case_records_uses_manifest_action_before_random_trajs():
+    forced = _traj("api-forced-action", "w", "d")
+    forced["traj_type"] = "api_custom"
+    rows = [
+        {
+            "item_id": "img001",
+            "image_uri": "s3://bucket/t2i/images/img001.png",
+            "image_prompt": "A quiet workshop.",
+            "video_prompt": "A quiet workshop.",
+            "video_prompt_source": "image_prompt_fallback",
+            "action": forced,
+            "action_source": "api",
+        }
+    ]
+
+    cases = build_case_records(_request(), rows, action_trajectories=None)
+
+    assert cases[0]["traj_id"] == "api-forced-action"
+    assert cases[0]["action_source"] == "api"
+    assert cases[0]["metadata"]["action_source"] == "api"
+    assert cases[0]["action_pattern"] == "api:api_custom"
+    assert cases[0]["metadata"]["source_segments"] == forced["segments"]
+    assert cases[0]["messages"][1]["controls"][0]["actions"][0] == [1, 0, 0, 0]
+    assert cases[0]["messages"][1]["controls"][0]["actions"][-1] == [0, 0, 0, 1]
+
+
 def test_callback_progress_payload_groups_one_video_per_image():
     cases = build_case_records(
         _request(),

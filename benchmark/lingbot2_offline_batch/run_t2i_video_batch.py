@@ -15,6 +15,7 @@ from typing import Any
 from t2i_video_batch import (
     build_callback_progress_payload,
     build_case_records,
+    manifest_requires_action_trajectories,
     write_jsonl,
 )
 
@@ -309,7 +310,11 @@ def main() -> None:
         str(request.get("input", {}).get("video_manifest_uri")),
         s3_client,
     )
-    action_trajectories = read_action_trajectories(request, s3_client)
+    action_trajectories = (
+        read_action_trajectories(request, s3_client)
+        if manifest_requires_action_trajectories(request, manifest_rows)
+        else None
+    )
     cases = build_case_records(
         request,
         manifest_rows,

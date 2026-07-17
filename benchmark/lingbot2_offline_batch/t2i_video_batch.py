@@ -19,6 +19,7 @@ from prepare_capacity_smoke_720p import (
 )
 from thirdperson_actions import (
     ACTION_SEED,
+    build_api_action_trajectory,
     build_action_trajectory,
     validate_action_trajectories,
 )
@@ -52,9 +53,46 @@ def action_seed(request: dict[str, Any]) -> int:
     return int(_video_config(request).get("action_seed") or ACTION_SEED)
 
 
+def _present_action(value: Any) -> bool:
+    return value not in (None, "", [], {})
+
+
+def _row_action_override(row: dict[str, Any], case_slot: int) -> tuple[Any | None, str]:
+    for key in ("action", "action_trajectory", "video_action", "sglang_action"):
+        value = row.get(key)
+        if not _present_action(value):
+            continue
+        if (
+            isinstance(value, list)
+            and value
+            and all(isinstance(item, dict) for item in value)
+        ):
+            if case_slot >= len(value):
+                raise ValueError(
+                    f"{row.get('item_id')}: action list has {len(value)} entries "
+                    f"but case slot {case_slot} was requested"
+                )
+            return value[case_slot], str(row.get("action_source") or "api")
+        return value, str(row.get("action_source") or "api")
+    return None, ""
+
+
 def video_dimensions(request: dict[str, Any]) -> tuple[int, int]:
     video = _video_config(request)
     return int(video.get("width") or WIDTH), int(video.get("height") or HEIGHT)
+
+
+def manifest_requires_action_trajectories(
+    request: dict[str, Any],
+    manifest_rows: list[dict[str, Any]],
+) -> bool:
+    per_image = videos_per_image(request)
+    for row in manifest_rows:
+        for case_slot in range(per_image):
+            action_override, _source = _row_action_override(row, case_slot)
+            if action_override is None:
+                return True
+    return False
 
 
 def build_case_records(
@@ -65,13 +103,17 @@ def build_case_records(
 ) -> list[dict[str, Any]]:
     per_image = videos_per_image(request)
     seed = action_seed(request)
-    if action_trajectories is None:
-        raise ValueError("action_trajectories is required")
-    trajectory_pool = validate_action_trajectories(action_trajectories)
-    max_cases_per_image = len(trajectory_pool)
-    if per_image <= 0 or per_image > max_cases_per_image:
+    if per_image <= 0:
+        raise ValueError("videos_per_image must be positive")
+    needs_random_actions = manifest_requires_action_trajectories(request, manifest_rows)
+    trajectory_pool: tuple[dict[str, Any], ...] = ()
+    if needs_random_actions:
+        if action_trajectories is None:
+            raise ValueError("action_trajectories is required when manifest rows omit action")
+        trajectory_pool = validate_action_trajectories(action_trajectories)
+    if trajectory_pool and per_image > len(trajectory_pool):
         raise ValueError(
-            f"videos_per_image must be between 1 and {max_cases_per_image}"
+            f"videos_per_image must be between 1 and {len(trajectory_pool)}"
         )
     width, height = video_dimensions(request)
     video_s3_prefix = str(_required(_output_config(request), "video_s3_prefix")).rstrip("/")
@@ -87,12 +129,21 @@ def build_case_records(
         item_stem = _safe_id(item_id)
         for case_slot in range(per_image):
             case_index = image_index * per_image + case_slot
-            trajectory = build_action_trajectory(
-                case_index,
-                seed,
-                trajectories=trajectory_pool,
-                validate=False,
-            )
+            action_override, action_override_source = _row_action_override(row, case_slot)
+            if action_override is not None:
+                trajectory = build_api_action_trajectory(
+                    action_override,
+                    case_index=case_index,
+                    seed=seed,
+                    source=action_override_source,
+                )
+            else:
+                trajectory = build_action_trajectory(
+                    case_index,
+                    seed,
+                    trajectories=trajectory_pool,
+                    validate=False,
+                )
             video_actions, latent_keys = quantize_actions(trajectory)
             movement_key = trajectory["movement_key"]
             ending_movement_key = trajectory["ending_movement_key"]

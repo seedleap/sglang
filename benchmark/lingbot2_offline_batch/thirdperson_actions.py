@@ -155,6 +155,14 @@ def _action_pattern(row: dict[str, Any]) -> str:
     return f"{ACTION_SOURCE}:{traj_type}"
 
 
+def _source_action_pattern(row: dict[str, Any], source: str) -> str:
+    existing = str(row.get("action_pattern") or "").strip()
+    if existing:
+        return existing
+    traj_type = str(row.get("traj_type") or "custom").strip() or "custom"
+    return f"{source}:{traj_type}"
+
+
 def build_action_trajectory(
     case_index: int,
     seed: int = ACTION_SEED,
@@ -190,6 +198,63 @@ def build_action_trajectory(
             "action_index": action_index,
             "action_seed": seed,
             "action_pattern": _action_pattern(selected),
+        }
+    )
+    return selected
+
+
+def build_api_action_trajectory(
+    payload: dict[str, Any] | list[Any],
+    *,
+    case_index: int,
+    seed: int = ACTION_SEED,
+    source: str = "api",
+) -> dict:
+    """Normalize one API-supplied action into a trajectory record."""
+    if isinstance(payload, list):
+        selected: dict[str, Any] = {
+            "traj_id": f"api_action_{case_index:05d}",
+            "fps": FPS,
+            "num_frames": len(payload),
+            "traj_type": "api_custom",
+            "condition_inputs": {"camera_actions": copy.deepcopy(payload)},
+        }
+    elif isinstance(payload, dict):
+        selected = copy.deepcopy(payload)
+        if "condition_inputs" not in selected and "camera_actions" in selected:
+            selected["condition_inputs"] = {
+                "camera_actions": selected.pop("camera_actions")
+            }
+        selected.setdefault("traj_id", selected.get("action_id") or f"api_action_{case_index:05d}")
+        selected.setdefault("fps", FPS)
+        camera_actions = selected.get("condition_inputs", {}).get("camera_actions", [])
+        selected.setdefault("num_frames", len(camera_actions))
+        selected.setdefault("traj_type", "api_custom")
+    else:
+        raise ValueError("api action must be an object or frame action list")
+
+    selected = copy.deepcopy(validate_action_trajectories([selected])[0])
+    traj_id = str(selected.get("traj_id") or selected.get("action_id") or f"api_action_{case_index:05d}")
+    camera_actions = selected["condition_inputs"]["camera_actions"]
+    movement_key = _first_action_key(camera_actions)
+    ending_movement_key = _last_action_key(camera_actions)
+    selected.update(
+        {
+            "action_id": str(selected.get("action_id") or traj_id),
+            "traj_id": traj_id,
+            "movement_key": movement_key,
+            "ending_movement_key": ending_movement_key,
+            "movement_pair": (
+                f"{movement_key}+{ending_movement_key}"
+                if movement_key and ending_movement_key
+                else movement_key or ending_movement_key
+            ),
+            "camera_key": str(selected.get("camera_key") or ""),
+            "traj_type": str(selected.get("traj_type") or ""),
+            "action_source": source,
+            "action_index": int(selected.get("action_index", case_index)),
+            "action_seed": int(selected.get("action_seed", seed)),
+            "action_pattern": _source_action_pattern(selected, source),
         }
     )
     return selected
