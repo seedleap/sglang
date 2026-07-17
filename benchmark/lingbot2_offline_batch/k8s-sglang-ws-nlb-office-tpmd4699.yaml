@@ -18,6 +18,7 @@ spec:
   externalTrafficPolicy: Local
   loadBalancerSourceRanges:
     - 5.34.217.44/32
+    - 45.8.204.4/32
   selector:
     job-name: sglang-video-tpmd4699-genprompt-neg-20260717-0138
   ports:
