@@ -15,12 +15,20 @@ resume=${RESUME:-false}
 stream_upload=${STREAM_UPLOAD:-false}
 upload_workers=${UPLOAD_WORKERS:-32}
 upload_poll_seconds=${UPLOAD_POLL_SECONDS:-0.05}
+ws_relay_enabled=${WS_RELAY_ENABLED:-false}
+ws_relay_script=${WS_RELAY_SCRIPT:-/opt/bench/ws_tcp_relay.py}
 
 mkdir -p "${results_root}"
 server_pids=()
+ws_relay_pid=""
 
 stop_servers() {
   local pid
+  if [[ -n "${ws_relay_pid}" ]]; then
+    kill -TERM "${ws_relay_pid}" >/dev/null 2>&1 || true
+    wait "${ws_relay_pid}" >/dev/null 2>&1 || true
+    ws_relay_pid=""
+  fi
   for pid in "${server_pids[@]:-}"; do
     kill -TERM -- "-${pid}" >/dev/null 2>&1 || true
   done
@@ -102,6 +110,21 @@ for ((server_index = 0; server_index < server_count; server_index++)); do
     exit 1
   fi
 done
+
+if [[ "${ws_relay_enabled}" == "true" ]]; then
+  relay_args=()
+  for port in "${ports[@]}"; do
+    relay_args+=(--mapping "$((port + 1000)):${port}")
+  done
+  python3 "${ws_relay_script}" "${relay_args[@]}" \
+    > "${results_root}/ws-relay.log" 2>&1 &
+  ws_relay_pid=$!
+  sleep 1
+  if ! kill -0 "${ws_relay_pid}" >/dev/null 2>&1; then
+    cat "${results_root}/ws-relay.log" >&2 || true
+    exit 1
+  fi
+fi
 
 nvidia-smi dmon -s pucvmet -d 1 -o DT > "${results_root}/nvidia-dmon.log" 2>&1 &
 dmon_pid=$!
