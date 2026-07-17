@@ -17,10 +17,20 @@ upload_workers=${UPLOAD_WORKERS:-32}
 upload_poll_seconds=${UPLOAD_POLL_SECONDS:-0.05}
 ws_relay_enabled=${WS_RELAY_ENABLED:-false}
 ws_relay_script=${WS_RELAY_SCRIPT:-/opt/bench/ws_tcp_relay.py}
+ws_relay_pool_port=${WS_RELAY_POOL_PORT:-31443}
+ws_proxy_script=${WS_PROXY_SCRIPT:-/opt/bench/ws_round_robin_proxy.py}
+ws_proxy_max_raw_frames=${WS_PROXY_MAX_RAW_FRAMES:-4}
+serve_only=${SERVE_ONLY:-false}
+serve_only_marker=${SERVE_ONLY_MARKER:-${results_root}/serve-only}
+
+if [[ -f "${serve_only_marker}" ]]; then
+  serve_only=true
+fi
 
 mkdir -p "${results_root}"
 server_pids=()
 ws_relay_pid=""
+ws_proxy_pid=""
 
 stop_servers() {
   local pid
@@ -28,6 +38,11 @@ stop_servers() {
     kill -TERM "${ws_relay_pid}" >/dev/null 2>&1 || true
     wait "${ws_relay_pid}" >/dev/null 2>&1 || true
     ws_relay_pid=""
+  fi
+  if [[ -n "${ws_proxy_pid}" ]]; then
+    kill -TERM "${ws_proxy_pid}" >/dev/null 2>&1 || true
+    wait "${ws_proxy_pid}" >/dev/null 2>&1 || true
+    ws_proxy_pid=""
   fi
   for pid in "${server_pids[@]:-}"; do
     kill -TERM -- "-${pid}" >/dev/null 2>&1 || true
@@ -116,6 +131,7 @@ if [[ "${ws_relay_enabled}" == "true" ]]; then
   for port in "${ports[@]}"; do
     relay_args+=(--mapping "$((port + 1000)):${port}")
   done
+  pool_targets=$(IFS=,; echo "${ports[*]}")
   python3 "${ws_relay_script}" "${relay_args[@]}" \
     > "${results_root}/ws-relay.log" 2>&1 &
   ws_relay_pid=$!
@@ -124,6 +140,30 @@ if [[ "${ws_relay_enabled}" == "true" ]]; then
     cat "${results_root}/ws-relay.log" >&2 || true
     exit 1
   fi
+  python3 "${ws_proxy_script}" \
+    --listen-port "${ws_relay_pool_port}" \
+    --target-ports "${pool_targets}" \
+    --max-raw-frames-per-message "${ws_proxy_max_raw_frames}" \
+    > "${results_root}/ws-proxy.log" 2>&1 &
+  ws_proxy_pid=$!
+  sleep 1
+  if ! kill -0 "${ws_proxy_pid}" >/dev/null 2>&1; then
+    cat "${results_root}/ws-proxy.log" >&2 || true
+    exit 1
+  fi
+fi
+
+if [[ "${serve_only}" == "true" ]]; then
+  echo "serve-only mode active; marker=${serve_only_marker}"
+  wait_pids=("${server_pids[@]}")
+  if [[ -n "${ws_relay_pid}" ]]; then
+    wait_pids+=("${ws_relay_pid}")
+  fi
+  if [[ -n "${ws_proxy_pid}" ]]; then
+    wait_pids+=("${ws_proxy_pid}")
+  fi
+  wait -n "${wait_pids[@]}"
+  exit 1
 fi
 
 nvidia-smi dmon -s pucvmet -d 1 -o DT > "${results_root}/nvidia-dmon.log" 2>&1 &

@@ -27,7 +27,7 @@ spec:
     - name: ws-primary-443
       protocol: TCP
       port: 443
-      targetPort: 31000
+      targetPort: 31443
     - name: ws-30000
       protocol: TCP
       port: 30000
