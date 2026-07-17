@@ -22,6 +22,7 @@ from t2i_video_batch import (
 DEFAULT_PRESIGN_SECONDS = 7 * 24 * 60 * 60
 DEFAULT_RUN_SCRIPT = "/opt/bench/run_capacity_smoke_720p.sh"
 DEFAULT_S3_REGION = "us-east-2"
+DEFAULT_ACTION_TRAJS_PATH = Path(__file__).with_name("trajs.jsonl")
 
 
 @dataclass(frozen=True)
@@ -57,14 +58,9 @@ def read_jsonl_uri(uri: str, s3_client: Any) -> list[dict[str, Any]]:
 
 
 def read_action_trajectories(request: dict[str, Any], s3_client: Any) -> list[dict[str, Any]]:
-    input_config = request.get("input") if isinstance(request.get("input"), dict) else {}
-    uri = (
-        str(input_config.get("action_trajs_uri") or "").strip()
-        or os.environ.get("SGLANG_VIDEO_ACTION_TRAJS_URI", "").strip()
-    )
-    if not uri:
-        raise ValueError("input.action_trajs_uri or SGLANG_VIDEO_ACTION_TRAJS_URI is required")
-    return read_jsonl_uri(uri, s3_client)
+    if not DEFAULT_ACTION_TRAJS_PATH.exists():
+        raise FileNotFoundError(f"bundled action trajectories not found: {DEFAULT_ACTION_TRAJS_PATH}")
+    return read_jsonl_uri(str(DEFAULT_ACTION_TRAJS_PATH), s3_client)
 
 
 def _presigned_image_url(image_uri: str, s3_client: Any, expires_in: int) -> str:

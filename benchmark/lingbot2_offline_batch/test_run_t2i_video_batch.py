@@ -9,6 +9,7 @@ from run_t2i_video_batch import (
     collect_upload_results,
     parse_s3_uri,
     post_callback,
+    read_action_trajectories,
     run_benchmark,
     upload_report,
 )
@@ -120,6 +121,28 @@ def test_build_runtime_inputs_writes_messages_and_presigned_image_urls(tmp_path)
     assert image_urls == {
         "img001": "https://signed.example.com/bucket/t2i/images/img001.png?ttl=604800"
     }
+
+
+def test_read_action_trajectories_always_uses_bundled_trajs(tmp_path, monkeypatch):
+    bundled_trajs = tmp_path / "trajs.jsonl"
+    bundled_trajs.write_text(
+        json.dumps(_traj("bundled-traj", "w", "d")) + "\n",
+        encoding="utf-8",
+    )
+
+    class FailingS3Client:
+        def get_object(self, **kwargs):
+            raise AssertionError("request action_trajs_uri should not be read")
+
+    monkeypatch.setattr("run_t2i_video_batch.DEFAULT_ACTION_TRAJS_PATH", bundled_trajs)
+    monkeypatch.setenv("SGLANG_VIDEO_ACTION_TRAJS_URI", "s3://bucket/env-trajs.jsonl")
+
+    trajs = read_action_trajectories(
+        {"input": {"action_trajs_uri": "s3://bucket/request-trajs.jsonl"}},
+        FailingS3Client(),
+    )
+
+    assert [traj["traj_id"] for traj in trajs] == ["bundled-traj"]
 
 
 def test_make_s3_client_forces_sigv4_presigned_urls(monkeypatch):
