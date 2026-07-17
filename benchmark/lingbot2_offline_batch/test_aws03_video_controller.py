@@ -318,6 +318,13 @@ class FakeBatchV1:
         self.deleted.append({"namespace": namespace, "name": name, **kwargs})
 
 
+class FakeNotFoundBatchV1(FakeBatchV1):
+    def read_namespaced_job_status(self, name, namespace):
+        error = Exception("NotFound")
+        error.status = 404
+        raise error
+
+
 class FakeEks:
     def __init__(self):
         self.updates = []
@@ -738,6 +745,44 @@ def test_reconcile_deletes_message_only_after_job_succeeds():
     assert result["completed"] == 1
     assert sqs.deleted[0]["ReceiptHandle"] == "receipt-1"
     assert state["inflight"] == []
+
+
+def test_reconcile_keeps_inflight_job_when_status_read_temporarily_404s():
+    config = _backend_config()
+    sqs = FakeSQS(_request())
+    state = {
+        "inflight": [
+            {
+                "request": _request(),
+                "receipt_handle": "receipt-1",
+                "message_id": "message-1",
+                "job_name": "sglang-video-pending",
+                "backend": "b200-spot",
+                "attempts": 1,
+                "started_at": 1000.0,
+                "last_renewed_at": 1000.0,
+                "requested_gpus": 8,
+            }
+        ]
+    }
+    batch = FakeNotFoundBatchV1()
+
+    result = reconcile_inflight_jobs(
+        sqs_client=sqs,
+        queue_url="https://sqs.us-west-2.amazonaws.com/123/video",
+        core_client=FakeCoreV1([], []),
+        batch_client=batch,
+        eks_client=FakeEks(),
+        config=config,
+        state=state,
+        now=1100.0,
+    )
+
+    assert result["failed"] == 0
+    assert result["restarted"] == 0
+    assert batch.deleted == []
+    assert sqs.deleted == []
+    assert state["inflight"][0]["job_name"] == "sglang-video-pending"
 
 
 def test_process_one_message_defers_without_deleting_when_gpu_cap_is_exceeded():

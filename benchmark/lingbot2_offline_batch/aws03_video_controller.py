@@ -524,6 +524,10 @@ def _already_exists(error: Exception) -> bool:
     return getattr(error, "status", None) == 409 or "AlreadyExists" in str(error)
 
 
+def _not_found(error: Exception) -> bool:
+    return getattr(error, "status", None) == 404 or "NotFound" in str(error)
+
+
 def _json_env(name: str, default: Any) -> Any:
     value = os.environ.get(name)
     if not value:
@@ -644,7 +648,9 @@ def _job_status(job: Any) -> dict[str, Any]:
 def _read_job_status(batch_client: Any, namespace: str, job_name: str) -> dict[str, Any]:
     try:
         return _job_status(batch_client.read_namespaced_job_status(name=job_name, namespace=namespace))
-    except Exception:
+    except Exception as error:
+        if _not_found(error):
+            return {}
         return {"failed": 1}
 
 
@@ -808,11 +814,15 @@ def reconcile_inflight_jobs(
                 failed += 1
                 continue
 
-            batch_client.delete_namespaced_job(
-                name=item["job_name"],
-                namespace=namespace,
-                propagation_policy="Background",
-            )
+            try:
+                batch_client.delete_namespaced_job(
+                    name=item["job_name"],
+                    namespace=namespace,
+                    propagation_policy="Background",
+                )
+            except Exception as error:
+                if not _not_found(error):
+                    raise
             requested_gpus = _int_or_default(item.get("requested_gpus"), 8)
             backend = choose_backend(
                 config,
