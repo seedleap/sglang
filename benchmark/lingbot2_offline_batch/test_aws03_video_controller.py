@@ -349,6 +349,15 @@ class FakeEks:
         return {"update": {"status": "InProgress"}}
 
 
+class FakeEksWithDesired(FakeEks):
+    def __init__(self, desired_size: int):
+        super().__init__()
+        self.desired_size = desired_size
+
+    def describe_nodegroup(self, **kwargs):
+        return {"nodegroup": {"scalingConfig": {"desiredSize": self.desired_size}}}
+
+
 def _node(name: str, selector: dict, gpus: int = 8, ready: bool = True) -> dict:
     conditions = [{"type": "Ready", "status": "True" if ready else "False"}]
     return {
@@ -703,6 +712,15 @@ def test_scale_fallback_nodegroups_counts_existing_backend_pods_after_restart():
 
     assert eks.updates[-1]["nodegroupName"] == "sglang-h100-spot"
     assert eks.updates[-1]["scalingConfig"]["desiredSize"] == 1
+
+
+def test_scale_fallback_nodegroups_skips_noop_desired_size_update():
+    config = _backend_config()
+    eks = FakeEksWithDesired(desired_size=0)
+
+    _scale_fallback_nodegroups(eks, config, {"inflight": []}, pods=[])
+
+    assert eks.updates == []
 
 
 def test_controller_tick_adopts_existing_job_after_restart_and_scales_nodes():

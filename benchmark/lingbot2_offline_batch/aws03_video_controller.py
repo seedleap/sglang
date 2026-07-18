@@ -806,6 +806,21 @@ def _scale_nodegroup(
     if eks_client is None:
         return
     desired_nodes = min(max_nodes, (max(0, desired_gpus) + node_gpus - 1) // node_gpus)
+    try:
+        response = eks_client.describe_nodegroup(
+            clusterName=cluster_name,
+            nodegroupName=nodegroup_name,
+        )
+        nodegroup = response.get("nodegroup") if isinstance(response, dict) else {}
+        scaling = (
+            nodegroup.get("scalingConfig")
+            if isinstance(nodegroup.get("scalingConfig"), dict)
+            else {}
+        )
+        if _int_or_default(scaling.get("desiredSize"), -1) == desired_nodes:
+            return
+    except Exception:
+        pass
     eks_client.update_nodegroup_config(
         clusterName=cluster_name,
         nodegroupName=nodegroup_name,
