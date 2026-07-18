@@ -7,6 +7,8 @@ import json
 import os
 import shutil
 import subprocess
+import threading
+import time
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
@@ -201,6 +203,31 @@ def case_checkpoint_s3_uri(request: dict[str, Any], case: dict[str, Any]) -> str
     return f"{_video_state_prefix(request)}/{case['case_id']}.json"
 
 
+def _metadata_prefix(request: dict[str, Any]) -> str:
+    output = request.get("output") if isinstance(request.get("output"), dict) else {}
+    configured = str(output.get("metadata_s3_prefix") or "").rstrip("/")
+    if configured:
+        return configured
+    video_prefix = str(output.get("video_s3_prefix") or "").rstrip("/")
+    if video_prefix.endswith("/videos"):
+        return video_prefix[: -len("/videos")] + "/video_metadata"
+    return video_prefix + "/video_metadata"
+
+
+def case_metadata_s3_uri(request: dict[str, Any], case: dict[str, Any]) -> str:
+    metadata_prefix = _metadata_prefix(request)
+    output = request.get("output") if isinstance(request.get("output"), dict) else {}
+    video_prefix = str(output.get("video_s3_prefix") or "").rstrip("/")
+    video_uri = str(case.get("video_s3_uri") or "")
+    if video_prefix and video_uri.startswith(video_prefix + "/"):
+        relative = video_uri[len(video_prefix) + 1 :]
+        if relative.endswith(".mp4"):
+            relative = relative[: -len(".mp4")] + ".json"
+    else:
+        relative = f"{case['case_id']}.json"
+    return f"{metadata_prefix}/{relative}"
+
+
 def _case_result_from_case(case: dict[str, Any], *, resumed: bool = False) -> dict[str, Any]:
     result = {
         "case_id": case["case_id"],
@@ -253,6 +280,82 @@ def _write_case_checkpoint(
     )
 
 
+def _write_case_metadata(
+    request: dict[str, Any],
+    case: dict[str, Any],
+    result: dict[str, Any],
+    s3_client: Any,
+) -> None:
+    metadata_uri = case_metadata_s3_uri(request, case)
+    bucket, key = parse_s3_uri(metadata_uri)
+    target_message = next(
+        (
+            message
+            for message in case.get("messages", [])
+            if isinstance(message, dict) and message.get("role") == "target"
+        ),
+        {},
+    )
+    target_metadata = (
+        target_message.get("metadata")
+        if isinstance(target_message.get("metadata"), dict)
+        else {}
+    )
+    body = {
+        **(case.get("metadata") if isinstance(case.get("metadata"), dict) else {}),
+        "sample_id": case["sample_id"],
+        "case_id": case["case_id"],
+        "status": result["status"],
+        "image_id": case["image_id"],
+        "image_uri": case["image_uri"],
+        "video_uri": result.get("video_uri") or case["video_s3_uri"],
+        "negative_prompt": target_metadata.get("negative_prompt"),
+        "movement_key": result.get("movement_key"),
+        "ending_movement_key": result.get("ending_movement_key"),
+        "movement_pair": result.get("movement_pair"),
+        "camera_key": result.get("camera_key"),
+        "traj_id": result.get("traj_id"),
+        "traj_type": result.get("traj_type"),
+        "action_source": result.get("action_source"),
+        "action_index": result.get("action_index"),
+        "action_seed": result.get("action_seed"),
+        "action_pattern": result.get("action_pattern"),
+    }
+    s3_client.put_object(
+        Bucket=bucket,
+        Key=key,
+        Body=(json.dumps(body, indent=2, ensure_ascii=False) + "\n").encode("utf-8"),
+        ContentType="application/json",
+    )
+
+
+def _persist_successful_case_output(
+    *,
+    case: dict[str, Any],
+    row: dict[str, Any],
+    s3_client: Any,
+    request: dict[str, Any] | None = None,
+    delete_local_output: bool = False,
+) -> dict[str, Any]:
+    output = Path(str(row.get("output") or ""))
+    exists_in_s3 = _s3_object_exists(case["video_s3_uri"], s3_client)
+    if not exists_in_s3:
+        if not output.is_file():
+            raise FileNotFoundError(
+                f"completed MP4 is missing and not uploaded: {output}"
+            )
+        _upload_video(output, case["video_s3_uri"], s3_client)
+
+    result = _case_result_from_case(case)
+    if request is not None:
+        _write_case_checkpoint(request, case, result, s3_client)
+        _write_case_metadata(request, case, result, s3_client)
+
+    if delete_local_output and output.is_file():
+        output.unlink()
+    return result
+
+
 def split_completed_cases(
     cases: list[dict[str, Any]],
     request: dict[str, Any],
@@ -276,6 +379,7 @@ def collect_upload_results(
     benchmark_summary: dict[str, Any],
     s3_client: Any,
     request: dict[str, Any] | None = None,
+    delete_local_outputs: bool = False,
 ) -> list[dict[str, Any]]:
     cases_by_sample_id = {case["sample_id"]: case for case in cases}
     results: list[dict[str, Any]] = []
@@ -288,12 +392,20 @@ def collect_upload_results(
         case = cases_by_sample_id[sample_id]
         seen.add(sample_id)
         if row.get("success"):
-            output = Path(row["output"])
-            _upload_video(output, case["video_s3_uri"], s3_client)
-            result = _case_result_from_case(case)
-            results.append(result)
-            if request is not None:
-                _write_case_checkpoint(request, case, result, s3_client)
+            try:
+                results.append(
+                    _persist_successful_case_output(
+                        case=case,
+                        row=row,
+                        s3_client=s3_client,
+                        request=request,
+                        delete_local_output=delete_local_outputs,
+                    )
+                )
+            except Exception as error:
+                results.append(
+                    _failed_case_result(case, f"{type(error).__name__}: {error}")
+                )
         else:
             results.append(
                 {
@@ -334,6 +446,97 @@ def collect_upload_results(
             }
         )
     return results
+
+
+class ProgressUploadWatcher:
+    def __init__(
+        self,
+        *,
+        runtime: RuntimeInputs,
+        cases: list[dict[str, Any]],
+        request: dict[str, Any],
+        s3_client: Any,
+        delete_local_outputs: bool,
+        poll_seconds: float = 0.25,
+    ) -> None:
+        self.progress_path = runtime.results_root / "cases" / "progress.jsonl"
+        self.cases_by_sample_id = {case["sample_id"]: case for case in cases}
+        self.request = request
+        self.s3_client = s3_client
+        self.delete_local_outputs = delete_local_outputs
+        self.poll_seconds = poll_seconds
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._lock = threading.Lock()
+        self._uploaded_by_case_id: dict[str, dict[str, Any]] = {}
+        self._errors: list[str] = []
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._thread.join(timeout=60)
+        if self._thread.is_alive():
+            with self._lock:
+                self._errors.append("progress upload watcher did not stop within 60s")
+
+    def uploaded_results(self) -> list[dict[str, Any]]:
+        with self._lock:
+            return list(self._uploaded_by_case_id.values())
+
+    def errors(self) -> list[str]:
+        with self._lock:
+            return list(self._errors)
+
+    def _record_error(self, error: Exception) -> None:
+        with self._lock:
+            self._errors.append(f"{type(error).__name__}: {error}")
+
+    def _handle_row(self, row: dict[str, Any], submitted: set[str]) -> None:
+        sample_id = str(row.get("sample_id") or "")
+        if not row.get("success") or sample_id in submitted:
+            return
+        case = self.cases_by_sample_id.get(sample_id)
+        if case is None:
+            raise ValueError(f"unknown progress sample_id: {sample_id}")
+        result = _persist_successful_case_output(
+            case=case,
+            row=row,
+            s3_client=self.s3_client,
+            request=self.request,
+            delete_local_output=self.delete_local_outputs,
+        )
+        with self._lock:
+            self._uploaded_by_case_id[case["case_id"]] = result
+        submitted.add(sample_id)
+
+    def _run(self) -> None:
+        offset = 0
+        partial = ""
+        submitted: set[str] = set()
+        while True:
+            try:
+                if self.progress_path.exists():
+                    with self.progress_path.open(encoding="utf-8") as progress:
+                        progress.seek(offset)
+                        chunk = progress.read()
+                        offset = progress.tell()
+                    if chunk:
+                        partial += chunk
+                        lines = partial.split("\n")
+                        partial = lines.pop()
+                        for line in lines:
+                            if line.strip():
+                                self._handle_row(json.loads(line), submitted)
+                if self._stop.is_set():
+                    if partial.strip():
+                        self._handle_row(json.loads(partial), submitted)
+                    return
+            except Exception as error:
+                self._record_error(error)
+            if self._stop.wait(self.poll_seconds):
+                continue
 
 
 def _max_attempts() -> int:
@@ -378,6 +581,8 @@ def run_video_batch(
     }
     failed_by_case_id: dict[str, dict[str, Any]] = {}
     attempt_summaries: list[dict[str, Any]] = []
+    stream_upload = _env_flag("SGLANG_VIDEO_BATCH_STREAM_UPLOAD", True)
+    delete_local_outputs = _env_flag("SGLANG_VIDEO_BATCH_DELETE_UPLOADED_LOCAL", True)
 
     for attempt in range(1, _max_attempts() + 1):
         if not pending_cases:
@@ -389,9 +594,26 @@ def run_video_batch(
             work_dir=work_dir / f"attempt-{attempt:03d}",
             s3_client=s3_client,
         )
+        watcher = (
+            ProgressUploadWatcher(
+                runtime=runtime,
+                cases=pending_cases,
+                request=request,
+                s3_client=s3_client,
+                delete_local_outputs=delete_local_outputs,
+            )
+            if stream_upload
+            else None
+        )
+        if watcher is not None:
+            watcher.start()
         try:
             benchmark_summary = run_benchmark(runtime, request=request)
         except Exception as error:
+            if watcher is not None:
+                watcher.stop()
+                for result in watcher.uploaded_results():
+                    completed_by_case_id[str(result["case_id"])] = result
             error_text = f"{type(error).__name__}: {error}"
             attempt_summaries.append(
                 {
@@ -399,19 +621,25 @@ def run_video_batch(
                     "status": "failed",
                     "pending_count": len(pending_cases),
                     "error": error_text,
+                    "stream_upload_errors": watcher.errors() if watcher is not None else [],
                 }
             )
             for case in pending_cases:
+                if case["case_id"] in completed_by_case_id:
+                    continue
                 failed_by_case_id[case["case_id"]] = _failed_case_result(
                     case,
                     error_text,
                 )
         else:
+            if watcher is not None:
+                watcher.stop()
             attempt_results = collect_upload_results(
                 pending_cases,
                 benchmark_summary,
                 s3_client,
                 request=request,
+                delete_local_outputs=delete_local_outputs,
             )
             succeeded_count = 0
             failed_count = 0
@@ -431,6 +659,10 @@ def run_video_batch(
                     "pending_count": len(pending_cases),
                     "succeeded_count": succeeded_count,
                     "failed_count": failed_count,
+                    "stream_uploaded_count": len(watcher.uploaded_results())
+                    if watcher is not None
+                    else 0,
+                    "stream_upload_errors": watcher.errors() if watcher is not None else [],
                     "benchmark_summary": benchmark_summary.get("summary", {}),
                 }
             )

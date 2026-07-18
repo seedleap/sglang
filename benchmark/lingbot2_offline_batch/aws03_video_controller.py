@@ -48,6 +48,10 @@ def _job_failed(status: dict[str, Any]) -> bool:
     return _condition_true(status, "Failed")
 
 
+def _job_missing(status: dict[str, Any]) -> bool:
+    return bool(status.get("not_found"))
+
+
 def _gpu_request(container: dict[str, Any]) -> int:
     resources = container.get("resources") if isinstance(container.get("resources"), dict) else {}
     requests = resources.get("requests") if isinstance(resources.get("requests"), dict) else {}
@@ -725,7 +729,7 @@ def _read_job_status(batch_client: Any, namespace: str, job_name: str) -> dict[s
         return _job_status(batch_client.read_namespaced_job_status(name=job_name, namespace=namespace))
     except Exception as error:
         if _not_found(error):
-            return {}
+            return {"not_found": True}
         return {"failed": 1}
 
 
@@ -917,7 +921,7 @@ def reconcile_inflight_jobs(
     max_attempts = _int_or_default(config.get("max_job_attempts"), 5)
     nodes = _list_nodes(core_client)
     pods = _list_capacity_pods(core_client, config)
-    completed = restarted = released = failed = 0
+    completed = restarted = released = failed = missing = 0
     remaining = []
     all_inflight = list(state.get("inflight", []))
 
@@ -930,6 +934,54 @@ def reconcile_inflight_jobs(
             )
             completed += 1
             continue
+
+        if _job_missing(status):
+            missing += 1
+            missing_grace = _int_or_default(config.get("missing_job_grace_seconds"), 180)
+            started_at = float(item.get("started_at", now))
+            first_missing_at = float(item.get("missing_job_seen_at", now))
+            if "missing_job_seen_at" not in item:
+                item["missing_job_seen_at"] = now
+                first_missing_at = now
+            if now - started_at < missing_grace and now - first_missing_at < missing_grace:
+                remaining.append(item)
+                continue
+
+            attempts = _int_or_default(item.get("attempts"), 1)
+            if attempts >= max_attempts:
+                sqs_client.change_message_visibility(
+                    QueueUrl=queue_url,
+                    ReceiptHandle=item["receipt_handle"],
+                    VisibilityTimeout=0,
+                )
+                failed += 1
+                continue
+
+            requested_gpus = _int_or_default(item.get("requested_gpus"), 8)
+            backend = choose_backend(
+                config,
+                nodes,
+                pods,
+                requested_gpus=requested_gpus,
+                state={"inflight": [candidate for candidate in all_inflight if candidate is not item]},
+            )
+            if backend is None:
+                remaining.append(item)
+                released += 1
+                continue
+            next_attempt = attempts + 1
+            manifest = _render_for_backend(item["request"], config, backend, attempt=next_attempt)
+            batch_client.create_namespaced_job(namespace=namespace, body=manifest)
+            item = {
+                **item,
+                "job_name": manifest["metadata"]["name"],
+                "backend": _backend_name(backend),
+                "attempts": next_attempt,
+                "last_renewed_at": now,
+                "requested_gpus": requested_gpus,
+            }
+            item.pop("missing_job_seen_at", None)
+            restarted += 1
 
         if _job_failed(status):
             attempts = _int_or_default(item.get("attempts"), 1)
@@ -974,6 +1026,7 @@ def reconcile_inflight_jobs(
                 "last_renewed_at": now,
                 "requested_gpus": requested_gpus,
             }
+            item.pop("missing_job_seen_at", None)
             restarted += 1
 
         remaining.append(item)
@@ -985,6 +1038,7 @@ def reconcile_inflight_jobs(
         "restarted": restarted,
         "released": released,
         "failed": failed,
+        "missing": missing,
     }
 
 
@@ -1168,6 +1222,10 @@ def _env_config() -> dict[str, Any]:
             "28800",
         ),
         "max_job_attempts": os.environ.get("SGLANG_VIDEO_MAX_JOB_ATTEMPTS", "5"),
+        "missing_job_grace_seconds": os.environ.get(
+            "SGLANG_VIDEO_MISSING_JOB_GRACE_SECONDS",
+            "180",
+        ),
         "b300_max_active_gpus": os.environ.get(
             "SGLANG_VIDEO_B300_MAX_ACTIVE_GPUS",
             os.environ.get("SGLANG_VIDEO_MAX_ACTIVE_GPUS", "32"),

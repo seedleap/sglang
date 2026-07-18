@@ -1035,9 +1035,54 @@ def test_reconcile_keeps_inflight_job_when_status_read_temporarily_404s():
 
     assert result["failed"] == 0
     assert result["restarted"] == 0
+    assert result["missing"] == 1
     assert batch.deleted == []
     assert sqs.deleted == []
     assert state["inflight"][0]["job_name"] == "sglang-video-pending"
+    assert state["inflight"][0]["missing_job_seen_at"] == 1100.0
+
+
+def test_reconcile_recreates_missing_inflight_job_after_grace_period():
+    config = {**_backend_config(), "missing_job_grace_seconds": 180}
+    b300 = _node("b300-a", config["backends"][0]["node_selector"])
+    sqs = FakeSQS(_request())
+    state = {
+        "inflight": [
+            {
+                "request": _request(),
+                "receipt_handle": "receipt-1",
+                "message_id": "message-1",
+                "job_name": "sglang-video-missing",
+                "backend": "b300-capacity-block",
+                "attempts": 1,
+                "started_at": 1000.0,
+                "last_renewed_at": 1000.0,
+                "requested_gpus": 8,
+            }
+        ]
+    }
+    batch = FakeNotFoundBatchV1()
+
+    result = reconcile_inflight_jobs(
+        sqs_client=sqs,
+        queue_url="https://sqs.us-west-2.amazonaws.com/123/video",
+        core_client=FakeCoreV1([], [b300]),
+        batch_client=batch,
+        eks_client=FakeEks(),
+        config=config,
+        state=state,
+        now=1300.0,
+    )
+
+    assert result["missing"] == 1
+    assert result["restarted"] == 1
+    assert result["failed"] == 0
+    assert sqs.deleted == []
+    assert batch.deleted == []
+    assert len(batch.created) == 1
+    assert state["inflight"][0]["attempts"] == 2
+    assert state["inflight"][0]["job_name"].startswith("sglang-video-")
+    assert "missing_job_seen_at" not in state["inflight"][0]
 
 
 def test_process_one_message_defers_without_deleting_when_gpu_cap_is_exceeded():

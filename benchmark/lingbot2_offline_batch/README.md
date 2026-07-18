@@ -81,20 +81,35 @@ running it calls `ChangeMessageVisibility` every
 `SGLANG_VIDEO_MESSAGE_RENEW_INTERVAL_SECONDS`, extending the lease to
 `SGLANG_VIDEO_MESSAGE_VISIBILITY_SECONDS`. If the controller crashes, renewal
 stops and the message becomes visible again after the last visibility timeout.
+If an inflight Kubernetes Job disappears, for example after an accidental
+manual Job deletion, the controller waits
+`SGLANG_VIDEO_MISSING_JOB_GRACE_SECONDS` and then recreates the Job under the
+same SQS message receipt instead of renewing forever.
 The replacement Job resumes from S3 checkpoints written by the runner under:
 
 ```text
 <output_prefix>/video_state/cases/<case_id>.json
 ```
 
+The batch runner streams successful videos to S3 while benchmark generation is
+still running. Each successful `progress.jsonl` row is uploaded to
+`<output_prefix>/videos/`, followed by a checkpoint under `video_state/cases/`
+and metadata under `<output_prefix>/video_metadata/`. After the upload succeeds,
+the local FSX MP4 is deleted, leaving only progress, summaries, and logs for
+debugging. On retries or replacement Jobs, the runner checks S3 first and skips
+videos that were already persisted.
+
 Important controller environment variables:
 
 ```text
+SGLANG_VIDEO_BATCH_STREAM_UPLOAD=true
+SGLANG_VIDEO_BATCH_DELETE_UPLOADED_LOCAL=true
 SGLANG_VIDEO_SQS_MAX_MESSAGES=10
 SGLANG_VIDEO_MESSAGE_VISIBILITY_SECONDS=900
 SGLANG_VIDEO_MESSAGE_RENEW_INTERVAL_SECONDS=60
 SGLANG_VIDEO_MESSAGE_MAX_LEASE_SECONDS=28800
 SGLANG_VIDEO_MAX_JOB_ATTEMPTS=5
+SGLANG_VIDEO_MISSING_JOB_GRACE_SECONDS=180
 SGLANG_VIDEO_B300_MAX_ACTIVE_GPUS=32
 SGLANG_VIDEO_FALLBACK_MAX_ACTIVE_GPUS=160
 SGLANG_VIDEO_H100_MAX_ACTIVE_GPUS=160

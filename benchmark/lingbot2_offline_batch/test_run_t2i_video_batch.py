@@ -1,5 +1,6 @@
 import json
 import sys
+import time
 from types import SimpleNamespace
 import urllib.request
 
@@ -8,6 +9,7 @@ from run_t2i_video_batch import (
     build_runtime_inputs,
     case_checkpoint_s3_uri,
     collect_upload_results,
+    case_metadata_s3_uri,
     parse_s3_uri,
     post_callback,
     read_action_trajectories,
@@ -67,6 +69,7 @@ class FakeS3Client:
                 "extra_args": ExtraArgs,
             }
         )
+        self.existing.add((bucket, key))
 
     def put_object(self, **kwargs):
         self.objects.append(kwargs)
@@ -89,6 +92,7 @@ def _request() -> dict:
         },
         "output": {
             "video_s3_prefix": "s3://bucket/t2i/videos",
+            "metadata_s3_prefix": "s3://bucket/t2i/video_metadata",
             "report_s3_uri": "s3://bucket/t2i/reports/sglang_video_report.json",
         },
         "video": {
@@ -291,6 +295,144 @@ def test_collect_upload_results_uploads_successes_and_reports_failures(tmp_path)
     assert results[0]["action_source"] == "trajs.jsonl"
     assert results[1]["status"] == "failed"
     assert results[1]["error"] == "RuntimeError: boom"
+
+
+def test_collect_upload_results_accepts_stream_uploaded_deleted_outputs(tmp_path):
+    cases = build_case_records(_request(), _rows(), action_trajectories=_trajs())
+    uploaded_output = tmp_path / "streamed.mp4"
+    uploaded_output.write_bytes(b"mp4")
+    uploaded_output.unlink()
+    fake_s3 = FakeS3Client()
+    bucket, key = parse_s3_uri(cases[0]["video_s3_uri"])
+    fake_s3.existing.add((bucket, key))
+
+    results = collect_upload_results(
+        cases,
+        {
+            "results": [
+                {
+                    "sample_id": cases[0]["sample_id"],
+                    "success": True,
+                    "output": str(uploaded_output),
+                }
+            ]
+        },
+        fake_s3,
+        request=_request(),
+    )
+
+    assert fake_s3.uploads == []
+    assert results == [
+        {
+            "case_id": cases[0]["case_id"],
+            "status": "succeeded",
+            "video_uri": cases[0]["video_s3_uri"],
+            "movement_key": cases[0]["movement_key"],
+            "ending_movement_key": cases[0]["ending_movement_key"],
+            "movement_pair": cases[0]["movement_pair"],
+            "camera_key": cases[0]["camera_key"],
+            "traj_id": cases[0]["traj_id"],
+            "traj_type": cases[0]["traj_type"],
+            "action_source": cases[0]["action_source"],
+            "action_index": cases[0]["action_index"],
+            "action_seed": cases[0]["action_seed"],
+            "action_pattern": cases[0]["action_pattern"],
+        }
+    ]
+
+
+def test_collect_upload_results_writes_metadata_and_deletes_local_video(tmp_path):
+    cases = build_case_records(_request(), _rows(), action_trajectories=_trajs())
+    successful_output = tmp_path / "video.mp4"
+    successful_output.write_bytes(b"mp4")
+    fake_s3 = FakeS3Client()
+
+    collect_upload_results(
+        cases,
+        {
+            "results": [
+                {
+                    "sample_id": cases[0]["sample_id"],
+                    "success": True,
+                    "output": str(successful_output),
+                }
+            ]
+        },
+        fake_s3,
+        request=_request(),
+        delete_local_outputs=True,
+    )
+
+    assert not successful_output.exists()
+    checkpoint_bucket, checkpoint_key = parse_s3_uri(
+        case_checkpoint_s3_uri(_request(), cases[0])
+    )
+    metadata_bucket, metadata_key = parse_s3_uri(case_metadata_s3_uri(_request(), cases[0]))
+    assert any(
+        obj["Bucket"] == checkpoint_bucket and obj["Key"] == checkpoint_key
+        for obj in fake_s3.objects
+    )
+    metadata_objects = [
+        obj
+        for obj in fake_s3.objects
+        if obj["Bucket"] == metadata_bucket and obj["Key"] == metadata_key
+    ]
+    assert metadata_objects
+    assert b'"video_prompt": "A quiet workshop."' in metadata_objects[0]["Body"]
+    assert b'"video_uri":' in metadata_objects[0]["Body"]
+
+
+def test_run_video_batch_streams_progress_uploads_before_benchmark_returns(
+    tmp_path,
+    monkeypatch,
+):
+    request = _request()
+    cases = build_case_records(request, _rows(), action_trajectories=_trajs())
+    fake_s3 = FakeS3Client()
+
+    def fake_run_benchmark(runtime, request):
+        output = runtime.results_root / "cases" / "videos" / "video.mp4"
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(b"mp4")
+        progress = runtime.results_root / "cases" / "progress.jsonl"
+        progress.write_text(
+            json.dumps(
+                {
+                    "sample_id": cases[0]["sample_id"],
+                    "success": True,
+                    "output": str(output),
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        deadline = time.monotonic() + 2.0
+        while output.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert not output.exists()
+        return {
+            "summary": {"successful_samples": 1, "failed_samples": 0},
+            "results": [
+                {
+                    "sample_id": cases[0]["sample_id"],
+                    "success": True,
+                    "output": str(output),
+                }
+            ],
+        }
+
+    monkeypatch.setenv("SGLANG_VIDEO_BATCH_STREAM_UPLOAD", "true")
+    monkeypatch.setattr("run_t2i_video_batch.run_benchmark", fake_run_benchmark)
+
+    result = run_video_batch(
+        request=request,
+        cases=cases,
+        work_dir=tmp_path / "work",
+        s3_client=fake_s3,
+    )
+
+    assert result.results[0]["status"] == "succeeded"
+    assert len(fake_s3.uploads) == 1
 
 
 def test_run_video_batch_retries_only_failed_cases_and_preserves_successes(
