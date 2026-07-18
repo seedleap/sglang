@@ -33,6 +33,12 @@ class RuntimeInputs:
     results_root: Path
 
 
+@dataclass(frozen=True)
+class BatchRunResult:
+    results: list[dict[str, Any]]
+    attempts: list[dict[str, Any]]
+
+
 def parse_s3_uri(uri: str) -> tuple[str, str]:
     if not uri.startswith("s3://"):
         raise ValueError(f"not an S3 URI: {uri}")
@@ -144,9 +150,18 @@ def run_benchmark(runtime: RuntimeInputs, *, request: dict[str, Any]) -> dict[st
         check=False,
     )
     summary_path = runtime.results_root / "cases" / "summary.json"
+    if not summary_path.exists():
+        raise RuntimeError(
+            f"benchmark failed with exit code {completed.returncode}; "
+            f"summary not found: {summary_path}"
+        )
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
     if completed.returncode != 0:
-        raise RuntimeError(f"benchmark failed with exit code {completed.returncode}")
-    return json.loads(summary_path.read_text(encoding="utf-8"))
+        summary.setdefault("summary", {})["benchmark_exit_code"] = completed.returncode
+        summary["summary"]["benchmark_error"] = (
+            f"benchmark failed with exit code {completed.returncode}"
+        )
+    return summary
 
 
 def _upload_video(path: Path, s3_uri: str, s3_client: Any) -> None:
@@ -321,6 +336,125 @@ def collect_upload_results(
     return results
 
 
+def _max_attempts() -> int:
+    raw_value = os.environ.get("SGLANG_VIDEO_BATCH_MAX_ATTEMPTS", "3")
+    try:
+        attempts = int(raw_value)
+    except ValueError as error:
+        raise ValueError(
+            f"SGLANG_VIDEO_BATCH_MAX_ATTEMPTS must be an integer: {raw_value}"
+        ) from error
+    return max(1, attempts)
+
+
+def _failed_case_result(case: dict[str, Any], error: str) -> dict[str, Any]:
+    return {
+        "case_id": case["case_id"],
+        "status": "failed",
+        "movement_key": case["movement_key"],
+        "ending_movement_key": case["ending_movement_key"],
+        "movement_pair": case["movement_pair"],
+        "camera_key": case["camera_key"],
+        "traj_id": case["traj_id"],
+        "traj_type": case["traj_type"],
+        "action_source": case["action_source"],
+        "action_index": case["action_index"],
+        "action_seed": case["action_seed"],
+        "action_pattern": case["action_pattern"],
+        "error": error,
+    }
+
+
+def run_video_batch(
+    *,
+    request: dict[str, Any],
+    cases: list[dict[str, Any]],
+    work_dir: Path,
+    s3_client: Any,
+) -> BatchRunResult:
+    pending_cases, resumed_results = split_completed_cases(cases, request, s3_client)
+    completed_by_case_id = {
+        str(result["case_id"]): result for result in resumed_results
+    }
+    failed_by_case_id: dict[str, dict[str, Any]] = {}
+    attempt_summaries: list[dict[str, Any]] = []
+
+    for attempt in range(1, _max_attempts() + 1):
+        if not pending_cases:
+            break
+
+        runtime = build_runtime_inputs(
+            request=request,
+            cases=pending_cases,
+            work_dir=work_dir / f"attempt-{attempt:03d}",
+            s3_client=s3_client,
+        )
+        try:
+            benchmark_summary = run_benchmark(runtime, request=request)
+        except Exception as error:
+            error_text = f"{type(error).__name__}: {error}"
+            attempt_summaries.append(
+                {
+                    "attempt": attempt,
+                    "status": "failed",
+                    "pending_count": len(pending_cases),
+                    "error": error_text,
+                }
+            )
+            for case in pending_cases:
+                failed_by_case_id[case["case_id"]] = _failed_case_result(
+                    case,
+                    error_text,
+                )
+        else:
+            attempt_results = collect_upload_results(
+                pending_cases,
+                benchmark_summary,
+                s3_client,
+                request=request,
+            )
+            succeeded_count = 0
+            failed_count = 0
+            for result in attempt_results:
+                case_id = str(result["case_id"])
+                if result.get("status") == "succeeded":
+                    completed_by_case_id[case_id] = result
+                    failed_by_case_id.pop(case_id, None)
+                    succeeded_count += 1
+                else:
+                    failed_by_case_id[case_id] = result
+                    failed_count += 1
+            attempt_summaries.append(
+                {
+                    "attempt": attempt,
+                    "status": "succeeded" if failed_count == 0 else "partial",
+                    "pending_count": len(pending_cases),
+                    "succeeded_count": succeeded_count,
+                    "failed_count": failed_count,
+                    "benchmark_summary": benchmark_summary.get("summary", {}),
+                }
+            )
+
+        pending_cases = [
+            case
+            for case in cases
+            if case["case_id"] not in completed_by_case_id
+        ]
+
+    final_results = [
+        completed_by_case_id[case["case_id"]]
+        for case in cases
+        if case["case_id"] in completed_by_case_id
+    ]
+    final_results.extend(
+        failed_by_case_id.get(case["case_id"])
+        or _failed_case_result(case, "batch attempts exhausted")
+        for case in cases
+        if case["case_id"] not in completed_by_case_id
+    )
+    return BatchRunResult(results=final_results, attempts=attempt_summaries)
+
+
 def upload_report(report: dict[str, Any], request: dict[str, Any], s3_client: Any) -> None:
     report_s3_uri = request.get("output", {}).get("report_s3_uri")
     if not report_s3_uri:
@@ -384,6 +518,13 @@ def cleanup_work_dir(work_dir: Path) -> None:
     shutil.rmtree(resolved, ignore_errors=True)
 
 
+def _env_flag(name: str, default: bool) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.lower() in {"1", "true", "yes"}
+
+
 def main() -> None:
     request = _load_request()
     work_dir = Path(
@@ -405,44 +546,42 @@ def main() -> None:
         manifest_rows,
         action_trajectories=action_trajectories,
     )
-    pending_cases, resumed_results = split_completed_cases(cases, request, s3_client)
-    runtime = build_runtime_inputs(
-        request=request,
-        cases=pending_cases,
-        work_dir=work_dir,
-        s3_client=s3_client,
-    )
 
     report: dict[str, Any]
+    completed_successfully = False
     try:
-        benchmark_summary = (
-            run_benchmark(runtime, request=request)
-            if pending_cases
-            else {"results": []}
-        )
-        upload_results = resumed_results + collect_upload_results(
-            pending_cases,
-            benchmark_summary,
-            s3_client,
+        batch_result = run_video_batch(
             request=request,
+            cases=cases,
+            work_dir=work_dir,
+            s3_client=s3_client,
         )
+        upload_results = batch_result.results
         callback_payload = build_callback_progress_payload(request, cases, upload_results)
         report = {
             "request": request,
             "summary": callback_payload["summary"],
             "counters": callback_payload["counters"],
+            "attempts": batch_result.attempts,
             "results": upload_results,
         }
-        report_path = runtime.results_root / "sglang-video-report.json"
+        report_path = work_dir / "results" / "sglang-video-report.json"
+        report_path.parent.mkdir(parents=True, exist_ok=True)
         report_path.write_text(
             json.dumps(report, indent=2, ensure_ascii=False) + "\n",
             encoding="utf-8",
         )
         upload_report(report, request, s3_client)
         post_callback(request, callback_payload)
+        completed_successfully = callback_payload["status"] == "succeeded"
+        if not completed_successfully:
+            failed = callback_payload["summary"]["video_failed_count"]
+            total = callback_payload["summary"]["video_expected_count"]
+            raise RuntimeError(f"video batch failed after retries: {failed}/{total} failed")
     finally:
-        cleanup_enabled = os.environ.get("SGLANG_VIDEO_BATCH_CLEANUP", "true").lower()
-        if cleanup_enabled in {"1", "true", "yes"}:
+        cleanup_enabled = _env_flag("SGLANG_VIDEO_BATCH_CLEANUP", True)
+        cleanup_on_failure = _env_flag("SGLANG_VIDEO_BATCH_CLEANUP_ON_FAILURE", False)
+        if cleanup_enabled and (completed_successfully or cleanup_on_failure):
             cleanup_work_dir(work_dir)
 
 

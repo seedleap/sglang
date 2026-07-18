@@ -12,6 +12,7 @@ from run_t2i_video_batch import (
     post_callback,
     read_action_trajectories,
     run_benchmark,
+    run_video_batch,
     split_completed_cases,
     upload_report,
 )
@@ -205,6 +206,41 @@ def test_run_benchmark_forwards_request_video_dimensions_to_runner(tmp_path, mon
     assert captured["env"]["SGLANG_VIDEO_FPS"] == "12"
 
 
+def test_run_benchmark_returns_summary_when_runner_exits_nonzero(tmp_path, monkeypatch):
+    request = _request()
+    cases = build_case_records(request, _rows(), action_trajectories=_trajs())
+    runtime = build_runtime_inputs(
+        request=request,
+        cases=cases,
+        work_dir=tmp_path,
+        s3_client=FakeS3Client(),
+    )
+
+    def fake_run(command, env, check):
+        summary_path = runtime.results_root / "cases" / "summary.json"
+        summary_path.parent.mkdir(parents=True, exist_ok=True)
+        summary_path.write_text(
+            json.dumps(
+                {
+                    "summary": {"successful_samples": 1, "failed_samples": 1},
+                    "results": [],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        return SimpleNamespace(returncode=1)
+
+    monkeypatch.setattr("run_t2i_video_batch.subprocess.run", fake_run)
+
+    summary = run_benchmark(runtime, request=request)
+
+    assert summary["summary"]["successful_samples"] == 1
+    assert summary["summary"]["failed_samples"] == 1
+    assert summary["summary"]["benchmark_exit_code"] == 1
+    assert summary["summary"]["benchmark_error"] == "benchmark failed with exit code 1"
+
+
 def test_collect_upload_results_uploads_successes_and_reports_failures(tmp_path):
     cases = build_case_records(
         _request(),
@@ -255,6 +291,91 @@ def test_collect_upload_results_uploads_successes_and_reports_failures(tmp_path)
     assert results[0]["action_source"] == "trajs.jsonl"
     assert results[1]["status"] == "failed"
     assert results[1]["error"] == "RuntimeError: boom"
+
+
+def test_run_video_batch_retries_only_failed_cases_and_preserves_successes(
+    tmp_path,
+    monkeypatch,
+):
+    request = _request()
+    rows = _rows() + [
+        {
+            "item_id": "img002",
+            "image_uri": "s3://bucket/t2i/images/img002.png",
+            "image_prompt": "A red robot.",
+            "video_prompt": "A red robot.",
+            "video_prompt_source": "image_prompt_fallback",
+        }
+    ]
+    cases = build_case_records(request, rows, action_trajectories=_trajs())
+    fake_s3 = FakeS3Client()
+    attempts = []
+
+    def fake_run_benchmark(runtime, request):
+        attempts.append(runtime)
+        message_rows = [
+            json.loads(line)
+            for line in runtime.messages_path.read_text(encoding="utf-8").splitlines()
+        ]
+        if len(attempts) == 1:
+            assert [row["sample_id"] for row in message_rows] == [
+                cases[0]["sample_id"],
+                cases[1]["sample_id"],
+            ]
+            output = tmp_path / "first.mp4"
+            output.write_bytes(b"mp4-first")
+            return {
+                "summary": {"successful_samples": 1, "failed_samples": 1},
+                "results": [
+                    {
+                        "sample_id": cases[0]["sample_id"],
+                        "success": True,
+                        "output": str(output),
+                    },
+                    {
+                        "sample_id": cases[1]["sample_id"],
+                        "success": False,
+                        "error": "RuntimeError: invalid generate request",
+                    },
+                ],
+            }
+
+        assert [row["sample_id"] for row in message_rows] == [cases[1]["sample_id"]]
+        output = tmp_path / "second.mp4"
+        output.write_bytes(b"mp4-second")
+        return {
+            "summary": {"successful_samples": 1, "failed_samples": 0},
+            "results": [
+                {
+                    "sample_id": cases[1]["sample_id"],
+                    "success": True,
+                    "output": str(output),
+                }
+            ],
+        }
+
+    monkeypatch.setenv("SGLANG_VIDEO_BATCH_MAX_ATTEMPTS", "2")
+    monkeypatch.setattr("run_t2i_video_batch.run_benchmark", fake_run_benchmark)
+
+    result = run_video_batch(
+        request=request,
+        cases=cases,
+        work_dir=tmp_path / "work",
+        s3_client=fake_s3,
+    )
+
+    assert len(attempts) == 2
+    assert [attempt.results_root.name for attempt in attempts] == ["results", "results"]
+    assert [attempt.results_root.parent.name for attempt in attempts] == [
+        "attempt-001",
+        "attempt-002",
+    ]
+    assert [row["status"] for row in result.results] == ["succeeded", "succeeded"]
+    assert [attempt["status"] for attempt in result.attempts] == ["partial", "succeeded"]
+    assert [upload["filename"] for upload in fake_s3.uploads] == [
+        str(tmp_path / "first.mp4"),
+        str(tmp_path / "second.mp4"),
+    ]
 
 
 def test_split_completed_cases_skips_existing_video_outputs_and_reports_resume_success(tmp_path):
