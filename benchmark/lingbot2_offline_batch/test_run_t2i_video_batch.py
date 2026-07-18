@@ -436,6 +436,80 @@ def test_run_video_batch_streams_progress_uploads_before_benchmark_returns(
     assert len(fake_s3.uploads) == 1
 
 
+def test_run_video_batch_posts_incremental_callback_after_stream_upload(
+    tmp_path,
+    monkeypatch,
+):
+    request = _request()
+    rows = _rows() + [
+        {
+            "item_id": "img002",
+            "image_uri": "s3://bucket/t2i/images/img002.png",
+            "image_prompt": "A red robot.",
+            "video_prompt": "A red robot.",
+            "video_prompt_source": "image_prompt_fallback",
+        }
+    ]
+    cases = build_case_records(request, rows, action_trajectories=_trajs())
+    fake_s3 = FakeS3Client()
+    callbacks = []
+
+    def fake_run_benchmark(runtime, request):
+        output = runtime.results_root / "cases" / "videos" / "video.mp4"
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(b"mp4")
+        progress = runtime.results_root / "cases" / "progress.jsonl"
+        progress.write_text(
+            json.dumps(
+                {
+                    "sample_id": cases[0]["sample_id"],
+                    "success": True,
+                    "output": str(output),
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        deadline = time.monotonic() + 2.0
+        while not callbacks and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert callbacks
+        return {
+            "summary": {"successful_samples": 1, "failed_samples": 1},
+            "results": [
+                {
+                    "sample_id": cases[0]["sample_id"],
+                    "success": True,
+                    "output": str(output),
+                },
+                {
+                    "sample_id": cases[1]["sample_id"],
+                    "success": False,
+                    "error": "RuntimeError: invalid generate request",
+                },
+            ],
+        }
+
+    monkeypatch.setenv("SGLANG_VIDEO_BATCH_STREAM_UPLOAD", "true")
+    monkeypatch.setenv("SGLANG_VIDEO_CALLBACK_PROGRESS_INTERVAL_SECONDS", "0")
+    monkeypatch.setenv("SGLANG_VIDEO_BATCH_MAX_ATTEMPTS", "1")
+    monkeypatch.setattr("run_t2i_video_batch.run_benchmark", fake_run_benchmark)
+
+    run_video_batch(
+        request=request,
+        cases=cases,
+        work_dir=tmp_path / "work",
+        s3_client=fake_s3,
+        progress_callback=callbacks.append,
+    )
+
+    assert callbacks[0]["status"] == "running"
+    assert callbacks[0]["summary"]["video_expected_count"] == 2
+    assert callbacks[0]["summary"]["video_succeeded_count"] == 1
+    assert callbacks[0]["summary"]["video_failed_count"] == 0
+    assert callbacks[0]["summary"]["video_running_count"] == 1
+
+
 def test_run_video_batch_retries_only_failed_cases_and_preserves_successes(
     tmp_path,
     monkeypatch,

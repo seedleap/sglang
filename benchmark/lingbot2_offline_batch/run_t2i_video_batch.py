@@ -12,7 +12,7 @@ import time
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from t2i_video_batch import (
     build_callback_progress_payload,
@@ -458,21 +458,36 @@ class ProgressUploadWatcher:
         s3_client: Any,
         delete_local_outputs: bool,
         poll_seconds: float = 0.25,
+        all_cases: list[dict[str, Any]] | None = None,
+        initial_results: list[dict[str, Any]] | None = None,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
+        progress_callback_min_interval_seconds: float = 30.0,
     ) -> None:
         self.progress_path = runtime.results_root / "cases" / "progress.jsonl"
         self.cases_by_sample_id = {case["sample_id"]: case for case in cases}
+        self.cases = all_cases or cases
         self.request = request
         self.s3_client = s3_client
         self.delete_local_outputs = delete_local_outputs
         self.poll_seconds = poll_seconds
+        self.progress_callback = progress_callback
+        self.progress_callback_min_interval_seconds = max(
+            0.0,
+            progress_callback_min_interval_seconds,
+        )
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._lock = threading.Lock()
-        self._uploaded_by_case_id: dict[str, dict[str, Any]] = {}
+        self._uploaded_by_case_id: dict[str, dict[str, Any]] = {
+            str(result["case_id"]): result for result in (initial_results or [])
+        }
         self._errors: list[str] = []
+        self._last_callback_at = 0.0
 
     def start(self) -> None:
         self._thread.start()
+        if self._uploaded_by_case_id:
+            self._emit_progress_callback(force=True)
 
     def stop(self) -> None:
         self._stop.set()
@@ -480,6 +495,7 @@ class ProgressUploadWatcher:
         if self._thread.is_alive():
             with self._lock:
                 self._errors.append("progress upload watcher did not stop within 60s")
+        self._emit_progress_callback(force=True)
 
     def uploaded_results(self) -> list[dict[str, Any]]:
         with self._lock:
@@ -492,6 +508,26 @@ class ProgressUploadWatcher:
     def _record_error(self, error: Exception) -> None:
         with self._lock:
             self._errors.append(f"{type(error).__name__}: {error}")
+
+    def _emit_progress_callback(self, *, force: bool = False) -> None:
+        if self.progress_callback is None:
+            return
+        now = time.monotonic()
+        with self._lock:
+            if (
+                not force
+                and self._last_callback_at
+                and now - self._last_callback_at
+                < self.progress_callback_min_interval_seconds
+            ):
+                return
+            results = list(self._uploaded_by_case_id.values())
+            self._last_callback_at = now
+        payload = build_callback_progress_payload(self.request, self.cases, results)
+        try:
+            self.progress_callback(payload)
+        except Exception as error:
+            self._record_error(error)
 
     def _handle_row(self, row: dict[str, Any], submitted: set[str]) -> None:
         sample_id = str(row.get("sample_id") or "")
@@ -510,6 +546,7 @@ class ProgressUploadWatcher:
         with self._lock:
             self._uploaded_by_case_id[case["case_id"]] = result
         submitted.add(sample_id)
+        self._emit_progress_callback()
 
     def _run(self) -> None:
         offset = 0
@@ -550,6 +587,16 @@ def _max_attempts() -> int:
     return max(1, attempts)
 
 
+def _float_env(name: str, default: float) -> float:
+    value = os.environ.get(name)
+    if value in (None, ""):
+        return default
+    try:
+        return float(value)
+    except ValueError:
+        return default
+
+
 def _failed_case_result(case: dict[str, Any], error: str) -> dict[str, Any]:
     return {
         "case_id": case["case_id"],
@@ -574,6 +621,7 @@ def run_video_batch(
     cases: list[dict[str, Any]],
     work_dir: Path,
     s3_client: Any,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> BatchRunResult:
     pending_cases, resumed_results = split_completed_cases(cases, request, s3_client)
     completed_by_case_id = {
@@ -583,6 +631,10 @@ def run_video_batch(
     attempt_summaries: list[dict[str, Any]] = []
     stream_upload = _env_flag("SGLANG_VIDEO_BATCH_STREAM_UPLOAD", True)
     delete_local_outputs = _env_flag("SGLANG_VIDEO_BATCH_DELETE_UPLOADED_LOCAL", True)
+    progress_callback_min_interval_seconds = _float_env(
+        "SGLANG_VIDEO_CALLBACK_PROGRESS_INTERVAL_SECONDS",
+        30.0,
+    )
 
     for attempt in range(1, _max_attempts() + 1):
         if not pending_cases:
@@ -601,6 +653,10 @@ def run_video_batch(
                 request=request,
                 s3_client=s3_client,
                 delete_local_outputs=delete_local_outputs,
+                all_cases=cases,
+                initial_results=list(completed_by_case_id.values()),
+                progress_callback=progress_callback,
+                progress_callback_min_interval_seconds=progress_callback_min_interval_seconds,
             )
             if stream_upload
             else None
@@ -787,6 +843,7 @@ def main() -> None:
             cases=cases,
             work_dir=work_dir,
             s3_client=s3_client,
+            progress_callback=lambda payload: post_callback(request, payload),
         )
         upload_results = batch_result.results
         callback_payload = build_callback_progress_payload(request, cases, upload_results)
