@@ -57,6 +57,15 @@ def main() -> None:
         )
         target = message["messages"][1]
         metadata = message["metadata"]
+        trajectory_balance = metadata.get("trajectory_balance") or {}
+        movement_key = metadata.get("movement_key") or trajectory_balance.get("movement_key")
+        ending_movement_key = (
+            metadata.get("ending_movement_key")
+            or trajectory_balance.get("ending_movement_key")
+            or trajectory_balance.get("camera_key")
+            or metadata.get("camera_key")
+            or ""
+        )
         items.append(
             {
                 "sample_id": sample_id,
@@ -64,8 +73,9 @@ def main() -> None:
                 "prompt": message["messages"][0]["content"],
                 "trajectory": metadata["source_trajectory_id"],
                 "segments": metadata["source_segments"],
-                "movement_key": metadata["trajectory_balance"]["movement_key"],
-                "camera_key": metadata["trajectory_balance"]["camera_key"],
+                "movement_key": movement_key,
+                "ending_movement_key": ending_movement_key,
+                "camera_key": metadata.get("camera_key", ""),
                 "latent_actions": metadata["latent_camera_actions"],
                 "width": target["output"]["width"],
                 "height": target["output"]["height"],
@@ -140,16 +150,17 @@ document.querySelector('#stats').innerHTML=[
   `输出 1280×720 · 24fps · 129f`
 ].map(x=>`<span class="pill">${{x}}</span>`).join('');
 function segmentHtml(s,i) {{
-  const kind=s.key===null?'none':i===0?'move':'camera';
+  const kind=s.key===null?'none':s.kind==='movement'||i===0?'move':'camera';
   const label=s.key===null?'none':s.key;
   return `<div class="segment ${{kind}}" style="flex:${{s.num_frames}}">${{esc(label)}} · ${{s.num_frames}}f</div>`;
 }}
 function card(x) {{
   const detail=x.segments.map(s=>`${{s.key??'none'}}: ${{s.start_frame}}–${{s.end_frame}} (${{s.num_frames}}f)`).join(' · ');
+  const ending=x.ending_movement_key||x.camera_key||'';
   return `<article>
     <video controls playsinline preload="metadata" src="${{esc(x.url)}}"></video>
     <div class="body">
-      <div class="title"><strong>${{esc(x.sample_id)}}</strong><span class="badge">${{esc(x.movement_key)}} → none → ${{esc(x.camera_key)}}</span></div>
+      <div class="title"><strong>${{esc(x.sample_id)}}</strong><span class="badge">${{esc(x.movement_key)}} → none → ${{esc(ending)}}</span></div>
       <div class="meta"><span>${{x.width}}×${{x.height}}</span><span>${{x.fps}}fps</span><span>${{x.frames}} frames</span><span>${{fmt(x.duration_sec)}}s</span><span>E2E ${{fmt(x.latency_sec)}}s</span><span>${{(x.bytes/1048576).toFixed(1)}}MiB</span></div>
       <div class="timeline">${{x.segments.map(segmentHtml).join('')}}</div>
       <div class="segments">${{esc(detail)}}</div>

@@ -105,6 +105,8 @@ def build_case(
             "seed": case_slot,
             "action_id": trajectory["action_id"],
             "movement_key": trajectory["movement_key"],
+            "ending_movement_key": trajectory["ending_movement_key"],
+            "movement_pair": trajectory["movement_pair"],
             "camera_key": trajectory["camera_key"],
             "action_seed": trajectory["action_seed"],
             "action_pattern": trajectory["action_pattern"],
@@ -200,7 +202,7 @@ def main() -> None:
                     args.group,
                 )
                 metadata = row["metadata"]
-                pair_counts[f"{metadata['movement_key']}+{metadata['camera_key']}"] += 1
+                pair_counts[metadata["movement_pair"]] += 1
                 shard = case_index % args.shards
                 encoded = json.dumps(row, ensure_ascii=False)
                 shard_files[shard].write(encoded + "\n")
@@ -220,6 +222,8 @@ def main() -> None:
                             "action_id": metadata["action_id"],
                             "trajectory_id": metadata["action_id"],
                             "movement_key": metadata["movement_key"],
+                            "ending_movement_key": metadata["ending_movement_key"],
+                            "movement_pair": metadata["movement_pair"],
                             "camera_key": metadata["camera_key"],
                             "action_seed": metadata["action_seed"],
                             "action_pattern": metadata["action_pattern"],
@@ -237,8 +241,9 @@ def main() -> None:
     if max(shard_counts) - min(shard_counts) > 1 or sum(shard_counts) != total_cases:
         raise ValueError(f"invalid shard distribution: {shard_counts}")
     counts = list(pair_counts.values())
-    if len(pair_counts) != 16 or max(counts) - min(counts) > 1:
-        raise ValueError(f"invalid action-pair distribution: {pair_counts}")
+    expected_pair_count = len(balance["pair_case_counts"])
+    if len(pair_counts) != expected_pair_count or max(counts) - min(counts) > 1:
+        raise ValueError(f"invalid movement-pair distribution: {pair_counts}")
     print(
         json.dumps(
             {

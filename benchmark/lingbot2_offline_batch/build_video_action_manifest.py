@@ -7,7 +7,13 @@ import argparse
 import json
 from pathlib import Path
 
-from prepare_capacity_smoke_720p import quantize_actions
+from prepare_capacity_smoke_720p import (
+    FPS,
+    HEIGHT,
+    OUTPUT_VIDEO_FRAMES,
+    WIDTH,
+    quantize_actions,
+)
 from thirdperson_actions import ACTION_SEED, build_action_trajectory
 
 
@@ -48,6 +54,8 @@ def main() -> None:
             for field in (
                 "action_id",
                 "movement_key",
+                "ending_movement_key",
+                "movement_pair",
                 "camera_key",
                 "action_seed",
                 "action_pattern",
@@ -74,17 +82,19 @@ def main() -> None:
                 "video": {
                     "s3_uri": output["s3_uri"],
                     "http_url": output["http_url"],
-                    "width": 1280,
-                    "height": 720,
-                    "fps": 24,
-                    "frames": 129,
-                    "duration_seconds": 5.375,
+                    "width": WIDTH,
+                    "height": HEIGHT,
+                    "fps": FPS,
+                    "frames": OUTPUT_VIDEO_FRAMES,
+                    "duration_seconds": OUTPUT_VIDEO_FRAMES / FPS,
                 },
                 "action_trajectory": {
                     "action_id": trajectory["action_id"],
                     "fps": trajectory["fps"],
                     "num_frames": trajectory["num_frames"],
                     "movement_key": trajectory["movement_key"],
+                    "ending_movement_key": trajectory["ending_movement_key"],
+                    "movement_pair": trajectory["movement_pair"],
                     "camera_key": trajectory["camera_key"],
                     "action_seed": trajectory["action_seed"],
                     "action_pattern": trajectory["action_pattern"],

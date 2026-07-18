@@ -1,43 +1,94 @@
 from thirdperson_actions import (
-    ACTION_PATTERN,
     ACTION_SEED,
+    ACTION_SOURCE,
     build_action_trajectory,
-    combo_for_case,
-    combo_schedule,
-    validate_assignment,
+    sampled_trajectory_index,
+    validate_action_trajectories,
 )
 
 
-def test_schedule_is_seeded_and_contains_all_pairs_once() -> None:
-    schedule = combo_schedule(ACTION_SEED)
-    assert len(schedule) == 16
-    assert len(set(schedule)) == 16
-    assert schedule == combo_schedule(ACTION_SEED)
+def _traj(traj_id: str, first_key: str, last_key: str | None = None) -> dict:
+    last_key = last_key or first_key
+    return {
+        "traj_id": traj_id,
+        "fps": 24,
+        "num_frames": 129,
+        "traj_type": "test_traj",
+        "condition_inputs": {
+            "camera_actions": (
+                [[first_key] for _ in range(64)]
+                + [[last_key] for _ in range(65)]
+            )
+        },
+        "segments": [
+            {"key": first_key, "start_frame": 0, "end_frame": 63, "num_frames": 64},
+            {"key": last_key, "start_frame": 64, "end_frame": 128, "num_frames": 65},
+        ],
+    }
 
 
-def test_each_image_gets_five_unique_pairs() -> None:
-    for image_index in range(3699):
-        pairs = {
-            combo_for_case(image_index * 5 + case_slot, ACTION_SEED)
-            for case_slot in range(5)
-        }
-        assert len(pairs) == 5
+def _trajs() -> tuple[dict, ...]:
+    return (
+        _traj("traj-0", "w", "a"),
+        _traj("traj-1", "a", "s"),
+        _traj("traj-2", "s", "d"),
+        _traj("traj-3", "d", "w"),
+    )
 
 
-def test_remaining_batch_is_globally_balanced() -> None:
-    result = validate_assignment(3699, 5, ACTION_SEED)
-    assert sum(result["pair_case_counts"].values()) == 18495
-    assert result["pair_count_min"] == 1155
-    assert result["pair_count_max"] == 1156
+def test_sampling_from_trajs_jsonl_is_seeded_random_without_replacement() -> None:
+    ids = [
+        build_action_trajectory(i, seed=7, trajectories=_trajs())["traj_id"]
+        for i in range(4)
+    ]
+
+    assert ids == ["traj-3", "traj-1", "traj-0", "traj-2"]
+    assert ids == [
+        build_action_trajectory(i, seed=7, trajectories=_trajs())["traj_id"]
+        for i in range(4)
+    ]
+    assert len(set(ids)) == 4
+    assert ids != ["traj-0", "traj-1", "traj-2", "traj-3"]
 
 
-def test_action_pattern_and_metadata_are_exact() -> None:
-    action = build_action_trajectory(1234, ACTION_SEED)
+def test_sampling_wraps_with_a_new_seeded_shuffle_when_pool_is_exhausted() -> None:
+    first_cycle = [
+        sampled_trajectory_index(i, pool_size=4, seed=ACTION_SEED) for i in range(4)
+    ]
+    second_cycle = [
+        sampled_trajectory_index(i, pool_size=4, seed=ACTION_SEED) for i in range(4, 8)
+    ]
+
+    assert sorted(first_cycle) == [0, 1, 2, 3]
+    assert sorted(second_cycle) == [0, 1, 2, 3]
+    assert second_cycle != first_cycle
+
+
+def test_action_metadata_comes_from_selected_traj() -> None:
+    action = build_action_trajectory(0, seed=7, trajectories=_trajs())
     frames = action["condition_inputs"]["camera_actions"]
+
+    assert action["traj_id"] == "traj-3"
+    assert action["action_id"] == "traj-3"
+    assert action["action_source"] == ACTION_SOURCE
+    assert action["action_index"] == 3
+    assert action["movement_key"] == "d"
+    assert action["ending_movement_key"] == "w"
+    assert action["movement_pair"] == "d+w"
+    assert action["camera_key"] == ""
+    assert action["action_seed"] == 7
+    assert action["action_pattern"] == "trajs.jsonl:test_traj"
     assert len(frames) == 129
-    assert frames[:57] == [[action["movement_key"]] for _ in range(57)]
-    assert frames[57:72] == [[] for _ in range(15)]
-    assert frames[72:] == [[action["camera_key"]] for _ in range(57)]
-    assert action["action_seed"] == ACTION_SEED
-    assert action["action_pattern"] == ACTION_PATTERN
-    assert action == build_action_trajectory(1234, ACTION_SEED)
+    assert frames == _trajs()[3]["condition_inputs"]["camera_actions"]
+
+
+def test_validate_action_trajectories_rejects_bad_shape() -> None:
+    bad = dict(_traj("bad", "w"))
+    bad["num_frames"] = 128
+
+    try:
+        validate_action_trajectories([bad])
+    except ValueError as error:
+        assert "expected 24 FPS and 129 frames" in str(error)
+    else:
+        raise AssertionError("expected invalid trajectory to be rejected")

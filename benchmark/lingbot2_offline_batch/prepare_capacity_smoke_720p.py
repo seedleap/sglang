@@ -11,12 +11,11 @@ from pathlib import Path
 from thirdperson_actions import ACTION_SEED, build_action_trajectory
 
 
-ACTION_KEYS = ["w", "a", "s", "d", "i", "j", "k", "l"]
-MOVEMENT_KEYS = ACTION_KEYS[:4]
-CAMERA_KEYS = ACTION_KEYS[4:]
+ACTION_KEYS = ["w", "a", "s", "d"]
+MOVEMENT_KEYS = tuple(ACTION_KEYS)
 FPS = 24
 WIDTH = 1280
-HEIGHT = 720
+HEIGHT = 704
 GENERATED_LATENT_FRAMES = 32
 OUTPUT_VIDEO_FRAMES = GENERATED_LATENT_FRAMES * 4 + 1
 
@@ -100,6 +99,8 @@ def main() -> None:
                     "source_trajectory_index": case_index,
                     "source_trajectory_id": trajectory["traj_id"],
                     "movement_key": trajectory["movement_key"],
+                    "ending_movement_key": trajectory["ending_movement_key"],
+                    "movement_pair": trajectory["movement_pair"],
                     "camera_key": trajectory["camera_key"],
                     "action_seed": trajectory["action_seed"],
                     "action_pattern": trajectory["action_pattern"],
