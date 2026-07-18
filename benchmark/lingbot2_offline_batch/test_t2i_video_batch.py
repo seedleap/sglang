@@ -213,3 +213,59 @@ def test_callback_progress_payload_groups_one_video_per_image():
     )
     assert payload["items"][0]["metadata"]["videos"][0]["camera_key"] == ""
     assert payload["items"][0]["metadata"]["videos"][0]["traj_id"] == cases[0]["traj_id"]
+
+
+def test_callback_progress_payload_completes_with_failed_video_reason():
+    cases = build_case_records(
+        _request(),
+        [
+            {
+                "item_id": "img001",
+                "image_uri": "s3://bucket/t2i/images/img001.png",
+                "image_prompt": "A quiet workshop.",
+                "video_prompt": "A quiet workshop.",
+                "video_prompt_source": "image_prompt_fallback",
+            },
+            {
+                "item_id": "img002",
+                "image_uri": "s3://bucket/t2i/images/img002.png",
+                "image_prompt": "A red robot.",
+                "video_prompt": "A red robot.",
+                "video_prompt_source": "image_prompt_fallback",
+            },
+        ],
+        action_trajectories=_trajs(),
+    )
+    results = [
+        {
+            "case_id": cases[0]["case_id"],
+            "status": "succeeded",
+            "video_uri": cases[0]["video_s3_uri"],
+        },
+        {
+            "case_id": cases[1]["case_id"],
+            "status": "failed",
+            "error": "RuntimeError: invalid generate request",
+        },
+    ]
+
+    payload = build_callback_progress_payload(_request(), cases, results)
+
+    assert payload["status"] == "completed"
+    assert payload["summary"]["video_status"] == "completed_with_failures"
+    assert payload["summary"]["video_expected_count"] == 2
+    assert payload["summary"]["video_succeeded_count"] == 1
+    assert payload["summary"]["video_failed_count"] == 1
+    assert payload["counters"] == {
+        "total": 2,
+        "succeeded": 1,
+        "failed": 1,
+        "running": 0,
+    }
+    failed_item = next(item for item in payload["items"] if item["item_id"] == "img002")
+    assert failed_item["status"] == "failed"
+    assert failed_item["metadata"]["video_status"] == "failed"
+    assert failed_item["metadata"]["videos"][0]["status"] == "failed"
+    assert failed_item["metadata"]["videos"][0]["error"] == (
+        "RuntimeError: invalid generate request"
+    )

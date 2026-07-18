@@ -806,10 +806,6 @@ def main() -> None:
         upload_report(report, request, s3_client)
         post_callback(request, callback_payload)
         completed_successfully = callback_payload["status"] == "succeeded"
-        if not completed_successfully:
-            failed = callback_payload["summary"]["video_failed_count"]
-            total = callback_payload["summary"]["video_expected_count"]
-            raise RuntimeError(f"video batch failed after retries: {failed}/{total} failed")
     finally:
         cleanup_enabled = _env_flag("SGLANG_VIDEO_BATCH_CLEANUP", True)
         cleanup_on_failure = _env_flag("SGLANG_VIDEO_BATCH_CLEANUP_ON_FAILURE", False)

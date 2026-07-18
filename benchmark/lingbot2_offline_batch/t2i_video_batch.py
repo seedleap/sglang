@@ -285,15 +285,31 @@ def build_callback_progress_payload(
                 item["video_uri"],
             ),
         )
+        resolved = len(videos)
         item_failed = any(video["status"] in {"failed", "rejected"} for video in videos)
+        item_succeeded_count = sum(video["status"] == "succeeded" for video in videos)
         item_succeeded = len(videos) == expected_by_item[image_id] and all(
             video["status"] == "succeeded" for video in videos
         )
-        video_status = "failed" if item_failed else "succeeded" if item_succeeded else "running"
+        if item_succeeded:
+            item_status = "succeeded"
+            video_status = "succeeded"
+        elif resolved < expected_by_item[image_id]:
+            item_status = "running"
+            video_status = "running"
+        elif item_failed and item_succeeded_count:
+            item_status = "completed"
+            video_status = "completed_with_failures"
+        elif item_failed:
+            item_status = "failed"
+            video_status = "failed"
+        else:
+            item_status = "running"
+            video_status = "running"
         items.append(
             {
                 "item_id": image_id,
-                "status": "succeeded" if video_status == "succeeded" else "running",
+                "status": item_status,
                 "stage": "sglang_video_generation",
                 "metadata": {
                     "video_status": video_status,
@@ -303,22 +319,32 @@ def build_callback_progress_payload(
         )
 
     total = len(cases)
-    video_status = "failed" if failed else "succeeded" if succeeded == total else "running"
+    running = max(0, total - succeeded - failed)
+    if total and running:
+        status = "running"
+        video_status = "running"
+    elif failed:
+        status = "completed"
+        video_status = "completed_with_failures"
+    else:
+        status = "succeeded"
+        video_status = "succeeded"
     return {
-        "status": video_status,
+        "status": status,
         "stage": "sglang_video_generation",
         "summary": {
             "video_status": video_status,
             "video_expected_count": total,
             "video_succeeded_count": succeeded,
             "video_failed_count": failed,
+            "video_running_count": running,
             "video_output_prefix": _output_config(request).get("video_s3_prefix", ""),
         },
         "counters": {
             "total": total,
             "succeeded": succeeded,
             "failed": failed,
-            "running": max(0, total - succeeded - failed),
+            "running": running,
         },
         "items": items,
     }

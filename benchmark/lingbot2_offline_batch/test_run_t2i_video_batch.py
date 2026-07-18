@@ -10,6 +10,7 @@ from run_t2i_video_batch import (
     case_checkpoint_s3_uri,
     collect_upload_results,
     case_metadata_s3_uri,
+    main,
     parse_s3_uri,
     post_callback,
     read_action_trajectories,
@@ -646,3 +647,70 @@ def test_post_callback_uses_generation_progress_put_with_bearer_token(monkeypatc
     assert sent["content_type"] == "application/json"
     assert sent["body"] == b'{"status": "succeeded"}'
     assert sent["timeout"] == 60
+
+
+def test_main_accepts_completed_batch_with_failed_videos_and_keeps_failure_workdir(
+    tmp_path,
+    monkeypatch,
+):
+    request = _request()
+    cases = build_case_records(
+        request,
+        _rows()
+        + [
+            {
+                "item_id": "img002",
+                "image_uri": "s3://bucket/t2i/images/img002.png",
+                "image_prompt": "A red robot.",
+                "video_prompt": "A red robot.",
+                "video_prompt_source": "image_prompt_fallback",
+            }
+        ],
+        action_trajectories=_trajs(),
+    )
+    callback_payloads = []
+    reports = []
+    cleaned = []
+
+    monkeypatch.setenv("SGLANG_VIDEO_BATCH_WORK_DIR", str(tmp_path / "work"))
+    monkeypatch.setattr("run_t2i_video_batch._load_request", lambda: request)
+    monkeypatch.setattr("run_t2i_video_batch._make_s3_client", FakeS3Client)
+    monkeypatch.setattr("run_t2i_video_batch.read_jsonl_uri", lambda *_args: _rows())
+    monkeypatch.setattr("run_t2i_video_batch.read_action_trajectories", lambda *_args: _trajs())
+    monkeypatch.setattr(
+        "run_t2i_video_batch.build_case_records",
+        lambda *_args, **_kwargs: cases,
+    )
+    monkeypatch.setattr(
+        "run_t2i_video_batch.run_video_batch",
+        lambda **_kwargs: SimpleNamespace(
+            attempts=[{"attempt": 1, "status": "partial"}],
+            results=[
+                {"case_id": cases[0]["case_id"], "status": "succeeded"},
+                {
+                    "case_id": cases[1]["case_id"],
+                    "status": "failed",
+                    "error": "RuntimeError: invalid generate request",
+                },
+            ],
+        ),
+    )
+    monkeypatch.setattr(
+        "run_t2i_video_batch.upload_report",
+        lambda report, *_args: reports.append(report),
+    )
+    monkeypatch.setattr(
+        "run_t2i_video_batch.post_callback",
+        lambda _request, payload: callback_payloads.append(payload),
+    )
+    monkeypatch.setattr(
+        "run_t2i_video_batch.cleanup_work_dir",
+        lambda work_dir: cleaned.append(work_dir),
+    )
+
+    main()
+
+    assert callback_payloads[0]["status"] == "completed"
+    assert callback_payloads[0]["summary"]["video_status"] == "completed_with_failures"
+    assert reports[0]["summary"]["video_failed_count"] == 1
+    assert cleaned == []
