@@ -89,6 +89,41 @@ def _pod_node_name(pod: dict[str, Any]) -> str:
     return str(spec.get("nodeName") or "")
 
 
+def _pod_phase(pod: dict[str, Any]) -> str:
+    status = pod.get("status") if isinstance(pod.get("status"), dict) else {}
+    return str(status.get("phase") or "")
+
+
+def _pod_job_name(pod: dict[str, Any]) -> str:
+    labels = _labels(pod)
+    job_name = labels.get("batch.kubernetes.io/job-name") or labels.get("job-name")
+    if job_name:
+        return str(job_name)
+    owner_references = _metadata(pod).get("ownerReferences")
+    if isinstance(owner_references, list):
+        for owner in owner_references:
+            if isinstance(owner, dict) and owner.get("kind") == "Job" and owner.get("name"):
+                return str(owner["name"])
+    return ""
+
+
+def _pending_pods_for_job(pods: list[dict[str, Any]], job_name: str) -> list[dict[str, Any]]:
+    result = []
+    for pod in pods:
+        metadata = _metadata(pod)
+        if metadata.get("deletionTimestamp"):
+            continue
+        if _pod_job_name(pod) != job_name:
+            continue
+        if _pod_phase(pod) == "Pending" and not _pod_node_name(pod):
+            result.append(pod)
+    return result
+
+
+def _pods_except_job(pods: list[dict[str, Any]], job_name: str) -> list[dict[str, Any]]:
+    return [pod for pod in pods if _pod_job_name(pod) != job_name]
+
+
 def _node_ready(node: dict[str, Any]) -> bool:
     status = node.get("status") if isinstance(node.get("status"), dict) else {}
     conditions = status.get("conditions") if isinstance(status.get("conditions"), list) else []
@@ -259,10 +294,12 @@ def choose_backend(
     *,
     requested_gpus: int,
     state: dict[str, Any] | None = None,
+    excluded_backend_names: set[str] | None = None,
 ) -> dict[str, Any] | None:
     """Pick B300 within its cap; otherwise pick fallback Spot GPUs within their shared cap."""
     backends = config.get("backends") if isinstance(config.get("backends"), list) else []
     state = state or {"inflight": []}
+    excluded_backend_names = excluded_backend_names or set()
     gpu_per_pod = _int_or_default(config.get("gpu_per_pod"), requested_gpus)
     b300_max_gpus = _int_or_default(
         config.get("b300_max_active_gpus"),
@@ -275,6 +312,8 @@ def choose_backend(
     )
     for backend in backends:
         if not isinstance(backend, dict) or not _is_b300_backend(backend):
+            continue
+        if _backend_name(backend) in excluded_backend_names:
             continue
         if b300_active + requested_gpus > b300_max_gpus:
             continue
@@ -303,6 +342,8 @@ def choose_backend(
             continue
         backend_name = _backend_name(backend)
         if not backend_name:
+            continue
+        if backend_name in excluded_backend_names:
             continue
         candidates.append(
             (
@@ -783,6 +824,12 @@ def _render_for_backend(
     )
 
 
+def _retry_excluded_backends(config: dict[str, Any], backend_name: str) -> set[str]:
+    if backend_name in _b300_backend_names(config):
+        return _b300_backend_names(config)
+    return {backend_name} if backend_name else set()
+
+
 def _backend_scale_target(
     backend: dict[str, Any],
     config: dict[str, Any],
@@ -921,7 +968,7 @@ def reconcile_inflight_jobs(
     max_attempts = _int_or_default(config.get("max_job_attempts"), 5)
     nodes = _list_nodes(core_client)
     pods = _list_capacity_pods(core_client, config)
-    completed = restarted = released = failed = missing = 0
+    completed = restarted = released = failed = missing = pending = 0
     remaining = []
     all_inflight = list(state.get("inflight", []))
 
@@ -981,6 +1028,7 @@ def reconcile_inflight_jobs(
                 "requested_gpus": requested_gpus,
             }
             item.pop("missing_job_seen_at", None)
+            item.pop("pending_job_seen_at", None)
             restarted += 1
 
         if _job_failed(status):
@@ -1027,7 +1075,82 @@ def reconcile_inflight_jobs(
                 "requested_gpus": requested_gpus,
             }
             item.pop("missing_job_seen_at", None)
+            item.pop("pending_job_seen_at", None)
             restarted += 1
+
+        if not _job_missing(status) and not _job_failed(status):
+            pending_pods = _pending_pods_for_job(pods, str(item.get("job_name") or ""))
+            if pending_pods:
+                pending += 1
+                pending_grace = _int_or_default(config.get("pending_job_grace_seconds"), 900)
+                started_at = float(item.get("started_at", now))
+                first_pending_at = float(item.get("pending_job_seen_at", now))
+                if "pending_job_seen_at" not in item:
+                    item["pending_job_seen_at"] = now
+                    first_pending_at = now
+                if now - started_at < pending_grace and now - first_pending_at < pending_grace:
+                    remaining.append(item)
+                    continue
+
+                attempts = _int_or_default(item.get("attempts"), 1)
+                if attempts >= max_attempts:
+                    sqs_client.change_message_visibility(
+                        QueueUrl=queue_url,
+                        ReceiptHandle=item["receipt_handle"],
+                        VisibilityTimeout=0,
+                    )
+                    failed += 1
+                    continue
+
+                requested_gpus = _int_or_default(item.get("requested_gpus"), 8)
+                backend = choose_backend(
+                    config,
+                    nodes,
+                    _pods_except_job(pods, str(item.get("job_name") or "")),
+                    requested_gpus=requested_gpus,
+                    state={
+                        "inflight": [
+                            candidate for candidate in all_inflight if candidate is not item
+                        ]
+                    },
+                    excluded_backend_names=_retry_excluded_backends(
+                        config,
+                        str(item.get("backend") or ""),
+                    ),
+                )
+                if backend is None:
+                    remaining.append(item)
+                    released += 1
+                    continue
+
+                try:
+                    batch_client.delete_namespaced_job(
+                        name=item["job_name"],
+                        namespace=namespace,
+                        propagation_policy="Background",
+                    )
+                except Exception as error:
+                    if not _not_found(error):
+                        raise
+                next_attempt = attempts + 1
+                manifest = _render_for_backend(
+                    item["request"],
+                    config,
+                    backend,
+                    attempt=next_attempt,
+                )
+                batch_client.create_namespaced_job(namespace=namespace, body=manifest)
+                item = {
+                    **item,
+                    "job_name": manifest["metadata"]["name"],
+                    "backend": _backend_name(backend),
+                    "attempts": next_attempt,
+                    "last_renewed_at": now,
+                    "requested_gpus": requested_gpus,
+                }
+                item.pop("missing_job_seen_at", None)
+                item.pop("pending_job_seen_at", None)
+                restarted += 1
 
         remaining.append(item)
 
@@ -1039,6 +1162,7 @@ def reconcile_inflight_jobs(
         "released": released,
         "failed": failed,
         "missing": missing,
+        "pending": pending,
     }
 
 
@@ -1225,6 +1349,10 @@ def _env_config() -> dict[str, Any]:
         "missing_job_grace_seconds": os.environ.get(
             "SGLANG_VIDEO_MISSING_JOB_GRACE_SECONDS",
             "180",
+        ),
+        "pending_job_grace_seconds": os.environ.get(
+            "SGLANG_VIDEO_PENDING_JOB_GRACE_SECONDS",
+            "900",
         ),
         "b300_max_active_gpus": os.environ.get(
             "SGLANG_VIDEO_B300_MAX_ACTIVE_GPUS",

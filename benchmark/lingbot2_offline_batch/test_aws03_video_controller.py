@@ -385,6 +385,23 @@ def _backend_gpu_pod(backend_name: str, gpus: int = 8, phase: str = "Running") -
     }
 
 
+def _job_pending_pod(job_name: str, backend_name: str, gpus: int = 8) -> dict:
+    return {
+        "metadata": {
+            "name": f"{job_name}-pod",
+            "labels": {
+                "job-name": job_name,
+                "batch.kubernetes.io/job-name": job_name,
+                "sglang.seedleap.io/backend": backend_name,
+            },
+        },
+        "status": {"phase": "Pending"},
+        "spec": {
+            "containers": [{"resources": {"requests": {"nvidia.com/gpu": str(gpus)}}}]
+        },
+    }
+
+
 def _backend_config() -> dict:
     return {
         "namespace": "default",
@@ -1040,6 +1057,102 @@ def test_reconcile_keeps_inflight_job_when_status_read_temporarily_404s():
     assert sqs.deleted == []
     assert state["inflight"][0]["job_name"] == "sglang-video-pending"
     assert state["inflight"][0]["missing_job_seen_at"] == 1100.0
+
+
+def test_reconcile_marks_pending_job_before_recreating_on_fallback():
+    config = {**_backend_config(), "pending_job_grace_seconds": 180}
+    batch = FakeBatchV1()
+    batch.jobs["sglang-video-stuck"] = {"status": {"active": 1}}
+    sqs = FakeSQS(_request())
+    state = {
+        "inflight": [
+            {
+                "request": _request(),
+                "receipt_handle": "receipt-1",
+                "message_id": "message-1",
+                "job_name": "sglang-video-stuck",
+                "backend": "b300-capacity-block",
+                "attempts": 1,
+                "started_at": 1000.0,
+                "last_renewed_at": 1000.0,
+                "requested_gpus": 8,
+            }
+        ]
+    }
+
+    result = reconcile_inflight_jobs(
+        sqs_client=sqs,
+        queue_url="https://sqs.us-west-2.amazonaws.com/123/video",
+        core_client=FakeCoreV1(
+            [_job_pending_pod("sglang-video-stuck", "b300-capacity-block")],
+            [],
+        ),
+        batch_client=batch,
+        eks_client=FakeEks(),
+        config=config,
+        state=state,
+        now=1100.0,
+    )
+
+    assert result["pending"] == 1
+    assert result["restarted"] == 0
+    assert batch.deleted == []
+    assert batch.created == []
+    assert sqs.deleted == []
+    assert state["inflight"][0]["job_name"] == "sglang-video-stuck"
+    assert state["inflight"][0]["pending_job_seen_at"] == 1100.0
+
+
+def test_reconcile_recreates_unschedulable_b300_job_on_fallback_after_grace_period():
+    config = {**_backend_config(), "pending_job_grace_seconds": 180}
+    b300 = _node("b300-a", config["backends"][0]["node_selector"])
+    h100 = _node("h100-a", config["backends"][1]["node_selector"])
+    batch = FakeBatchV1()
+    batch.jobs["sglang-video-stuck"] = {"status": {"active": 1}}
+    sqs = FakeSQS(_request())
+    state = {
+        "inflight": [
+            {
+                "request": _request(),
+                "receipt_handle": "receipt-1",
+                "message_id": "message-1",
+                "job_name": "sglang-video-stuck",
+                "backend": "b300-capacity-block",
+                "attempts": 1,
+                "started_at": 1000.0,
+                "last_renewed_at": 1000.0,
+                "requested_gpus": 8,
+                "pending_job_seen_at": 1000.0,
+            }
+        ]
+    }
+
+    result = reconcile_inflight_jobs(
+        sqs_client=sqs,
+        queue_url="https://sqs.us-west-2.amazonaws.com/123/video",
+        core_client=FakeCoreV1(
+            [_job_pending_pod("sglang-video-stuck", "b300-capacity-block")],
+            [b300, h100],
+        ),
+        batch_client=batch,
+        eks_client=FakeEks(),
+        config=config,
+        state=state,
+        now=1300.0,
+    )
+
+    assert result["pending"] == 1
+    assert result["restarted"] == 1
+    assert result["failed"] == 0
+    assert sqs.deleted == []
+    assert batch.deleted[0]["name"] == "sglang-video-stuck"
+    assert len(batch.created) == 1
+    created = batch.created[0]["body"]
+    assert created["metadata"]["labels"]["sglang.seedleap.io/backend"] == "h100-spot"
+    assert state["inflight"][0]["backend"] == "h100-spot"
+    assert state["inflight"][0]["attempts"] == 2
+    assert state["inflight"][0]["job_name"].startswith("sglang-video-")
+    assert "pending_job_seen_at" not in state["inflight"][0]
 
 
 def test_reconcile_recreates_missing_inflight_job_after_grace_period():
