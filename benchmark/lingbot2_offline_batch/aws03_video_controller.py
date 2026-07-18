@@ -871,6 +871,19 @@ def _backend_scale_target(
     }
 
 
+def _scale_target_key(*, cluster_name: str, nodegroup_name: str) -> str:
+    return f"{cluster_name}/{nodegroup_name}"
+
+
+def _aws_error_code(error: Exception) -> str:
+    response = getattr(error, "response", None)
+    if isinstance(response, dict):
+        error_info = response.get("Error")
+        if isinstance(error_info, dict):
+            return str(error_info.get("Code") or "")
+    return ""
+
+
 def _scale_nodegroup(
     eks_client: Any,
     *,
@@ -896,13 +909,39 @@ def _scale_nodegroup(
         )
         if _int_or_default(scaling.get("desiredSize"), -1) == desired_nodes:
             return
-    except Exception:
-        pass
-    eks_client.update_nodegroup_config(
-        clusterName=cluster_name,
-        nodegroupName=nodegroup_name,
-        scalingConfig={"desiredSize": desired_nodes},
-    )
+    except Exception as error:
+        print(
+            json.dumps(
+                {
+                    "status": "nodegroup_describe_failed",
+                    "nodegroup": nodegroup_name,
+                    "error": str(error),
+                    "error_code": _aws_error_code(error),
+                },
+                sort_keys=True,
+            ),
+            flush=True,
+        )
+    try:
+        eks_client.update_nodegroup_config(
+            clusterName=cluster_name,
+            nodegroupName=nodegroup_name,
+            scalingConfig={"desiredSize": desired_nodes},
+        )
+    except Exception as error:
+        print(
+            json.dumps(
+                {
+                    "status": "nodegroup_scale_skipped",
+                    "nodegroup": nodegroup_name,
+                    "desired_nodes": desired_nodes,
+                    "error": str(error),
+                    "error_code": _aws_error_code(error),
+                },
+                sort_keys=True,
+            ),
+            flush=True,
+        )
 
 
 def _scale_fallback_nodegroups(
@@ -910,9 +949,11 @@ def _scale_fallback_nodegroups(
     config: dict[str, Any],
     state: dict[str, Any],
     pods: list[dict[str, Any]] | None = None,
+    now: float | None = None,
 ) -> None:
     if eks_client is None:
         return
+    now = time.time() if now is None else now
     backends = config.get("backends") if isinstance(config.get("backends"), list) else []
     targets: dict[tuple[str, str], dict[str, Any]] = {}
     for backend in backends:
@@ -932,6 +973,11 @@ def _scale_fallback_nodegroups(
         targets[key]["backend_names"].add(_backend_name(backend))
         targets[key]["max_nodes"] = max(targets[key]["max_nodes"], target["max_nodes"])
 
+    scale_down_state = state.setdefault("fallback_scale_down", {})
+    if not isinstance(scale_down_state, dict):
+        scale_down_state = {}
+        state["fallback_scale_down"] = scale_down_state
+    scale_down_grace = _int_or_default(config.get("fallback_scale_down_grace_seconds"), 900)
     for target in targets.values():
         inflight_gpus = sum(
             _int_or_default(item.get("requested_gpus"), target["node_gpus"])
@@ -943,6 +989,19 @@ def _scale_fallback_nodegroups(
             for backend_name in target["backend_names"]
         )
         desired_gpus = max(inflight_gpus, pod_gpus)
+        target_key = _scale_target_key(
+            cluster_name=target["cluster_name"],
+            nodegroup_name=target["nodegroup_name"],
+        )
+        if desired_gpus > 0:
+            scale_down_state.pop(target_key, None)
+        else:
+            first_empty_at = scale_down_state.get(target_key)
+            if first_empty_at is None:
+                scale_down_state[target_key] = now
+                continue
+            if now - float(first_empty_at) < scale_down_grace:
+                continue
         _scale_nodegroup(
             eks_client,
             cluster_name=target["cluster_name"],
@@ -1155,7 +1214,7 @@ def reconcile_inflight_jobs(
         remaining.append(item)
 
     state["inflight"] = remaining
-    _scale_fallback_nodegroups(eks_client, config, state, pods=pods)
+    _scale_fallback_nodegroups(eks_client, config, state, pods=pods, now=now)
     return {
         "completed": completed,
         "restarted": restarted,
@@ -1247,7 +1306,7 @@ def controller_tick(
                             "requested_gpus": requested_gpus,
                         }
                     )
-                _scale_fallback_nodegroups(eks_client, config, state, pods=pods)
+                _scale_fallback_nodegroups(eks_client, config, state, pods=pods, now=now)
                 adopted += 1
                 continue
 
@@ -1287,7 +1346,7 @@ def controller_tick(
                 "requested_gpus": requested_gpus,
             }
         )
-        _scale_fallback_nodegroups(eks_client, config, state, pods=pods)
+        _scale_fallback_nodegroups(eks_client, config, state, pods=pods, now=now)
         started += 1
 
     return {
@@ -1371,6 +1430,10 @@ def _env_config() -> dict[str, Any]:
         "defer_visibility_timeout": os.environ.get(
             "SGLANG_VIDEO_DEFER_VISIBILITY_TIMEOUT",
             "60",
+        ),
+        "fallback_scale_down_grace_seconds": os.environ.get(
+            "SGLANG_VIDEO_FALLBACK_SCALE_DOWN_GRACE_SECONDS",
+            "900",
         ),
         "pod_label_selector": os.environ.get(
             "SGLANG_VIDEO_POD_LABEL_SELECTOR",

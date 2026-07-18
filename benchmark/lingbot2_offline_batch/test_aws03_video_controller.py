@@ -358,6 +358,13 @@ class FakeEksWithDesired(FakeEks):
         return {"nodegroup": {"scalingConfig": {"desiredSize": self.desired_size}}}
 
 
+class FakeEksResourceInUse(FakeEksWithDesired):
+    def update_nodegroup_config(self, **kwargs):
+        error = Exception("Nodegroup cannot be updated as it is currently not in Active State")
+        error.response = {"Error": {"Code": "ResourceInUseException"}}
+        raise error
+
+
 def _node(name: str, selector: dict, gpus: int = 8, ready: bool = True) -> dict:
     conditions = [{"type": "Ready", "status": "True" if ready else "False"}]
     return {
@@ -778,6 +785,39 @@ def test_scale_fallback_nodegroups_skips_noop_desired_size_update():
     _scale_fallback_nodegroups(eks, config, {"inflight": []}, pods=[])
 
     assert eks.updates == []
+
+
+def test_scale_fallback_nodegroups_holds_positive_nodegroup_before_scale_down():
+    config = {**_backend_config(), "fallback_scale_down_grace_seconds": 900}
+    eks = FakeEksWithDesired(desired_size=1)
+    state = {"inflight": []}
+
+    _scale_fallback_nodegroups(eks, config, state, pods=[], now=1000.0)
+
+    assert eks.updates == []
+    assert state["fallback_scale_down"]["leap-world-aws03-usw2/sglang-h100-spot"] == 1000.0
+
+
+def test_scale_fallback_nodegroups_scales_down_after_grace_period():
+    config = {**_backend_config(), "fallback_scale_down_grace_seconds": 900}
+    eks = FakeEksWithDesired(desired_size=1)
+    state = {
+        "inflight": [],
+        "fallback_scale_down": {"leap-world-aws03-usw2/sglang-h100-spot": 1000.0},
+    }
+
+    _scale_fallback_nodegroups(eks, config, state, pods=[], now=2000.0)
+
+    assert eks.updates[-1]["nodegroupName"] == "sglang-h100-spot"
+    assert eks.updates[-1]["scalingConfig"]["desiredSize"] == 0
+
+
+def test_scale_fallback_nodegroups_ignores_resource_in_use_update_conflict():
+    config = _backend_config()
+    eks = FakeEksResourceInUse(desired_size=0)
+    state = {"inflight": [{"backend": "h100-spot", "requested_gpus": 8}]}
+
+    _scale_fallback_nodegroups(eks, config, state, pods=[])
 
 
 def test_controller_tick_adopts_existing_job_after_restart_and_scales_nodes():
