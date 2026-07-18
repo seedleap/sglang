@@ -251,10 +251,14 @@ def test_env_config_reads_placement_profiles_and_job_ttl(monkeypatch):
         json.dumps(placement_profiles),
     )
     monkeypatch.setenv("SGLANG_VIDEO_JOB_TTL_SECONDS_AFTER_FINISHED", "900")
+    monkeypatch.setenv("SGLANG_VIDEO_B300_MAX_ACTIVE_GPUS", "32")
+    monkeypatch.setenv("SGLANG_VIDEO_FALLBACK_MAX_ACTIVE_GPUS", "160")
 
     config = _env_config()
 
     assert config["max_active_gpus"] == "8"
+    assert config["b300_max_active_gpus"] == "32"
+    assert config["fallback_max_active_gpus"] == "160"
     assert config["gpu_per_pod"] == "8"
     assert config["job_parallelism"] == "1"
     assert config["placement_profiles"] == placement_profiles
@@ -361,6 +365,14 @@ def _gpu_pod(name: str, node_name: str, gpus: int = 8, phase: str = "Running") -
             "nodeName": node_name,
             "containers": [{"resources": {"requests": {"nvidia.com/gpu": str(gpus)}}}],
         },
+    }
+
+
+def _backend_gpu_pod(backend_name: str, gpus: int = 8, phase: str = "Running") -> dict:
+    return {
+        "metadata": {"labels": {"sglang.seedleap.io/backend": backend_name}},
+        "status": {"phase": phase},
+        "spec": {"containers": [{"resources": {"requests": {"nvidia.com/gpu": str(gpus)}}}]},
     }
 
 
@@ -481,6 +493,73 @@ def test_choose_backend_can_use_b200_as_fallback_when_b300_is_full():
     )
 
     assert selected["name"] == "b200-spot"
+
+
+def test_choose_backend_respects_b300_cap_before_fallback_pool_cap():
+    config = {
+        **_backend_config(),
+        "b300_max_active_gpus": 32,
+        "fallback_max_active_gpus": 160,
+    }
+    b300 = _node("b300-free", config["backends"][0]["node_selector"])
+    h100 = _node("h100-a", config["backends"][1]["node_selector"])
+    b300_pods_at_cap = [
+        _backend_gpu_pod("b300-capacity-block", 8),
+        _backend_gpu_pod("b300-capacity-block", 8),
+        _backend_gpu_pod("b300-capacity-block", 8),
+        _backend_gpu_pod("b300-capacity-block", 8),
+    ]
+
+    selected = choose_backend(
+        config,
+        [b300, h100],
+        b300_pods_at_cap,
+        requested_gpus=8,
+    )
+
+    assert selected["name"] == "h100-spot"
+
+
+def test_choose_backend_allows_fallback_pool_to_160_gpus():
+    config = {
+        **_backend_config(),
+        "fallback_max_active_gpus": 160,
+    }
+    state = {"inflight": [{"backend": "h100-spot", "requested_gpus": 152}]}
+
+    selected = choose_backend(config, [], [], requested_gpus=8, state=state)
+    blocked = choose_backend(
+        config,
+        [],
+        [],
+        requested_gpus=8,
+        state={"inflight": [{"backend": "h100-spot", "requested_gpus": 160}]},
+    )
+
+    assert selected["name"] == "h100-spot"
+    assert blocked is None
+
+
+def test_choose_backend_treats_p5e_and_p5en_as_fallback_gpu_backends():
+    for instance_type in ("p5e.48xlarge", "p5en.48xlarge"):
+        config = {
+            **_backend_config(),
+            "fallback_max_active_gpus": 160,
+            "backends": [
+                {
+                    "name": f"h200-{instance_type.split('.')[0]}-spot",
+                    "node_selector": {
+                        "eks.amazonaws.com/capacityType": "SPOT",
+                        "node.kubernetes.io/instance-type": instance_type,
+                    },
+                    "scale_nodegroup": True,
+                },
+            ],
+        }
+
+        selected = choose_backend(config, [], [], requested_gpus=8)
+
+        assert selected["node_selector"]["node.kubernetes.io/instance-type"] == instance_type
 
 
 def test_choose_backend_does_not_double_count_h100_pods_and_inflight_state():

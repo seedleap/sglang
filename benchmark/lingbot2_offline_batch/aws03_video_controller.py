@@ -11,8 +11,13 @@ from typing import Any
 
 
 TERMINAL_POD_PHASES = {"Succeeded", "Failed"}
-FALLBACK_GPU_BACKEND_NAMES = {"h100", "h100-spot", "b200", "b200-spot"}
-FALLBACK_GPU_INSTANCE_TYPES = {"p5.48xlarge", "p6-b200.48xlarge"}
+FALLBACK_GPU_BACKEND_NAMES = {"h100", "h100-spot", "h200", "h200-spot", "b200", "b200-spot"}
+FALLBACK_GPU_INSTANCE_TYPES = {
+    "p5.48xlarge",
+    "p5e.48xlarge",
+    "p5en.48xlarge",
+    "p6-b200.48xlarge",
+}
 B300_BACKEND_NAMES = {"b300", "b300-capacity-block"}
 DEFAULT_CONTAINER_COMMAND = [
     "python3",
@@ -147,6 +152,7 @@ def _is_h100_backend(backend: dict[str, Any]) -> bool:
     return (
         name in FALLBACK_GPU_BACKEND_NAMES
         or "h100" in name
+        or "h200" in name
         or "b200" in name
         or selector.get("node.kubernetes.io/instance-type") in FALLBACK_GPU_INSTANCE_TYPES
     )
@@ -194,6 +200,15 @@ def _fallback_backend_names(config: dict[str, Any]) -> set[str]:
     }
 
 
+def _b300_backend_names(config: dict[str, Any]) -> set[str]:
+    backends = config.get("backends") if isinstance(config.get("backends"), list) else []
+    return {
+        _backend_name(backend)
+        for backend in backends
+        if isinstance(backend, dict) and _is_b300_backend(backend) and _backend_name(backend)
+    }
+
+
 def _fallback_gpu_requests(
     pods: list[dict[str, Any]],
     backend_names: set[str],
@@ -229,19 +244,33 @@ def choose_backend(
     requested_gpus: int,
     state: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
-    """Pick B300 when it has free GPUs; otherwise pick fallback Spot GPUs within cap."""
+    """Pick B300 within its cap; otherwise pick fallback Spot GPUs within their shared cap."""
     backends = config.get("backends") if isinstance(config.get("backends"), list) else []
     state = state or {"inflight": []}
+    gpu_per_pod = _int_or_default(config.get("gpu_per_pod"), requested_gpus)
+    b300_max_gpus = _int_or_default(
+        config.get("b300_max_active_gpus"),
+        _int_or_default(config.get("max_active_gpus"), 32),
+    )
+    b300_names = _b300_backend_names(config)
+    b300_active = max(
+        _fallback_gpu_requests(pods, b300_names),
+        _fallback_inflight_gpus(state, b300_names, gpu_per_pod),
+    )
     for backend in backends:
         if not isinstance(backend, dict) or not _is_b300_backend(backend):
+            continue
+        if b300_active + requested_gpus > b300_max_gpus:
             continue
         selector = backend.get("node_selector") if isinstance(backend.get("node_selector"), dict) else {}
         if backend_free_gpus(nodes, pods, selector) >= requested_gpus:
             return backend
 
-    h100_max_gpus = _int_or_default(config.get("h100_max_active_gpus"), 32)
+    fallback_max_gpus = _int_or_default(
+        config.get("fallback_max_active_gpus"),
+        _int_or_default(config.get("h100_max_active_gpus"), 32),
+    )
     allow_h100_demand = str(config.get("allow_h100_demand") or "").lower() in {"1", "true", "yes"}
-    gpu_per_pod = _int_or_default(config.get("gpu_per_pod"), requested_gpus)
     fallback_names = _fallback_backend_names(config)
     fallback_active = max(
         _fallback_gpu_requests(pods, fallback_names),
@@ -252,7 +281,7 @@ def choose_backend(
             continue
         if _is_demand_backend(backend) and not allow_h100_demand:
             continue
-        if fallback_active + requested_gpus <= h100_max_gpus:
+        if fallback_active + requested_gpus <= fallback_max_gpus:
             return backend
     return None
 
@@ -1098,6 +1127,14 @@ def _env_config() -> dict[str, Any]:
             "28800",
         ),
         "max_job_attempts": os.environ.get("SGLANG_VIDEO_MAX_JOB_ATTEMPTS", "5"),
+        "b300_max_active_gpus": os.environ.get(
+            "SGLANG_VIDEO_B300_MAX_ACTIVE_GPUS",
+            os.environ.get("SGLANG_VIDEO_MAX_ACTIVE_GPUS", "32"),
+        ),
+        "fallback_max_active_gpus": os.environ.get(
+            "SGLANG_VIDEO_FALLBACK_MAX_ACTIVE_GPUS",
+            os.environ.get("SGLANG_VIDEO_H100_MAX_ACTIVE_GPUS", "32"),
+        ),
         "h100_max_active_gpus": os.environ.get("SGLANG_VIDEO_H100_MAX_ACTIVE_GPUS", "32"),
         "h100_node_gpus": os.environ.get("SGLANG_VIDEO_H100_NODE_GPUS", "8"),
         "h100_max_nodes": os.environ.get("SGLANG_VIDEO_H100_MAX_NODES", "4"),

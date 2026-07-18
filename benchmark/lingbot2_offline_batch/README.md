@@ -63,12 +63,14 @@ pod failure, or controller restart does not lose work.
 
 Scheduling policy:
 
-- Prefer a B300 capacity-block backend when a matching Ready node has at least
-  one full 8-GPU slot free.
-- If B300 exists but is full, fall back to the configured H100/B200 Spot backends.
-- The fallback GPU backends are capped together by
-  `SGLANG_VIDEO_H100_MAX_ACTIVE_GPUS`; production default should be `32`, which
-  means at most four 8-GPU Jobs.
+- Prefer a B300 capacity-block backend when it has one full 8-GPU slot free and
+  the B300 pool is still below `SGLANG_VIDEO_B300_MAX_ACTIVE_GPUS`.
+- If B300 exists but is full or already at its pool cap, fall back to the
+  configured B200/H100/H200 Spot backends.
+- B300 and fallback capacity are capped separately. Production defaults are
+  `SGLANG_VIDEO_B300_MAX_ACTIVE_GPUS=32` and
+  `SGLANG_VIDEO_FALLBACK_MAX_ACTIVE_GPUS=160`, which means at most four B300
+  8-GPU Jobs plus twenty fallback 8-GPU Jobs.
 - If neither backend has capacity, the controller changes message visibility and
   leaves the message in SQS for a later attempt.
 
@@ -91,9 +93,11 @@ SGLANG_VIDEO_MESSAGE_VISIBILITY_SECONDS=900
 SGLANG_VIDEO_MESSAGE_RENEW_INTERVAL_SECONDS=60
 SGLANG_VIDEO_MESSAGE_MAX_LEASE_SECONDS=28800
 SGLANG_VIDEO_MAX_JOB_ATTEMPTS=5
-SGLANG_VIDEO_H100_MAX_ACTIVE_GPUS=32
+SGLANG_VIDEO_B300_MAX_ACTIVE_GPUS=32
+SGLANG_VIDEO_FALLBACK_MAX_ACTIVE_GPUS=160
+SGLANG_VIDEO_H100_MAX_ACTIVE_GPUS=160
 SGLANG_VIDEO_H100_NODE_GPUS=8
-SGLANG_VIDEO_H100_MAX_NODES=4
+SGLANG_VIDEO_H100_MAX_NODES=20
 SGLANG_VIDEO_H100_EKS_CLUSTER_NAME=leap-world-aws03-usw2
 SGLANG_VIDEO_ALLOW_H100_DEMAND=false
 ```
@@ -113,7 +117,7 @@ Use `SGLANG_VIDEO_BACKENDS_JSON` to make backend choice explicit. Example:
   {
     "name": "b200-spot",
     "scale_nodegroup": true,
-    "max_nodes": 2,
+    "max_nodes": 20,
     "node_selector": {
       "eks.amazonaws.com/capacityType": "SPOT",
       "eks.amazonaws.com/nodegroup": "minwm-spot-p6-b200-0703",
@@ -124,11 +128,33 @@ Use `SGLANG_VIDEO_BACKENDS_JSON` to make backend choice explicit. Example:
   {
     "name": "h100-spot",
     "scale_nodegroup": true,
-    "max_nodes": 4,
+    "max_nodes": 20,
     "node_selector": {
       "eks.amazonaws.com/capacityType": "SPOT",
-      "eks.amazonaws.com/nodegroup": "sglang-spot-p5-h100",
+      "eks.amazonaws.com/nodegroup": "minwm-spot-p5-h100-sglang-0718",
       "node.kubernetes.io/instance-type": "p5.48xlarge",
+      "seedleap.ai/workload": "wan22-ti2v"
+    }
+  },
+  {
+    "name": "h200-p5e-spot",
+    "scale_nodegroup": true,
+    "max_nodes": 20,
+    "node_selector": {
+      "eks.amazonaws.com/capacityType": "SPOT",
+      "eks.amazonaws.com/nodegroup": "minwm-spot-p5e-h200-sglang-0718",
+      "node.kubernetes.io/instance-type": "p5e.48xlarge",
+      "seedleap.ai/workload": "wan22-ti2v"
+    }
+  },
+  {
+    "name": "h200-p5en-spot",
+    "scale_nodegroup": true,
+    "max_nodes": 20,
+    "node_selector": {
+      "eks.amazonaws.com/capacityType": "SPOT",
+      "eks.amazonaws.com/nodegroup": "minwm-spot-p5en-h200-sglang-0718",
+      "node.kubernetes.io/instance-type": "p5en.48xlarge",
       "seedleap.ai/workload": "wan22-ti2v"
     }
   }
