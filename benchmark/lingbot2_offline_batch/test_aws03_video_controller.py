@@ -571,6 +571,46 @@ def test_choose_backend_treats_p5e_and_p5en_as_fallback_gpu_backends():
         assert selected["node_selector"]["node.kubernetes.io/instance-type"] == instance_type
 
 
+def test_choose_backend_spreads_fallback_messages_to_least_busy_backend():
+    config = {
+        **_backend_config(),
+        "fallback_max_active_gpus": 160,
+        "backends": [
+            {
+                "name": "b200-spot",
+                "node_selector": {
+                    "eks.amazonaws.com/capacityType": "SPOT",
+                    "node.kubernetes.io/instance-type": "p6-b200.48xlarge",
+                },
+            },
+            {
+                "name": "h100-spot",
+                "node_selector": {
+                    "eks.amazonaws.com/capacityType": "SPOT",
+                    "node.kubernetes.io/instance-type": "p5.48xlarge",
+                },
+            },
+            {
+                "name": "h200-p5e-spot",
+                "node_selector": {
+                    "eks.amazonaws.com/capacityType": "SPOT",
+                    "node.kubernetes.io/instance-type": "p5e.48xlarge",
+                },
+            },
+        ],
+    }
+    state = {
+        "inflight": [
+            {"backend": "b200-spot", "requested_gpus": 16},
+            {"backend": "h100-spot", "requested_gpus": 8},
+        ]
+    }
+
+    selected = choose_backend(config, [], [], requested_gpus=8, state=state)
+
+    assert selected["name"] == "h200-p5e-spot"
+
+
 def test_choose_backend_does_not_double_count_h100_pods_and_inflight_state():
     config = _backend_config()
     h100_selector = config["backends"][1]["node_selector"]

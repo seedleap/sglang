@@ -236,6 +236,18 @@ def _fallback_inflight_gpus(
     )
 
 
+def _backend_active_gpus(
+    pods: list[dict[str, Any]],
+    state: dict[str, Any],
+    backend_name: str,
+    gpu_per_pod: int,
+) -> int:
+    return max(
+        _backend_gpu_requests(pods, backend_name),
+        _inflight_backend_gpus(state, backend_name, gpu_per_pod),
+    )
+
+
 def choose_backend(
     config: dict[str, Any],
     nodes: list[dict[str, Any]],
@@ -276,14 +288,28 @@ def choose_backend(
         _fallback_gpu_requests(pods, fallback_names),
         _fallback_inflight_gpus(state, fallback_names, gpu_per_pod),
     )
-    for backend in backends:
+    if fallback_active + requested_gpus > fallback_max_gpus:
+        return None
+
+    candidates: list[tuple[int, int, dict[str, Any]]] = []
+    for index, backend in enumerate(backends):
         if not isinstance(backend, dict) or not _is_h100_backend(backend):
             continue
         if _is_demand_backend(backend) and not allow_h100_demand:
             continue
-        if fallback_active + requested_gpus <= fallback_max_gpus:
-            return backend
-    return None
+        backend_name = _backend_name(backend)
+        if not backend_name:
+            continue
+        candidates.append(
+            (
+                _backend_active_gpus(pods, state, backend_name, gpu_per_pod),
+                index,
+                backend,
+            )
+        )
+    if not candidates:
+        return None
+    return min(candidates, key=lambda item: (item[0], item[1]))[2]
 
 
 def can_start_job(

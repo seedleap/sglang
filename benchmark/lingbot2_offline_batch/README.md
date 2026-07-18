@@ -71,6 +71,8 @@ Scheduling policy:
   `SGLANG_VIDEO_B300_MAX_ACTIVE_GPUS=32` and
   `SGLANG_VIDEO_FALLBACK_MAX_ACTIVE_GPUS=160`, which means at most four B300
   8-GPU Jobs plus twenty fallback 8-GPU Jobs.
+- Fallback Jobs are assigned to the least-busy configured fallback backend, so a
+  queue burst can fan out across B200, H100, and H200 nodegroups.
 - If neither backend has capacity, the controller changes message visibility and
   leaves the message in SQS for a later attempt.
 
