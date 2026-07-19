@@ -7,7 +7,9 @@ import json
 import os
 import re
 import time
+import urllib.request
 from typing import Any
+from urllib.parse import urlparse
 
 
 TERMINAL_POD_PHASES = {"Succeeded", "Failed"}
@@ -655,6 +657,215 @@ def _json_env(name: str, default: Any) -> Any:
     return json.loads(value)
 
 
+def _parse_s3_uri(uri: str) -> tuple[str, str]:
+    parsed = urlparse(uri)
+    if parsed.scheme != "s3" or not parsed.netloc or not parsed.path:
+        raise ValueError(f"invalid S3 URI: {uri}")
+    return parsed.netloc, parsed.path.lstrip("/")
+
+
+def _read_json_s3_uri(uri: str, s3_client: Any) -> dict[str, Any]:
+    bucket, key = _parse_s3_uri(uri)
+    response = s3_client.get_object(Bucket=bucket, Key=key)
+    body = response["Body"].read()
+    if isinstance(body, bytes):
+        return json.loads(body.decode("utf-8"))
+    return json.loads(body)
+
+
+def _item_id_from_video_result(result: dict[str, Any]) -> str:
+    video_uri = str(result.get("video_uri") or "")
+    parsed = urlparse(video_uri)
+    parts = [part for part in parsed.path.split("/") if part]
+    if "videos" in parts:
+        index = parts.index("videos")
+        if index + 1 < len(parts):
+            return parts[index + 1]
+    case_id = str(result.get("case_id") or "")
+    marker = "-action-"
+    if marker in case_id:
+        return case_id.split(marker, 1)[0]
+    return case_id
+
+
+def _video_status_from_counts(total: int, succeeded: int, failed: int, running: int) -> str:
+    if total and running:
+        return "running"
+    if failed and succeeded:
+        return "completed_with_failures"
+    if failed:
+        return "failed"
+    if total and succeeded == total:
+        return "succeeded"
+    return "running"
+
+
+def _progress_payload_from_report(report: dict[str, Any]) -> dict[str, Any]:
+    payload = report.get("callback_payload")
+    if isinstance(payload, dict):
+        return payload
+
+    summary = report.get("summary") if isinstance(report.get("summary"), dict) else {}
+    counters = report.get("counters") if isinstance(report.get("counters"), dict) else {}
+    results = report.get("results") if isinstance(report.get("results"), list) else []
+    total = _int_or_default(summary.get("video_expected_count"), _int_or_default(counters.get("total"), 0))
+    succeeded = _int_or_default(
+        summary.get("video_succeeded_count"),
+        _int_or_default(counters.get("succeeded"), 0),
+    )
+    failed = _int_or_default(
+        summary.get("video_failed_count"),
+        _int_or_default(counters.get("failed"), 0),
+    )
+    running = _int_or_default(
+        summary.get("video_running_count"),
+        max(0, total - succeeded - failed),
+    )
+    video_status = str(summary.get("video_status") or "").strip() or _video_status_from_counts(
+        total,
+        succeeded,
+        failed,
+        running,
+    )
+
+    items_by_id: dict[str, dict[str, Any]] = {}
+    video_fields = (
+        "case_id",
+        "video_uri",
+        "movement_key",
+        "ending_movement_key",
+        "movement_pair",
+        "camera_key",
+        "traj_id",
+        "traj_type",
+        "action_source",
+        "action_index",
+        "action_seed",
+        "action_pattern",
+        "status",
+        "error",
+    )
+    for result in results:
+        if not isinstance(result, dict):
+            continue
+        item_id = _item_id_from_video_result(result)
+        if not item_id:
+            continue
+        status = str(result.get("status") or "running")
+        video = {field: result.get(field) for field in video_fields if field in result}
+        video["status"] = status
+        video["error"] = result.get("error") or ""
+        item = items_by_id.setdefault(
+            item_id,
+            {
+                "item_id": item_id,
+                "status": status,
+                "stage": "sglang_video_generation",
+                "output_uri": str(result.get("video_uri") or ""),
+                "error": "",
+                "metadata": {"video_status": status, "videos": []},
+            },
+        )
+        if status != "succeeded" and item["status"] == "succeeded":
+            item["status"] = status
+        if not item.get("output_uri") and result.get("video_uri"):
+            item["output_uri"] = str(result["video_uri"])
+        item["metadata"]["videos"].append(video)
+
+    for item in items_by_id.values():
+        videos = item["metadata"]["videos"]
+        item_total = len(videos)
+        item_succeeded = sum(video.get("status") == "succeeded" for video in videos)
+        item_failed = sum(video.get("status") in {"failed", "rejected"} for video in videos)
+        item_running = max(0, item_total - item_succeeded - item_failed)
+        item_video_status = _video_status_from_counts(
+            item_total,
+            item_succeeded,
+            item_failed,
+            item_running,
+        )
+        item["metadata"]["video_status"] = item_video_status
+        if item_video_status == "completed_with_failures":
+            item["status"] = "completed"
+        else:
+            item["status"] = item_video_status
+
+    if video_status == "succeeded":
+        status = "succeeded"
+    elif video_status in {"completed_with_failures", "failed"}:
+        status = "completed" if video_status == "completed_with_failures" else "failed"
+    else:
+        status = "running"
+    return {
+        "status": status,
+        "stage": "sglang_video_generation",
+        "summary": summary,
+        "counters": counters,
+        "items": list(items_by_id.values()),
+    }
+
+
+def _callback_token() -> str:
+    return (
+        os.environ.get("SGLANG_VIDEO_CALLBACK_TOKEN")
+        or os.environ.get("LWDP_GENERATION_API_TOKEN")
+        or ""
+    ).strip()
+
+
+def _post_final_progress_callback(
+    request: dict[str, Any],
+    payload: dict[str, Any],
+    *,
+    callback_urlopen: Any | None = None,
+) -> None:
+    callback = request.get("callback") if isinstance(request.get("callback"), dict) else {}
+    url = callback.get("url")
+    if not url:
+        return
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    token = _callback_token()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+        headers["X-LWDP-Token"] = token
+    http_request = urllib.request.Request(
+        str(url),
+        data=body,
+        headers=headers,
+        method="PUT",
+    )
+    opener = callback_urlopen or urllib.request.urlopen
+    with opener(http_request, timeout=60) as response:
+        if response.status >= 300:
+            raise RuntimeError(f"callback failed with HTTP {response.status}")
+
+
+def repair_final_progress_from_report(
+    request: dict[str, Any],
+    *,
+    s3_client: Any | None = None,
+    callback_urlopen: Any | None = None,
+) -> bool:
+    output = request.get("output") if isinstance(request.get("output"), dict) else {}
+    report_s3_uri = str(output.get("report_s3_uri") or "")
+    if not report_s3_uri:
+        return True
+    if s3_client is None:
+        import boto3
+
+        region = os.environ.get("SGLANG_VIDEO_S3_REGION") or os.environ.get("AWS_REGION")
+        s3_client = boto3.client("s3", region_name=region)
+    report = _read_json_s3_uri(report_s3_uri, s3_client)
+    payload = _progress_payload_from_report(report)
+    _post_final_progress_callback(
+        request,
+        payload,
+        callback_urlopen=callback_urlopen,
+    )
+    return True
+
+
 def process_one_message(
     *,
     sqs_client: Any,
@@ -1022,18 +1233,33 @@ def reconcile_inflight_jobs(
     config: dict[str, Any],
     state: dict[str, Any],
     now: float,
+    s3_client: Any | None = None,
+    callback_urlopen: Any | None = None,
 ) -> dict[str, int]:
     namespace = config.get("namespace", "default")
     max_attempts = _int_or_default(config.get("max_job_attempts"), 5)
     nodes = _list_nodes(core_client)
     pods = _list_capacity_pods(core_client, config)
     completed = restarted = released = failed = missing = pending = 0
+    callback_repaired = callback_pending = 0
     remaining = []
     all_inflight = list(state.get("inflight", []))
 
     for item in all_inflight:
         status = _read_job_status(batch_client, namespace, item["job_name"])
         if _job_succeeded(status):
+            try:
+                if repair_final_progress_from_report(
+                    item["request"],
+                    s3_client=s3_client,
+                    callback_urlopen=callback_urlopen,
+                ):
+                    callback_repaired += 1
+            except Exception as error:
+                item["callback_error"] = f"{type(error).__name__}: {error}"
+                remaining.append(item)
+                callback_pending += 1
+                continue
             sqs_client.delete_message(
                 QueueUrl=queue_url,
                 ReceiptHandle=item["receipt_handle"],
@@ -1222,6 +1448,8 @@ def reconcile_inflight_jobs(
         "failed": failed,
         "missing": missing,
         "pending": pending,
+        "callback_repaired": callback_repaired,
+        "callback_pending": callback_pending,
     }
 
 
@@ -1235,6 +1463,8 @@ def controller_tick(
     config: dict[str, Any],
     state: dict[str, Any],
     now: float | None = None,
+    s3_client: Any | None = None,
+    callback_urlopen: Any | None = None,
 ) -> dict[str, Any]:
     now = time.time() if now is None else now
     state.setdefault("inflight", [])
@@ -1254,6 +1484,8 @@ def controller_tick(
         config=config,
         state=state,
         now=now,
+        s3_client=s3_client,
+        callback_urlopen=callback_urlopen,
     )
 
     gpu_per_pod = _int_or_default(config.get("gpu_per_pod"), 8)
@@ -1272,6 +1504,7 @@ def controller_tick(
     nodes = _list_nodes(core_client)
     pods = _list_capacity_pods(core_client, config)
     started = deferred = adopted = completed_existing = 0
+    callback_repaired_existing = callback_pending_existing = 0
     for message in messages:
         request = _decode_request(message)
         namespace = config.get("namespace", "default")
@@ -1279,6 +1512,24 @@ def controller_tick(
         if existing_job is not None:
             status = _job_status(existing_job)
             if _job_succeeded(status):
+                try:
+                    if repair_final_progress_from_report(
+                        request,
+                        s3_client=s3_client,
+                        callback_urlopen=callback_urlopen,
+                    ):
+                        callback_repaired_existing += 1
+                except Exception:
+                    sqs_client.change_message_visibility(
+                        QueueUrl=queue_url,
+                        ReceiptHandle=message["ReceiptHandle"],
+                        VisibilityTimeout=_int_or_default(
+                            config.get("defer_visibility_timeout"),
+                            60,
+                        ),
+                    )
+                    callback_pending_existing += 1
+                    continue
                 sqs_client.delete_message(
                     QueueUrl=queue_url,
                     ReceiptHandle=message["ReceiptHandle"],
@@ -1357,6 +1608,8 @@ def controller_tick(
         "deferred": deferred,
         "adopted": adopted,
         "completed_existing": completed_existing,
+        "callback_repaired_existing": callback_repaired_existing,
+        "callback_pending_existing": callback_pending_existing,
         "inflight": len(state.get("inflight", [])),
     }
 
@@ -1470,6 +1723,8 @@ def main() -> None:
     region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
     sqs_client = boto3.client("sqs", region_name=region)
     eks_client = boto3.client("eks", region_name=region)
+    s3_region = os.environ.get("SGLANG_VIDEO_S3_REGION") or os.environ.get("AWS_REGION")
+    s3_client = boto3.client("s3", region_name=s3_region)
     kube_config.load_incluster_config()
     core_client = client.CoreV1Api()
     batch_client = client.BatchV1Api()
@@ -1484,6 +1739,7 @@ def main() -> None:
             eks_client=eks_client,
             config=config,
             state=state,
+            s3_client=s3_client,
         )
         print(json.dumps(result, sort_keys=True), flush=True)
         if result["status"] == "idle":

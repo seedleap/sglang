@@ -723,6 +723,46 @@ def test_post_callback_uses_generation_progress_put_with_bearer_token(monkeypatc
     assert sent["timeout"] == 60
 
 
+def test_post_callback_retries_transient_http_failures(monkeypatch):
+    attempts = []
+
+    class FakeResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    def fake_urlopen(request, timeout):
+        attempts.append((request.full_url, timeout))
+        if len(attempts) < 3:
+            raise urllib.error.HTTPError(
+                request.full_url,
+                502,
+                "Bad Gateway",
+                hdrs=None,
+                fp=None,
+            )
+        return FakeResponse()
+
+    monkeypatch.setenv("SGLANG_VIDEO_CALLBACK_RETRY_ATTEMPTS", "3")
+    monkeypatch.setenv("SGLANG_VIDEO_CALLBACK_RETRY_BASE_SECONDS", "0")
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    post_callback(
+        {
+            "callback": {
+                "url": "https://pipeline.example.com/api/v1/generation/jobs/gen/progress"
+            }
+        },
+        {"status": "succeeded"},
+    )
+
+    assert len(attempts) == 3
+
+
 def test_main_accepts_completed_batch_with_failed_videos_and_keeps_failure_workdir(
     tmp_path,
     monkeypatch,

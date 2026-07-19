@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import threading
 import time
+import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
@@ -756,6 +757,15 @@ def upload_report(report: dict[str, Any], request: dict[str, Any], s3_client: An
     )
 
 
+def _callback_retry_attempts() -> int:
+    raw_value = os.environ.get("SGLANG_VIDEO_CALLBACK_RETRY_ATTEMPTS", "5")
+    try:
+        attempts = int(raw_value)
+    except ValueError:
+        attempts = 5
+    return max(1, attempts)
+
+
 def post_callback(request: dict[str, Any], payload: dict[str, Any]) -> None:
     callback = request.get("callback") if isinstance(request.get("callback"), dict) else {}
     url = callback.get("url")
@@ -772,9 +782,25 @@ def post_callback(request: dict[str, Any], payload: dict[str, Any]) -> None:
         headers=headers,
         method="PUT",
     )
-    with urllib.request.urlopen(http_request, timeout=60) as response:
-        if response.status >= 300:
-            raise RuntimeError(f"callback failed with HTTP {response.status}")
+    attempts = _callback_retry_attempts()
+    base_sleep = _float_env("SGLANG_VIDEO_CALLBACK_RETRY_BASE_SECONDS", 1.0)
+    for attempt in range(1, attempts + 1):
+        try:
+            with urllib.request.urlopen(http_request, timeout=60) as response:
+                if response.status >= 300:
+                    raise RuntimeError(f"callback failed with HTTP {response.status}")
+                return
+        except (urllib.error.URLError, TimeoutError, RuntimeError) as error:
+            if attempt >= attempts:
+                raise
+            sleep_seconds = base_sleep * min(2 ** (attempt - 1), 8)
+            print(
+                "generation progress callback retry "
+                f"attempt={attempt} max_attempts={attempts} error={type(error).__name__}: {error}",
+                flush=True,
+            )
+            if sleep_seconds > 0:
+                time.sleep(sleep_seconds)
 
 
 def _load_request() -> dict[str, Any]:
@@ -853,6 +879,7 @@ def main() -> None:
             "counters": callback_payload["counters"],
             "attempts": batch_result.attempts,
             "results": upload_results,
+            "callback_payload": callback_payload,
         }
         report_path = work_dir / "results" / "sglang-video-report.json"
         report_path.parent.mkdir(parents=True, exist_ok=True)

@@ -1,4 +1,5 @@
 import json
+import io
 
 from aws03_video_controller import (
     _env_config,
@@ -363,6 +364,17 @@ class FakeEksResourceInUse(FakeEksWithDesired):
         error = Exception("Nodegroup cannot be updated as it is currently not in Active State")
         error.response = {"Error": {"Code": "ResourceInUseException"}}
         raise error
+
+
+class FakeS3:
+    def __init__(self, objects: dict[tuple[str, str], dict]):
+        self.objects = objects
+        self.reads = []
+
+    def get_object(self, *, Bucket, Key):
+        self.reads.append({"Bucket": Bucket, "Key": Key})
+        payload = self.objects[(Bucket, Key)]
+        return {"Body": io.BytesIO(json.dumps(payload).encode("utf-8"))}
 
 
 def _node(name: str, selector: dict, gpus: int = 8, ready: bool = True) -> dict:
@@ -1057,6 +1069,160 @@ def test_reconcile_deletes_message_only_after_job_succeeds():
     assert result["completed"] == 1
     assert sqs.deleted[0]["ReceiptHandle"] == "receipt-1"
     assert state["inflight"] == []
+
+
+def test_reconcile_repairs_final_progress_from_s3_report_before_deleting_message():
+    config = _backend_config()
+    batch = FakeBatchV1()
+    batch.jobs["sglang-video-done"] = {"status": {"succeeded": 1}}
+    request = _request()
+    request["output"]["report_s3_uri"] = "s3://bucket/t2i/reports/sglang_video_report.json"
+    report = {
+        "summary": {
+            "video_status": "succeeded",
+            "video_expected_count": 1,
+            "video_succeeded_count": 1,
+            "video_failed_count": 0,
+            "video_running_count": 0,
+            "video_output_prefix": "s3://bucket/t2i/videos",
+        },
+        "counters": {"total": 1, "succeeded": 1, "failed": 0, "running": 0},
+        "results": [
+            {
+                "case_id": "img001-action-00-traj001",
+                "status": "succeeded",
+                "video_uri": "s3://bucket/t2i/videos/img001/00_traj001.mp4",
+                "traj_id": "traj001",
+                "movement_key": "w",
+                "ending_movement_key": "a",
+                "movement_pair": "w+a",
+                "camera_key": "",
+                "action_seed": 20260715,
+                "action_pattern": "api:combo:w-a",
+            }
+        ],
+    }
+    s3 = FakeS3({("bucket", "t2i/reports/sglang_video_report.json"): report})
+    sent = {}
+
+    class FakeResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    def fake_urlopen(http_request, timeout):
+        sent["url"] = http_request.full_url
+        sent["body"] = json.loads(http_request.data.decode("utf-8"))
+        sent["timeout"] = timeout
+        return FakeResponse()
+
+    sqs = FakeSQS(request)
+    state = {
+        "inflight": [
+            {
+                "request": request,
+                "receipt_handle": "receipt-1",
+                "message_id": "message-1",
+                "job_name": "sglang-video-done",
+                "backend": "b300-capacity-block",
+                "attempts": 1,
+                "started_at": 1000.0,
+                "last_renewed_at": 1000.0,
+            }
+        ]
+    }
+
+    result = reconcile_inflight_jobs(
+        sqs_client=sqs,
+        queue_url="https://sqs.us-west-2.amazonaws.com/123/video",
+        core_client=FakeCoreV1([], []),
+        batch_client=batch,
+        eks_client=FakeEks(),
+        config=config,
+        state=state,
+        now=1100.0,
+        s3_client=s3,
+        callback_urlopen=fake_urlopen,
+    )
+
+    assert result["completed"] == 1
+    assert result["callback_repaired"] == 1
+    assert sqs.deleted[0]["ReceiptHandle"] == "receipt-1"
+    assert s3.reads == [{"Bucket": "bucket", "Key": "t2i/reports/sglang_video_report.json"}]
+    assert sent["url"].endswith("/api/v1/generation/jobs/gen_t2i_001/progress")
+    assert sent["body"]["status"] == "succeeded"
+    assert sent["body"]["summary"]["video_succeeded_count"] == 1
+    assert sent["body"]["items"][0]["item_id"] == "img001"
+    assert sent["body"]["items"][0]["metadata"]["videos"][0]["traj_id"] == "traj001"
+    assert state["inflight"] == []
+
+
+def test_reconcile_keeps_sqs_message_when_final_progress_repair_fails():
+    config = _backend_config()
+    batch = FakeBatchV1()
+    batch.jobs["sglang-video-done"] = {"status": {"succeeded": 1}}
+    request = _request()
+    request["output"]["report_s3_uri"] = "s3://bucket/t2i/reports/sglang_video_report.json"
+    report = {
+        "summary": {
+            "video_status": "succeeded",
+            "video_expected_count": 1,
+            "video_succeeded_count": 1,
+            "video_failed_count": 0,
+            "video_running_count": 0,
+        },
+        "counters": {"total": 1, "succeeded": 1, "failed": 0, "running": 0},
+        "results": [
+            {
+                "case_id": "img001-action-00-traj001",
+                "status": "succeeded",
+                "video_uri": "s3://bucket/t2i/videos/img001/00_traj001.mp4",
+            }
+        ],
+    }
+    s3 = FakeS3({("bucket", "t2i/reports/sglang_video_report.json"): report})
+
+    def failing_urlopen(_http_request, timeout):
+        raise OSError("callback unavailable")
+
+    sqs = FakeSQS(request)
+    state = {
+        "inflight": [
+            {
+                "request": request,
+                "receipt_handle": "receipt-1",
+                "message_id": "message-1",
+                "job_name": "sglang-video-done",
+                "backend": "b300-capacity-block",
+                "attempts": 1,
+                "started_at": 1000.0,
+                "last_renewed_at": 1000.0,
+            }
+        ]
+    }
+
+    result = reconcile_inflight_jobs(
+        sqs_client=sqs,
+        queue_url="https://sqs.us-west-2.amazonaws.com/123/video",
+        core_client=FakeCoreV1([], []),
+        batch_client=batch,
+        eks_client=FakeEks(),
+        config=config,
+        state=state,
+        now=1100.0,
+        s3_client=s3,
+        callback_urlopen=failing_urlopen,
+    )
+
+    assert result["completed"] == 0
+    assert result["callback_pending"] == 1
+    assert sqs.deleted == []
+    assert state["inflight"][0]["job_name"] == "sglang-video-done"
+    assert "callback unavailable" in state["inflight"][0]["callback_error"]
 
 
 def test_reconcile_keeps_inflight_job_when_status_read_temporarily_404s():

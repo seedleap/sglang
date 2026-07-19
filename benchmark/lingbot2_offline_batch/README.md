@@ -99,11 +99,24 @@ the local FSX MP4 is deleted, leaving only progress, summaries, and logs for
 debugging. On retries or replacement Jobs, the runner checks S3 first and skips
 videos that were already persisted.
 
+The runner also posts live and final progress callbacks to LWDP. Callback PUTs
+are retried with `SGLANG_VIDEO_CALLBACK_RETRY_ATTEMPTS` and
+`SGLANG_VIDEO_CALLBACK_RETRY_BASE_SECONDS`. As a second guard, the controller
+reads `<output_prefix>/reports/sglang_video_report.json` before deleting a
+completed message and replays the final progress callback from that report. If
+the replay fails, the SQS message is kept in flight and retried later instead
+of being deleted with a stale LWDP status. Configure the controller with
+`SGLANG_VIDEO_CALLBACK_TOKEN` or `LWDP_GENERATION_API_TOKEN` so this final
+repair callback can authenticate to `lwdp.loopit.me`.
+
 Important controller environment variables:
 
 ```text
 SGLANG_VIDEO_BATCH_STREAM_UPLOAD=true
 SGLANG_VIDEO_BATCH_DELETE_UPLOADED_LOCAL=true
+SGLANG_VIDEO_CALLBACK_RETRY_ATTEMPTS=5
+SGLANG_VIDEO_CALLBACK_RETRY_BASE_SECONDS=1
+SGLANG_VIDEO_CALLBACK_TOKEN=<from lwdp-generation-token>
 SGLANG_VIDEO_SQS_MAX_MESSAGES=10
 SGLANG_VIDEO_MESSAGE_VISIBILITY_SECONDS=900
 SGLANG_VIDEO_MESSAGE_RENEW_INTERVAL_SECONDS=60
