@@ -2138,7 +2138,24 @@ def _scale_nodegroup(
             if isinstance(nodegroup.get("scalingConfig"), dict)
             else {}
         )
-        if _int_or_default(scaling.get("desiredSize"), -1) == desired_nodes:
+        current_desired_nodes = _int_or_default(scaling.get("desiredSize"), -1)
+        if current_desired_nodes == desired_nodes:
+            return
+        if desired_gpus > 0 and current_desired_nodes > desired_nodes:
+            print(
+                json.dumps(
+                    {
+                        "status": "nodegroup_scale_down_held",
+                        "nodegroup": nodegroup_name,
+                        "current_desired_nodes": current_desired_nodes,
+                        "desired_nodes": desired_nodes,
+                        "desired_gpus": desired_gpus,
+                        "reason": "active_fallback_workload",
+                    },
+                    sort_keys=True,
+                ),
+                flush=True,
+            )
             return
     try:
         eks_client.update_nodegroup_config(

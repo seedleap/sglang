@@ -1235,6 +1235,28 @@ def test_scale_fallback_nodegroups_releases_stale_inflight_without_active_pod():
     assert eks.updates[-1]["scalingConfig"]["desiredSize"] == 0
 
 
+def test_scale_fallback_nodegroups_does_not_partially_scale_down_while_active():
+    config = {
+        **_backend_config(),
+        "fallback_scale_down_grace_seconds": 0,
+    }
+    eks = FakeEksWithDesired(desired_size=2)
+    state = {
+        "inflight": [
+            {
+                "backend": "h100-spot",
+                "job_name": "sglang-video-active",
+                "requested_gpus": 8,
+                "started_at": 1000.0,
+            }
+        ]
+    }
+
+    _scale_fallback_nodegroups(eks, config, state, pods=[], now=1100.0)
+
+    assert eks.updates == []
+
+
 def test_scale_fallback_nodegroups_holds_startup_protection_without_active_pod():
     config = {
         **_backend_config(),
