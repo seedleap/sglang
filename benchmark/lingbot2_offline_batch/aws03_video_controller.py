@@ -183,6 +183,16 @@ def _live_pods_for_job(pods: list[dict[str, Any]], job_name: str) -> list[dict[s
     return result
 
 
+def _succeeded_pods_for_job(pods: list[dict[str, Any]], job_name: str) -> list[dict[str, Any]]:
+    result = []
+    for pod in pods:
+        if _pod_job_name(pod) != job_name:
+            continue
+        if _pod_phase(pod) == "Succeeded":
+            result.append(pod)
+    return result
+
+
 def _pods_except_job(pods: list[dict[str, Any]], job_name: str) -> list[dict[str, Any]]:
     return [pod for pod in pods if _pod_job_name(pod) != job_name]
 
@@ -1629,6 +1639,9 @@ def _inactive_job_ready_for_retry(
         return False
     if _job_missing(status) or _job_failed(status) or _job_succeeded(status):
         return False
+    if _succeeded_pods_for_job(pods, job_name):
+        item.pop("inactive_job_seen_at", None)
+        return False
     if _live_pods_for_job(pods, job_name):
         item.pop("inactive_job_seen_at", None)
         return False
@@ -2391,7 +2404,7 @@ def reconcile_inflight_jobs(
             continue
 
         status = _read_job_status(batch_client, namespace, item["job_name"])
-        if _job_succeeded(status):
+        if _job_succeeded(status) or _succeeded_pods_for_job(pods, old_job_name):
             try:
                 if repair_final_progress_from_report(
                     item["request"],
@@ -2846,7 +2859,8 @@ def controller_tick(
         existing_job = _existing_job_for_request(batch_client, namespace, request)
         if existing_job is not None:
             status = _job_status(existing_job)
-            if _job_succeeded(status):
+            existing_job_name = str(_metadata(existing_job).get("name") or "")
+            if _job_succeeded(status) or _succeeded_pods_for_job(pods, existing_job_name):
                 try:
                     if repair_final_progress_from_report(
                         request,

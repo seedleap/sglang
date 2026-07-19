@@ -518,6 +518,22 @@ def _job_scheduled_pending_pod(
     return pod
 
 
+def _job_succeeded_pod(
+    job_name: str,
+    backend_name: str,
+    node_name: str = "node-a",
+    gpus: int = 8,
+) -> dict:
+    pod = _job_scheduled_pending_pod(
+        job_name,
+        backend_name,
+        node_name=node_name,
+        gpus=gpus,
+    )
+    pod["status"] = {"phase": "Succeeded"}
+    return pod
+
+
 def _backend_config() -> dict:
     return {
         "namespace": "default",
@@ -1513,6 +1529,47 @@ def test_controller_tick_restarts_suspended_existing_job_instead_of_adopting_or_
     assert batch.created[0]["body"]["metadata"]["name"].endswith("-r2")
     assert state["inflight"][0]["attempts"] == 2
     assert state["inflight"][0]["receipt_handle"] == "receipt-1"
+
+
+def test_controller_tick_completes_existing_job_when_status_lags_but_pod_succeeded():
+    config = _backend_config()
+    request = _request()
+    request["output"] = {"video_s3_prefix": "s3://bucket/t2i/videos"}
+    existing_job = render_job_manifest(
+        request,
+        {
+            **config,
+            "placement_profiles": [config["backends"][0]],
+            "selected_backend": "b300-capacity-block",
+        },
+    )
+    existing_job["status"] = {"active": 0}
+    job_name = existing_job["metadata"]["name"]
+    batch = FakeBatchV1()
+    batch.jobs[job_name] = existing_job
+    sqs = FakeSQS(request)
+    state = {"inflight": []}
+
+    result = controller_tick(
+        sqs_client=sqs,
+        queue_url="https://sqs.us-west-2.amazonaws.com/123/video",
+        core_client=FakeCoreV1(
+            [_job_succeeded_pod(job_name, "b300-capacity-block")],
+            [_node("b300-a", config["backends"][0]["node_selector"])],
+        ),
+        batch_client=batch,
+        eks_client=FakeEks(),
+        config=config,
+        state=state,
+        now=1000.0,
+    )
+
+    assert result["completed_existing"] == 1
+    assert result["restarted_existing_inactive"] == 0
+    assert batch.created == []
+    assert batch.deleted == []
+    assert sqs.deleted[0]["ReceiptHandle"] == "receipt-1"
+    assert state["inflight"] == []
 
 
 def test_controller_tick_rescues_orphan_failed_job_when_sqs_message_is_not_visible():
@@ -2611,6 +2668,54 @@ def test_reconcile_restarts_stale_inflight_job_with_no_live_pod():
     assert state["inflight"][0]["attempts"] == 2
     assert state["inflight"][0]["job_name"].startswith("sglang-video-")
     assert "inactive_job_seen_at" not in state["inflight"][0]
+
+
+def test_reconcile_completes_inflight_when_job_status_lags_but_pod_succeeded():
+    config = {**_backend_config(), "inflight_without_pod_grace_seconds": 120}
+    request = _request()
+    request["output"] = {"video_s3_prefix": "s3://bucket/t2i/videos"}
+    job_name = "sglang-video-done-with-lagging-status"
+    sqs = FakeSQS(request)
+    state = {
+        "inflight": [
+            {
+                "request": request,
+                "receipt_handle": "receipt-1",
+                "message_id": "message-1",
+                "job_name": job_name,
+                "backend": "b300-capacity-block",
+                "attempts": 1,
+                "started_at": 1000.0,
+                "last_renewed_at": 1000.0,
+                "inactive_job_seen_at": 1000.0,
+                "requested_gpus": 8,
+            }
+        ]
+    }
+    batch = FakeBatchV1()
+    batch.jobs[job_name] = {"status": {"active": 0}}
+
+    result = reconcile_inflight_jobs(
+        sqs_client=sqs,
+        queue_url="https://sqs.us-west-2.amazonaws.com/123/video",
+        core_client=FakeCoreV1(
+            [_job_succeeded_pod(job_name, "b300-capacity-block")],
+            [_node("b300-a", config["backends"][0]["node_selector"])],
+        ),
+        batch_client=batch,
+        eks_client=FakeEks(),
+        config=config,
+        state=state,
+        now=1300.0,
+    )
+
+    assert result["completed"] == 1
+    assert result["inactive"] == 0
+    assert result["restarted"] == 0
+    assert sqs.deleted[0]["ReceiptHandle"] == "receipt-1"
+    assert batch.created == []
+    assert batch.deleted == []
+    assert state["inflight"] == []
 
 
 def test_controller_tick_drops_stale_inflight_capacity_before_deferring_visible_message():
