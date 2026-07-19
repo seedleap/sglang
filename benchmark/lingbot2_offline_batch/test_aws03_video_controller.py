@@ -157,9 +157,48 @@ def test_render_job_manifest_can_match_existing_b300_batch_runtime_shape():
     assert pod["nodeSelector"]["eks.amazonaws.com/nodegroup"] == "wan22-cb-p6b300-0715-20c"
     assert pod["priorityClassName"] == "wan22-debug-low"
     assert pod["schedulerName"] == "volcano"
-    assert pod["tolerations"] == [{"operator": "Exists"}]
+    assert {"operator": "Exists"} not in pod["tolerations"]
+    assert pod["tolerations"] == [
+        {"key": "nvidia.com/gpu", "operator": "Exists", "effect": "NoSchedule"}
+    ]
     assert any(volume["name"] == "shm" for volume in pod["volumes"])
     assert any(mount["mountPath"] == "/dev/shm" for mount in container["volumeMounts"])
+
+
+def test_render_job_manifest_replaces_blanket_toleration_with_workload_toleration():
+    manifest = render_job_manifest(
+        _request(),
+        {
+            "namespace": "default",
+            "job_image": "lmsysorg/sglang:dev@sha256:test",
+            "placement_profiles": [
+                {
+                    "name": "b200-spot",
+                    "node_selector": {
+                        "eks.amazonaws.com/capacityType": "SPOT",
+                        "eks.amazonaws.com/nodegroup": "minwm-spot-p6-b200-0703",
+                        "node.kubernetes.io/instance-type": "p6-b200.48xlarge",
+                        "seedleap.ai/workload": "wan22-ti2v",
+                    },
+                }
+            ],
+            "tolerations": [{"operator": "Exists"}],
+        },
+    )
+
+    pod = manifest["spec"]["template"]["spec"]
+    assert {"operator": "Exists"} not in pod["tolerations"]
+    assert {
+        "key": "seedleap.ai/workload",
+        "operator": "Equal",
+        "value": "wan22-ti2v",
+        "effect": "NoSchedule",
+    } in pod["tolerations"]
+    assert {
+        "key": "nvidia.com/gpu",
+        "operator": "Exists",
+        "effect": "NoSchedule",
+    } in pod["tolerations"]
 
 
 def test_render_job_manifest_can_target_b300_and_h100_spot_demand_with_preferred_affinity():
@@ -542,6 +581,30 @@ def test_backend_free_gpus_subtracts_gpu_pods_on_matching_nodes():
     pods = [_gpu_pod("training", "b300-a", 8)]
 
     assert backend_free_gpus(nodes, pods, b300_selector) == 8
+
+
+def test_backend_free_gpus_ignores_unschedulable_or_draining_nodes():
+    b200_selector = {
+        "eks.amazonaws.com/capacityType": "SPOT",
+        "eks.amazonaws.com/nodegroup": "minwm-spot-p6-b200-0703",
+        "node.kubernetes.io/instance-type": "p6-b200.48xlarge",
+        "seedleap.ai/workload": "wan22-ti2v",
+    }
+    cordoned = _node("b200-cordoned", b200_selector)
+    cordoned["spec"] = {"unschedulable": True}
+    deleting = _node("b200-deleting", b200_selector)
+    deleting["metadata"]["deletionTimestamp"] = "2026-07-19T10:00:00Z"
+    system_tainted = _node("b200-system-tainted", b200_selector)
+    system_tainted["spec"] = {
+        "taints": [{"key": "node.kubernetes.io/unschedulable", "effect": "NoSchedule"}]
+    }
+    ready = _node("b200-ready", b200_selector)
+
+    assert backend_free_gpus(
+        [cordoned, deleting, system_tainted, ready],
+        [],
+        b200_selector,
+    ) == 8
 
 
 def test_choose_backend_prefers_b300_when_free_and_uses_h100_when_b300_is_full():
@@ -1338,6 +1401,127 @@ def test_controller_tick_adopts_existing_job_after_restart_and_scales_nodes():
     assert batch.created == []
     assert state["inflight"][0]["job_name"] == existing_job["metadata"]["name"]
     assert eks.updates[-1]["scalingConfig"]["desiredSize"] == 1
+
+
+def test_controller_tick_rescues_visible_failed_existing_job_after_state_loss():
+    config = {**_backend_config(), "orphan_failed_job_rescue_max_per_tick": 0}
+    request = _request()
+    existing_job = render_job_manifest(
+        request,
+        {
+            **config,
+            "placement_profiles": [config["backends"][1]],
+            "selected_backend": "h100-spot",
+        },
+    )
+    existing_job["status"] = {
+        "conditions": [
+            {"type": "Failed", "status": "True", "reason": "BackoffLimitExceeded"}
+        ]
+    }
+    batch = FakeBatchV1()
+    batch.jobs[existing_job["metadata"]["name"]] = existing_job
+    sqs = FakeSQS(request)
+    eks = FakeEks()
+    b300 = _node("b300-a", config["backends"][0]["node_selector"])
+    state = {"inflight": []}
+
+    result = controller_tick(
+        sqs_client=sqs,
+        queue_url="https://sqs.us-west-2.amazonaws.com/123/video",
+        core_client=FakeCoreV1([], [b300]),
+        batch_client=batch,
+        eks_client=eks,
+        config=config,
+        state=state,
+        now=1000.0,
+    )
+
+    assert result["rescued_existing_failed"] == 1
+    assert batch.deleted[0]["name"] == existing_job["metadata"]["name"]
+    assert len(batch.created) == 1
+    assert batch.created[0]["body"]["metadata"]["name"].endswith("-r2")
+    assert state["inflight"][0]["attempts"] == 2
+    assert state["inflight"][0]["receipt_handle"] == "receipt-1"
+
+
+def test_controller_tick_rescues_orphan_failed_job_when_sqs_message_is_not_visible():
+    config = _backend_config()
+    request = _request()
+    existing_job = render_job_manifest(
+        request,
+        {
+            **config,
+            "placement_profiles": [config["backends"][1]],
+            "selected_backend": "h100-spot",
+        },
+    )
+    existing_job["status"] = {
+        "conditions": [
+            {"type": "Failed", "status": "True", "reason": "BackoffLimitExceeded"}
+        ]
+    }
+    batch = FakeBatchV1()
+    batch.jobs[existing_job["metadata"]["name"]] = existing_job
+    eks = FakeEks()
+    b300 = _node("b300-a", config["backends"][0]["node_selector"])
+    state = {"inflight": []}
+
+    result = controller_tick(
+        sqs_client=FakeSQS([]),
+        queue_url="https://sqs.us-west-2.amazonaws.com/123/video",
+        core_client=FakeCoreV1([], [b300]),
+        batch_client=batch,
+        eks_client=eks,
+        config=config,
+        state=state,
+        now=1000.0,
+    )
+
+    assert result["rescued_orphan_failed"] == 1
+    assert result["status"] == "started"
+    assert batch.deleted[0]["name"] == existing_job["metadata"]["name"]
+    assert batch.created[0]["body"]["metadata"]["name"].endswith("-r2")
+    assert state["inflight"][0]["orphan_rescue"] is True
+    assert "receipt_handle" not in state["inflight"][0]
+
+
+def test_reconcile_completed_orphan_rescue_does_not_require_sqs_receipt():
+    config = _backend_config()
+    batch = FakeBatchV1()
+    batch.jobs["sglang-video-orphan-r2"] = {
+        "status": {"conditions": [{"type": "Complete", "status": "True"}]}
+    }
+    sqs = FakeSQS(_request())
+    state = {
+        "inflight": [
+            {
+                "request": _request(),
+                "job_name": "sglang-video-orphan-r2",
+                "backend": "b300-capacity-block",
+                "attempts": 2,
+                "orphan_rescue": True,
+                "started_at": 1000.0,
+                "last_renewed_at": 1000.0,
+                "requested_gpus": 8,
+            }
+        ]
+    }
+
+    result = reconcile_inflight_jobs(
+        sqs_client=sqs,
+        queue_url="https://sqs.us-west-2.amazonaws.com/123/video",
+        core_client=FakeCoreV1([], []),
+        batch_client=batch,
+        eks_client=FakeEks(),
+        config=config,
+        state=state,
+        now=1100.0,
+    )
+
+    assert result["completed"] == 1
+    assert sqs.deleted == []
+    assert state["inflight"] == []
 
 
 def test_controller_tick_starts_multiple_messages_up_to_fallback_job_cap_and_scales_nodes():

@@ -38,6 +38,18 @@ CAPACITY_FALLBACK_NODEGROUP_ISSUE_TOKENS = {
     "capacity is not available",
     "spot capacity",
 }
+SYSTEM_NODE_TAINT_PREFIXES = (
+    "node.kubernetes.io/",
+    "node.cloudprovider.kubernetes.io/",
+)
+SYSTEM_NODE_TAINT_KEYS = {
+    "ToBeDeletedByClusterAutoscaler",
+    "aws.amazon.com/spot-interruption",
+}
+DEFAULT_SAFE_JOB_TOLERATIONS = [
+    {"key": "nvidia.com/gpu", "operator": "Exists", "effect": "NoSchedule"},
+]
+WORKLOAD_TOLERATION_KEY = "seedleap.ai/workload"
 
 
 def _int_or_default(value: Any, default: int) -> int:
@@ -155,6 +167,30 @@ def _node_ready(node: dict[str, Any]) -> bool:
     )
 
 
+def _node_has_blocking_system_taint(node: dict[str, Any]) -> bool:
+    spec = node.get("spec") if isinstance(node.get("spec"), dict) else {}
+    taints = spec.get("taints") if isinstance(spec.get("taints"), list) else []
+    for taint in taints:
+        if not isinstance(taint, dict):
+            continue
+        effect = str(taint.get("effect") or "")
+        if effect not in {"NoSchedule", "NoExecute"}:
+            continue
+        key = str(taint.get("key") or "")
+        if key in SYSTEM_NODE_TAINT_KEYS or key.startswith(SYSTEM_NODE_TAINT_PREFIXES):
+            return True
+    return False
+
+
+def _node_schedulable(node: dict[str, Any]) -> bool:
+    if _metadata(node).get("deletionTimestamp"):
+        return False
+    spec = node.get("spec") if isinstance(node.get("spec"), dict) else {}
+    if bool(spec.get("unschedulable")):
+        return False
+    return _node_ready(node) and not _node_has_blocking_system_taint(node)
+
+
 def _node_allocatable_gpus(node: dict[str, Any]) -> int:
     status = node.get("status") if isinstance(node.get("status"), dict) else {}
     allocatable = status.get("allocatable") if isinstance(status.get("allocatable"), dict) else {}
@@ -193,7 +229,7 @@ def backend_free_gpus(
     """Return currently free GPUs on Ready nodes matching a backend selector."""
     total = 0
     for node in nodes:
-        if not _node_ready(node) or not _matches_selector(_labels(node), selector):
+        if not _node_schedulable(node) or not _matches_selector(_labels(node), selector):
             continue
         total += max(
             0,
@@ -984,6 +1020,95 @@ def _configured_affinity(config: dict[str, Any]) -> dict[str, Any]:
     return merged
 
 
+def _toleration_identity(toleration: dict[str, Any]) -> tuple[str, str, str, str]:
+    return (
+        str(toleration.get("key") or ""),
+        str(toleration.get("operator") or ""),
+        str(toleration.get("value") or ""),
+        str(toleration.get("effect") or ""),
+    )
+
+
+def _is_blanket_exists_toleration(toleration: dict[str, Any]) -> bool:
+    return str(toleration.get("operator") or "") == "Exists" and not toleration.get("key")
+
+
+def _is_system_taint_toleration(toleration: dict[str, Any]) -> bool:
+    key = str(toleration.get("key") or "")
+    return key in SYSTEM_NODE_TAINT_KEYS or key.startswith(SYSTEM_NODE_TAINT_PREFIXES)
+
+
+def _workload_toleration_values(config: dict[str, Any]) -> list[str]:
+    selectors: list[dict[str, Any]] = []
+    node_selector = config.get("node_selector")
+    if isinstance(node_selector, dict):
+        selectors.append(node_selector)
+    profiles = (
+        config.get("placement_profiles")
+        if isinstance(config.get("placement_profiles"), list)
+        else []
+    )
+    for profile in profiles:
+        if not isinstance(profile, dict):
+            continue
+        selector = profile.get("node_selector")
+        if isinstance(selector, dict):
+            selectors.append(selector)
+
+    values: list[str] = []
+    seen: set[str] = set()
+    for selector in selectors:
+        raw_value = selector.get(WORKLOAD_TOLERATION_KEY)
+        raw_values = raw_value if isinstance(raw_value, list) else [raw_value]
+        for value in raw_values:
+            if value in (None, ""):
+                continue
+            text = str(value)
+            if text not in seen:
+                values.append(text)
+                seen.add(text)
+    return values
+
+
+def _append_toleration(result: list[dict[str, Any]], toleration: dict[str, Any]) -> None:
+    if _toleration_identity(toleration) in {
+        _toleration_identity(item) for item in result
+    }:
+        return
+    result.append(toleration)
+
+
+def _configured_tolerations(config: dict[str, Any]) -> list[dict[str, Any]]:
+    raw_tolerations = (
+        config.get("tolerations") if isinstance(config.get("tolerations"), list) else []
+    )
+    result: list[dict[str, Any]] = []
+    needs_safe_defaults = bool(raw_tolerations)
+    for toleration in raw_tolerations:
+        if not isinstance(toleration, dict):
+            continue
+        if _is_blanket_exists_toleration(toleration) or _is_system_taint_toleration(toleration):
+            continue
+        _append_toleration(result, dict(toleration))
+
+    workload_values = _workload_toleration_values(config)
+    needs_safe_defaults = needs_safe_defaults or bool(workload_values)
+    if needs_safe_defaults:
+        for toleration in DEFAULT_SAFE_JOB_TOLERATIONS:
+            _append_toleration(result, dict(toleration))
+    for workload_value in workload_values:
+        _append_toleration(
+            result,
+            {
+                "key": WORKLOAD_TOLERATION_KEY,
+                "operator": "Equal",
+                "value": workload_value,
+                "effect": "NoSchedule",
+            },
+        )
+    return result
+
+
 def render_job_manifest(request: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
     """Render a Kubernetes Job manifest for one SGLang t2i video batch."""
     gpu_per_pod = _int_or_default(config.get("gpu_per_pod"), 8)
@@ -1060,8 +1185,9 @@ def render_job_manifest(request: dict[str, Any], config: dict[str, Any]) -> dict
         pod_spec["priorityClassName"] = config["priority_class_name"]
     if config.get("scheduler_name"):
         pod_spec["schedulerName"] = config["scheduler_name"]
-    if config.get("tolerations"):
-        pod_spec["tolerations"] = config["tolerations"]
+    tolerations = _configured_tolerations(config)
+    if tolerations:
+        pod_spec["tolerations"] = tolerations
 
     job_spec: dict[str, Any] = {
         "parallelism": parallelism,
@@ -1444,6 +1570,42 @@ def _message_visibility_seconds(config: dict[str, Any]) -> int:
     return _int_or_default(config.get("message_visibility_seconds"), 900)
 
 
+def _inflight_receipt_handle(item: dict[str, Any]) -> str:
+    return str(item.get("receipt_handle") or "").strip()
+
+
+def _delete_inflight_message(
+    sqs_client: Any,
+    queue_url: str,
+    item: dict[str, Any],
+) -> bool:
+    receipt_handle = _inflight_receipt_handle(item)
+    if not receipt_handle:
+        return False
+    sqs_client.delete_message(
+        QueueUrl=queue_url,
+        ReceiptHandle=receipt_handle,
+    )
+    return True
+
+
+def _change_inflight_visibility(
+    sqs_client: Any,
+    queue_url: str,
+    item: dict[str, Any],
+    timeout_seconds: int,
+) -> bool:
+    receipt_handle = _inflight_receipt_handle(item)
+    if not receipt_handle:
+        return False
+    sqs_client.change_message_visibility(
+        QueueUrl=queue_url,
+        ReceiptHandle=receipt_handle,
+        VisibilityTimeout=timeout_seconds,
+    )
+    return True
+
+
 def renew_inflight_messages(
     *,
     sqs_client: Any,
@@ -1459,20 +1621,15 @@ def renew_inflight_messages(
     remaining = []
     all_inflight = list(state.get("inflight", []))
     for item in all_inflight:
+        if not _inflight_receipt_handle(item):
+            remaining.append(item)
+            continue
         if now - float(item.get("started_at", now)) > max_lease:
-            sqs_client.change_message_visibility(
-                QueueUrl=queue_url,
-                ReceiptHandle=item["receipt_handle"],
-                VisibilityTimeout=0,
-            )
+            _change_inflight_visibility(sqs_client, queue_url, item, 0)
             expired += 1
             continue
         if now - float(item.get("last_renewed_at", 0)) >= renew_interval:
-            sqs_client.change_message_visibility(
-                QueueUrl=queue_url,
-                ReceiptHandle=item["receipt_handle"],
-                VisibilityTimeout=visibility,
-            )
+            _change_inflight_visibility(sqs_client, queue_url, item, visibility)
             item["last_renewed_at"] = now
             renewed += 1
         remaining.append(item)
@@ -1528,6 +1685,38 @@ def _existing_job_for_request(
     return jobs[0]
 
 
+def _list_sglang_jobs(batch_client: Any, namespace: str) -> list[dict[str, Any]]:
+    response = batch_client.list_namespaced_job(
+        namespace=namespace,
+        label_selector="app.kubernetes.io/name=sglang-video-batch",
+    )
+    response = _object_to_dict(response)
+    items = response.get("items", []) if isinstance(response, dict) else response.items
+    return [_object_to_dict(item) for item in items]
+
+
+def _request_from_job(job: dict[str, Any]) -> dict[str, Any] | None:
+    spec = job.get("spec") if isinstance(job.get("spec"), dict) else {}
+    template = spec.get("template") if isinstance(spec.get("template"), dict) else {}
+    pod_spec = template.get("spec") if isinstance(template.get("spec"), dict) else {}
+    containers = pod_spec.get("containers") if isinstance(pod_spec.get("containers"), list) else []
+    for container in containers:
+        if not isinstance(container, dict):
+            continue
+        env_items = container.get("env") if isinstance(container.get("env"), list) else []
+        for env_item in env_items:
+            if not isinstance(env_item, dict):
+                continue
+            if env_item.get("name") != "SGLANG_VIDEO_BATCH_REQUEST_JSON":
+                continue
+            value = env_item.get("value")
+            if not isinstance(value, str) or not value.strip():
+                return None
+            payload = json.loads(value)
+            return payload if isinstance(payload, dict) else None
+    return None
+
+
 def _render_for_backend(
     request: dict[str, Any],
     config: dict[str, Any],
@@ -1544,6 +1733,13 @@ def _render_for_backend(
             "job_name_suffix": f"r{attempt}" if attempt > 1 else "",
         },
     )
+
+
+def _attempt_from_job_name(job_name: str) -> int:
+    match = re.search(r"-r([0-9]+)$", job_name)
+    if match is None:
+        return 1
+    return max(1, _int_or_default(match.group(1), 1))
 
 
 def _retry_excluded_backends(config: dict[str, Any], backend_name: str) -> set[str]:
@@ -1941,6 +2137,140 @@ def _prime_fallback_scale_down(
         scale_down_state[target_key] = now - scale_down_grace
 
 
+def rescue_orphan_failed_jobs(
+    *,
+    core_client: Any,
+    batch_client: Any,
+    eks_client: Any,
+    config: dict[str, Any],
+    state: dict[str, Any],
+    now: float,
+) -> dict[str, int]:
+    namespace = config.get("namespace", "default")
+    max_rescues = _int_or_default(config.get("orphan_failed_job_rescue_max_per_tick"), 1)
+    if max_rescues <= 0:
+        return {"rescued_orphan_failed": 0, "orphan_failed_no_capacity": 0}
+
+    tracked_generation_ids = {
+        str(item.get("request", {}).get("generation_job_id") or "")
+        for item in state.get("inflight", [])
+        if isinstance(item.get("request"), dict)
+    }
+    tracked_job_names = {
+        str(item.get("job_name") or "") for item in state.get("inflight", [])
+    }
+    jobs_by_generation: dict[str, list[dict[str, Any]]] = {}
+    for job in _list_sglang_jobs(batch_client, namespace):
+        labels = _labels(job)
+        generation_job_id = str(labels.get("sglang.seedleap.io/generation-job-id") or "")
+        if not generation_job_id or generation_job_id in tracked_generation_ids:
+            continue
+        jobs_by_generation.setdefault(generation_job_id, []).append(job)
+
+    nodes = _list_nodes(core_client)
+    pods = _list_capacity_pods(core_client, config)
+    requested_gpus = _int_or_default(config.get("gpu_per_pod"), 8) * _int_or_default(
+        config.get("job_parallelism"),
+        1,
+    )
+    max_attempts = _int_or_default(config.get("max_job_attempts"), 5)
+    rescued = no_capacity = 0
+
+    for generation_job_id in sorted(jobs_by_generation):
+        jobs = jobs_by_generation[generation_job_id]
+        if any(not _job_failed(_job_status(job)) for job in jobs):
+            continue
+        failed_jobs = [
+            job
+            for job in jobs
+            if str(_metadata(job).get("name") or "") not in tracked_job_names
+        ]
+        if not failed_jobs:
+            continue
+        failed_jobs.sort(
+            key=lambda job: str(_metadata(job).get("creationTimestamp") or ""),
+            reverse=True,
+        )
+        old_job = failed_jobs[0]
+        old_metadata = _metadata(old_job)
+        old_job_name = str(old_metadata.get("name") or "")
+        attempts = _attempt_from_job_name(old_job_name)
+        if attempts >= max_attempts:
+            continue
+        request = _request_from_job(old_job)
+        if request is None:
+            continue
+
+        backend = choose_backend(
+            config,
+            nodes,
+            pods,
+            requested_gpus=requested_gpus,
+            state=state,
+        )
+        if backend is None:
+            no_capacity += 1
+            continue
+
+        old_backend_name = str(_labels(old_job).get("sglang.seedleap.io/backend") or "")
+        try:
+            batch_client.delete_namespaced_job(
+                name=old_job_name,
+                namespace=namespace,
+                propagation_policy="Background",
+            )
+        except Exception as error:
+            if not _not_found(error):
+                raise
+        next_attempt = attempts + 1
+        next_backend_name = _backend_name(backend)
+        manifest = _render_for_backend(request, config, backend, attempt=next_attempt)
+        batch_client.create_namespaced_job(namespace=namespace, body=manifest)
+        state.setdefault("inflight", []).append(
+            {
+                "request": request,
+                "message_id": "",
+                "job_name": manifest["metadata"]["name"],
+                "backend": next_backend_name,
+                "attempts": next_attempt,
+                "orphan_rescue": True,
+                "started_at": now,
+                "last_renewed_at": now,
+                "requested_gpus": requested_gpus,
+            }
+        )
+        if next_backend_name in _fallback_backend_names(config):
+            _consume_fallback_prewarm(
+                state,
+                next_backend_name,
+                requested_gpus=requested_gpus,
+            )
+        elif next_backend_name in _b300_backend_names(config):
+            released_prewarm_backends = _consume_any_fallback_prewarm(
+                state,
+                _fallback_backend_names(config),
+                requested_gpus=requested_gpus,
+            )
+            if released_prewarm_backends:
+                _prime_fallback_scale_down(config, state, released_prewarm_backends, now=now)
+        if (
+            old_backend_name in _fallback_backend_names(config)
+            and next_backend_name in _b300_backend_names(config)
+        ):
+            _prime_fallback_scale_down(config, state, {old_backend_name}, now=now)
+        _scale_fallback_nodegroups(eks_client, config, state, pods=pods, now=now)
+        tracked_generation_ids.add(generation_job_id)
+        tracked_job_names.add(manifest["metadata"]["name"])
+        rescued += 1
+        if rescued >= max_rescues:
+            break
+
+    return {
+        "rescued_orphan_failed": rescued,
+        "orphan_failed_no_capacity": no_capacity,
+    }
+
+
 def reconcile_inflight_jobs(
     *,
     sqs_client: Any,
@@ -1983,10 +2313,7 @@ def reconcile_inflight_jobs(
                 remaining.append(item)
                 callback_pending += 1
                 continue
-            sqs_client.delete_message(
-                QueueUrl=queue_url,
-                ReceiptHandle=item["receipt_handle"],
-            )
+            _delete_inflight_message(sqs_client, queue_url, item)
             completed += 1
             continue
 
@@ -2004,10 +2331,7 @@ def reconcile_inflight_jobs(
                 remaining.append(item)
                 callback_pending += 1
                 continue
-            sqs_client.delete_message(
-                QueueUrl=queue_url,
-                ReceiptHandle=item["receipt_handle"],
-            )
+            _delete_inflight_message(sqs_client, queue_url, item)
             completed += 1
             continue
 
@@ -2025,11 +2349,7 @@ def reconcile_inflight_jobs(
 
             attempts = _int_or_default(item.get("attempts"), 1)
             if attempts >= max_attempts:
-                sqs_client.change_message_visibility(
-                    QueueUrl=queue_url,
-                    ReceiptHandle=item["receipt_handle"],
-                    VisibilityTimeout=0,
-                )
+                _change_inflight_visibility(sqs_client, queue_url, item, 0)
                 failed += 1
                 continue
 
@@ -2042,13 +2362,11 @@ def reconcile_inflight_jobs(
                 state={"inflight": [candidate for candidate in all_inflight if candidate is not item]},
             )
             if backend is None:
-                sqs_client.change_message_visibility(
-                    QueueUrl=queue_url,
-                    ReceiptHandle=item["receipt_handle"],
-                    VisibilityTimeout=_int_or_default(
-                        config.get("defer_visibility_timeout"),
-                        60,
-                    ),
+                _change_inflight_visibility(
+                    sqs_client,
+                    queue_url,
+                    item,
+                    _int_or_default(config.get("defer_visibility_timeout"), 60),
                 )
                 if old_backend_name in _fallback_backend_names(config):
                     fallback_backends_released.add(old_backend_name)
@@ -2079,11 +2397,7 @@ def reconcile_inflight_jobs(
         if _job_failed(status):
             attempts = _int_or_default(item.get("attempts"), 1)
             if attempts >= max_attempts:
-                sqs_client.change_message_visibility(
-                    QueueUrl=queue_url,
-                    ReceiptHandle=item["receipt_handle"],
-                    VisibilityTimeout=0,
-                )
+                _change_inflight_visibility(sqs_client, queue_url, item, 0)
                 failed += 1
                 continue
 
@@ -2106,13 +2420,11 @@ def reconcile_inflight_jobs(
                 state={"inflight": [candidate for candidate in all_inflight if candidate is not item]},
             )
             if backend is None:
-                sqs_client.change_message_visibility(
-                    QueueUrl=queue_url,
-                    ReceiptHandle=item["receipt_handle"],
-                    VisibilityTimeout=_int_or_default(
-                        config.get("defer_visibility_timeout"),
-                        60,
-                    ),
+                _change_inflight_visibility(
+                    sqs_client,
+                    queue_url,
+                    item,
+                    _int_or_default(config.get("defer_visibility_timeout"), 60),
                 )
                 if old_backend_name in _fallback_backend_names(config):
                     fallback_backends_released.add(old_backend_name)
@@ -2160,13 +2472,11 @@ def reconcile_inflight_jobs(
                     except Exception as error:
                         if not _not_found(error):
                             raise
-                    sqs_client.change_message_visibility(
-                        QueueUrl=queue_url,
-                        ReceiptHandle=item["receipt_handle"],
-                        VisibilityTimeout=_int_or_default(
-                            config.get("defer_visibility_timeout"),
-                            60,
-                        ),
+                    _change_inflight_visibility(
+                        sqs_client,
+                        queue_url,
+                        item,
+                        _int_or_default(config.get("defer_visibility_timeout"), 60),
                     )
                     released += 1
                     continue
@@ -2183,11 +2493,7 @@ def reconcile_inflight_jobs(
 
                 attempts = _int_or_default(item.get("attempts"), 1)
                 if attempts >= max_attempts:
-                    sqs_client.change_message_visibility(
-                        QueueUrl=queue_url,
-                        ReceiptHandle=item["receipt_handle"],
-                        VisibilityTimeout=0,
-                    )
+                    _change_inflight_visibility(sqs_client, queue_url, item, 0)
                     failed += 1
                     continue
 
@@ -2219,13 +2525,11 @@ def reconcile_inflight_jobs(
                         except Exception as error:
                             if not _not_found(error):
                                 raise
-                        sqs_client.change_message_visibility(
-                            QueueUrl=queue_url,
-                            ReceiptHandle=item["receipt_handle"],
-                            VisibilityTimeout=_int_or_default(
-                                config.get("defer_visibility_timeout"),
-                                60,
-                            ),
+                        _change_inflight_visibility(
+                            sqs_client,
+                            queue_url,
+                            item,
+                            _int_or_default(config.get("defer_visibility_timeout"), 60),
                         )
                         fallback_backends_released.add(old_backend_name)
                         released += 1
@@ -2340,6 +2644,18 @@ def controller_tick(
         s3_client=s3_client,
         callback_urlopen=callback_urlopen,
     )
+    orphan_rescue_result = rescue_orphan_failed_jobs(
+        core_client=core_client,
+        batch_client=batch_client,
+        eks_client=eks_client,
+        config=config,
+        state=state,
+        now=now,
+    )
+    rescued_orphan_failed = _int_or_default(
+        orphan_rescue_result.get("rescued_orphan_failed"),
+        0,
+    )
 
     gpu_per_pod = _int_or_default(config.get("gpu_per_pod"), 8)
     parallelism = _int_or_default(config.get("job_parallelism"), 1)
@@ -2363,10 +2679,11 @@ def controller_tick(
             )
             _scale_fallback_nodegroups(eks_client, config, state, pods=pods, now=now)
         return {
-            "status": "idle",
+            "status": "started" if rescued_orphan_failed else "idle",
             **renew_result,
             **reconcile_result,
-            "started": 0,
+            **orphan_rescue_result,
+            "started": rescued_orphan_failed,
             "deferred": 0,
             "released_prewarm": len(released_prewarm),
         }
@@ -2374,6 +2691,7 @@ def controller_tick(
     nodes = _list_nodes(core_client)
     pods = _list_capacity_pods(core_client, config)
     started = deferred = adopted = completed_existing = 0
+    rescued_existing_failed = 0
     prewarmed = prewarm_skipped = 0
     released_prewarm_count = _int_or_default(reconcile_result.get("released_prewarm"), 0)
     callback_repaired_existing = callback_pending_existing = 0
@@ -2432,6 +2750,97 @@ def controller_tick(
                 _scale_fallback_nodegroups(eks_client, config, state, pods=pods, now=now)
                 adopted += 1
                 continue
+            labels = _labels(existing_job)
+            metadata = _metadata(existing_job)
+            old_job_name = str(metadata.get("name") or "")
+            old_backend_name = str(labels.get("sglang.seedleap.io/backend") or "")
+            attempts = _attempt_from_job_name(old_job_name)
+            max_attempts = _int_or_default(config.get("max_job_attempts"), 5)
+            if attempts >= max_attempts:
+                sqs_client.change_message_visibility(
+                    QueueUrl=queue_url,
+                    ReceiptHandle=message["ReceiptHandle"],
+                    VisibilityTimeout=0,
+                )
+                deferred += 1
+                continue
+
+            backend = choose_backend(
+                config,
+                nodes,
+                pods,
+                requested_gpus=requested_gpus,
+                state=state,
+            )
+            if backend is None:
+                sqs_client.change_message_visibility(
+                    QueueUrl=queue_url,
+                    ReceiptHandle=message["ReceiptHandle"],
+                    VisibilityTimeout=_int_or_default(
+                        config.get("defer_visibility_timeout"),
+                        60,
+                    ),
+                )
+                deferred += 1
+                continue
+
+            if old_job_name:
+                try:
+                    batch_client.delete_namespaced_job(
+                        name=old_job_name,
+                        namespace=namespace,
+                        propagation_policy="Background",
+                    )
+                except Exception as error:
+                    if not _not_found(error):
+                        raise
+            next_attempt = attempts + 1
+            manifest = _render_for_backend(request, config, backend, attempt=next_attempt)
+            namespace = manifest["metadata"]["namespace"]
+            batch_client.create_namespaced_job(namespace=namespace, body=manifest)
+            state["inflight"].append(
+                {
+                    "request": request,
+                    "receipt_handle": message["ReceiptHandle"],
+                    "message_id": message.get("MessageId", ""),
+                    "job_name": manifest["metadata"]["name"],
+                    "backend": _backend_name(backend),
+                    "attempts": next_attempt,
+                    "started_at": now,
+                    "last_renewed_at": now,
+                    "requested_gpus": requested_gpus,
+                }
+            )
+            backend_name = _backend_name(backend)
+            if backend_name in _fallback_backend_names(config):
+                _consume_fallback_prewarm(
+                    state,
+                    backend_name,
+                    requested_gpus=requested_gpus,
+                )
+            elif backend_name in _b300_backend_names(config):
+                released_prewarm_backends = _consume_any_fallback_prewarm(
+                    state,
+                    _fallback_backend_names(config),
+                    requested_gpus=requested_gpus,
+                )
+                if released_prewarm_backends:
+                    released_prewarm_count += len(released_prewarm_backends)
+                    _prime_fallback_scale_down(
+                        config,
+                        state,
+                        released_prewarm_backends,
+                        now=now,
+                    )
+            if (
+                old_backend_name in _fallback_backend_names(config)
+                and backend_name in _b300_backend_names(config)
+            ):
+                _prime_fallback_scale_down(config, state, {old_backend_name}, now=now)
+            _scale_fallback_nodegroups(eks_client, config, state, pods=pods, now=now)
+            rescued_existing_failed += 1
+            started += 1
+            continue
 
         backend = choose_backend(
             config,
@@ -2514,13 +2923,16 @@ def controller_tick(
         _scale_fallback_nodegroups(eks_client, config, state, pods=pods, now=now)
         started += 1
 
+    total_started = started + rescued_orphan_failed
     return {
-        "status": "started" if started else "adopted" if adopted else "deferred",
+        "status": "started" if total_started else "adopted" if adopted else "deferred",
         **renew_result,
         **reconcile_result,
-        "started": started,
+        **orphan_rescue_result,
+        "started": total_started,
         "deferred": deferred,
         "adopted": adopted,
+        "rescued_existing_failed": rescued_existing_failed,
         "prewarmed": prewarmed,
         "prewarm_skipped": prewarm_skipped,
         "released_prewarm": released_prewarm_count,
@@ -2582,6 +2994,10 @@ def _env_config() -> dict[str, Any]:
         "pending_job_grace_seconds": os.environ.get(
             "SGLANG_VIDEO_PENDING_JOB_GRACE_SECONDS",
             "900",
+        ),
+        "orphan_failed_job_rescue_max_per_tick": os.environ.get(
+            "SGLANG_VIDEO_ORPHAN_FAILED_JOB_RESCUE_MAX_PER_TICK",
+            "1",
         ),
         "max_active_jobs": os.environ.get("SGLANG_VIDEO_MAX_ACTIVE_JOBS", "7"),
         "b300_max_active_jobs": os.environ.get("SGLANG_VIDEO_B300_MAX_ACTIVE_JOBS", "5"),
