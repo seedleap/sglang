@@ -1356,6 +1356,15 @@ def _read_json_s3_uri(uri: str, s3_client: Any) -> dict[str, Any]:
     return json.loads(body)
 
 
+def _s3_not_found(error: Exception) -> bool:
+    response = getattr(error, "response", None)
+    if isinstance(response, dict):
+        code = str(response.get("Error", {}).get("Code") or "")
+        if code in {"404", "NoSuchKey", "NoSuchBucket", "NotFound"}:
+            return True
+    return any(token in str(error) for token in ("NoSuchKey", "NoSuchBucket", "NotFound"))
+
+
 def _item_id_from_video_result(result: dict[str, Any]) -> str:
     video_uri = str(result.get("video_uri") or "")
     parsed = urlparse(video_uri)
@@ -1541,6 +1550,38 @@ def repair_final_progress_from_report(
         s3_client = boto3.client("s3", region_name=region)
     report = _read_json_s3_uri(report_s3_uri, s3_client)
     payload = _progress_payload_from_report(report)
+    _post_final_progress_callback(
+        request,
+        payload,
+        callback_urlopen=callback_urlopen,
+    )
+    return True
+
+
+def repair_final_progress_if_report_exists(
+    request: dict[str, Any],
+    *,
+    s3_client: Any | None = None,
+    callback_urlopen: Any | None = None,
+) -> bool:
+    output = request.get("output") if isinstance(request.get("output"), dict) else {}
+    report_s3_uri = str(output.get("report_s3_uri") or "")
+    if not report_s3_uri:
+        return False
+    if s3_client is None:
+        import boto3
+
+        region = os.environ.get("SGLANG_VIDEO_S3_REGION") or os.environ.get("AWS_REGION")
+        s3_client = boto3.client("s3", region_name=region)
+    try:
+        report = _read_json_s3_uri(report_s3_uri, s3_client)
+    except Exception as error:
+        if _s3_not_found(error):
+            return False
+        raise
+    payload = _progress_payload_from_report(report)
+    if str(payload.get("status") or "") == "running":
+        return False
     _post_final_progress_callback(
         request,
         payload,
@@ -2403,6 +2444,32 @@ def reconcile_inflight_jobs(
             completed += 1
             continue
 
+        try:
+            if repair_final_progress_if_report_exists(
+                item["request"],
+                s3_client=s3_client,
+                callback_urlopen=callback_urlopen,
+            ):
+                try:
+                    batch_client.delete_namespaced_job(
+                        name=old_job_name,
+                        namespace=namespace,
+                        propagation_policy="Background",
+                    )
+                    deleted_job_names.add(old_job_name)
+                except Exception as error:
+                    if not _not_found(error):
+                        raise
+                _delete_inflight_message(sqs_client, queue_url, item)
+                completed += 1
+                callback_repaired += 1
+                continue
+        except Exception as error:
+            item = _mark_callback_pending(item, error, now=now)
+            remaining.append(item)
+            callback_pending += 1
+            continue
+
         status = _read_job_status(batch_client, namespace, item["job_name"])
         if _job_succeeded(status) or _succeeded_pods_for_job(pods, old_job_name):
             try:
@@ -2853,9 +2920,33 @@ def controller_tick(
     prewarmed = prewarm_skipped = 0
     released_prewarm_count = _int_or_default(reconcile_result.get("released_prewarm"), 0)
     callback_repaired_existing = callback_pending_existing = 0
+    completed_from_report = 0
     for message in messages:
         request = _decode_request(message)
         namespace = config.get("namespace", "default")
+        try:
+            if repair_final_progress_if_report_exists(
+                request,
+                s3_client=s3_client,
+                callback_urlopen=callback_urlopen,
+            ):
+                sqs_client.delete_message(
+                    QueueUrl=queue_url,
+                    ReceiptHandle=message["ReceiptHandle"],
+                )
+                completed_from_report += 1
+                continue
+        except Exception:
+            sqs_client.change_message_visibility(
+                QueueUrl=queue_url,
+                ReceiptHandle=message["ReceiptHandle"],
+                VisibilityTimeout=_int_or_default(
+                    config.get("defer_visibility_timeout"),
+                    60,
+                ),
+            )
+            callback_pending_existing += 1
+            continue
         existing_job = _existing_job_for_request(batch_client, namespace, request)
         if existing_job is not None:
             status = _job_status(existing_job)
@@ -3186,7 +3277,13 @@ def controller_tick(
 
     total_started = started + rescued_orphan_failed
     return {
-        "status": "started" if total_started else "adopted" if adopted else "deferred",
+        "status": "started"
+        if total_started
+        else "completed"
+        if completed_from_report or completed_existing
+        else "adopted"
+        if adopted
+        else "deferred",
         **renew_result,
         **reconcile_result,
         **orphan_rescue_result,
@@ -3199,6 +3296,7 @@ def controller_tick(
         "prewarm_skipped": prewarm_skipped,
         "released_prewarm": released_prewarm_count,
         "completed_existing": completed_existing,
+        "completed_from_report": completed_from_report,
         "callback_repaired_existing": callback_repaired_existing,
         "callback_pending_existing": callback_pending_existing,
         "inflight": len(state.get("inflight", [])),

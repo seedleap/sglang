@@ -1572,6 +1572,67 @@ def test_controller_tick_completes_existing_job_when_status_lags_but_pod_succeed
     assert state["inflight"] == []
 
 
+def test_controller_tick_deletes_visible_message_when_final_report_already_exists():
+    config = _backend_config()
+    request = _request()
+    request["output"]["report_s3_uri"] = "s3://bucket/t2i/reports/sglang_video_report.json"
+    report = {
+        "summary": {
+            "video_status": "succeeded",
+            "video_expected_count": 1,
+            "video_succeeded_count": 1,
+            "video_failed_count": 0,
+            "video_running_count": 0,
+        },
+        "counters": {"total": 1, "succeeded": 1, "failed": 0, "running": 0},
+        "results": [
+            {
+                "case_id": "img001-action-00-traj001",
+                "status": "succeeded",
+                "video_uri": "s3://bucket/t2i/videos/img001/00_traj001.mp4",
+            }
+        ],
+    }
+    sent = {}
+
+    class FakeResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    def fake_urlopen(http_request, timeout):
+        sent["url"] = http_request.full_url
+        sent["body"] = json.loads(http_request.data.decode("utf-8"))
+        return FakeResponse()
+
+    sqs = FakeSQS(request)
+    batch = FakeBatchV1()
+    state = {"inflight": []}
+
+    result = controller_tick(
+        sqs_client=sqs,
+        queue_url="https://sqs.us-west-2.amazonaws.com/123/video",
+        core_client=FakeCoreV1([], [_node("b300-a", config["backends"][0]["node_selector"])]),
+        batch_client=batch,
+        eks_client=FakeEks(),
+        config=config,
+        state=state,
+        now=1000.0,
+        s3_client=FakeS3({("bucket", "t2i/reports/sglang_video_report.json"): report}),
+        callback_urlopen=fake_urlopen,
+    )
+
+    assert result["completed_from_report"] == 1
+    assert result["started"] == 0
+    assert batch.created == []
+    assert sqs.deleted[0]["ReceiptHandle"] == "receipt-1"
+    assert sent["body"]["status"] == "succeeded"
+
+
 def test_controller_tick_rescues_orphan_failed_job_when_sqs_message_is_not_visible():
     config = _backend_config()
     request = _request()
@@ -2715,6 +2776,84 @@ def test_reconcile_completes_inflight_when_job_status_lags_but_pod_succeeded():
     assert sqs.deleted[0]["ReceiptHandle"] == "receipt-1"
     assert batch.created == []
     assert batch.deleted == []
+    assert state["inflight"] == []
+
+
+def test_reconcile_deletes_inflight_job_when_final_report_already_exists():
+    config = _backend_config()
+    request = _request()
+    request["output"]["report_s3_uri"] = "s3://bucket/t2i/reports/sglang_video_report.json"
+    report = {
+        "summary": {
+            "video_status": "succeeded",
+            "video_expected_count": 1,
+            "video_succeeded_count": 1,
+            "video_failed_count": 0,
+            "video_running_count": 0,
+        },
+        "counters": {"total": 1, "succeeded": 1, "failed": 0, "running": 0},
+        "results": [
+            {
+                "case_id": "img001-action-00-traj001",
+                "status": "succeeded",
+                "video_uri": "s3://bucket/t2i/videos/img001/00_traj001.mp4",
+            }
+        ],
+    }
+    sent = {}
+
+    class FakeResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    def fake_urlopen(http_request, timeout):
+        sent["url"] = http_request.full_url
+        sent["body"] = json.loads(http_request.data.decode("utf-8"))
+        return FakeResponse()
+
+    job_name = "sglang-video-report-already-done"
+    sqs = FakeSQS(request)
+    state = {
+        "inflight": [
+            {
+                "request": request,
+                "receipt_handle": "receipt-1",
+                "message_id": "message-1",
+                "job_name": job_name,
+                "backend": "b300-capacity-block",
+                "attempts": 1,
+                "started_at": 1000.0,
+                "last_renewed_at": 1000.0,
+                "requested_gpus": 8,
+            }
+        ]
+    }
+    batch = FakeBatchV1()
+    batch.jobs[job_name] = {"status": {"active": 1}}
+
+    result = reconcile_inflight_jobs(
+        sqs_client=sqs,
+        queue_url="https://sqs.us-west-2.amazonaws.com/123/video",
+        core_client=FakeCoreV1([_job_pending_pod(job_name, "b300-capacity-block")], []),
+        batch_client=batch,
+        eks_client=FakeEks(),
+        config=config,
+        state=state,
+        now=1300.0,
+        s3_client=FakeS3({("bucket", "t2i/reports/sglang_video_report.json"): report}),
+        callback_urlopen=fake_urlopen,
+    )
+
+    assert result["completed"] == 1
+    assert result["callback_repaired"] == 1
+    assert batch.deleted[0]["name"] == job_name
+    assert sqs.deleted[0]["ReceiptHandle"] == "receipt-1"
+    assert sent["body"]["status"] == "succeeded"
     assert state["inflight"] == []
 
 
