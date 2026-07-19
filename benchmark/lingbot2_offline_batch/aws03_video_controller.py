@@ -523,6 +523,58 @@ def _consume_fallback_prewarm(
     item["requested_jobs"] = remaining_jobs
 
 
+def _consume_any_fallback_prewarm(
+    state: dict[str, Any],
+    backend_names: set[str],
+    *,
+    requested_gpus: int,
+) -> set[str]:
+    prewarm = _fallback_prewarm_state(state)
+    for backend_name in sorted(backend_names):
+        item = prewarm.get(backend_name)
+        if not isinstance(item, dict):
+            continue
+        _consume_fallback_prewarm(
+            state,
+            backend_name,
+            requested_gpus=requested_gpus,
+        )
+        return {backend_name}
+    return set()
+
+
+def _release_unused_fallback_prewarm(
+    config: dict[str, Any],
+    state: dict[str, Any],
+    pods: list[dict[str, Any]],
+) -> set[str]:
+    fallback_names = _fallback_backend_names(config)
+    if not fallback_names:
+        return set()
+    active_backend_names = {
+        str(item.get("backend") or "")
+        for item in state.get("inflight", [])
+        if str(item.get("backend") or "") in fallback_names
+    }
+    for pod in pods:
+        metadata = _metadata(pod)
+        if metadata.get("deletionTimestamp"):
+            continue
+        if _pod_phase(pod) in {"Succeeded", "Failed"}:
+            continue
+        backend_name = str(_labels(pod).get("sglang.seedleap.io/backend") or "")
+        if backend_name in fallback_names:
+            active_backend_names.add(backend_name)
+
+    prewarm = _fallback_prewarm_state(state)
+    released: set[str] = set()
+    for backend_name in list(prewarm):
+        if backend_name in fallback_names and backend_name not in active_backend_names:
+            prewarm.pop(backend_name, None)
+            released.add(backend_name)
+    return released
+
+
 def _backend_active_gpus(
     pods: list[dict[str, Any]],
     state: dict[str, Any],
@@ -2159,7 +2211,24 @@ def controller_tick(
     )
     messages = response.get("Messages", [])
     if not messages:
-        return {"status": "idle", **renew_result, **reconcile_result, "started": 0, "deferred": 0}
+        pods = _list_capacity_pods(core_client, config)
+        released_prewarm = _release_unused_fallback_prewarm(config, state, pods)
+        if released_prewarm:
+            _prime_fallback_scale_down(
+                config,
+                state,
+                released_prewarm,
+                now=now,
+            )
+            _scale_fallback_nodegroups(eks_client, config, state, pods=pods, now=now)
+        return {
+            "status": "idle",
+            **renew_result,
+            **reconcile_result,
+            "started": 0,
+            "deferred": 0,
+            "released_prewarm": len(released_prewarm),
+        }
 
     nodes = _list_nodes(core_client)
     pods = _list_capacity_pods(core_client, config)
@@ -2286,6 +2355,19 @@ def controller_tick(
                 backend_name,
                 requested_gpus=requested_gpus,
             )
+        elif backend_name in _b300_backend_names(config):
+            released_prewarm = _consume_any_fallback_prewarm(
+                state,
+                _fallback_backend_names(config),
+                requested_gpus=requested_gpus,
+            )
+            if released_prewarm:
+                _prime_fallback_scale_down(
+                    config,
+                    state,
+                    released_prewarm,
+                    now=now,
+                )
         _scale_fallback_nodegroups(eks_client, config, state, pods=pods, now=now)
         started += 1
 

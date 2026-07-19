@@ -1049,6 +1049,39 @@ def test_controller_tick_idle_still_scales_down_empty_fallback_nodegroup():
     assert eks.updates[-1]["scalingConfig"]["desiredSize"] == 0
 
 
+def test_controller_tick_idle_releases_unused_fallback_prewarm():
+    config = {**_backend_config(), "fallback_scale_down_grace_seconds": 60}
+    eks = FakeEksWithDesired(desired_size=1)
+    state = {
+        "inflight": [],
+        "fallback_prewarm": {
+            "h100-spot": {
+                "requested_gpus": 8,
+                "requested_jobs": 1,
+                "started_at": 1000.0,
+                "updated_at": 1000.0,
+            }
+        },
+    }
+
+    result = controller_tick(
+        sqs_client=FakeSQS([]),
+        queue_url="https://sqs.us-west-2.amazonaws.com/123/video",
+        core_client=FakeCoreV1([], []),
+        batch_client=FakeBatchV1(),
+        eks_client=eks,
+        config=config,
+        state=state,
+        now=1100.0,
+    )
+
+    assert result["status"] == "idle"
+    assert result["released_prewarm"] == 1
+    assert state["fallback_prewarm"] == {}
+    assert eks.updates[-1]["nodegroupName"] == "sglang-h100-spot"
+    assert eks.updates[-1]["scalingConfig"]["desiredSize"] == 0
+
+
 def test_scale_fallback_nodegroups_ignores_resource_in_use_update_conflict():
     config = _backend_config()
     eks = FakeEksResourceInUse(desired_size=0)
@@ -1141,6 +1174,44 @@ def test_controller_tick_starts_multiple_messages_up_to_fallback_job_cap_and_sca
     assert sqs.visibility_changes[-1]["VisibilityTimeout"] > 0
     assert eks.updates[-1]["scalingConfig"]["desiredSize"] == 2
     assert len(state["inflight"]) == 2
+
+
+def test_controller_tick_b300_start_consumes_fallback_prewarm():
+    config = _backend_config()
+    b300 = _node("b300-a", config["backends"][0]["node_selector"])
+    batch = FakeBatchV1()
+    sqs = FakeSQS(_request())
+    eks = FakeEksWithDesired(desired_size=1)
+    state = {
+        "inflight": [],
+        "fallback_prewarm": {
+            "h100-spot": {
+                "requested_gpus": 8,
+                "requested_jobs": 1,
+                "started_at": 1000.0,
+                "updated_at": 1000.0,
+            }
+        },
+    }
+
+    result = controller_tick(
+        sqs_client=sqs,
+        queue_url="https://sqs.us-west-2.amazonaws.com/123/video",
+        core_client=FakeCoreV1([], [b300]),
+        batch_client=batch,
+        eks_client=eks,
+        config=config,
+        state=state,
+        now=1100.0,
+    )
+
+    assert result["started"] == 1
+    assert batch.created[0]["body"]["metadata"]["labels"]["sglang.seedleap.io/backend"] == (
+        "b300-capacity-block"
+    )
+    assert state["fallback_prewarm"] == {}
+    assert eks.updates[-1]["nodegroupName"] == "sglang-h100-spot"
+    assert eks.updates[-1]["scalingConfig"]["desiredSize"] == 0
 
 
 def test_controller_tick_prewarms_fallback_without_creating_pending_job_when_no_spot_node_ready():
