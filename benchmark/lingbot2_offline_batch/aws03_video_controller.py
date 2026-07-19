@@ -290,6 +290,35 @@ def _backend_group_active_jobs(
     return len(_backend_job_keys(pods, state, backend_names))
 
 
+def _active_job_caps_exceeded(
+    config: dict[str, Any],
+    pods: list[dict[str, Any]],
+    state: dict[str, Any],
+    backend_name: str,
+) -> bool:
+    b300_names = _b300_backend_names(config)
+    fallback_names = _fallback_backend_names(config)
+    max_active_jobs = _int_or_default(config.get("max_active_jobs"), 7)
+    if max_active_jobs > 0:
+        active_jobs = _backend_group_active_jobs(pods, state, b300_names | fallback_names)
+        if active_jobs > max_active_jobs:
+            return True
+
+    if backend_name in b300_names:
+        b300_max_jobs = _int_or_default(config.get("b300_max_active_jobs"), 5)
+        return (
+            b300_max_jobs > 0
+            and _backend_group_active_jobs(pods, state, b300_names) > b300_max_jobs
+        )
+    if backend_name in fallback_names:
+        fallback_max_jobs = _int_or_default(config.get("fallback_max_active_jobs"), 2)
+        return (
+            fallback_max_jobs > 0
+            and _backend_group_active_jobs(pods, state, fallback_names) > fallback_max_jobs
+        )
+    return False
+
+
 def _fallback_backend_names(config: dict[str, Any]) -> set[str]:
     backends = config.get("backends") if isinstance(config.get("backends"), list) else []
     return {
@@ -1489,6 +1518,33 @@ def reconcile_inflight_jobs(
             pending_pods = _pending_pods_for_job(pods, str(item.get("job_name") or ""))
             if pending_pods:
                 pending += 1
+                if _active_job_caps_exceeded(
+                    config,
+                    pods,
+                    {"inflight": all_inflight},
+                    str(item.get("backend") or ""),
+                ):
+                    try:
+                        batch_client.delete_namespaced_job(
+                            name=old_job_name,
+                            namespace=namespace,
+                            propagation_policy="Background",
+                        )
+                        deleted_job_names.add(old_job_name)
+                    except Exception as error:
+                        if not _not_found(error):
+                            raise
+                    sqs_client.change_message_visibility(
+                        QueueUrl=queue_url,
+                        ReceiptHandle=item["receipt_handle"],
+                        VisibilityTimeout=_int_or_default(
+                            config.get("defer_visibility_timeout"),
+                            60,
+                        ),
+                    )
+                    released += 1
+                    continue
+
                 pending_grace = _int_or_default(config.get("pending_job_grace_seconds"), 900)
                 started_at = float(item.get("started_at", now))
                 first_pending_at = float(item.get("pending_job_seen_at", now))

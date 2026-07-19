@@ -1521,6 +1521,60 @@ def test_reconcile_recreates_unschedulable_b300_job_on_fallback_after_grace_peri
     assert "pending_job_seen_at" not in state["inflight"][0]
 
 
+def test_reconcile_releases_pending_fallback_job_when_active_job_caps_are_exceeded():
+    config = {**_backend_config(), "pending_job_grace_seconds": 180}
+    batch = FakeBatchV1()
+    batch.jobs["sglang-video-overflow"] = {"status": {"active": 1}}
+    sqs = FakeSQS(_request())
+    pods = [_job_pending_pod("sglang-video-overflow", "h100-spot")]
+    pods.extend(
+        _job_pending_pod(f"sglang-video-b300-{index}", "b300-capacity-block")
+        for index in range(5)
+    )
+    pods.extend(
+        _job_pending_pod(f"sglang-video-h100-{index}", "h100-spot")
+        for index in range(2)
+    )
+    state = {
+        "inflight": [
+            {
+                "request": _request(),
+                "receipt_handle": "receipt-1",
+                "message_id": "message-1",
+                "job_name": "sglang-video-overflow",
+                "backend": "h100-spot",
+                "attempts": 1,
+                "started_at": 1000.0,
+                "last_renewed_at": 1000.0,
+                "requested_gpus": 8,
+            }
+        ]
+    }
+
+    result = reconcile_inflight_jobs(
+        sqs_client=sqs,
+        queue_url="https://sqs.us-west-2.amazonaws.com/123/video",
+        core_client=FakeCoreV1(pods, []),
+        batch_client=batch,
+        eks_client=FakeEks(),
+        config=config,
+        state=state,
+        now=1100.0,
+    )
+
+    assert result["released"] == 1
+    assert result["restarted"] == 0
+    assert batch.deleted[0]["name"] == "sglang-video-overflow"
+    assert sqs.visibility_changes == [
+        {
+            "QueueUrl": "https://sqs.us-west-2.amazonaws.com/123/video",
+            "ReceiptHandle": "receipt-1",
+            "VisibilityTimeout": 60,
+        }
+    ]
+    assert state["inflight"] == []
+
+
 def test_reconcile_retargets_pending_fallback_job_to_b300_and_cancels_fallback_scale_up():
     config = {
         **_backend_config(),
