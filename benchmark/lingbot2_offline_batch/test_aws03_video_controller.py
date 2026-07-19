@@ -1310,6 +1310,56 @@ def test_reconcile_recreates_failed_h100_job_under_same_message_receipt():
     assert state["inflight"][0]["job_name"].startswith("sglang-video-")
 
 
+def test_reconcile_releases_failed_fallback_job_when_no_backend_is_available():
+    config = {**_backend_config(), "fallback_scale_down_grace_seconds": 60}
+    batch = FakeBatchV1()
+    batch.jobs["sglang-video-old"] = {
+        "status": {"conditions": [{"type": "Failed", "status": "True"}]}
+    }
+    sqs = FakeSQS(_request())
+    eks = FakeEksWithDesired(desired_size=1)
+    state = {
+        "inflight": [
+            {
+                "request": _request(),
+                "receipt_handle": "receipt-1",
+                "message_id": "message-1",
+                "job_name": "sglang-video-old",
+                "backend": "h100-spot",
+                "attempts": 1,
+                "started_at": 1000.0,
+                "last_renewed_at": 1000.0,
+                "requested_gpus": 8,
+            }
+        ]
+    }
+
+    result = reconcile_inflight_jobs(
+        sqs_client=sqs,
+        queue_url="https://sqs.us-west-2.amazonaws.com/123/video",
+        core_client=FakeCoreV1([], []),
+        batch_client=batch,
+        eks_client=eks,
+        config=config,
+        state=state,
+        now=1100.0,
+    )
+
+    assert result["released"] == 1
+    assert result["restarted"] == 0
+    assert batch.deleted[0]["name"] == "sglang-video-old"
+    assert sqs.visibility_changes == [
+        {
+            "QueueUrl": "https://sqs.us-west-2.amazonaws.com/123/video",
+            "ReceiptHandle": "receipt-1",
+            "VisibilityTimeout": 60,
+        }
+    ]
+    assert state["inflight"] == []
+    assert eks.updates[-1]["nodegroupName"] == "sglang-h100-spot"
+    assert eks.updates[-1]["scalingConfig"]["desiredSize"] == 0
+
+
 def test_reconcile_keeps_inflight_job_when_failed_count_is_not_terminal():
     config = _backend_config()
     batch = FakeBatchV1()

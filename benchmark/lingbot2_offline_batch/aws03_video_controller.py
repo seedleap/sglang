@@ -1799,6 +1799,7 @@ def reconcile_inflight_jobs(
     all_inflight = list(state.get("inflight", []))
     deleted_job_names: set[str] = set()
     fallback_backends_retargeted_to_b300: set[str] = set()
+    fallback_backends_released: set[str] = set()
 
     for item in all_inflight:
         old_job_name = str(item.get("job_name") or "")
@@ -1855,7 +1856,16 @@ def reconcile_inflight_jobs(
                 state={"inflight": [candidate for candidate in all_inflight if candidate is not item]},
             )
             if backend is None:
-                remaining.append(item)
+                sqs_client.change_message_visibility(
+                    QueueUrl=queue_url,
+                    ReceiptHandle=item["receipt_handle"],
+                    VisibilityTimeout=_int_or_default(
+                        config.get("defer_visibility_timeout"),
+                        60,
+                    ),
+                )
+                if old_backend_name in _fallback_backend_names(config):
+                    fallback_backends_released.add(old_backend_name)
                 released += 1
                 continue
             next_attempt = attempts + 1
@@ -1909,7 +1919,16 @@ def reconcile_inflight_jobs(
                 state={"inflight": [candidate for candidate in all_inflight if candidate is not item]},
             )
             if backend is None:
-                remaining.append(item)
+                sqs_client.change_message_visibility(
+                    QueueUrl=queue_url,
+                    ReceiptHandle=item["receipt_handle"],
+                    VisibilityTimeout=_int_or_default(
+                        config.get("defer_visibility_timeout"),
+                        60,
+                    ),
+                )
+                if old_backend_name in _fallback_backend_names(config):
+                    fallback_backends_released.add(old_backend_name)
                 released += 1
                 continue
             next_attempt = attempts + 1
@@ -2001,6 +2020,28 @@ def reconcile_inflight_jobs(
                     ),
                 )
                 if backend is None:
+                    if old_backend_name in _fallback_backend_names(config):
+                        try:
+                            batch_client.delete_namespaced_job(
+                                name=old_job_name,
+                                namespace=namespace,
+                                propagation_policy="Background",
+                            )
+                            deleted_job_names.add(old_job_name)
+                        except Exception as error:
+                            if not _not_found(error):
+                                raise
+                        sqs_client.change_message_visibility(
+                            QueueUrl=queue_url,
+                            ReceiptHandle=item["receipt_handle"],
+                            VisibilityTimeout=_int_or_default(
+                                config.get("defer_visibility_timeout"),
+                                60,
+                            ),
+                        )
+                        fallback_backends_released.add(old_backend_name)
+                        released += 1
+                        continue
                     remaining.append(item)
                     released += 1
                     continue
@@ -2047,7 +2088,7 @@ def reconcile_inflight_jobs(
     _prime_fallback_scale_down(
         config,
         state,
-        fallback_backends_retargeted_to_b300,
+        fallback_backends_retargeted_to_b300 | fallback_backends_released,
         now=now,
     )
     _scale_fallback_nodegroups(
