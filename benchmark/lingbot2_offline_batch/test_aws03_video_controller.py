@@ -3,6 +3,7 @@ import io
 
 from aws03_video_controller import (
     _env_config,
+    _job_succeeded,
     _scale_fallback_nodegroups,
     active_gpu_requests,
     backend_free_gpus,
@@ -312,6 +313,7 @@ def test_env_config_reads_placement_profiles_and_job_ttl(monkeypatch):
     assert config["fallback_max_active_gpus"] == "160"
     assert config["fallback_prewarm_ttl_seconds"] == "600"
     assert config["fallback_inflight_without_pod_grace_seconds"] == "300"
+    assert config["inflight_without_pod_grace_seconds"] == "300"
     assert config["fallback_nodegroup_not_active_cooldown_seconds"] == "120"
     assert config["fallback_capacity_cooldown_seconds"] == "600"
     assert config["fallback_hard_failure_cooldown_seconds"] == "3600"
@@ -1453,6 +1455,66 @@ def test_controller_tick_rescues_visible_failed_existing_job_after_state_loss():
     assert state["inflight"][0]["receipt_handle"] == "receipt-1"
 
 
+def test_job_succeeded_does_not_treat_suspended_indexed_partial_success_as_complete():
+    status = {
+        "succeeded": 18,
+        "failed": 12,
+        "completedIndexes": "0-7,9-18",
+        "failedIndexes": "8",
+        "conditions": [{"type": "Suspended", "status": "True"}],
+    }
+
+    assert not _job_succeeded(status)
+
+
+def test_controller_tick_restarts_suspended_existing_job_instead_of_adopting_or_completing():
+    config = _backend_config()
+    request = _request()
+    existing_job = render_job_manifest(
+        request,
+        {
+            **config,
+            "placement_profiles": [config["backends"][1]],
+            "selected_backend": "h100-spot",
+        },
+    )
+    existing_job["spec"]["suspend"] = True
+    existing_job["spec"]["completions"] = 20
+    existing_job["status"] = {
+        "succeeded": 18,
+        "failed": 12,
+        "completedIndexes": "0-7,9-18",
+        "failedIndexes": "8",
+        "conditions": [{"type": "Suspended", "status": "True"}],
+    }
+    batch = FakeBatchV1()
+    batch.jobs[existing_job["metadata"]["name"]] = existing_job
+    sqs = FakeSQS(request)
+    eks = FakeEks()
+    b300 = _node("b300-a", config["backends"][0]["node_selector"])
+    state = {"inflight": []}
+
+    result = controller_tick(
+        sqs_client=sqs,
+        queue_url="https://sqs.us-west-2.amazonaws.com/123/video",
+        core_client=FakeCoreV1([], [b300]),
+        batch_client=batch,
+        eks_client=eks,
+        config=config,
+        state=state,
+        now=1000.0,
+    )
+
+    assert result["restarted_existing_inactive"] == 1
+    assert result["completed_existing"] == 0
+    assert result["adopted"] == 0
+    assert batch.deleted[0]["name"] == existing_job["metadata"]["name"]
+    assert len(batch.created) == 1
+    assert batch.created[0]["body"]["metadata"]["name"].endswith("-r2")
+    assert state["inflight"][0]["attempts"] == 2
+    assert state["inflight"][0]["receipt_handle"] == "receipt-1"
+
+
 def test_controller_tick_rescues_orphan_failed_job_when_sqs_message_is_not_visible():
     config = _backend_config()
     request = _request()
@@ -2504,6 +2566,103 @@ def test_reconcile_recreates_missing_inflight_job_after_grace_period():
     assert state["inflight"][0]["attempts"] == 2
     assert state["inflight"][0]["job_name"].startswith("sglang-video-")
     assert "missing_job_seen_at" not in state["inflight"][0]
+
+
+def test_reconcile_restarts_stale_inflight_job_with_no_live_pod():
+    config = {**_backend_config(), "inflight_without_pod_grace_seconds": 300}
+    b300 = _node("b300-a", config["backends"][0]["node_selector"])
+    sqs = FakeSQS(_request())
+    state = {
+        "inflight": [
+            {
+                "request": _request(),
+                "receipt_handle": "receipt-1",
+                "message_id": "message-1",
+                "job_name": "sglang-video-orphan-active",
+                "backend": "b300-capacity-block",
+                "attempts": 1,
+                "started_at": 1000.0,
+                "last_renewed_at": 1000.0,
+                "inactive_job_seen_at": 1000.0,
+                "requested_gpus": 8,
+            }
+        ]
+    }
+    batch = FakeBatchV1()
+    batch.jobs["sglang-video-orphan-active"] = {"status": {"active": 0}}
+
+    result = reconcile_inflight_jobs(
+        sqs_client=sqs,
+        queue_url="https://sqs.us-west-2.amazonaws.com/123/video",
+        core_client=FakeCoreV1([], [b300]),
+        batch_client=batch,
+        eks_client=FakeEks(),
+        config=config,
+        state=state,
+        now=1400.0,
+    )
+
+    assert result["inactive"] == 1
+    assert result["restarted"] == 1
+    assert result["failed"] == 0
+    assert sqs.deleted == []
+    assert batch.deleted[0]["name"] == "sglang-video-orphan-active"
+    assert len(batch.created) == 1
+    assert state["inflight"][0]["attempts"] == 2
+    assert state["inflight"][0]["job_name"].startswith("sglang-video-")
+    assert "inactive_job_seen_at" not in state["inflight"][0]
+
+
+def test_controller_tick_drops_stale_inflight_capacity_before_deferring_visible_message():
+    config = {
+        **_backend_config(),
+        "b300_max_active_jobs": 5,
+        "max_job_attempts": 5,
+        "inflight_without_pod_grace_seconds": 300,
+    }
+    state = {
+        "inflight": [
+            {
+                "request": {**_request(), "generation_job_id": f"gen_stale_{index}"},
+                "receipt_handle": f"stale-receipt-{index}",
+                "message_id": f"stale-message-{index}",
+                "job_name": f"sglang-video-stale-{index}",
+                "backend": "b300-capacity-block",
+                "attempts": 5,
+                "started_at": 1000.0,
+                "last_renewed_at": 1000.0,
+                "inactive_job_seen_at": 1000.0,
+                "requested_gpus": 8,
+            }
+            for index in range(5)
+        ]
+    }
+    batch = FakeBatchV1()
+    for index in range(5):
+        batch.jobs[f"sglang-video-stale-{index}"] = {"status": {"active": 0}}
+    b300_nodes = [
+        _node(f"b300-{index}", config["backends"][0]["node_selector"])
+        for index in range(6)
+    ]
+
+    result = controller_tick(
+        sqs_client=FakeSQS(_request()),
+        queue_url="https://sqs.us-west-2.amazonaws.com/123/video",
+        core_client=FakeCoreV1([], b300_nodes),
+        batch_client=batch,
+        eks_client=FakeEks(),
+        config=config,
+        state=state,
+        now=1400.0,
+    )
+
+    assert result["inactive"] == 5
+    assert result["failed"] == 5
+    assert result["deferred"] == 0
+    assert result["started"] == 1
+    assert len(state["inflight"]) == 1
+    assert state["inflight"][0]["job_name"].startswith("sglang-video-gen-t2i-001")
+    assert len(batch.created) == 1
 
 
 def test_process_one_message_defers_without_deleting_when_gpu_cap_is_exceeded():

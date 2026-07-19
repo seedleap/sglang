@@ -79,12 +79,22 @@ def _condition_true(status: dict[str, Any], condition_type: str) -> bool:
     )
 
 
-def _job_succeeded(status: dict[str, Any]) -> bool:
-    return _int_or_default(status.get("succeeded"), 0) > 0 or _condition_true(status, "Complete")
-
-
 def _job_failed(status: dict[str, Any]) -> bool:
     return _condition_true(status, "Failed")
+
+
+def _job_suspended(status: dict[str, Any]) -> bool:
+    return _condition_true(status, "Suspended")
+
+
+def _job_succeeded(status: dict[str, Any]) -> bool:
+    if _job_failed(status) or _job_suspended(status):
+        return False
+    if _condition_true(status, "Complete") or _condition_true(status, "SuccessCriteriaMet"):
+        return True
+    if status.get("completedIndexes") or status.get("failedIndexes"):
+        return False
+    return _int_or_default(status.get("succeeded"), 0) > 0
 
 
 def _job_missing(status: dict[str, Any]) -> bool:
@@ -156,6 +166,20 @@ def _pending_pods_for_job(pods: list[dict[str, Any]], job_name: str) -> list[dic
             continue
         if _pod_phase(pod) == "Pending" and not _pod_node_name(pod):
             result.append(pod)
+    return result
+
+
+def _live_pods_for_job(pods: list[dict[str, Any]], job_name: str) -> list[dict[str, Any]]:
+    result = []
+    for pod in pods:
+        metadata = _metadata(pod)
+        if metadata.get("deletionTimestamp"):
+            continue
+        if _pod_job_name(pod) != job_name:
+            continue
+        if _pod_phase(pod) in TERMINAL_POD_PHASES:
+            continue
+        result.append(pod)
     return result
 
 
@@ -1582,6 +1606,43 @@ def _message_visibility_seconds(config: dict[str, Any]) -> int:
     return _int_or_default(config.get("message_visibility_seconds"), 900)
 
 
+def _inflight_without_pod_grace_seconds(config: dict[str, Any]) -> int:
+    return _int_or_default(
+        config.get(
+            "inflight_without_pod_grace_seconds",
+            config.get("fallback_inflight_without_pod_grace_seconds"),
+        ),
+        300,
+    )
+
+
+def _inactive_job_ready_for_retry(
+    item: dict[str, Any],
+    status: dict[str, Any],
+    pods: list[dict[str, Any]],
+    *,
+    now: float,
+    config: dict[str, Any],
+) -> bool:
+    job_name = str(item.get("job_name") or "")
+    if not job_name:
+        return False
+    if _job_missing(status) or _job_failed(status) or _job_succeeded(status):
+        return False
+    if _live_pods_for_job(pods, job_name):
+        item.pop("inactive_job_seen_at", None)
+        return False
+    if _job_suspended(status):
+        item.setdefault("inactive_job_seen_at", now)
+        return True
+
+    first_inactive_at = float(item.get("inactive_job_seen_at", now))
+    if "inactive_job_seen_at" not in item:
+        item["inactive_job_seen_at"] = now
+        first_inactive_at = now
+    return now - first_inactive_at >= _inflight_without_pod_grace_seconds(config)
+
+
 def _inflight_receipt_handle(item: dict[str, Any]) -> str:
     return str(item.get("receipt_handle") or "").strip()
 
@@ -2300,7 +2361,7 @@ def reconcile_inflight_jobs(
     max_attempts = _int_or_default(config.get("max_job_attempts"), 5)
     nodes = _list_nodes(core_client)
     pods = _list_capacity_pods(core_client, config)
-    completed = restarted = released = failed = missing = pending = 0
+    completed = restarted = released = failed = missing = pending = inactive = 0
     released_prewarm = 0
     callback_repaired = callback_pending = 0
     remaining = []
@@ -2404,6 +2465,75 @@ def reconcile_inflight_jobs(
                 fallback_backends_retargeted_to_b300.add(old_backend_name)
             item.pop("missing_job_seen_at", None)
             item.pop("pending_job_seen_at", None)
+            item.pop("inactive_job_seen_at", None)
+            restarted += 1
+
+        if _inactive_job_ready_for_retry(item, status, pods, now=now, config=config):
+            inactive += 1
+            attempts = _int_or_default(item.get("attempts"), 1)
+            try:
+                batch_client.delete_namespaced_job(
+                    name=old_job_name,
+                    namespace=namespace,
+                    propagation_policy="Background",
+                )
+                deleted_job_names.add(old_job_name)
+            except Exception as error:
+                if not _not_found(error):
+                    raise
+            if attempts >= max_attempts:
+                _change_inflight_visibility(sqs_client, queue_url, item, 0)
+                if old_backend_name in _fallback_backend_names(config):
+                    fallback_backends_released.add(old_backend_name)
+                failed += 1
+                continue
+
+            requested_gpus = _int_or_default(item.get("requested_gpus"), 8)
+            excluded_backend_names = (
+                {old_backend_name}
+                if old_backend_name in _fallback_backend_names(config)
+                else set()
+            )
+            backend = choose_backend(
+                config,
+                nodes,
+                _pods_except_job(pods, old_job_name),
+                requested_gpus=requested_gpus,
+                state={"inflight": [candidate for candidate in all_inflight if candidate is not item]},
+                excluded_backend_names=excluded_backend_names,
+            )
+            if backend is None:
+                _change_inflight_visibility(
+                    sqs_client,
+                    queue_url,
+                    item,
+                    _int_or_default(config.get("defer_visibility_timeout"), 60),
+                )
+                if old_backend_name in _fallback_backend_names(config):
+                    fallback_backends_released.add(old_backend_name)
+                released += 1
+                continue
+            next_attempt = attempts + 1
+            next_backend_name = _backend_name(backend)
+            manifest = _render_for_backend(item["request"], config, backend, attempt=next_attempt)
+            batch_client.create_namespaced_job(namespace=namespace, body=manifest)
+            item = {
+                **item,
+                "job_name": manifest["metadata"]["name"],
+                "backend": next_backend_name,
+                "attempts": next_attempt,
+                "started_at": now,
+                "last_renewed_at": now,
+                "requested_gpus": requested_gpus,
+            }
+            if (
+                old_backend_name in _fallback_backend_names(config)
+                and next_backend_name in _b300_backend_names(config)
+            ):
+                fallback_backends_retargeted_to_b300.add(old_backend_name)
+            item.pop("missing_job_seen_at", None)
+            item.pop("pending_job_seen_at", None)
+            item.pop("inactive_job_seen_at", None)
             restarted += 1
 
         if _job_failed(status):
@@ -2462,6 +2592,7 @@ def reconcile_inflight_jobs(
                 fallback_backends_retargeted_to_b300.add(old_backend_name)
             item.pop("missing_job_seen_at", None)
             item.pop("pending_job_seen_at", None)
+            item.pop("inactive_job_seen_at", None)
             restarted += 1
 
         if not _job_missing(status) and not _job_failed(status):
@@ -2585,6 +2716,7 @@ def reconcile_inflight_jobs(
                     fallback_backends_retargeted_to_b300.add(old_backend_name)
                 item.pop("missing_job_seen_at", None)
                 item.pop("pending_job_seen_at", None)
+                item.pop("inactive_job_seen_at", None)
                 restarted += 1
 
         remaining.append(item)
@@ -2616,6 +2748,7 @@ def reconcile_inflight_jobs(
         "failed": failed,
         "missing": missing,
         "pending": pending,
+        "inactive": inactive,
         "callback_repaired": callback_repaired,
         "callback_pending": callback_pending,
         "released_prewarm": released_prewarm,
@@ -2703,7 +2836,7 @@ def controller_tick(
     nodes = _list_nodes(core_client)
     pods = _list_capacity_pods(core_client, config)
     started = deferred = adopted = completed_existing = 0
-    rescued_existing_failed = 0
+    rescued_existing_failed = restarted_existing_inactive = 0
     prewarmed = prewarm_skipped = 0
     released_prewarm_count = _int_or_default(reconcile_result.get("released_prewarm"), 0)
     callback_repaired_existing = callback_pending_existing = 0
@@ -2743,22 +2876,124 @@ def controller_tick(
                 metadata = _metadata(existing_job)
                 backend_name = str(labels.get("sglang.seedleap.io/backend") or "")
                 job_name = str(metadata.get("name") or "")
-                if job_name and not any(
-                    item.get("job_name") == job_name for item in state.get("inflight", [])
+                existing_item = {
+                    "request": request,
+                    "receipt_handle": message["ReceiptHandle"],
+                    "message_id": message.get("MessageId", ""),
+                    "job_name": job_name,
+                    "backend": backend_name,
+                    "attempts": _attempt_from_job_name(job_name),
+                    "started_at": now,
+                    "last_renewed_at": now,
+                    "requested_gpus": requested_gpus,
+                }
+                if _inactive_job_ready_for_retry(
+                    existing_item,
+                    status,
+                    pods,
+                    now=now,
+                    config=config,
                 ):
+                    attempts = _attempt_from_job_name(job_name)
+                    max_attempts = _int_or_default(config.get("max_job_attempts"), 5)
+                    if attempts >= max_attempts:
+                        sqs_client.change_message_visibility(
+                            QueueUrl=queue_url,
+                            ReceiptHandle=message["ReceiptHandle"],
+                            VisibilityTimeout=0,
+                        )
+                        deferred += 1
+                        continue
+
+                    excluded_backend_names = (
+                        {backend_name}
+                        if backend_name in _fallback_backend_names(config)
+                        else set()
+                    )
+                    backend = choose_backend(
+                        config,
+                        nodes,
+                        _pods_except_job(pods, job_name),
+                        requested_gpus=requested_gpus,
+                        state=state,
+                        excluded_backend_names=excluded_backend_names,
+                    )
+                    if backend is None:
+                        sqs_client.change_message_visibility(
+                            QueueUrl=queue_url,
+                            ReceiptHandle=message["ReceiptHandle"],
+                            VisibilityTimeout=_int_or_default(
+                                config.get("defer_visibility_timeout"),
+                                60,
+                            ),
+                        )
+                        deferred += 1
+                        continue
+
+                    if job_name:
+                        try:
+                            batch_client.delete_namespaced_job(
+                                name=job_name,
+                                namespace=namespace,
+                                propagation_policy="Background",
+                            )
+                        except Exception as error:
+                            if not _not_found(error):
+                                raise
+                    next_attempt = attempts + 1
+                    manifest = _render_for_backend(
+                        request,
+                        config,
+                        backend,
+                        attempt=next_attempt,
+                    )
+                    namespace = manifest["metadata"]["namespace"]
+                    batch_client.create_namespaced_job(namespace=namespace, body=manifest)
                     state["inflight"].append(
                         {
-                            "request": request,
-                            "receipt_handle": message["ReceiptHandle"],
-                            "message_id": message.get("MessageId", ""),
-                            "job_name": job_name,
-                            "backend": backend_name,
-                            "attempts": 1,
+                            **existing_item,
+                            "job_name": manifest["metadata"]["name"],
+                            "backend": _backend_name(backend),
+                            "attempts": next_attempt,
                             "started_at": now,
                             "last_renewed_at": now,
                             "requested_gpus": requested_gpus,
                         }
                     )
+                    next_backend_name = _backend_name(backend)
+                    if next_backend_name in _fallback_backend_names(config):
+                        _consume_fallback_prewarm(
+                            state,
+                            next_backend_name,
+                            requested_gpus=requested_gpus,
+                        )
+                    elif next_backend_name in _b300_backend_names(config):
+                        released_prewarm_backends = _consume_any_fallback_prewarm(
+                            state,
+                            _fallback_backend_names(config),
+                            requested_gpus=requested_gpus,
+                        )
+                        if released_prewarm_backends:
+                            released_prewarm_count += len(released_prewarm_backends)
+                            _prime_fallback_scale_down(
+                                config,
+                                state,
+                                released_prewarm_backends,
+                                now=now,
+                            )
+                    if (
+                        backend_name in _fallback_backend_names(config)
+                        and next_backend_name in _b300_backend_names(config)
+                    ):
+                        _prime_fallback_scale_down(config, state, {backend_name}, now=now)
+                    _scale_fallback_nodegroups(eks_client, config, state, pods=pods, now=now)
+                    restarted_existing_inactive += 1
+                    started += 1
+                    continue
+                if job_name and not any(
+                    item.get("job_name") == job_name for item in state.get("inflight", [])
+                ):
+                    state["inflight"].append(existing_item)
                 _scale_fallback_nodegroups(eks_client, config, state, pods=pods, now=now)
                 adopted += 1
                 continue
@@ -2945,6 +3180,7 @@ def controller_tick(
         "deferred": deferred,
         "adopted": adopted,
         "rescued_existing_failed": rescued_existing_failed,
+        "restarted_existing_inactive": restarted_existing_inactive,
         "prewarmed": prewarmed,
         "prewarm_skipped": prewarm_skipped,
         "released_prewarm": released_prewarm_count,
@@ -3006,6 +3242,10 @@ def _env_config() -> dict[str, Any]:
         "pending_job_grace_seconds": os.environ.get(
             "SGLANG_VIDEO_PENDING_JOB_GRACE_SECONDS",
             "900",
+        ),
+        "inflight_without_pod_grace_seconds": os.environ.get(
+            "SGLANG_VIDEO_INFLIGHT_WITHOUT_POD_GRACE_SECONDS",
+            os.environ.get("SGLANG_VIDEO_FALLBACK_INFLIGHT_WITHOUT_POD_GRACE_SECONDS", "300"),
         ),
         "orphan_failed_job_rescue_max_per_tick": os.environ.get(
             "SGLANG_VIDEO_ORPHAN_FAILED_JOB_RESCUE_MAX_PER_TICK",
