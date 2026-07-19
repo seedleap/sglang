@@ -263,6 +263,9 @@ def test_env_config_reads_placement_profiles_and_job_ttl(monkeypatch):
     assert config["fallback_max_active_jobs"] == "2"
     assert config["b300_max_active_gpus"] == "32"
     assert config["fallback_max_active_gpus"] == "160"
+    assert config["fallback_prewarm_ttl_seconds"] == "600"
+    assert config["fallback_capacity_cooldown_seconds"] == "600"
+    assert config["fallback_hard_failure_cooldown_seconds"] == "3600"
     assert config["gpu_per_pod"] == "8"
     assert config["job_parallelism"] == "1"
     assert config["placement_profiles"] == placement_profiles
@@ -360,6 +363,20 @@ class FakeEksWithDesired(FakeEks):
 
     def describe_nodegroup(self, **kwargs):
         return {"nodegroup": {"scalingConfig": {"desiredSize": self.desired_size}}}
+
+
+class FakeEksWithHealth(FakeEksWithDesired):
+    def __init__(self, desired_size: int, issues: list[dict]):
+        super().__init__(desired_size)
+        self.issues = issues
+
+    def describe_nodegroup(self, **kwargs):
+        return {
+            "nodegroup": {
+                "scalingConfig": {"desiredSize": self.desired_size},
+                "health": {"issues": self.issues},
+            }
+        }
 
 
 class FakeEksResourceInUse(FakeEksWithDesired):
@@ -576,12 +593,16 @@ def test_choose_backend_allows_fallback_pool_to_160_gpus():
         **_backend_config(),
         "fallback_max_active_gpus": 160,
     }
+    h100_nodes = [
+        _node(f"h100-{index}", config["backends"][1]["node_selector"])
+        for index in range(20)
+    ]
     state = {"inflight": [{"backend": "h100-spot", "requested_gpus": 152}]}
 
-    selected = choose_backend(config, [], [], requested_gpus=8, state=state)
+    selected = choose_backend(config, h100_nodes, [], requested_gpus=8, state=state)
     blocked = choose_backend(
         config,
-        [],
+        h100_nodes,
         [],
         requested_gpus=8,
         state={"inflight": [{"backend": "h100-spot", "requested_gpus": 160}]},
@@ -608,7 +629,8 @@ def test_choose_backend_treats_p5e_and_p5en_as_fallback_gpu_backends():
             ],
         }
 
-        selected = choose_backend(config, [], [], requested_gpus=8)
+        node = _node("fallback-a", config["backends"][0]["node_selector"])
+        selected = choose_backend(config, [node], [], requested_gpus=8)
 
         assert selected["node_selector"]["node.kubernetes.io/instance-type"] == instance_type
 
@@ -648,8 +670,13 @@ def test_choose_backend_spreads_fallback_messages_to_least_busy_backend():
             {"backend": "h100-spot", "requested_gpus": 8},
         ]
     }
+    nodes = [
+        _node("b200-a", config["backends"][0]["node_selector"]),
+        _node("h100-a", config["backends"][1]["node_selector"]),
+        _node("h200-a", config["backends"][2]["node_selector"]),
+    ]
 
-    selected = choose_backend(config, [], [], requested_gpus=8, state=state)
+    selected = choose_backend(config, nodes, [], requested_gpus=8, state=state)
 
     assert selected["name"] == "h200-p5e-spot"
 
@@ -663,7 +690,10 @@ def test_choose_backend_prefers_b300_until_five_jobs_then_uses_spot():
         "b300_max_active_gpus": 40,
         "fallback_max_active_gpus": 160,
     }
-    b300 = _node("b300-a", config["backends"][0]["node_selector"])
+    b300_nodes = [
+        _node(f"b300-{index}", config["backends"][0]["node_selector"])
+        for index in range(5)
+    ]
     h100 = _node("h100-a", config["backends"][1]["node_selector"])
     four_b300_jobs = {
         "inflight": [
@@ -688,14 +718,14 @@ def test_choose_backend_prefers_b300_until_five_jobs_then_uses_spot():
 
     selected_b300 = choose_backend(
         config,
-        [b300, h100],
+        [*b300_nodes, h100],
         [],
         requested_gpus=8,
         state=four_b300_jobs,
     )
     selected_spot = choose_backend(
         config,
-        [b300, h100],
+        [*b300_nodes, h100],
         [],
         requested_gpus=8,
         state=five_b300_jobs,
@@ -714,7 +744,10 @@ def test_choose_backend_limits_fallback_to_two_jobs_even_when_gpu_cap_is_higher(
         "b300_max_active_gpus": 40,
         "fallback_max_active_gpus": 160,
     }
-    h100 = _node("h100-a", config["backends"][1]["node_selector"])
+    h100_nodes = [
+        _node(f"h100-{index}", config["backends"][1]["node_selector"])
+        for index in range(2)
+    ]
     one_spot_job = {
         "inflight": [
             {
@@ -743,8 +776,8 @@ def test_choose_backend_limits_fallback_to_two_jobs_even_when_gpu_cap_is_higher(
         ]
     }
 
-    selected = choose_backend(config, [h100], [], requested_gpus=8, state=one_spot_job)
-    blocked = choose_backend(config, [h100], [], requested_gpus=8, state=two_spot_jobs)
+    selected = choose_backend(config, h100_nodes, [], requested_gpus=8, state=one_spot_job)
+    blocked = choose_backend(config, h100_nodes, [], requested_gpus=8, state=two_spot_jobs)
 
     assert selected["name"] == "h100-spot"
     assert blocked is None
@@ -926,6 +959,26 @@ def test_scale_fallback_nodegroups_counts_existing_backend_pods_after_restart():
     assert eks.updates[-1]["scalingConfig"]["desiredSize"] == 1
 
 
+def test_scale_fallback_nodegroups_counts_prewarmed_backend_capacity():
+    config = _backend_config()
+    eks = FakeEksWithDesired(desired_size=0)
+    state = {
+        "inflight": [],
+        "fallback_prewarm": {
+            "h100-spot": {
+                "requested_gpus": 8,
+                "started_at": 1000.0,
+                "updated_at": 1000.0,
+            }
+        },
+    }
+
+    _scale_fallback_nodegroups(eks, config, state, pods=[], now=1000.0)
+
+    assert eks.updates[-1]["nodegroupName"] == "sglang-h100-spot"
+    assert eks.updates[-1]["scalingConfig"]["desiredSize"] == 1
+
+
 def test_scale_fallback_nodegroups_skips_noop_desired_size_update():
     config = _backend_config()
     eks = FakeEksWithDesired(desired_size=0)
@@ -1045,7 +1098,9 @@ def test_controller_tick_starts_multiple_messages_up_to_fallback_job_cap_and_sca
     requests = [{**_request(), "generation_job_id": f"gen_t2i_{index}"} for index in range(5)]
     config = _backend_config()
     b300 = _node("b300-a", config["backends"][0]["node_selector"])
-    core = FakeCoreV1([_gpu_pod("busy", "b300-a", 8)], [b300])
+    h100_a = _node("h100-a", config["backends"][1]["node_selector"])
+    h100_b = _node("h100-b", config["backends"][1]["node_selector"])
+    core = FakeCoreV1([_gpu_pod("busy", "b300-a", 8)], [b300, h100_a, h100_b])
     batch = FakeBatchV1()
     sqs = FakeSQS(requests)
     eks = FakeEks()
@@ -1074,6 +1129,104 @@ def test_controller_tick_starts_multiple_messages_up_to_fallback_job_cap_and_sca
     assert sqs.visibility_changes[-1]["VisibilityTimeout"] > 0
     assert eks.updates[-1]["scalingConfig"]["desiredSize"] == 2
     assert len(state["inflight"]) == 2
+
+
+def test_controller_tick_prewarms_fallback_without_creating_pending_job_when_no_spot_node_ready():
+    config = _backend_config()
+    b300 = _node("b300-a", config["backends"][0]["node_selector"])
+    core = FakeCoreV1([_gpu_pod("busy", "b300-a", 8)], [b300])
+    batch = FakeBatchV1()
+    sqs = FakeSQS(_request())
+    eks = FakeEksWithDesired(desired_size=0)
+    state = {"inflight": []}
+
+    result = controller_tick(
+        sqs_client=sqs,
+        queue_url="https://sqs.us-west-2.amazonaws.com/123/video",
+        core_client=core,
+        batch_client=batch,
+        eks_client=eks,
+        config=config,
+        state=state,
+        now=1000.0,
+    )
+
+    assert result["started"] == 0
+    assert result["deferred"] == 1
+    assert result["prewarmed"] == 1
+    assert batch.created == []
+    assert state["fallback_prewarm"]["h100-spot"]["requested_gpus"] == 8
+    assert sqs.visibility_changes[-1]["ReceiptHandle"] == "receipt-1"
+    assert eks.updates[-1]["nodegroupName"] == "sglang-h100-spot"
+    assert eks.updates[-1]["scalingConfig"]["desiredSize"] == 1
+
+
+def test_controller_tick_does_not_overcommit_single_ready_fallback_node():
+    requests = [{**_request(), "generation_job_id": f"gen_t2i_{index}"} for index in range(3)]
+    config = _backend_config()
+    b300 = _node("b300-a", config["backends"][0]["node_selector"])
+    h100 = _node("h100-a", config["backends"][1]["node_selector"])
+    core = FakeCoreV1([_gpu_pod("busy", "b300-a", 8)], [b300, h100])
+    batch = FakeBatchV1()
+    sqs = FakeSQS(requests)
+    eks = FakeEksWithDesired(desired_size=1)
+    state = {"inflight": []}
+
+    result = controller_tick(
+        sqs_client=sqs,
+        queue_url="https://sqs.us-west-2.amazonaws.com/123/video",
+        core_client=core,
+        batch_client=batch,
+        eks_client=eks,
+        config={**config, "sqs_max_messages": 10},
+        state=state,
+        now=1000.0,
+    )
+
+    assert result["started"] == 1
+    assert result["deferred"] == 2
+    assert result["prewarmed"] == 1
+    assert len(batch.created) == 1
+    assert len(state["inflight"]) == 1
+    assert state["fallback_prewarm"]["h100-spot"]["requested_gpus"] == 8
+    assert eks.updates[-1]["nodegroupName"] == "sglang-h100-spot"
+    assert eks.updates[-1]["scalingConfig"]["desiredSize"] == 2
+
+
+def test_controller_tick_skips_unhealthy_fallback_prewarm_and_does_not_create_job():
+    config = _backend_config()
+    b300 = _node("b300-a", config["backends"][0]["node_selector"])
+    core = FakeCoreV1([_gpu_pod("busy", "b300-a", 8)], [b300])
+    batch = FakeBatchV1()
+    sqs = FakeSQS(_request())
+    eks = FakeEksWithHealth(
+        desired_size=0,
+        issues=[
+            {
+                "code": "InvalidFleetConfiguration",
+                "message": "p5e.48xlarge is not supported in your requested Availability Zone",
+            }
+        ],
+    )
+    state = {"inflight": []}
+
+    result = controller_tick(
+        sqs_client=sqs,
+        queue_url="https://sqs.us-west-2.amazonaws.com/123/video",
+        core_client=core,
+        batch_client=batch,
+        eks_client=eks,
+        config=config,
+        state=state,
+        now=1000.0,
+    )
+
+    assert result["started"] == 0
+    assert result["deferred"] == 1
+    assert result["prewarm_skipped"] == 1
+    assert batch.created == []
+    assert eks.updates == []
+    assert state["fallback_backend_cooldown"]["h100-spot"] > 1000.0
 
 
 def test_renew_inflight_messages_extends_visibility_without_deleting():

@@ -25,6 +25,19 @@ DEFAULT_CONTAINER_COMMAND = [
     "python3",
     "/opt/bench/run_t2i_video_batch.py",
 ]
+HARD_FALLBACK_NODEGROUP_ISSUE_TOKENS = {
+    "invalidfleetconfiguration",
+    "invalidlaunchtemplate",
+    "ec2launchtemplatenotfound",
+    "unsupported",
+    "not supported",
+}
+CAPACITY_FALLBACK_NODEGROUP_ISSUE_TOKENS = {
+    "unfulfillablecapacity",
+    "insufficientinstancecapacity",
+    "capacity is not available",
+    "spot capacity",
+}
 
 
 def _int_or_default(value: Any, default: int) -> int:
@@ -187,6 +200,20 @@ def backend_free_gpus(
             _node_allocatable_gpus(node) - _pod_gpu_requests_on_node(pods, _node_name(node)),
         )
     return total
+
+
+def _backend_effective_free_gpus(
+    nodes: list[dict[str, Any]],
+    pods: list[dict[str, Any]],
+    selector: dict[str, Any],
+    state: dict[str, Any],
+    backend_name: str,
+    gpu_per_pod: int,
+) -> int:
+    free_gpus = backend_free_gpus(nodes, pods, selector)
+    pod_gpus = _backend_gpu_requests(pods, backend_name)
+    inflight_gpus = _inflight_backend_gpus(state, backend_name, gpu_per_pod)
+    return max(0, free_gpus - max(0, inflight_gpus - pod_gpus))
 
 
 def _backend_name(value: dict[str, Any]) -> str:
@@ -364,6 +391,138 @@ def _fallback_inflight_gpus(
     )
 
 
+def _fallback_prewarm_state(state: dict[str, Any]) -> dict[str, Any]:
+    prewarm = state.setdefault("fallback_prewarm", {})
+    if not isinstance(prewarm, dict):
+        prewarm = {}
+        state["fallback_prewarm"] = prewarm
+    return prewarm
+
+
+def _fallback_backend_cooldown_state(state: dict[str, Any]) -> dict[str, Any]:
+    cooldown = state.setdefault("fallback_backend_cooldown", {})
+    if not isinstance(cooldown, dict):
+        cooldown = {}
+        state["fallback_backend_cooldown"] = cooldown
+    return cooldown
+
+
+def _cleanup_fallback_prewarm(
+    config: dict[str, Any],
+    state: dict[str, Any],
+    *,
+    now: float,
+) -> None:
+    ttl_seconds = _int_or_default(config.get("fallback_prewarm_ttl_seconds"), 600)
+    prewarm = _fallback_prewarm_state(state)
+    for backend_name, item in list(prewarm.items()):
+        if not isinstance(item, dict):
+            prewarm.pop(backend_name, None)
+            continue
+        updated_at = float(item.get("updated_at") or item.get("started_at") or now)
+        if ttl_seconds >= 0 and now - updated_at > ttl_seconds:
+            prewarm.pop(backend_name, None)
+
+
+def _cleanup_fallback_backend_cooldowns(state: dict[str, Any], *, now: float) -> None:
+    cooldown = _fallback_backend_cooldown_state(state)
+    for backend_name, until in list(cooldown.items()):
+        try:
+            if now >= float(until):
+                cooldown.pop(backend_name, None)
+        except (TypeError, ValueError):
+            cooldown.pop(backend_name, None)
+
+
+def _fallback_backend_in_cooldown(
+    state: dict[str, Any],
+    backend_name: str,
+    *,
+    now: float,
+) -> bool:
+    _cleanup_fallback_backend_cooldowns(state, now=now)
+    cooldown = _fallback_backend_cooldown_state(state)
+    try:
+        return now < float(cooldown.get(backend_name) or 0)
+    except (TypeError, ValueError):
+        cooldown.pop(backend_name, None)
+        return False
+
+
+def _fallback_prewarm_gpus(
+    state: dict[str, Any],
+    backend_names: set[str],
+    gpu_per_pod: int,
+) -> int:
+    total = 0
+    for backend_name, item in _fallback_prewarm_state(state).items():
+        if backend_name not in backend_names or not isinstance(item, dict):
+            continue
+        total += _int_or_default(item.get("requested_gpus"), gpu_per_pod)
+    return total
+
+
+def _backend_prewarm_gpus(
+    state: dict[str, Any],
+    backend_name: str,
+    gpu_per_pod: int,
+) -> int:
+    return _fallback_prewarm_gpus(state, {backend_name}, gpu_per_pod)
+
+
+def _fallback_prewarm_jobs(state: dict[str, Any], backend_names: set[str]) -> int:
+    total = 0
+    for backend_name, item in _fallback_prewarm_state(state).items():
+        if backend_name not in backend_names or not isinstance(item, dict):
+            continue
+        requested_jobs = item.get("requested_jobs")
+        if requested_jobs in (None, ""):
+            total += 1 if _int_or_default(item.get("requested_gpus"), 0) > 0 else 0
+        else:
+            total += _int_or_default(requested_jobs, 0)
+    return total
+
+
+def _backend_prewarm_jobs(state: dict[str, Any], backend_name: str) -> int:
+    return _fallback_prewarm_jobs(state, {backend_name})
+
+
+def _add_fallback_prewarm(
+    state: dict[str, Any],
+    backend_name: str,
+    *,
+    requested_gpus: int,
+    now: float,
+) -> None:
+    prewarm = _fallback_prewarm_state(state)
+    item = prewarm.get(backend_name)
+    if not isinstance(item, dict):
+        item = {"requested_gpus": 0, "requested_jobs": 0, "started_at": now}
+    item["requested_gpus"] = _int_or_default(item.get("requested_gpus"), 0) + requested_gpus
+    item["requested_jobs"] = _int_or_default(item.get("requested_jobs"), 0) + 1
+    item["updated_at"] = now
+    prewarm[backend_name] = item
+
+
+def _consume_fallback_prewarm(
+    state: dict[str, Any],
+    backend_name: str,
+    *,
+    requested_gpus: int,
+) -> None:
+    prewarm = _fallback_prewarm_state(state)
+    item = prewarm.get(backend_name)
+    if not isinstance(item, dict):
+        return
+    remaining_gpus = max(0, _int_or_default(item.get("requested_gpus"), 0) - requested_gpus)
+    remaining_jobs = max(0, _int_or_default(item.get("requested_jobs"), 1) - 1)
+    if remaining_gpus == 0 or remaining_jobs == 0:
+        prewarm.pop(backend_name, None)
+        return
+    item["requested_gpus"] = remaining_gpus
+    item["requested_jobs"] = remaining_jobs
+
+
 def _backend_active_gpus(
     pods: list[dict[str, Any]],
     state: dict[str, Any],
@@ -419,7 +578,18 @@ def choose_backend(
         if b300_active + requested_gpus > b300_max_gpus:
             continue
         selector = backend.get("node_selector") if isinstance(backend.get("node_selector"), dict) else {}
-        if backend_free_gpus(nodes, pods, selector) >= requested_gpus:
+        backend_name = _backend_name(backend)
+        if (
+            _backend_effective_free_gpus(
+                nodes,
+                pods,
+                selector,
+                state,
+                backend_name,
+                gpu_per_pod,
+            )
+            >= requested_gpus
+        ):
             return backend
 
     fallback_max_gpus = _int_or_default(
@@ -449,10 +619,113 @@ def choose_backend(
             continue
         if backend_name in excluded_backend_names:
             continue
+        selector = backend.get("node_selector") if isinstance(backend.get("node_selector"), dict) else {}
+        if (
+            _backend_effective_free_gpus(
+                nodes,
+                pods,
+                selector,
+                state,
+                backend_name,
+                gpu_per_pod,
+            )
+            < requested_gpus
+        ):
+            continue
         candidates.append(
             (
                 _backend_active_jobs(pods, state, backend_name),
                 _backend_active_gpus(pods, state, backend_name, gpu_per_pod),
+                index,
+                backend,
+            )
+        )
+    if not candidates:
+        return None
+    return min(candidates, key=lambda item: (item[0], item[1], item[2]))[3]
+
+
+def choose_fallback_prewarm_backend(
+    config: dict[str, Any],
+    nodes: list[dict[str, Any]],
+    pods: list[dict[str, Any]],
+    *,
+    requested_gpus: int,
+    state: dict[str, Any] | None = None,
+    excluded_backend_names: set[str] | None = None,
+    now: float | None = None,
+) -> dict[str, Any] | None:
+    """Pick a fallback backend to scale before creating a Kubernetes Job."""
+    now = time.time() if now is None else now
+    backends = config.get("backends") if isinstance(config.get("backends"), list) else []
+    state = state or {"inflight": []}
+    excluded_backend_names = excluded_backend_names or set()
+    _cleanup_fallback_prewarm(config, state, now=now)
+    _cleanup_fallback_backend_cooldowns(state, now=now)
+
+    gpu_per_pod = _int_or_default(config.get("gpu_per_pod"), requested_gpus)
+    b300_names = _b300_backend_names(config)
+    fallback_names = _fallback_backend_names(config)
+    all_backend_names = b300_names | fallback_names
+    max_active_jobs = _int_or_default(config.get("max_active_jobs"), 7)
+    if max_active_jobs > 0:
+        active_jobs = _backend_group_active_jobs(pods, state, all_backend_names)
+        prewarm_jobs = _fallback_prewarm_jobs(state, fallback_names)
+        if active_jobs + prewarm_jobs + 1 > max_active_jobs:
+            return None
+
+    fallback_max_jobs = _int_or_default(config.get("fallback_max_active_jobs"), 2)
+    fallback_active_jobs = _backend_group_active_jobs(pods, state, fallback_names)
+    fallback_prewarm_jobs = _fallback_prewarm_jobs(state, fallback_names)
+    if fallback_max_jobs > 0 and fallback_active_jobs + fallback_prewarm_jobs + 1 > fallback_max_jobs:
+        return None
+
+    fallback_max_gpus = _int_or_default(
+        config.get("fallback_max_active_gpus"),
+        _int_or_default(config.get("h100_max_active_gpus"), 32),
+    )
+    fallback_active = max(
+        _fallback_gpu_requests(pods, fallback_names),
+        _fallback_inflight_gpus(state, fallback_names, gpu_per_pod),
+    )
+    fallback_prewarm_gpus = _fallback_prewarm_gpus(state, fallback_names, gpu_per_pod)
+    if fallback_active + fallback_prewarm_gpus + requested_gpus > fallback_max_gpus:
+        return None
+
+    allow_h100_demand = str(config.get("allow_h100_demand") or "").lower() in {"1", "true", "yes"}
+    candidates: list[tuple[int, int, int, dict[str, Any]]] = []
+    for index, backend in enumerate(backends):
+        if not isinstance(backend, dict) or not _is_h100_backend(backend):
+            continue
+        if _is_demand_backend(backend) and not allow_h100_demand:
+            continue
+        backend_name = _backend_name(backend)
+        if not backend_name or backend_name in excluded_backend_names:
+            continue
+        if _fallback_backend_in_cooldown(state, backend_name, now=now):
+            continue
+        target = _backend_scale_target(backend, config)
+        if target is None:
+            continue
+        selector = backend.get("node_selector") if isinstance(backend.get("node_selector"), dict) else {}
+        if (
+            _backend_effective_free_gpus(
+                nodes,
+                pods,
+                selector,
+                state,
+                backend_name,
+                gpu_per_pod,
+            )
+            >= requested_gpus
+        ):
+            continue
+        candidates.append(
+            (
+                _backend_active_jobs(pods, state, backend_name)
+                + _backend_prewarm_jobs(state, backend_name),
+                _backend_active_gpus(pods, state, backend_name, gpu_per_pod)
+                + _backend_prewarm_gpus(state, backend_name, gpu_per_pod),
                 index,
                 backend,
             )
@@ -1198,31 +1471,60 @@ def _aws_error_code(error: Exception) -> str:
     return ""
 
 
-def _scale_nodegroup(
+def _nodegroup_health_issues(nodegroup: dict[str, Any]) -> list[dict[str, Any]]:
+    health = nodegroup.get("health") if isinstance(nodegroup.get("health"), dict) else {}
+    issues = health.get("issues") if isinstance(health.get("issues"), list) else []
+    return [issue for issue in issues if isinstance(issue, dict)]
+
+
+def _fallback_nodegroup_issue_kind(issues: list[dict[str, Any]]) -> str:
+    issue_text = " ".join(
+        f"{issue.get('code') or ''} {issue.get('message') or ''}".lower()
+        for issue in issues
+    )
+    if any(token in issue_text for token in HARD_FALLBACK_NODEGROUP_ISSUE_TOKENS):
+        return "hard"
+    if any(token in issue_text for token in CAPACITY_FALLBACK_NODEGROUP_ISSUE_TOKENS):
+        return "capacity"
+    return ""
+
+
+def _set_fallback_backend_cooldown(
+    config: dict[str, Any],
+    state: dict[str, Any],
+    backend_name: str,
+    *,
+    kind: str,
+    now: float,
+) -> float:
+    if kind == "hard":
+        cooldown_seconds = _int_or_default(
+            config.get("fallback_hard_failure_cooldown_seconds"),
+            3600,
+        )
+    else:
+        cooldown_seconds = _int_or_default(
+            config.get("fallback_capacity_cooldown_seconds"),
+            600,
+        )
+    until = now + max(0, cooldown_seconds)
+    _fallback_backend_cooldown_state(state)[backend_name] = until
+    return until
+
+
+def _describe_nodegroup(
     eks_client: Any,
     *,
     cluster_name: str,
     nodegroup_name: str,
-    node_gpus: int,
-    max_nodes: int,
-    desired_gpus: int,
-) -> None:
-    if eks_client is None:
-        return
-    desired_nodes = min(max_nodes, (max(0, desired_gpus) + node_gpus - 1) // node_gpus)
+) -> dict[str, Any] | None:
     try:
         response = eks_client.describe_nodegroup(
             clusterName=cluster_name,
             nodegroupName=nodegroup_name,
         )
         nodegroup = response.get("nodegroup") if isinstance(response, dict) else {}
-        scaling = (
-            nodegroup.get("scalingConfig")
-            if isinstance(nodegroup.get("scalingConfig"), dict)
-            else {}
-        )
-        if _int_or_default(scaling.get("desiredSize"), -1) == desired_nodes:
-            return
+        return nodegroup if isinstance(nodegroup, dict) else {}
     except Exception as error:
         print(
             json.dumps(
@@ -1236,6 +1538,34 @@ def _scale_nodegroup(
             ),
             flush=True,
         )
+        return None
+
+
+def _scale_nodegroup(
+    eks_client: Any,
+    *,
+    cluster_name: str,
+    nodegroup_name: str,
+    node_gpus: int,
+    max_nodes: int,
+    desired_gpus: int,
+) -> None:
+    if eks_client is None:
+        return
+    desired_nodes = min(max_nodes, (max(0, desired_gpus) + node_gpus - 1) // node_gpus)
+    nodegroup = _describe_nodegroup(
+        eks_client,
+        cluster_name=cluster_name,
+        nodegroup_name=nodegroup_name,
+    )
+    if nodegroup is not None:
+        scaling = (
+            nodegroup.get("scalingConfig")
+            if isinstance(nodegroup.get("scalingConfig"), dict)
+            else {}
+        )
+        if _int_or_default(scaling.get("desiredSize"), -1) == desired_nodes:
+            return
     try:
         eks_client.update_nodegroup_config(
             clusterName=cluster_name,
@@ -1268,6 +1598,7 @@ def _scale_fallback_nodegroups(
     if eks_client is None:
         return
     now = time.time() if now is None else now
+    _cleanup_fallback_prewarm(config, state, now=now)
     backends = config.get("backends") if isinstance(config.get("backends"), list) else []
     targets: dict[tuple[str, str], dict[str, Any]] = {}
     for backend in backends:
@@ -1302,7 +1633,12 @@ def _scale_fallback_nodegroups(
             _backend_gpu_requests(pods or [], backend_name)
             for backend_name in target["backend_names"]
         )
-        desired_gpus = max(inflight_gpus, pod_gpus)
+        prewarm_gpus = _fallback_prewarm_gpus(
+            state,
+            target["backend_names"],
+            target["node_gpus"],
+        )
+        desired_gpus = max(inflight_gpus, pod_gpus) + prewarm_gpus
         target_key = _scale_target_key(
             cluster_name=target["cluster_name"],
             nodegroup_name=target["nodegroup_name"],
@@ -1324,6 +1660,89 @@ def _scale_fallback_nodegroups(
             max_nodes=target["max_nodes"],
             desired_gpus=desired_gpus,
         )
+
+
+def _prewarm_fallback_backend(
+    eks_client: Any,
+    config: dict[str, Any],
+    state: dict[str, Any],
+    backend: dict[str, Any],
+    *,
+    requested_gpus: int,
+    now: float,
+    pods: list[dict[str, Any]] | None = None,
+) -> bool:
+    if eks_client is None:
+        return False
+    backend_name = _backend_name(backend)
+    if not backend_name:
+        return False
+    if _fallback_backend_in_cooldown(state, backend_name, now=now):
+        return False
+    target = _backend_scale_target(backend, config)
+    if target is None:
+        return False
+    nodegroup = _describe_nodegroup(
+        eks_client,
+        cluster_name=target["cluster_name"],
+        nodegroup_name=target["nodegroup_name"],
+    )
+    if nodegroup is None:
+        until = _set_fallback_backend_cooldown(
+            config,
+            state,
+            backend_name,
+            kind="capacity",
+            now=now,
+        )
+        print(
+            json.dumps(
+                {
+                    "status": "fallback_prewarm_skipped",
+                    "backend": backend_name,
+                    "nodegroup": target["nodegroup_name"],
+                    "reason": "nodegroup_describe_failed",
+                    "cooldown_until": until,
+                },
+                sort_keys=True,
+            ),
+            flush=True,
+        )
+        return False
+    issues = _nodegroup_health_issues(nodegroup)
+    issue_kind = _fallback_nodegroup_issue_kind(issues)
+    if issue_kind:
+        until = _set_fallback_backend_cooldown(
+            config,
+            state,
+            backend_name,
+            kind=issue_kind,
+            now=now,
+        )
+        print(
+            json.dumps(
+                {
+                    "status": "fallback_prewarm_skipped",
+                    "backend": backend_name,
+                    "nodegroup": target["nodegroup_name"],
+                    "reason": f"nodegroup_{issue_kind}_issue",
+                    "issues": issues,
+                    "cooldown_until": until,
+                },
+                sort_keys=True,
+            ),
+            flush=True,
+        )
+        return False
+
+    _add_fallback_prewarm(
+        state,
+        backend_name,
+        requested_gpus=requested_gpus,
+        now=now,
+    )
+    _scale_fallback_nodegroups(eks_client, config, state, pods=pods or [], now=now)
+    return True
 
 
 def _prime_fallback_scale_down(
@@ -1701,6 +2120,7 @@ def controller_tick(
     nodes = _list_nodes(core_client)
     pods = _list_capacity_pods(core_client, config)
     started = deferred = adopted = completed_existing = 0
+    prewarmed = prewarm_skipped = 0
     callback_repaired_existing = callback_pending_existing = 0
     for message in messages:
         request = _decode_request(message)
@@ -1766,6 +2186,27 @@ def controller_tick(
             state=state,
         )
         if backend is None:
+            prewarm_backend = choose_fallback_prewarm_backend(
+                config,
+                nodes,
+                pods,
+                requested_gpus=requested_gpus,
+                state=state,
+                now=now,
+            )
+            if prewarm_backend is not None:
+                if _prewarm_fallback_backend(
+                    eks_client,
+                    config,
+                    state,
+                    prewarm_backend,
+                    requested_gpus=requested_gpus,
+                    now=now,
+                    pods=pods,
+                ):
+                    prewarmed += 1
+                else:
+                    prewarm_skipped += 1
             sqs_client.change_message_visibility(
                 QueueUrl=queue_url,
                 ReceiptHandle=message["ReceiptHandle"],
@@ -1794,6 +2235,13 @@ def controller_tick(
                 "requested_gpus": requested_gpus,
             }
         )
+        backend_name = _backend_name(backend)
+        if backend_name in _fallback_backend_names(config):
+            _consume_fallback_prewarm(
+                state,
+                backend_name,
+                requested_gpus=requested_gpus,
+            )
         _scale_fallback_nodegroups(eks_client, config, state, pods=pods, now=now)
         started += 1
 
@@ -1804,6 +2252,8 @@ def controller_tick(
         "started": started,
         "deferred": deferred,
         "adopted": adopted,
+        "prewarmed": prewarmed,
+        "prewarm_skipped": prewarm_skipped,
         "completed_existing": completed_existing,
         "callback_repaired_existing": callback_repaired_existing,
         "callback_pending_existing": callback_pending_existing,
@@ -1890,6 +2340,18 @@ def _env_config() -> dict[str, Any]:
         "fallback_scale_down_grace_seconds": os.environ.get(
             "SGLANG_VIDEO_FALLBACK_SCALE_DOWN_GRACE_SECONDS",
             "60",
+        ),
+        "fallback_prewarm_ttl_seconds": os.environ.get(
+            "SGLANG_VIDEO_FALLBACK_PREWARM_TTL_SECONDS",
+            "600",
+        ),
+        "fallback_capacity_cooldown_seconds": os.environ.get(
+            "SGLANG_VIDEO_FALLBACK_CAPACITY_COOLDOWN_SECONDS",
+            "600",
+        ),
+        "fallback_hard_failure_cooldown_seconds": os.environ.get(
+            "SGLANG_VIDEO_FALLBACK_HARD_FAILURE_COOLDOWN_SECONDS",
+            "3600",
         ),
         "pod_label_selector": os.environ.get(
             "SGLANG_VIDEO_POD_LABEL_SELECTOR",
