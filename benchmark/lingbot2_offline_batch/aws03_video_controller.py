@@ -220,6 +220,22 @@ def _backend_name(value: dict[str, Any]) -> str:
     return str(value.get("name") or "").strip()
 
 
+def _inflight_counts_for_capacity(item: dict[str, Any]) -> bool:
+    return not (
+        bool(item.get("callback_pending"))
+        or item.get("gpu_released_at") not in (None, "")
+    )
+
+
+def _mark_callback_pending(item: dict[str, Any], error: Exception, *, now: float) -> dict[str, Any]:
+    item["callback_error"] = f"{type(error).__name__}: {error}"
+    item["callback_pending"] = True
+    item.setdefault("gpu_released_at", now)
+    item.pop("missing_job_seen_at", None)
+    item.pop("pending_job_seen_at", None)
+    return item
+
+
 def _is_h100_backend(backend: dict[str, Any]) -> bool:
     name = _backend_name(backend).lower()
     selector = backend.get("node_selector") if isinstance(backend.get("node_selector"), dict) else {}
@@ -287,6 +303,8 @@ def _backend_job_keys(
     inflight = state.get("inflight") if isinstance(state.get("inflight"), list) else []
     for index, item in enumerate(inflight):
         if not isinstance(item, dict):
+            continue
+        if not _inflight_counts_for_capacity(item):
             continue
         backend_name = str(item.get("backend") or "")
         if backend_name not in backend_names:
@@ -375,7 +393,7 @@ def _inflight_backend_gpus(state: dict[str, Any], backend_name: str, gpu_per_pod
     return sum(
         _int_or_default(item.get("requested_gpus"), gpu_per_pod)
         for item in state.get("inflight", [])
-        if item.get("backend") == backend_name
+        if item.get("backend") == backend_name and _inflight_counts_for_capacity(item)
     )
 
 
@@ -388,6 +406,7 @@ def _fallback_inflight_gpus(
         _int_or_default(item.get("requested_gpus"), gpu_per_pod)
         for item in state.get("inflight", [])
         if str(item.get("backend") or "") in backend_names
+        and _inflight_counts_for_capacity(item)
     )
 
 
@@ -423,6 +442,8 @@ def _fallback_inflight_gpus_for_nodegroup_scaling(
     active_job_names = _active_backend_job_names(pods, backend_names)
     total = 0
     for item in state.get("inflight", []):
+        if not _inflight_counts_for_capacity(item):
+            continue
         backend_name = str(item.get("backend") or "")
         if backend_name not in backend_names:
             continue
@@ -603,6 +624,7 @@ def _release_unused_fallback_prewarm(
         str(item.get("backend") or "")
         for item in state.get("inflight", [])
         if str(item.get("backend") or "") in fallback_names
+        and _inflight_counts_for_capacity(item)
     }
     for pod in pods:
         metadata = _metadata(pod)
@@ -1934,6 +1956,26 @@ def reconcile_inflight_jobs(
     for item in all_inflight:
         old_job_name = str(item.get("job_name") or "")
         old_backend_name = str(item.get("backend") or "")
+        if not _inflight_counts_for_capacity(item):
+            try:
+                if repair_final_progress_from_report(
+                    item["request"],
+                    s3_client=s3_client,
+                    callback_urlopen=callback_urlopen,
+                ):
+                    callback_repaired += 1
+            except Exception as error:
+                item = _mark_callback_pending(item, error, now=now)
+                remaining.append(item)
+                callback_pending += 1
+                continue
+            sqs_client.delete_message(
+                QueueUrl=queue_url,
+                ReceiptHandle=item["receipt_handle"],
+            )
+            completed += 1
+            continue
+
         status = _read_job_status(batch_client, namespace, item["job_name"])
         if _job_succeeded(status):
             try:
@@ -1944,7 +1986,7 @@ def reconcile_inflight_jobs(
                 ):
                     callback_repaired += 1
             except Exception as error:
-                item["callback_error"] = f"{type(error).__name__}: {error}"
+                item = _mark_callback_pending(item, error, now=now)
                 remaining.append(item)
                 callback_pending += 1
                 continue

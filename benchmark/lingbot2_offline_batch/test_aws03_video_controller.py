@@ -763,6 +763,51 @@ def test_choose_backend_prefers_b300_until_five_jobs_then_uses_spot():
     assert selected_spot["name"] == "h100-spot"
 
 
+def test_choose_backend_does_not_count_callback_pending_jobs_against_b300_capacity():
+    config = {
+        **_backend_config(),
+        "max_active_jobs": 7,
+        "b300_max_active_jobs": 5,
+        "fallback_max_active_jobs": 2,
+        "b300_max_active_gpus": 40,
+        "fallback_max_active_gpus": 160,
+    }
+    b300_nodes = [
+        _node(f"b300-{index}", config["backends"][0]["node_selector"])
+        for index in range(5)
+    ]
+    h100 = _node("h100-a", config["backends"][1]["node_selector"])
+    state = {
+        "inflight": [
+            {
+                "backend": "b300-capacity-block",
+                "job_name": f"sglang-video-b300-{index}",
+                "requested_gpus": 8,
+            }
+            for index in range(4)
+        ]
+        + [
+            {
+                "backend": "b300-capacity-block",
+                "job_name": "sglang-video-callback-pending",
+                "requested_gpus": 8,
+                "callback_pending": True,
+                "gpu_released_at": 1100.0,
+            }
+        ]
+    }
+
+    selected = choose_backend(
+        config,
+        [*b300_nodes, h100],
+        [],
+        requested_gpus=8,
+        state=state,
+    )
+
+    assert selected["name"] == "b300-capacity-block"
+
+
 def test_choose_backend_limits_fallback_to_two_jobs_even_when_gpu_cap_is_higher():
     config = {
         **_backend_config(),
@@ -1761,7 +1806,84 @@ def test_reconcile_keeps_sqs_message_when_final_progress_repair_fails():
     assert result["callback_pending"] == 1
     assert sqs.deleted == []
     assert state["inflight"][0]["job_name"] == "sglang-video-done"
+    assert state["inflight"][0]["callback_pending"] is True
+    assert state["inflight"][0]["gpu_released_at"] == 1100.0
     assert "callback unavailable" in state["inflight"][0]["callback_error"]
+
+
+def test_reconcile_repairs_callback_pending_without_restarting_deleted_completed_job():
+    config = _backend_config()
+    request = _request()
+    request["output"]["report_s3_uri"] = "s3://bucket/t2i/reports/sglang_video_report.json"
+    report = {
+        "summary": {
+            "video_status": "succeeded",
+            "video_expected_count": 1,
+            "video_succeeded_count": 1,
+            "video_failed_count": 0,
+            "video_running_count": 0,
+        },
+        "counters": {"total": 1, "succeeded": 1, "failed": 0, "running": 0},
+        "results": [
+            {
+                "case_id": "img001-action-00-traj001",
+                "status": "succeeded",
+                "video_uri": "s3://bucket/t2i/videos/img001/00_traj001.mp4",
+            }
+        ],
+    }
+    s3 = FakeS3({("bucket", "t2i/reports/sglang_video_report.json"): report})
+
+    class FakeResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    def fake_urlopen(_http_request, timeout):
+        return FakeResponse()
+
+    sqs = FakeSQS(request)
+    batch = FakeNotFoundBatchV1()
+    state = {
+        "inflight": [
+            {
+                "request": request,
+                "receipt_handle": "receipt-1",
+                "message_id": "message-1",
+                "job_name": "sglang-video-done",
+                "backend": "b300-capacity-block",
+                "attempts": 1,
+                "started_at": 1000.0,
+                "last_renewed_at": 1000.0,
+                "callback_pending": True,
+                "gpu_released_at": 1050.0,
+                "callback_error": "OSError: callback unavailable",
+            }
+        ]
+    }
+
+    result = reconcile_inflight_jobs(
+        sqs_client=sqs,
+        queue_url="https://sqs.us-west-2.amazonaws.com/123/video",
+        core_client=FakeCoreV1([], [_node("b300-a", config["backends"][0]["node_selector"])]),
+        batch_client=batch,
+        eks_client=FakeEks(),
+        config=config,
+        state=state,
+        now=1100.0,
+        s3_client=s3,
+        callback_urlopen=fake_urlopen,
+    )
+
+    assert result["completed"] == 1
+    assert result["callback_repaired"] == 1
+    assert batch.created == []
+    assert sqs.deleted[0]["ReceiptHandle"] == "receipt-1"
+    assert state["inflight"] == []
 
 
 def test_reconcile_keeps_inflight_job_when_status_read_temporarily_404s():
