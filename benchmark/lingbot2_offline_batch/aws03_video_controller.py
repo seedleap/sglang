@@ -48,6 +48,18 @@ SYSTEM_NODE_TAINT_KEYS = {
 }
 DEFAULT_SAFE_JOB_TOLERATIONS = [
     {"key": "nvidia.com/gpu", "operator": "Exists", "effect": "NoSchedule"},
+    {
+        "key": "seedleap.ai/workload",
+        "operator": "Equal",
+        "value": "wan22-ti2v",
+        "effect": "NoSchedule",
+    },
+    {
+        "key": "seedleap.ai/workload",
+        "operator": "Equal",
+        "value": "sglang-video",
+        "effect": "NoSchedule",
+    },
 ]
 WORKLOAD_TOLERATION_KEY = "seedleap.ai/workload"
 

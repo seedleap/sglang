@@ -158,9 +158,17 @@ def test_render_job_manifest_can_match_existing_b300_batch_runtime_shape():
     assert pod["priorityClassName"] == "wan22-debug-low"
     assert pod["schedulerName"] == "volcano"
     assert {"operator": "Exists"} not in pod["tolerations"]
-    assert pod["tolerations"] == [
-        {"key": "nvidia.com/gpu", "operator": "Exists", "effect": "NoSchedule"}
-    ]
+    assert {
+        "key": "nvidia.com/gpu",
+        "operator": "Exists",
+        "effect": "NoSchedule",
+    } in pod["tolerations"]
+    assert {
+        "key": "seedleap.ai/workload",
+        "operator": "Equal",
+        "value": "wan22-ti2v",
+        "effect": "NoSchedule",
+    } in pod["tolerations"]
     assert any(volume["name"] == "shm" for volume in pod["volumes"])
     assert any(mount["mountPath"] == "/dev/shm" for mount in container["volumeMounts"])
 
