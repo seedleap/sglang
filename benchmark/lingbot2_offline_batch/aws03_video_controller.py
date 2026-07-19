@@ -1816,6 +1816,29 @@ def _prewarm_fallback_backend(
             flush=True,
         )
         return False
+    nodegroup_status = str(nodegroup.get("status") or "ACTIVE")
+    if nodegroup_status != "ACTIVE":
+        cooldown_seconds = _int_or_default(
+            config.get("fallback_nodegroup_not_active_cooldown_seconds"),
+            120,
+        )
+        until = now + max(0, cooldown_seconds)
+        _fallback_backend_cooldown_state(state)[backend_name] = until
+        print(
+            json.dumps(
+                {
+                    "status": "fallback_prewarm_skipped",
+                    "backend": backend_name,
+                    "nodegroup": target["nodegroup_name"],
+                    "nodegroup_status": nodegroup_status,
+                    "reason": "nodegroup_not_active",
+                    "cooldown_until": until,
+                },
+                sort_keys=True,
+            ),
+            flush=True,
+        )
+        return False
     issues = _nodegroup_health_issues(nodegroup)
     issue_kind = _fallback_nodegroup_issue_kind(issues)
     if issue_kind:
@@ -2525,6 +2548,10 @@ def _env_config() -> dict[str, Any]:
         "fallback_inflight_without_pod_grace_seconds": os.environ.get(
             "SGLANG_VIDEO_FALLBACK_INFLIGHT_WITHOUT_POD_GRACE_SECONDS",
             "300",
+        ),
+        "fallback_nodegroup_not_active_cooldown_seconds": os.environ.get(
+            "SGLANG_VIDEO_FALLBACK_NODEGROUP_NOT_ACTIVE_COOLDOWN_SECONDS",
+            "120",
         ),
         "fallback_prewarm_ttl_seconds": os.environ.get(
             "SGLANG_VIDEO_FALLBACK_PREWARM_TTL_SECONDS",

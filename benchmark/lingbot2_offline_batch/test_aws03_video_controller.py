@@ -265,6 +265,7 @@ def test_env_config_reads_placement_profiles_and_job_ttl(monkeypatch):
     assert config["fallback_max_active_gpus"] == "160"
     assert config["fallback_prewarm_ttl_seconds"] == "600"
     assert config["fallback_inflight_without_pod_grace_seconds"] == "300"
+    assert config["fallback_nodegroup_not_active_cooldown_seconds"] == "120"
     assert config["fallback_capacity_cooldown_seconds"] == "600"
     assert config["fallback_hard_failure_cooldown_seconds"] == "3600"
     assert config["gpu_per_pod"] == "8"
@@ -376,6 +377,20 @@ class FakeEksWithHealth(FakeEksWithDesired):
             "nodegroup": {
                 "scalingConfig": {"desiredSize": self.desired_size},
                 "health": {"issues": self.issues},
+            }
+        }
+
+
+class FakeEksWithStatus(FakeEksWithDesired):
+    def __init__(self, desired_size: int, status: str):
+        super().__init__(desired_size)
+        self.status = status
+
+    def describe_nodegroup(self, **kwargs):
+        return {
+            "nodegroup": {
+                "status": self.status,
+                "scalingConfig": {"desiredSize": self.desired_size},
             }
         }
 
@@ -1358,6 +1373,35 @@ def test_controller_tick_skips_unhealthy_fallback_prewarm_and_does_not_create_jo
     assert result["prewarm_skipped"] == 1
     assert batch.created == []
     assert eks.updates == []
+    assert state["fallback_backend_cooldown"]["h100-spot"] > 1000.0
+
+
+def test_controller_tick_skips_non_active_fallback_prewarm_while_nodegroup_updates():
+    config = _backend_config()
+    b300 = _node("b300-a", config["backends"][0]["node_selector"])
+    core = FakeCoreV1([_gpu_pod("busy", "b300-a", 8)], [b300])
+    batch = FakeBatchV1()
+    sqs = FakeSQS(_request())
+    eks = FakeEksWithStatus(desired_size=0, status="UPDATING")
+    state = {"inflight": []}
+
+    result = controller_tick(
+        sqs_client=sqs,
+        queue_url="https://sqs.us-west-2.amazonaws.com/123/video",
+        core_client=core,
+        batch_client=batch,
+        eks_client=eks,
+        config=config,
+        state=state,
+        now=1000.0,
+    )
+
+    assert result["started"] == 0
+    assert result["deferred"] == 1
+    assert result["prewarm_skipped"] == 1
+    assert batch.created == []
+    assert eks.updates == []
+    assert state["fallback_prewarm"] == {}
     assert state["fallback_backend_cooldown"]["h100-spot"] > 1000.0
 
 
