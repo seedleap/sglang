@@ -1863,15 +1863,15 @@ def _render_for_backend(
     *,
     attempt: int,
 ) -> dict[str, Any]:
-    return render_job_manifest(
-        request,
-        {
-            **config,
-            "placement_profiles": [backend],
-            "selected_backend": _backend_name(backend),
-            "job_name_suffix": f"r{attempt}" if attempt > 1 else "",
-        },
-    )
+    render_config = {
+        **config,
+        "placement_profiles": [backend],
+        "selected_backend": _backend_name(backend),
+        "job_name_suffix": f"r{attempt}" if attempt > 1 else "",
+    }
+    if "scheduler_name" in backend:
+        render_config["scheduler_name"] = str(backend.get("scheduler_name") or "")
+    return render_job_manifest(request, render_config)
 
 
 def _attempt_from_job_name(job_name: str) -> int:

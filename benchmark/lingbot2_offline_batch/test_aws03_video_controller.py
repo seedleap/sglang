@@ -4,6 +4,7 @@ import io
 from aws03_video_controller import (
     _env_config,
     _job_succeeded,
+    _render_for_backend,
     _scale_fallback_nodegroups,
     active_gpu_requests,
     backend_free_gpus,
@@ -172,6 +173,30 @@ def test_render_job_manifest_can_match_existing_b300_batch_runtime_shape():
     } in pod["tolerations"]
     assert any(volume["name"] == "shm" for volume in pod["volumes"])
     assert any(mount["mountPath"] == "/dev/shm" for mount in container["volumeMounts"])
+
+
+def test_render_for_backend_allows_scheduler_override():
+    manifest = _render_for_backend(
+        _request(),
+        {
+            "namespace": "default",
+            "job_image": "lmsysorg/sglang:dev@sha256:test",
+            "scheduler_name": "volcano",
+        },
+        {
+            "name": "b200-spot",
+            "scheduler_name": "default-scheduler",
+            "node_selector": {
+                "eks.amazonaws.com/capacityType": "SPOT",
+                "node.kubernetes.io/instance-type": "p6-b200.48xlarge",
+            },
+        },
+        attempt=1,
+    )
+
+    pod = manifest["spec"]["template"]["spec"]
+    assert pod["schedulerName"] == "default-scheduler"
+    assert manifest["metadata"]["labels"]["sglang.seedleap.io/backend"] == "b200-spot"
 
 
 def test_render_job_manifest_replaces_blanket_toleration_with_workload_toleration():
