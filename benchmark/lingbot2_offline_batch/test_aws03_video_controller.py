@@ -1361,6 +1361,64 @@ def test_reconcile_recreates_unschedulable_b300_job_on_fallback_after_grace_peri
     assert "pending_job_seen_at" not in state["inflight"][0]
 
 
+def test_reconcile_retargets_pending_fallback_job_to_b300_and_cancels_fallback_scale_up():
+    config = {
+        **_backend_config(),
+        "pending_job_grace_seconds": 180,
+        "fallback_scale_down_grace_seconds": 900,
+    }
+    b300 = _node("b300-a", config["backends"][0]["node_selector"])
+    batch = FakeBatchV1()
+    batch.jobs["sglang-video-stuck"] = {"status": {"active": 1}}
+    sqs = FakeSQS(_request())
+    eks = FakeEksWithDesired(desired_size=1)
+    state = {
+        "inflight": [
+            {
+                "request": _request(),
+                "receipt_handle": "receipt-1",
+                "message_id": "message-1",
+                "job_name": "sglang-video-stuck",
+                "backend": "h100-spot",
+                "attempts": 1,
+                "started_at": 1000.0,
+                "last_renewed_at": 1000.0,
+                "requested_gpus": 8,
+                "pending_job_seen_at": 1000.0,
+            }
+        ]
+    }
+
+    result = reconcile_inflight_jobs(
+        sqs_client=sqs,
+        queue_url="https://sqs.us-west-2.amazonaws.com/123/video",
+        core_client=FakeCoreV1(
+            [_job_pending_pod("sglang-video-stuck", "h100-spot")],
+            [b300],
+        ),
+        batch_client=batch,
+        eks_client=eks,
+        config=config,
+        state=state,
+        now=1300.0,
+    )
+
+    assert result["pending"] == 1
+    assert result["restarted"] == 1
+    assert result["failed"] == 0
+    assert sqs.deleted == []
+    assert batch.deleted[0]["name"] == "sglang-video-stuck"
+    assert len(batch.created) == 1
+    created = batch.created[0]["body"]
+    assert created["metadata"]["labels"]["sglang.seedleap.io/backend"] == "b300-capacity-block"
+    assert state["inflight"][0]["backend"] == "b300-capacity-block"
+    assert state["inflight"][0]["attempts"] == 2
+    assert state["inflight"][0]["job_name"].startswith("sglang-video-")
+    assert "pending_job_seen_at" not in state["inflight"][0]
+    assert eks.updates[-1]["nodegroupName"] == "sglang-h100-spot"
+    assert eks.updates[-1]["scalingConfig"]["desiredSize"] == 0
+
+
 def test_reconcile_recreates_missing_inflight_job_after_grace_period():
     config = {**_backend_config(), "missing_job_grace_seconds": 180}
     b300 = _node("b300-a", config["backends"][0]["node_selector"])

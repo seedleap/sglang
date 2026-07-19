@@ -126,6 +126,12 @@ def _pods_except_job(pods: list[dict[str, Any]], job_name: str) -> list[dict[str
     return [pod for pod in pods if _pod_job_name(pod) != job_name]
 
 
+def _pods_except_jobs(pods: list[dict[str, Any]], job_names: set[str]) -> list[dict[str, Any]]:
+    if not job_names:
+        return pods
+    return [pod for pod in pods if _pod_job_name(pod) not in job_names]
+
+
 def _node_ready(node: dict[str, Any]) -> bool:
     status = node.get("status") if isinstance(node.get("status"), dict) else {}
     conditions = status.get("conditions") if isinstance(status.get("conditions"), list) else []
@@ -1223,6 +1229,37 @@ def _scale_fallback_nodegroups(
         )
 
 
+def _prime_fallback_scale_down(
+    config: dict[str, Any],
+    state: dict[str, Any],
+    backend_names: set[str],
+    *,
+    now: float,
+) -> None:
+    fallback_names = _fallback_backend_names(config)
+    target_backend_names = backend_names & fallback_names
+    if not target_backend_names:
+        return
+
+    scale_down_state = state.setdefault("fallback_scale_down", {})
+    if not isinstance(scale_down_state, dict):
+        scale_down_state = {}
+        state["fallback_scale_down"] = scale_down_state
+    scale_down_grace = _int_or_default(config.get("fallback_scale_down_grace_seconds"), 900)
+    backends = config.get("backends") if isinstance(config.get("backends"), list) else []
+    for backend in backends:
+        if not isinstance(backend, dict) or _backend_name(backend) not in target_backend_names:
+            continue
+        target = _backend_scale_target(backend, config)
+        if target is None:
+            continue
+        target_key = _scale_target_key(
+            cluster_name=target["cluster_name"],
+            nodegroup_name=target["nodegroup_name"],
+        )
+        scale_down_state[target_key] = now - scale_down_grace
+
+
 def reconcile_inflight_jobs(
     *,
     sqs_client: Any,
@@ -1244,8 +1281,12 @@ def reconcile_inflight_jobs(
     callback_repaired = callback_pending = 0
     remaining = []
     all_inflight = list(state.get("inflight", []))
+    deleted_job_names: set[str] = set()
+    fallback_backends_retargeted_to_b300: set[str] = set()
 
     for item in all_inflight:
+        old_job_name = str(item.get("job_name") or "")
+        old_backend_name = str(item.get("backend") or "")
         status = _read_job_status(batch_client, namespace, item["job_name"])
         if _job_succeeded(status):
             try:
@@ -1302,16 +1343,22 @@ def reconcile_inflight_jobs(
                 released += 1
                 continue
             next_attempt = attempts + 1
+            next_backend_name = _backend_name(backend)
             manifest = _render_for_backend(item["request"], config, backend, attempt=next_attempt)
             batch_client.create_namespaced_job(namespace=namespace, body=manifest)
             item = {
                 **item,
                 "job_name": manifest["metadata"]["name"],
-                "backend": _backend_name(backend),
+                "backend": next_backend_name,
                 "attempts": next_attempt,
                 "last_renewed_at": now,
                 "requested_gpus": requested_gpus,
             }
+            if (
+                old_backend_name in _fallback_backend_names(config)
+                and next_backend_name in _b300_backend_names(config)
+            ):
+                fallback_backends_retargeted_to_b300.add(old_backend_name)
             item.pop("missing_job_seen_at", None)
             item.pop("pending_job_seen_at", None)
             restarted += 1
@@ -1329,10 +1376,11 @@ def reconcile_inflight_jobs(
 
             try:
                 batch_client.delete_namespaced_job(
-                    name=item["job_name"],
+                    name=old_job_name,
                     namespace=namespace,
                     propagation_policy="Background",
                 )
+                deleted_job_names.add(old_job_name)
             except Exception as error:
                 if not _not_found(error):
                     raise
@@ -1349,16 +1397,22 @@ def reconcile_inflight_jobs(
                 released += 1
                 continue
             next_attempt = attempts + 1
+            next_backend_name = _backend_name(backend)
             manifest = _render_for_backend(item["request"], config, backend, attempt=next_attempt)
             batch_client.create_namespaced_job(namespace=namespace, body=manifest)
             item = {
                 **item,
                 "job_name": manifest["metadata"]["name"],
-                "backend": _backend_name(backend),
+                "backend": next_backend_name,
                 "attempts": next_attempt,
                 "last_renewed_at": now,
                 "requested_gpus": requested_gpus,
             }
+            if (
+                old_backend_name in _fallback_backend_names(config)
+                and next_backend_name in _b300_backend_names(config)
+            ):
+                fallback_backends_retargeted_to_b300.add(old_backend_name)
             item.pop("missing_job_seen_at", None)
             item.pop("pending_job_seen_at", None)
             restarted += 1
@@ -1410,14 +1464,16 @@ def reconcile_inflight_jobs(
 
                 try:
                     batch_client.delete_namespaced_job(
-                        name=item["job_name"],
+                        name=old_job_name,
                         namespace=namespace,
                         propagation_policy="Background",
                     )
+                    deleted_job_names.add(old_job_name)
                 except Exception as error:
                     if not _not_found(error):
                         raise
                 next_attempt = attempts + 1
+                next_backend_name = _backend_name(backend)
                 manifest = _render_for_backend(
                     item["request"],
                     config,
@@ -1428,11 +1484,16 @@ def reconcile_inflight_jobs(
                 item = {
                     **item,
                     "job_name": manifest["metadata"]["name"],
-                    "backend": _backend_name(backend),
+                    "backend": next_backend_name,
                     "attempts": next_attempt,
                     "last_renewed_at": now,
                     "requested_gpus": requested_gpus,
                 }
+                if (
+                    old_backend_name in _fallback_backend_names(config)
+                    and next_backend_name in _b300_backend_names(config)
+                ):
+                    fallback_backends_retargeted_to_b300.add(old_backend_name)
                 item.pop("missing_job_seen_at", None)
                 item.pop("pending_job_seen_at", None)
                 restarted += 1
@@ -1440,7 +1501,19 @@ def reconcile_inflight_jobs(
         remaining.append(item)
 
     state["inflight"] = remaining
-    _scale_fallback_nodegroups(eks_client, config, state, pods=pods, now=now)
+    _prime_fallback_scale_down(
+        config,
+        state,
+        fallback_backends_retargeted_to_b300,
+        now=now,
+    )
+    _scale_fallback_nodegroups(
+        eks_client,
+        config,
+        state,
+        pods=_pods_except_jobs(pods, deleted_job_names),
+        now=now,
+    )
     return {
         "completed": completed,
         "restarted": restarted,
