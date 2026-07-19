@@ -337,6 +337,7 @@ def test_env_config_reads_placement_profiles_and_job_ttl(monkeypatch):
     assert config["b300_max_active_gpus"] == "32"
     assert config["fallback_max_active_gpus"] == "160"
     assert config["fallback_prewarm_ttl_seconds"] == "600"
+    assert config["fallback_startup_protection_seconds"] == "600"
     assert config["fallback_inflight_without_pod_grace_seconds"] == "300"
     assert config["inflight_without_pod_grace_seconds"] == "300"
     assert config["fallback_nodegroup_not_active_cooldown_seconds"] == "120"
@@ -1230,6 +1231,61 @@ def test_scale_fallback_nodegroups_releases_stale_inflight_without_active_pod():
 
     _scale_fallback_nodegroups(eks, config, state, pods=[], now=1600.0)
 
+    assert eks.updates[-1]["nodegroupName"] == "sglang-h100-spot"
+    assert eks.updates[-1]["scalingConfig"]["desiredSize"] == 0
+
+
+def test_scale_fallback_nodegroups_holds_startup_protection_without_active_pod():
+    config = {
+        **_backend_config(),
+        "fallback_scale_down_grace_seconds": 0,
+        "fallback_startup_protection_seconds": 600,
+    }
+    eks = FakeEksWithDesired(desired_size=0)
+    state = {
+        "inflight": [],
+        "fallback_scale_down": {"leap-world-aws03-usw2/sglang-h100-spot": 1000.0},
+        "fallback_startup_protection": {
+            "h100-spot": {
+                "sglang-video-starting": {
+                    "requested_gpus": 8,
+                    "started_at": 1000.0,
+                    "expires_at": 1600.0,
+                }
+            }
+        },
+    }
+
+    _scale_fallback_nodegroups(eks, config, state, pods=[], now=1300.0)
+
+    assert eks.updates[-1]["nodegroupName"] == "sglang-h100-spot"
+    assert eks.updates[-1]["scalingConfig"]["desiredSize"] == 1
+
+
+def test_scale_fallback_nodegroups_releases_expired_startup_protection():
+    config = {
+        **_backend_config(),
+        "fallback_scale_down_grace_seconds": 0,
+        "fallback_startup_protection_seconds": 60,
+    }
+    eks = FakeEksWithDesired(desired_size=1)
+    state = {
+        "inflight": [],
+        "fallback_scale_down": {"leap-world-aws03-usw2/sglang-h100-spot": 1000.0},
+        "fallback_startup_protection": {
+            "h100-spot": {
+                "sglang-video-starting": {
+                    "requested_gpus": 8,
+                    "started_at": 1000.0,
+                    "expires_at": 1060.0,
+                }
+            }
+        },
+    }
+
+    _scale_fallback_nodegroups(eks, config, state, pods=[], now=1100.0)
+
+    assert state["fallback_startup_protection"] == {}
     assert eks.updates[-1]["nodegroupName"] == "sglang-h100-spot"
     assert eks.updates[-1]["scalingConfig"]["desiredSize"] == 0
 

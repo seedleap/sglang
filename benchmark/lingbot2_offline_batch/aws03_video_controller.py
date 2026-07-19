@@ -558,6 +558,14 @@ def _fallback_backend_cooldown_state(state: dict[str, Any]) -> dict[str, Any]:
     return cooldown
 
 
+def _fallback_startup_protection_state(state: dict[str, Any]) -> dict[str, Any]:
+    protection = state.setdefault("fallback_startup_protection", {})
+    if not isinstance(protection, dict):
+        protection = {}
+        state["fallback_startup_protection"] = protection
+    return protection
+
+
 def _cleanup_fallback_prewarm(
     config: dict[str, Any],
     state: dict[str, Any],
@@ -573,6 +581,36 @@ def _cleanup_fallback_prewarm(
         updated_at = float(item.get("updated_at") or item.get("started_at") or now)
         if ttl_seconds >= 0 and now - updated_at > ttl_seconds:
             prewarm.pop(backend_name, None)
+
+
+def _cleanup_fallback_startup_protection(
+    config: dict[str, Any],
+    state: dict[str, Any],
+    *,
+    now: float,
+) -> None:
+    ttl_seconds = _int_or_default(config.get("fallback_startup_protection_seconds"), 600)
+    protection = _fallback_startup_protection_state(state)
+    for backend_name, entries in list(protection.items()):
+        if not isinstance(entries, dict):
+            protection.pop(backend_name, None)
+            continue
+        for job_name, item in list(entries.items()):
+            if not isinstance(item, dict):
+                entries.pop(job_name, None)
+                continue
+            try:
+                expires_at = float(
+                    item.get("expires_at")
+                    or float(item.get("started_at") or now) + max(0, ttl_seconds)
+                )
+            except (TypeError, ValueError):
+                entries.pop(job_name, None)
+                continue
+            if ttl_seconds >= 0 and now >= expires_at:
+                entries.pop(job_name, None)
+        if not entries:
+            protection.pop(backend_name, None)
 
 
 def _cleanup_fallback_backend_cooldowns(state: dict[str, Any], *, now: float) -> None:
@@ -619,6 +657,22 @@ def _backend_prewarm_gpus(
     gpu_per_pod: int,
 ) -> int:
     return _fallback_prewarm_gpus(state, {backend_name}, gpu_per_pod)
+
+
+def _fallback_startup_protection_gpus(
+    state: dict[str, Any],
+    backend_names: set[str],
+    gpu_per_pod: int,
+) -> int:
+    total = 0
+    for backend_name, entries in _fallback_startup_protection_state(state).items():
+        if backend_name not in backend_names or not isinstance(entries, dict):
+            continue
+        for item in entries.values():
+            if not isinstance(item, dict):
+                continue
+            total += _int_or_default(item.get("requested_gpus"), gpu_per_pod)
+    return total
 
 
 def _fallback_prewarm_jobs(state: dict[str, Any], backend_names: set[str]) -> int:
@@ -672,6 +726,56 @@ def _consume_fallback_prewarm(
         return
     item["requested_gpus"] = remaining_gpus
     item["requested_jobs"] = remaining_jobs
+
+
+def _protect_fallback_startup(
+    config: dict[str, Any],
+    state: dict[str, Any],
+    backend_name: str,
+    *,
+    requested_gpus: int,
+    now: float,
+    job_name: str,
+) -> None:
+    ttl_seconds = _int_or_default(config.get("fallback_startup_protection_seconds"), 600)
+    if ttl_seconds <= 0:
+        return
+    protection = _fallback_startup_protection_state(state)
+    entries = protection.get(backend_name)
+    if not isinstance(entries, dict):
+        entries = {}
+    entries[job_name or f"fallback-{now:.6f}"] = {
+        "requested_gpus": requested_gpus,
+        "started_at": now,
+        "expires_at": now + ttl_seconds,
+    }
+    protection[backend_name] = entries
+
+
+def _mark_fallback_job_started(
+    config: dict[str, Any],
+    state: dict[str, Any],
+    backend_name: str,
+    *,
+    requested_gpus: int,
+    now: float,
+    job_name: str,
+) -> None:
+    if backend_name not in _fallback_backend_names(config):
+        return
+    _consume_fallback_prewarm(
+        state,
+        backend_name,
+        requested_gpus=requested_gpus,
+    )
+    _protect_fallback_startup(
+        config,
+        state,
+        backend_name,
+        requested_gpus=requested_gpus,
+        now=now,
+        job_name=job_name,
+    )
 
 
 def _consume_any_fallback_prewarm(
@@ -2042,6 +2146,18 @@ def _scale_nodegroup(
             nodegroupName=nodegroup_name,
             scalingConfig={"desiredSize": desired_nodes},
         )
+        print(
+            json.dumps(
+                {
+                    "status": "nodegroup_scaled",
+                    "nodegroup": nodegroup_name,
+                    "desired_nodes": desired_nodes,
+                    "desired_gpus": desired_gpus,
+                },
+                sort_keys=True,
+            ),
+            flush=True,
+        )
     except Exception as error:
         print(
             json.dumps(
@@ -2069,6 +2185,7 @@ def _scale_fallback_nodegroups(
         return
     now = time.time() if now is None else now
     _cleanup_fallback_prewarm(config, state, now=now)
+    _cleanup_fallback_startup_protection(config, state, now=now)
     backends = config.get("backends") if isinstance(config.get("backends"), list) else []
     targets: dict[tuple[str, str], dict[str, Any]] = {}
     for backend in backends:
@@ -2115,7 +2232,12 @@ def _scale_fallback_nodegroups(
             target["backend_names"],
             target["node_gpus"],
         )
-        desired_gpus = max(inflight_gpus, pod_gpus) + prewarm_gpus
+        startup_protection_gpus = _fallback_startup_protection_gpus(
+            state,
+            target["backend_names"],
+            target["node_gpus"],
+        )
+        desired_gpus = max(inflight_gpus, pod_gpus, startup_protection_gpus) + prewarm_gpus
         target_key = _scale_target_key(
             cluster_name=target["cluster_name"],
             nodegroup_name=target["nodegroup_name"],
@@ -2379,10 +2501,13 @@ def rescue_orphan_failed_jobs(
             }
         )
         if next_backend_name in _fallback_backend_names(config):
-            _consume_fallback_prewarm(
+            _mark_fallback_job_started(
+                config,
                 state,
                 next_backend_name,
                 requested_gpus=requested_gpus,
+                now=now,
+                job_name=manifest["metadata"]["name"],
             )
         elif next_backend_name in _b300_backend_names(config):
             released_prewarm_backends = _consume_any_fallback_prewarm(
@@ -2550,6 +2675,15 @@ def reconcile_inflight_jobs(
                 "last_renewed_at": now,
                 "requested_gpus": requested_gpus,
             }
+            if next_backend_name in _fallback_backend_names(config):
+                _mark_fallback_job_started(
+                    config,
+                    state,
+                    next_backend_name,
+                    requested_gpus=requested_gpus,
+                    now=now,
+                    job_name=manifest["metadata"]["name"],
+                )
             if (
                 old_backend_name in _fallback_backend_names(config)
                 and next_backend_name in _b300_backend_names(config)
@@ -2618,6 +2752,15 @@ def reconcile_inflight_jobs(
                 "last_renewed_at": now,
                 "requested_gpus": requested_gpus,
             }
+            if next_backend_name in _fallback_backend_names(config):
+                _mark_fallback_job_started(
+                    config,
+                    state,
+                    next_backend_name,
+                    requested_gpus=requested_gpus,
+                    now=now,
+                    job_name=manifest["metadata"]["name"],
+                )
             if (
                 old_backend_name in _fallback_backend_names(config)
                 and next_backend_name in _b300_backend_names(config)
@@ -2677,6 +2820,15 @@ def reconcile_inflight_jobs(
                 "last_renewed_at": now,
                 "requested_gpus": requested_gpus,
             }
+            if next_backend_name in _fallback_backend_names(config):
+                _mark_fallback_job_started(
+                    config,
+                    state,
+                    next_backend_name,
+                    requested_gpus=requested_gpus,
+                    now=now,
+                    job_name=manifest["metadata"]["name"],
+                )
             if (
                 old_backend_name in _fallback_backend_names(config)
                 and next_backend_name in _b300_backend_names(config)
@@ -2801,6 +2953,15 @@ def reconcile_inflight_jobs(
                     "last_renewed_at": now,
                     "requested_gpus": requested_gpus,
                 }
+                if next_backend_name in _fallback_backend_names(config):
+                    _mark_fallback_job_started(
+                        config,
+                        state,
+                        next_backend_name,
+                        requested_gpus=requested_gpus,
+                        now=now,
+                        job_name=manifest["metadata"]["name"],
+                    )
                 if (
                     old_backend_name in _fallback_backend_names(config)
                     and next_backend_name in _b300_backend_names(config)
@@ -3079,10 +3240,13 @@ def controller_tick(
                     )
                     next_backend_name = _backend_name(backend)
                     if next_backend_name in _fallback_backend_names(config):
-                        _consume_fallback_prewarm(
+                        _mark_fallback_job_started(
+                            config,
                             state,
                             next_backend_name,
                             requested_gpus=requested_gpus,
+                            now=now,
+                            job_name=manifest["metadata"]["name"],
                         )
                     elif next_backend_name in _b300_backend_names(config):
                         released_prewarm_backends = _consume_any_fallback_prewarm(
@@ -3177,10 +3341,13 @@ def controller_tick(
             )
             backend_name = _backend_name(backend)
             if backend_name in _fallback_backend_names(config):
-                _consume_fallback_prewarm(
+                _mark_fallback_job_started(
+                    config,
                     state,
                     backend_name,
                     requested_gpus=requested_gpus,
+                    now=now,
+                    job_name=manifest["metadata"]["name"],
                 )
             elif backend_name in _b300_backend_names(config):
                 released_prewarm_backends = _consume_any_fallback_prewarm(
@@ -3265,10 +3432,13 @@ def controller_tick(
         )
         backend_name = _backend_name(backend)
         if backend_name in _fallback_backend_names(config):
-            _consume_fallback_prewarm(
+            _mark_fallback_job_started(
+                config,
                 state,
                 backend_name,
                 requested_gpus=requested_gpus,
+                now=now,
+                job_name=manifest["metadata"]["name"],
             )
         elif backend_name in _b300_backend_names(config):
             released_prewarm_backends = _consume_any_fallback_prewarm(
@@ -3433,6 +3603,10 @@ def _env_config() -> dict[str, Any]:
         ),
         "fallback_prewarm_ttl_seconds": os.environ.get(
             "SGLANG_VIDEO_FALLBACK_PREWARM_TTL_SECONDS",
+            "600",
+        ),
+        "fallback_startup_protection_seconds": os.environ.get(
+            "SGLANG_VIDEO_FALLBACK_STARTUP_PROTECTION_SECONDS",
             "600",
         ),
         "fallback_capacity_cooldown_seconds": os.environ.get(
