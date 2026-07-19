@@ -1578,7 +1578,19 @@ def repair_final_progress_if_report_exists(
     except Exception as error:
         if _s3_not_found(error):
             return False
-        raise
+        print(
+            json.dumps(
+                {
+                    "status": "final_report_probe_skipped",
+                    "report_s3_uri": report_s3_uri,
+                    "error": str(error),
+                    "error_code": _aws_error_code(error),
+                },
+                sort_keys=True,
+            ),
+            flush=True,
+        )
+        return False
     payload = _progress_payload_from_report(report)
     if str(payload.get("status") or "") == "running":
         return False

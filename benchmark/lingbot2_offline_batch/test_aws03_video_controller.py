@@ -462,6 +462,13 @@ class FakeS3:
         return {"Body": io.BytesIO(json.dumps(payload).encode("utf-8"))}
 
 
+class FakeS3Error:
+    def get_object(self, *, Bucket, Key):
+        error = Exception("AccessDenied while reading report")
+        error.response = {"Error": {"Code": "AccessDenied"}}
+        raise error
+
+
 def _node(name: str, selector: dict, gpus: int = 8, ready: bool = True) -> dict:
     conditions = [{"type": "Ready", "status": "True" if ready else "False"}]
     return {
@@ -1631,6 +1638,32 @@ def test_controller_tick_deletes_visible_message_when_final_report_already_exist
     assert batch.created == []
     assert sqs.deleted[0]["ReceiptHandle"] == "receipt-1"
     assert sent["body"]["status"] == "succeeded"
+
+
+def test_controller_tick_continues_when_final_report_probe_fails():
+    config = _backend_config()
+    request = _request()
+    request["output"]["report_s3_uri"] = "s3://bucket/t2i/reports/sglang_video_report.json"
+    sqs = FakeSQS(request)
+    batch = FakeBatchV1()
+    state = {"inflight": []}
+
+    result = controller_tick(
+        sqs_client=sqs,
+        queue_url="https://sqs.us-west-2.amazonaws.com/123/video",
+        core_client=FakeCoreV1([], [_node("b300-a", config["backends"][0]["node_selector"])]),
+        batch_client=batch,
+        eks_client=FakeEks(),
+        config=config,
+        state=state,
+        now=1000.0,
+        s3_client=FakeS3Error(),
+    )
+
+    assert result["started"] == 1
+    assert result["callback_pending_existing"] == 0
+    assert sqs.visibility_changes == []
+    assert len(batch.created) == 1
 
 
 def test_controller_tick_rescues_orphan_failed_job_when_sqs_message_is_not_visible():
