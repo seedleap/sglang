@@ -1191,6 +1191,98 @@ def test_controller_tick_idle_releases_unused_fallback_prewarm():
     assert eks.updates[-1]["scalingConfig"]["desiredSize"] == 0
 
 
+def test_controller_tick_releases_unused_fallback_prewarm_even_with_messages():
+    config = {
+        **_backend_config(),
+        "fallback_scale_down_grace_seconds": 0,
+    }
+    batch = FakeBatchV1()
+    eks = FakeEksWithDesired(desired_size=1)
+    b300 = _node("b300-a", config["backends"][0]["node_selector"])
+    state = {
+        "inflight": [],
+        "fallback_prewarm": {
+            "h100-spot": {
+                "requested_gpus": 8,
+                "requested_jobs": 1,
+                "started_at": 1000.0,
+                "updated_at": 1000.0,
+            }
+        },
+    }
+
+    result = controller_tick(
+        sqs_client=FakeSQS(_request()),
+        queue_url="https://sqs.us-west-2.amazonaws.com/123/video",
+        core_client=FakeCoreV1([], [b300]),
+        batch_client=batch,
+        eks_client=eks,
+        config=config,
+        state=state,
+        now=1100.0,
+    )
+
+    assert result["status"] == "started"
+    assert result["released_prewarm"] == 1
+    assert len(batch.created) == 1
+    assert batch.created[0]["body"]["metadata"]["labels"]["sglang.seedleap.io/backend"] == "b300-capacity-block"
+    assert state["fallback_prewarm"] == {}
+    assert eks.updates[-1]["nodegroupName"] == "sglang-h100-spot"
+    assert eks.updates[-1]["scalingConfig"]["desiredSize"] == 0
+
+
+def test_reconcile_releases_stale_prewarm_when_pending_fallback_job_is_released():
+    config = {
+        **_backend_config(),
+        "pending_job_grace_seconds": 180,
+        "fallback_scale_down_grace_seconds": 0,
+    }
+    batch = FakeBatchV1()
+    batch.jobs["sglang-video-stuck"] = {"status": {"active": 1}}
+    sqs = FakeSQS(_request())
+    eks = FakeEksWithDesired(desired_size=1)
+    state = {
+        "inflight": [
+            {
+                "request": _request(),
+                "receipt_handle": "receipt-1",
+                "message_id": "message-1",
+                "job_name": "sglang-video-stuck",
+                "backend": "h100-spot",
+                "attempts": 1,
+                "started_at": 1000.0,
+                "last_renewed_at": 1000.0,
+                "requested_gpus": 8,
+                "pending_job_seen_at": 1000.0,
+            }
+        ],
+        "fallback_prewarm": {
+            "h100-spot": {
+                "requested_gpus": 8,
+                "requested_jobs": 1,
+                "started_at": 1000.0,
+                "updated_at": 1000.0,
+            }
+        },
+    }
+
+    result = reconcile_inflight_jobs(
+        sqs_client=sqs,
+        queue_url="https://sqs.us-west-2.amazonaws.com/123/video",
+        core_client=FakeCoreV1([_job_pending_pod("sglang-video-stuck", "h100-spot")], []),
+        batch_client=batch,
+        eks_client=eks,
+        config=config,
+        state=state,
+        now=1300.0,
+    )
+
+    assert result["released"] == 1
+    assert state["fallback_prewarm"] == {}
+    assert eks.updates[-1]["nodegroupName"] == "sglang-h100-spot"
+    assert eks.updates[-1]["scalingConfig"]["desiredSize"] == 0
+
+
 def test_scale_fallback_nodegroups_ignores_resource_in_use_update_conflict():
     config = _backend_config()
     eks = FakeEksResourceInUse(desired_size=0)

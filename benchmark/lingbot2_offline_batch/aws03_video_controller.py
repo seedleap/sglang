@@ -612,6 +612,19 @@ def _consume_any_fallback_prewarm(
     return set()
 
 
+def _release_fallback_prewarm_for_backends(
+    state: dict[str, Any],
+    backend_names: set[str],
+) -> set[str]:
+    prewarm = _fallback_prewarm_state(state)
+    released: set[str] = set()
+    for backend_name in list(backend_names):
+        if backend_name in prewarm:
+            prewarm.pop(backend_name, None)
+            released.add(backend_name)
+    return released
+
+
 def _release_unused_fallback_prewarm(
     config: dict[str, Any],
     state: dict[str, Any],
@@ -1946,6 +1959,7 @@ def reconcile_inflight_jobs(
     nodes = _list_nodes(core_client)
     pods = _list_capacity_pods(core_client, config)
     completed = restarted = released = failed = missing = pending = 0
+    released_prewarm = 0
     callback_repaired = callback_pending = 0
     remaining = []
     all_inflight = list(state.get("inflight", []))
@@ -2260,10 +2274,16 @@ def reconcile_inflight_jobs(
         remaining.append(item)
 
     state["inflight"] = remaining
+    scale_down_backends = fallback_backends_retargeted_to_b300 | fallback_backends_released
+    released_prewarm_backends = _release_fallback_prewarm_for_backends(
+        state,
+        scale_down_backends,
+    )
+    released_prewarm = len(released_prewarm_backends)
     _prime_fallback_scale_down(
         config,
         state,
-        fallback_backends_retargeted_to_b300 | fallback_backends_released,
+        scale_down_backends | released_prewarm_backends,
         now=now,
     )
     _scale_fallback_nodegroups(
@@ -2282,6 +2302,7 @@ def reconcile_inflight_jobs(
         "pending": pending,
         "callback_repaired": callback_repaired,
         "callback_pending": callback_pending,
+        "released_prewarm": released_prewarm,
     }
 
 
@@ -2354,6 +2375,7 @@ def controller_tick(
     pods = _list_capacity_pods(core_client, config)
     started = deferred = adopted = completed_existing = 0
     prewarmed = prewarm_skipped = 0
+    released_prewarm_count = _int_or_default(reconcile_result.get("released_prewarm"), 0)
     callback_repaired_existing = callback_pending_existing = 0
     for message in messages:
         request = _decode_request(message)
@@ -2476,16 +2498,17 @@ def controller_tick(
                 requested_gpus=requested_gpus,
             )
         elif backend_name in _b300_backend_names(config):
-            released_prewarm = _consume_any_fallback_prewarm(
+            released_prewarm_backends = _consume_any_fallback_prewarm(
                 state,
                 _fallback_backend_names(config),
                 requested_gpus=requested_gpus,
             )
-            if released_prewarm:
+            if released_prewarm_backends:
+                released_prewarm_count += len(released_prewarm_backends)
                 _prime_fallback_scale_down(
                     config,
                     state,
-                    released_prewarm,
+                    released_prewarm_backends,
                     now=now,
                 )
         _scale_fallback_nodegroups(eks_client, config, state, pods=pods, now=now)
@@ -2500,6 +2523,7 @@ def controller_tick(
         "adopted": adopted,
         "prewarmed": prewarmed,
         "prewarm_skipped": prewarm_skipped,
+        "released_prewarm": released_prewarm_count,
         "completed_existing": completed_existing,
         "callback_repaired_existing": callback_repaired_existing,
         "callback_pending_existing": callback_pending_existing,
