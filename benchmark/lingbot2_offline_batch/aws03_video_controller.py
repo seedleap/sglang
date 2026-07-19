@@ -238,6 +238,58 @@ def _backend_gpu_requests(pods: list[dict[str, Any]], backend_name: str) -> int:
     return total
 
 
+def _backend_job_keys(
+    pods: list[dict[str, Any]],
+    state: dict[str, Any],
+    backend_names: set[str],
+) -> set[tuple[str, str]]:
+    keys: set[tuple[str, str]] = set()
+    for index, pod in enumerate(pods):
+        backend_name = str(_labels(pod).get("sglang.seedleap.io/backend") or "")
+        if backend_name not in backend_names:
+            continue
+        metadata = _metadata(pod)
+        if metadata.get("deletionTimestamp"):
+            continue
+        status = pod.get("status") if isinstance(pod.get("status"), dict) else {}
+        if status.get("phase") in TERMINAL_POD_PHASES:
+            continue
+        job_key = _pod_job_name(pod) or str(metadata.get("name") or f"pod-{index}")
+        keys.add((backend_name, job_key))
+
+    inflight = state.get("inflight") if isinstance(state.get("inflight"), list) else []
+    for index, item in enumerate(inflight):
+        if not isinstance(item, dict):
+            continue
+        backend_name = str(item.get("backend") or "")
+        if backend_name not in backend_names:
+            continue
+        job_key = str(
+            item.get("job_name")
+            or item.get("message_id")
+            or item.get("receipt_handle")
+            or f"inflight-{index}"
+        )
+        keys.add((backend_name, job_key))
+    return keys
+
+
+def _backend_active_jobs(
+    pods: list[dict[str, Any]],
+    state: dict[str, Any],
+    backend_name: str,
+) -> int:
+    return len(_backend_job_keys(pods, state, {backend_name}))
+
+
+def _backend_group_active_jobs(
+    pods: list[dict[str, Any]],
+    state: dict[str, Any],
+    backend_names: set[str],
+) -> int:
+    return len(_backend_job_keys(pods, state, backend_names))
+
+
 def _fallback_backend_names(config: dict[str, Any]) -> set[str]:
     backends = config.get("backends") if isinstance(config.get("backends"), list) else []
     return {
@@ -309,19 +361,31 @@ def choose_backend(
     state = state or {"inflight": []}
     excluded_backend_names = excluded_backend_names or set()
     gpu_per_pod = _int_or_default(config.get("gpu_per_pod"), requested_gpus)
+    b300_names = _b300_backend_names(config)
+    fallback_names = _fallback_backend_names(config)
+    all_backend_names = b300_names | fallback_names
+    max_active_jobs = _int_or_default(config.get("max_active_jobs"), 7)
+    if max_active_jobs > 0:
+        active_jobs = _backend_group_active_jobs(pods, state, all_backend_names)
+        if active_jobs + 1 > max_active_jobs:
+            return None
+
     b300_max_gpus = _int_or_default(
         config.get("b300_max_active_gpus"),
         _int_or_default(config.get("max_active_gpus"), 32),
     )
-    b300_names = _b300_backend_names(config)
+    b300_max_jobs = _int_or_default(config.get("b300_max_active_jobs"), 5)
     b300_active = max(
         _fallback_gpu_requests(pods, b300_names),
         _fallback_inflight_gpus(state, b300_names, gpu_per_pod),
     )
+    b300_active_jobs = _backend_group_active_jobs(pods, state, b300_names)
     for backend in backends:
         if not isinstance(backend, dict) or not _is_b300_backend(backend):
             continue
         if _backend_name(backend) in excluded_backend_names:
+            continue
+        if b300_max_jobs > 0 and b300_active_jobs + 1 > b300_max_jobs:
             continue
         if b300_active + requested_gpus > b300_max_gpus:
             continue
@@ -333,16 +397,19 @@ def choose_backend(
         config.get("fallback_max_active_gpus"),
         _int_or_default(config.get("h100_max_active_gpus"), 32),
     )
+    fallback_max_jobs = _int_or_default(config.get("fallback_max_active_jobs"), 2)
     allow_h100_demand = str(config.get("allow_h100_demand") or "").lower() in {"1", "true", "yes"}
-    fallback_names = _fallback_backend_names(config)
     fallback_active = max(
         _fallback_gpu_requests(pods, fallback_names),
         _fallback_inflight_gpus(state, fallback_names, gpu_per_pod),
     )
+    fallback_active_jobs = _backend_group_active_jobs(pods, state, fallback_names)
+    if fallback_max_jobs > 0 and fallback_active_jobs + 1 > fallback_max_jobs:
+        return None
     if fallback_active + requested_gpus > fallback_max_gpus:
         return None
 
-    candidates: list[tuple[int, int, dict[str, Any]]] = []
+    candidates: list[tuple[int, int, int, dict[str, Any]]] = []
     for index, backend in enumerate(backends):
         if not isinstance(backend, dict) or not _is_h100_backend(backend):
             continue
@@ -355,6 +422,7 @@ def choose_backend(
             continue
         candidates.append(
             (
+                _backend_active_jobs(pods, state, backend_name),
                 _backend_active_gpus(pods, state, backend_name, gpu_per_pod),
                 index,
                 backend,
@@ -362,7 +430,7 @@ def choose_backend(
         )
     if not candidates:
         return None
-    return min(candidates, key=lambda item: (item[0], item[1]))[2]
+    return min(candidates, key=lambda item: (item[0], item[1], item[2]))[3]
 
 
 def can_start_job(
@@ -1739,6 +1807,12 @@ def _env_config() -> dict[str, Any]:
             "SGLANG_VIDEO_PENDING_JOB_GRACE_SECONDS",
             "900",
         ),
+        "max_active_jobs": os.environ.get("SGLANG_VIDEO_MAX_ACTIVE_JOBS", "7"),
+        "b300_max_active_jobs": os.environ.get("SGLANG_VIDEO_B300_MAX_ACTIVE_JOBS", "5"),
+        "fallback_max_active_jobs": os.environ.get(
+            "SGLANG_VIDEO_FALLBACK_MAX_ACTIVE_JOBS",
+            "2",
+        ),
         "b300_max_active_gpus": os.environ.get(
             "SGLANG_VIDEO_B300_MAX_ACTIVE_GPUS",
             os.environ.get("SGLANG_VIDEO_MAX_ACTIVE_GPUS", "32"),
@@ -1759,7 +1833,7 @@ def _env_config() -> dict[str, Any]:
         ),
         "fallback_scale_down_grace_seconds": os.environ.get(
             "SGLANG_VIDEO_FALLBACK_SCALE_DOWN_GRACE_SECONDS",
-            "900",
+            "60",
         ),
         "pod_label_selector": os.environ.get(
             "SGLANG_VIDEO_POD_LABEL_SELECTOR",

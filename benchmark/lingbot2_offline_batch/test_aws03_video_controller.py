@@ -258,6 +258,9 @@ def test_env_config_reads_placement_profiles_and_job_ttl(monkeypatch):
     config = _env_config()
 
     assert config["max_active_gpus"] == "8"
+    assert config["max_active_jobs"] == "7"
+    assert config["b300_max_active_jobs"] == "5"
+    assert config["fallback_max_active_jobs"] == "2"
     assert config["b300_max_active_gpus"] == "32"
     assert config["fallback_max_active_gpus"] == "160"
     assert config["gpu_per_pod"] == "8"
@@ -429,6 +432,9 @@ def _backend_config() -> dict:
         "fsx_claim_name": "fsx-claim",
         "gpu_per_pod": 8,
         "job_parallelism": 1,
+        "max_active_jobs": 7,
+        "b300_max_active_jobs": 5,
+        "fallback_max_active_jobs": 2,
         "max_active_gpus": 40,
         "h100_max_active_gpus": 32,
         "h100_node_gpus": 8,
@@ -611,6 +617,7 @@ def test_choose_backend_spreads_fallback_messages_to_least_busy_backend():
     config = {
         **_backend_config(),
         "fallback_max_active_gpus": 160,
+        "fallback_max_active_jobs": 10,
         "backends": [
             {
                 "name": "b200-spot",
@@ -647,8 +654,137 @@ def test_choose_backend_spreads_fallback_messages_to_least_busy_backend():
     assert selected["name"] == "h200-p5e-spot"
 
 
+def test_choose_backend_prefers_b300_until_five_jobs_then_uses_spot():
+    config = {
+        **_backend_config(),
+        "max_active_jobs": 7,
+        "b300_max_active_jobs": 5,
+        "fallback_max_active_jobs": 2,
+        "b300_max_active_gpus": 40,
+        "fallback_max_active_gpus": 160,
+    }
+    b300 = _node("b300-a", config["backends"][0]["node_selector"])
+    h100 = _node("h100-a", config["backends"][1]["node_selector"])
+    four_b300_jobs = {
+        "inflight": [
+            {
+                "backend": "b300-capacity-block",
+                "job_name": f"sglang-video-b300-{index}",
+                "requested_gpus": 8,
+            }
+            for index in range(4)
+        ]
+    }
+    five_b300_jobs = {
+        "inflight": [
+            {
+                "backend": "b300-capacity-block",
+                "job_name": f"sglang-video-b300-{index}",
+                "requested_gpus": 8,
+            }
+            for index in range(5)
+        ]
+    }
+
+    selected_b300 = choose_backend(
+        config,
+        [b300, h100],
+        [],
+        requested_gpus=8,
+        state=four_b300_jobs,
+    )
+    selected_spot = choose_backend(
+        config,
+        [b300, h100],
+        [],
+        requested_gpus=8,
+        state=five_b300_jobs,
+    )
+
+    assert selected_b300["name"] == "b300-capacity-block"
+    assert selected_spot["name"] == "h100-spot"
+
+
+def test_choose_backend_limits_fallback_to_two_jobs_even_when_gpu_cap_is_higher():
+    config = {
+        **_backend_config(),
+        "max_active_jobs": 7,
+        "b300_max_active_jobs": 5,
+        "fallback_max_active_jobs": 2,
+        "b300_max_active_gpus": 40,
+        "fallback_max_active_gpus": 160,
+    }
+    h100 = _node("h100-a", config["backends"][1]["node_selector"])
+    one_spot_job = {
+        "inflight": [
+            {
+                "backend": "b300-capacity-block",
+                "job_name": f"sglang-video-b300-{index}",
+                "requested_gpus": 8,
+            }
+            for index in range(5)
+        ]
+        + [
+            {
+                "backend": "h100-spot",
+                "job_name": "sglang-video-h100-0",
+                "requested_gpus": 8,
+            }
+        ]
+    }
+    two_spot_jobs = {
+        "inflight": one_spot_job["inflight"]
+        + [
+            {
+                "backend": "h100-spot",
+                "job_name": "sglang-video-h100-1",
+                "requested_gpus": 8,
+            }
+        ]
+    }
+
+    selected = choose_backend(config, [h100], [], requested_gpus=8, state=one_spot_job)
+    blocked = choose_backend(config, [h100], [], requested_gpus=8, state=two_spot_jobs)
+
+    assert selected["name"] == "h100-spot"
+    assert blocked is None
+
+
+def test_choose_backend_enforces_total_job_cap_across_b300_and_spot():
+    config = {
+        **_backend_config(),
+        "max_active_jobs": 7,
+        "b300_max_active_jobs": 5,
+        "fallback_max_active_jobs": 2,
+        "b300_max_active_gpus": 40,
+        "fallback_max_active_gpus": 160,
+    }
+    b300 = _node("b300-a", config["backends"][0]["node_selector"])
+    h100 = _node("h100-a", config["backends"][1]["node_selector"])
+    state = {
+        "inflight": [
+            {
+                "backend": "b300-capacity-block",
+                "job_name": f"sglang-video-b300-{index}",
+                "requested_gpus": 8,
+            }
+            for index in range(5)
+        ]
+        + [
+            {
+                "backend": "h100-spot",
+                "job_name": f"sglang-video-h100-{index}",
+                "requested_gpus": 8,
+            }
+            for index in range(2)
+        ]
+    }
+
+    assert choose_backend(config, [b300, h100], [], requested_gpus=8, state=state) is None
+
+
 def test_choose_backend_does_not_double_count_h100_pods_and_inflight_state():
-    config = _backend_config()
+    config = {**_backend_config(), "fallback_max_active_jobs": 10}
     h100_selector = config["backends"][1]["node_selector"]
     h100_pods = [
         {
@@ -824,6 +960,30 @@ def test_scale_fallback_nodegroups_scales_down_after_grace_period():
     assert eks.updates[-1]["scalingConfig"]["desiredSize"] == 0
 
 
+def test_controller_tick_idle_still_scales_down_empty_fallback_nodegroup():
+    config = {**_backend_config(), "fallback_scale_down_grace_seconds": 60}
+    eks = FakeEksWithDesired(desired_size=1)
+    state = {
+        "inflight": [],
+        "fallback_scale_down": {"leap-world-aws03-usw2/sglang-h100-spot": 1000.0},
+    }
+
+    result = controller_tick(
+        sqs_client=FakeSQS([]),
+        queue_url="https://sqs.us-west-2.amazonaws.com/123/video",
+        core_client=FakeCoreV1([], []),
+        batch_client=FakeBatchV1(),
+        eks_client=eks,
+        config=config,
+        state=state,
+        now=1100.0,
+    )
+
+    assert result["status"] == "idle"
+    assert eks.updates[-1]["nodegroupName"] == "sglang-h100-spot"
+    assert eks.updates[-1]["scalingConfig"]["desiredSize"] == 0
+
+
 def test_scale_fallback_nodegroups_ignores_resource_in_use_update_conflict():
     config = _backend_config()
     eks = FakeEksResourceInUse(desired_size=0)
@@ -881,7 +1041,7 @@ def test_controller_tick_adopts_existing_job_after_restart_and_scales_nodes():
     assert eks.updates[-1]["scalingConfig"]["desiredSize"] == 1
 
 
-def test_controller_tick_starts_multiple_messages_up_to_h100_gpu_cap_and_scales_nodes():
+def test_controller_tick_starts_multiple_messages_up_to_fallback_job_cap_and_scales_nodes():
     requests = [{**_request(), "generation_job_id": f"gen_t2i_{index}"} for index in range(5)]
     config = _backend_config()
     b300 = _node("b300-a", config["backends"][0]["node_selector"])
@@ -902,9 +1062,9 @@ def test_controller_tick_starts_multiple_messages_up_to_h100_gpu_cap_and_scales_
         now=1000.0,
     )
 
-    assert result["started"] == 4
-    assert result["deferred"] == 1
-    assert len(batch.created) == 4
+    assert result["started"] == 2
+    assert result["deferred"] == 3
+    assert len(batch.created) == 2
     assert all(
         job["body"]["metadata"]["labels"]["sglang.seedleap.io/backend"] == "h100-spot"
         for job in batch.created
@@ -912,8 +1072,8 @@ def test_controller_tick_starts_multiple_messages_up_to_h100_gpu_cap_and_scales_
     assert sqs.deleted == []
     assert sqs.visibility_changes[-1]["ReceiptHandle"] == "receipt-5"
     assert sqs.visibility_changes[-1]["VisibilityTimeout"] > 0
-    assert eks.updates[-1]["scalingConfig"]["desiredSize"] == 4
-    assert len(state["inflight"]) == 4
+    assert eks.updates[-1]["scalingConfig"]["desiredSize"] == 2
+    assert len(state["inflight"]) == 2
 
 
 def test_renew_inflight_messages_extends_visibility_without_deleting():
