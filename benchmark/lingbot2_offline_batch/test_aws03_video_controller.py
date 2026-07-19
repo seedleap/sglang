@@ -348,6 +348,39 @@ def test_env_config_reads_placement_profiles_and_job_ttl(monkeypatch):
     assert config["ttl_seconds_after_finished"] == "900"
 
 
+def test_env_config_merges_scheduler_name_from_matching_placement_profile(monkeypatch):
+    placement_profiles = [
+        {
+            "name": "b200-spot",
+            "scheduler_name": "default-scheduler",
+            "node_selector": {
+                "eks.amazonaws.com/capacityType": "SPOT",
+                "node.kubernetes.io/instance-type": "p6-b200.48xlarge",
+            },
+        }
+    ]
+    backends = [
+        {
+            "name": "b200-spot",
+            "node_selector": {
+                "eks.amazonaws.com/capacityType": "SPOT",
+                "node.kubernetes.io/instance-type": "p6-b200.48xlarge",
+            },
+        }
+    ]
+
+    monkeypatch.setenv("SGLANG_VIDEO_JOB_IMAGE", "lmsysorg/sglang:dev@sha256:test")
+    monkeypatch.setenv(
+        "SGLANG_VIDEO_JOB_PLACEMENT_PROFILES_JSON",
+        json.dumps(placement_profiles),
+    )
+    monkeypatch.setenv("SGLANG_VIDEO_BACKENDS_JSON", json.dumps(backends))
+
+    config = _env_config()
+
+    assert config["backends"][0]["scheduler_name"] == "default-scheduler"
+
+
 class FakeSQS:
     def __init__(self, request: dict | list[dict]):
         self.requests = request if isinstance(request, list) else [request]

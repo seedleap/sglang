@@ -3318,7 +3318,27 @@ def controller_tick(
 def _backend_profiles_from_env(placement_profiles: list[dict[str, Any]]) -> list[dict[str, Any]]:
     configured = _json_env("SGLANG_VIDEO_BACKENDS_JSON", [])
     if isinstance(configured, list) and configured:
-        return configured
+        placement_by_name = {
+            _backend_name(profile): profile
+            for profile in placement_profiles
+            if isinstance(profile, dict) and _backend_name(profile)
+        }
+        backends: list[dict[str, Any]] = []
+        for backend in configured:
+            if not isinstance(backend, dict):
+                continue
+            merged = dict(backend)
+            placement = placement_by_name.get(_backend_name(merged))
+            if (
+                isinstance(placement, dict)
+                and "scheduler_name" in placement
+                and "scheduler_name" not in merged
+            ):
+                merged["scheduler_name"] = placement.get("scheduler_name")
+            if _is_h100_backend(merged):
+                merged.setdefault("scale_nodegroup", True)
+            backends.append(merged)
+        return backends
     backends: list[dict[str, Any]] = []
     for profile in placement_profiles:
         if not isinstance(profile, dict):
