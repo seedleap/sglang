@@ -391,6 +391,54 @@ def _fallback_inflight_gpus(
     )
 
 
+def _active_backend_job_names(
+    pods: list[dict[str, Any]],
+    backend_names: set[str],
+) -> set[tuple[str, str]]:
+    active: set[tuple[str, str]] = set()
+    for pod in pods:
+        metadata = _metadata(pod)
+        if metadata.get("deletionTimestamp"):
+            continue
+        if _pod_phase(pod) in TERMINAL_POD_PHASES:
+            continue
+        backend_name = str(_labels(pod).get("sglang.seedleap.io/backend") or "")
+        if backend_name not in backend_names:
+            continue
+        job_name = _pod_job_name(pod)
+        if job_name:
+            active.add((backend_name, job_name))
+    return active
+
+
+def _fallback_inflight_gpus_for_nodegroup_scaling(
+    state: dict[str, Any],
+    pods: list[dict[str, Any]],
+    backend_names: set[str],
+    gpu_per_pod: int,
+    *,
+    now: float,
+    orphan_grace_seconds: int,
+) -> int:
+    active_job_names = _active_backend_job_names(pods, backend_names)
+    total = 0
+    for item in state.get("inflight", []):
+        backend_name = str(item.get("backend") or "")
+        if backend_name not in backend_names:
+            continue
+        job_name = str(item.get("job_name") or "")
+        if job_name and (backend_name, job_name) in active_job_names:
+            total += _int_or_default(item.get("requested_gpus"), gpu_per_pod)
+            continue
+        try:
+            started_at = float(item.get("started_at", now))
+        except (TypeError, ValueError):
+            started_at = now
+        if now - started_at <= orphan_grace_seconds:
+            total += _int_or_default(item.get("requested_gpus"), gpu_per_pod)
+    return total
+
+
 def _fallback_prewarm_state(state: dict[str, Any]) -> dict[str, Any]:
     prewarm = state.setdefault("fallback_prewarm", {})
     if not isinstance(prewarm, dict):
@@ -1675,11 +1723,18 @@ def _scale_fallback_nodegroups(
         scale_down_state = {}
         state["fallback_scale_down"] = scale_down_state
     scale_down_grace = _int_or_default(config.get("fallback_scale_down_grace_seconds"), 900)
+    orphan_grace = _int_or_default(
+        config.get("fallback_inflight_without_pod_grace_seconds"),
+        300,
+    )
     for target in targets.values():
-        inflight_gpus = sum(
-            _int_or_default(item.get("requested_gpus"), target["node_gpus"])
-            for item in state.get("inflight", [])
-            if str(item.get("backend") or "") in target["backend_names"]
+        inflight_gpus = _fallback_inflight_gpus_for_nodegroup_scaling(
+            state,
+            pods or [],
+            target["backend_names"],
+            target["node_gpus"],
+            now=now,
+            orphan_grace_seconds=orphan_grace,
         )
         pod_gpus = sum(
             _backend_gpu_requests(pods or [], backend_name)
@@ -2466,6 +2521,10 @@ def _env_config() -> dict[str, Any]:
         "fallback_scale_down_grace_seconds": os.environ.get(
             "SGLANG_VIDEO_FALLBACK_SCALE_DOWN_GRACE_SECONDS",
             "60",
+        ),
+        "fallback_inflight_without_pod_grace_seconds": os.environ.get(
+            "SGLANG_VIDEO_FALLBACK_INFLIGHT_WITHOUT_POD_GRACE_SECONDS",
+            "300",
         ),
         "fallback_prewarm_ttl_seconds": os.environ.get(
             "SGLANG_VIDEO_FALLBACK_PREWARM_TTL_SECONDS",

@@ -264,6 +264,7 @@ def test_env_config_reads_placement_profiles_and_job_ttl(monkeypatch):
     assert config["b300_max_active_gpus"] == "32"
     assert config["fallback_max_active_gpus"] == "160"
     assert config["fallback_prewarm_ttl_seconds"] == "600"
+    assert config["fallback_inflight_without_pod_grace_seconds"] == "300"
     assert config["fallback_capacity_cooldown_seconds"] == "600"
     assert config["fallback_hard_failure_cooldown_seconds"] == "3600"
     assert config["gpu_per_pod"] == "8"
@@ -969,6 +970,54 @@ def test_scale_fallback_nodegroups_counts_existing_backend_pods_after_restart():
 
     assert eks.updates[-1]["nodegroupName"] == "sglang-h100-spot"
     assert eks.updates[-1]["scalingConfig"]["desiredSize"] == 1
+
+
+def test_scale_fallback_nodegroups_holds_recent_inflight_before_pod_appears():
+    config = {
+        **_backend_config(),
+        "fallback_inflight_without_pod_grace_seconds": 300,
+    }
+    eks = FakeEksWithDesired(desired_size=0)
+    state = {
+        "inflight": [
+            {
+                "backend": "h100-spot",
+                "job_name": "sglang-video-starting",
+                "requested_gpus": 8,
+                "started_at": 1000.0,
+            }
+        ]
+    }
+
+    _scale_fallback_nodegroups(eks, config, state, pods=[], now=1060.0)
+
+    assert eks.updates[-1]["nodegroupName"] == "sglang-h100-spot"
+    assert eks.updates[-1]["scalingConfig"]["desiredSize"] == 1
+
+
+def test_scale_fallback_nodegroups_releases_stale_inflight_without_active_pod():
+    config = {
+        **_backend_config(),
+        "fallback_scale_down_grace_seconds": 0,
+        "fallback_inflight_without_pod_grace_seconds": 300,
+    }
+    eks = FakeEksWithDesired(desired_size=1)
+    state = {
+        "inflight": [
+            {
+                "backend": "h100-spot",
+                "job_name": "sglang-video-gone",
+                "requested_gpus": 8,
+                "started_at": 1000.0,
+            }
+        ],
+        "fallback_scale_down": {"leap-world-aws03-usw2/sglang-h100-spot": 1500.0},
+    }
+
+    _scale_fallback_nodegroups(eks, config, state, pods=[], now=1600.0)
+
+    assert eks.updates[-1]["nodegroupName"] == "sglang-h100-spot"
+    assert eks.updates[-1]["scalingConfig"]["desiredSize"] == 0
 
 
 def test_scale_fallback_nodegroups_counts_prewarmed_backend_capacity():
