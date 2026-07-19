@@ -441,6 +441,18 @@ def _job_pending_pod(job_name: str, backend_name: str, gpus: int = 8) -> dict:
     }
 
 
+def _job_scheduled_pending_pod(
+    job_name: str,
+    backend_name: str,
+    node_name: str = "node-a",
+    gpus: int = 8,
+) -> dict:
+    pod = _job_pending_pod(job_name, backend_name, gpus=gpus)
+    pod["spec"]["nodeName"] = node_name
+    pod["status"]["conditions"] = [{"type": "PodScheduled", "status": "True"}]
+    return pod
+
+
 def _backend_config() -> dict:
     return {
         "namespace": "default",
@@ -1720,8 +1732,52 @@ def test_reconcile_recreates_unschedulable_b300_job_on_fallback_after_grace_peri
     assert created["metadata"]["labels"]["sglang.seedleap.io/backend"] == "h100-spot"
     assert state["inflight"][0]["backend"] == "h100-spot"
     assert state["inflight"][0]["attempts"] == 2
+    assert state["inflight"][0]["started_at"] == 1300.0
     assert state["inflight"][0]["job_name"].startswith("sglang-video-")
     assert "pending_job_seen_at" not in state["inflight"][0]
+
+
+def test_reconcile_keeps_scheduled_pending_job_while_container_is_starting():
+    config = {**_backend_config(), "pending_job_grace_seconds": 180}
+    batch = FakeBatchV1()
+    batch.jobs["sglang-video-starting"] = {"status": {"active": 1}}
+    sqs = FakeSQS(_request())
+    state = {
+        "inflight": [
+            {
+                "request": _request(),
+                "receipt_handle": "receipt-1",
+                "message_id": "message-1",
+                "job_name": "sglang-video-starting",
+                "backend": "h100-spot",
+                "attempts": 2,
+                "started_at": 1000.0,
+                "last_renewed_at": 1000.0,
+                "requested_gpus": 8,
+                "pending_job_seen_at": 1000.0,
+            }
+        ]
+    }
+
+    result = reconcile_inflight_jobs(
+        sqs_client=sqs,
+        queue_url="https://sqs.us-west-2.amazonaws.com/123/video",
+        core_client=FakeCoreV1(
+            [_job_scheduled_pending_pod("sglang-video-starting", "h100-spot")],
+            [],
+        ),
+        batch_client=batch,
+        eks_client=FakeEks(),
+        config=config,
+        state=state,
+        now=1300.0,
+    )
+
+    assert result["pending"] == 0
+    assert result["restarted"] == 0
+    assert batch.deleted == []
+    assert batch.created == []
+    assert state["inflight"][0]["job_name"] == "sglang-video-starting"
 
 
 def test_reconcile_releases_pending_fallback_job_when_active_job_caps_are_exceeded():
@@ -1830,6 +1886,7 @@ def test_reconcile_retargets_pending_fallback_job_to_b300_and_cancels_fallback_s
     assert created["metadata"]["labels"]["sglang.seedleap.io/backend"] == "b300-capacity-block"
     assert state["inflight"][0]["backend"] == "b300-capacity-block"
     assert state["inflight"][0]["attempts"] == 2
+    assert state["inflight"][0]["started_at"] == 1300.0
     assert state["inflight"][0]["job_name"].startswith("sglang-video-")
     assert "pending_job_seen_at" not in state["inflight"][0]
     assert eks.updates[-1]["nodegroupName"] == "sglang-h100-spot"

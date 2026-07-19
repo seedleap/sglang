@@ -1877,6 +1877,7 @@ def reconcile_inflight_jobs(
                 "job_name": manifest["metadata"]["name"],
                 "backend": next_backend_name,
                 "attempts": next_attempt,
+                "started_at": now,
                 "last_renewed_at": now,
                 "requested_gpus": requested_gpus,
             }
@@ -1940,6 +1941,7 @@ def reconcile_inflight_jobs(
                 "job_name": manifest["metadata"]["name"],
                 "backend": next_backend_name,
                 "attempts": next_attempt,
+                "started_at": now,
                 "last_renewed_at": now,
                 "requested_gpus": requested_gpus,
             }
@@ -2070,6 +2072,7 @@ def reconcile_inflight_jobs(
                     "job_name": manifest["metadata"]["name"],
                     "backend": next_backend_name,
                     "attempts": next_attempt,
+                    "started_at": now,
                     "last_renewed_at": now,
                     "requested_gpus": requested_gpus,
                 }
