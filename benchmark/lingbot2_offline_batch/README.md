@@ -51,30 +51,31 @@ Copy `/results` before deleting the completed pod and ConfigMap.
 For the lightweight, externally callable AWS service built from this benchmark
 contract, see [`examples/lingbot_batch_api`](../../examples/lingbot_batch_api/README.md).
 It pairs one synchronous HTTP adapter with each SGLang instance, returns 429
-instead of building a server-side queue, and lets HPA/Karpenter resize B300 Spot
+instead of building a server-side queue, and lets HPA/Karpenter resize GPU
 capacity while callers provide backpressure.
 
 ## aws03 SQS video controller
 
 `aws03_video_controller.py` consumes one SQS message per SGLang video batch. It
 does not delete a message when the Kubernetes Job is created. Instead, the
-message is dynamically renewed until the Job succeeds, so H100 Spot interruption,
-pod failure, or controller restart does not lose work.
+message is dynamically renewed until the Job succeeds, so pod failure,
+Kubernetes Job replacement, or controller restart does not lose work.
 
 Scheduling policy:
 
-- Prefer a B300 capacity-block backend when it has one full 8-GPU slot free and
-  the B300 pool is still below `SGLANG_VIDEO_B300_MAX_ACTIVE_GPUS`.
-- If B300 exists but is full or already at its pool cap, fall back to the
-  configured B200/H100/H200 Spot backends.
-- B300 and fallback capacity are capped separately. Production defaults are
-  `SGLANG_VIDEO_B300_MAX_ACTIVE_GPUS=32` and
-  `SGLANG_VIDEO_FALLBACK_MAX_ACTIVE_GPUS=160`, which means at most four B300
-  8-GPU Jobs plus twenty fallback 8-GPU Jobs.
-- Fallback Jobs are assigned to the least-busy configured fallback backend, so a
-  queue burst can fan out across B200, H100, and H200 nodegroups.
-- If neither backend has capacity, the controller changes message visibility and
-  leaves the message in SQS for a later attempt.
+- Production currently uses only the B300 capacity-block backend. Configure
+  `SGLANG_VIDEO_DISABLE_FALLBACK_BACKENDS=true` and include only
+  `b300-capacity-block` in `SGLANG_VIDEO_BACKENDS_JSON`.
+- A Job starts only when B300 has one full 8-GPU slot free and the B300 pool is
+  still below `SGLANG_VIDEO_B300_MAX_ACTIVE_GPUS` and
+  `SGLANG_VIDEO_B300_MAX_ACTIVE_JOBS`.
+- If B300 is full or already at its pool cap, the controller changes message
+  visibility and leaves the message in SQS for a later attempt. It does not
+  create B200/H100/H200 Spot Jobs in this mode.
+- The controller still supports fallback GPU backends for experiments, but they
+  must be explicitly enabled by setting
+  `SGLANG_VIDEO_DISABLE_FALLBACK_BACKENDS=false` and adding the fallback entries
+  to `SGLANG_VIDEO_BACKENDS_JSON`.
 
 The controller tracks inflight messages in memory. While a Job is pending or
 running it calls `ChangeMessageVisibility` every
@@ -123,16 +124,16 @@ SGLANG_VIDEO_MESSAGE_RENEW_INTERVAL_SECONDS=60
 SGLANG_VIDEO_MESSAGE_MAX_LEASE_SECONDS=28800
 SGLANG_VIDEO_MAX_JOB_ATTEMPTS=5
 SGLANG_VIDEO_MISSING_JOB_GRACE_SECONDS=180
-SGLANG_VIDEO_B300_MAX_ACTIVE_GPUS=32
-SGLANG_VIDEO_FALLBACK_MAX_ACTIVE_GPUS=160
-SGLANG_VIDEO_H100_MAX_ACTIVE_GPUS=160
-SGLANG_VIDEO_H100_NODE_GPUS=8
-SGLANG_VIDEO_H100_MAX_NODES=20
-SGLANG_VIDEO_H100_EKS_CLUSTER_NAME=leap-world-aws03-usw2
-SGLANG_VIDEO_ALLOW_H100_DEMAND=false
+SGLANG_VIDEO_DISABLE_FALLBACK_BACKENDS=true
+SGLANG_VIDEO_MAX_ACTIVE_JOBS=5
+SGLANG_VIDEO_B300_MAX_ACTIVE_JOBS=5
+SGLANG_VIDEO_B300_MAX_ACTIVE_GPUS=40
+SGLANG_VIDEO_FALLBACK_MAX_ACTIVE_JOBS=0
+SGLANG_VIDEO_FALLBACK_MAX_ACTIVE_GPUS=0
 ```
 
-Use `SGLANG_VIDEO_BACKENDS_JSON` to make backend choice explicit. Example:
+Use `SGLANG_VIDEO_BACKENDS_JSON` to make backend choice explicit. Current
+production B300-only example:
 
 ```json
 [
@@ -143,54 +144,11 @@ Use `SGLANG_VIDEO_BACKENDS_JSON` to make backend choice explicit. Example:
       "eks.amazonaws.com/nodegroup": "wan22-cb-p6b300-0715-20c",
       "node.kubernetes.io/instance-type": "p6-b300.48xlarge"
     }
-  },
-  {
-    "name": "b200-spot",
-    "scale_nodegroup": true,
-    "max_nodes": 20,
-    "node_selector": {
-      "eks.amazonaws.com/capacityType": "SPOT",
-      "eks.amazonaws.com/nodegroup": "minwm-spot-p6-b200-0703",
-      "node.kubernetes.io/instance-type": "p6-b200.48xlarge",
-      "seedleap.ai/workload": "wan22-ti2v"
-    }
-  },
-  {
-    "name": "h100-spot",
-    "scale_nodegroup": true,
-    "max_nodes": 20,
-    "node_selector": {
-      "eks.amazonaws.com/capacityType": "SPOT",
-      "eks.amazonaws.com/nodegroup": "minwm-spot-p5-h100-sglang-0718",
-      "node.kubernetes.io/instance-type": "p5.48xlarge",
-      "seedleap.ai/workload": "wan22-ti2v"
-    }
-  },
-  {
-    "name": "h200-p5e-spot",
-    "scale_nodegroup": true,
-    "max_nodes": 20,
-    "node_selector": {
-      "eks.amazonaws.com/capacityType": "SPOT",
-      "eks.amazonaws.com/nodegroup": "minwm-spot-p5e-h200-sglang-0718",
-      "node.kubernetes.io/instance-type": "p5e.48xlarge",
-      "seedleap.ai/workload": "wan22-ti2v"
-    }
-  },
-  {
-    "name": "h200-p5en-spot",
-    "scale_nodegroup": true,
-    "max_nodes": 20,
-    "node_selector": {
-      "eks.amazonaws.com/capacityType": "SPOT",
-      "eks.amazonaws.com/nodegroup": "minwm-spot-p5en-h200-sglang-0718",
-      "node.kubernetes.io/instance-type": "p5en.48xlarge",
-      "seedleap.ai/workload": "wan22-ti2v"
-    }
   }
 ]
 ```
 
 Apply `k8s-aws03-video-controller-rbac.yaml` with the controller deployment.
 The service account also needs AWS IAM permissions for SQS receive/delete/change
-visibility and `eks:UpdateNodegroupConfig` on the configured fallback nodegroups.
+visibility. `eks:UpdateNodegroupConfig` is only required when fallback GPU
+nodegroups are explicitly enabled.

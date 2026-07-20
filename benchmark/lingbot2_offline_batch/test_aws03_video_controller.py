@@ -343,6 +343,7 @@ def test_env_config_reads_placement_profiles_and_job_ttl(monkeypatch):
     assert config["fallback_nodegroup_not_active_cooldown_seconds"] == "120"
     assert config["fallback_capacity_cooldown_seconds"] == "600"
     assert config["fallback_hard_failure_cooldown_seconds"] == "3600"
+    assert config["disable_fallback_backends"] is False
     assert config["gpu_per_pod"] == "8"
     assert config["job_parallelism"] == "1"
     assert config["placement_profiles"] == placement_profiles
@@ -380,6 +381,41 @@ def test_env_config_merges_scheduler_name_from_matching_placement_profile(monkey
     config = _env_config()
 
     assert config["backends"][0]["scheduler_name"] == "default-scheduler"
+
+
+def test_env_config_can_disable_fallback_backends(monkeypatch):
+    backends = [
+        {
+            "name": "b300-capacity-block",
+            "node_selector": {
+                "eks.amazonaws.com/capacityType": "CAPACITY_BLOCK",
+                "node.kubernetes.io/instance-type": "p6-b300.48xlarge",
+            },
+        },
+        {
+            "name": "b200-spot",
+            "node_selector": {
+                "eks.amazonaws.com/capacityType": "SPOT",
+                "node.kubernetes.io/instance-type": "p6-b200.48xlarge",
+            },
+        },
+        {
+            "name": "h100-spot",
+            "node_selector": {
+                "eks.amazonaws.com/capacityType": "SPOT",
+                "node.kubernetes.io/instance-type": "p5.48xlarge",
+            },
+        },
+    ]
+
+    monkeypatch.setenv("SGLANG_VIDEO_JOB_IMAGE", "lmsysorg/sglang:dev@sha256:test")
+    monkeypatch.setenv("SGLANG_VIDEO_BACKENDS_JSON", json.dumps(backends))
+    monkeypatch.setenv("SGLANG_VIDEO_DISABLE_FALLBACK_BACKENDS", "true")
+
+    config = _env_config()
+
+    assert config["disable_fallback_backends"] is True
+    assert [backend["name"] for backend in config["backends"]] == ["b300-capacity-block"]
 
 
 class FakeSQS:
@@ -744,6 +780,21 @@ def test_choose_backend_can_use_b200_as_fallback_when_b300_is_full():
     )
 
     assert selected["name"] == "b200-spot"
+
+
+def test_choose_backend_returns_none_when_fallback_disabled_and_b300_is_full():
+    config = {**_backend_config(), "disable_fallback_backends": True}
+    b300 = _node("b300-a", config["backends"][0]["node_selector"])
+    h100 = _node("h100-a", config["backends"][1]["node_selector"])
+
+    selected = choose_backend(
+        config,
+        [b300, h100],
+        [_gpu_pod("training", "b300-a", 8)],
+        requested_gpus=8,
+    )
+
+    assert selected is None
 
 
 def test_choose_backend_respects_b300_cap_before_fallback_pool_cap():

@@ -346,6 +346,14 @@ def _is_demand_backend(backend: dict[str, Any]) -> bool:
     return "demand" in name or selector.get("eks.amazonaws.com/capacityType") == "ON_DEMAND"
 
 
+def _truthy(value: Any) -> bool:
+    return str(value or "").lower() in {"1", "true", "yes"}
+
+
+def _fallback_backends_disabled(config: dict[str, Any]) -> bool:
+    return _truthy(config.get("disable_fallback_backends"))
+
+
 def _backend_gpu_requests(pods: list[dict[str, Any]], backend_name: str) -> int:
     total = 0
     for pod in pods:
@@ -447,6 +455,8 @@ def _active_job_caps_exceeded(
 
 
 def _fallback_backend_names(config: dict[str, Any]) -> set[str]:
+    if _fallback_backends_disabled(config):
+        return set()
     backends = config.get("backends") if isinstance(config.get("backends"), list) else []
     return {
         _backend_name(backend)
@@ -865,7 +875,7 @@ def choose_backend(
     state: dict[str, Any] | None = None,
     excluded_backend_names: set[str] | None = None,
 ) -> dict[str, Any] | None:
-    """Pick B300 within its cap; otherwise pick fallback Spot GPUs within their shared cap."""
+    """Pick B300 within its cap; optionally pick fallback GPUs within their shared cap."""
     backends = config.get("backends") if isinstance(config.get("backends"), list) else []
     state = state or {"inflight": []}
     excluded_backend_names = excluded_backend_names or set()
@@ -912,6 +922,9 @@ def choose_backend(
             >= requested_gpus
         ):
             return backend
+
+    if _fallback_backends_disabled(config):
+        return None
 
     fallback_max_gpus = _int_or_default(
         config.get("fallback_max_active_gpus"),
@@ -983,6 +996,8 @@ def choose_fallback_prewarm_backend(
     excluded_backend_names = excluded_backend_names or set()
     _cleanup_fallback_prewarm(config, state, now=now)
     _cleanup_fallback_backend_cooldowns(state, now=now)
+    if _fallback_backends_disabled(config):
+        return None
 
     gpu_per_pod = _int_or_default(config.get("gpu_per_pod"), requested_gpus)
     b300_names = _b300_backend_names(config)
@@ -3502,7 +3517,11 @@ def controller_tick(
     }
 
 
-def _backend_profiles_from_env(placement_profiles: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _backend_profiles_from_env(
+    placement_profiles: list[dict[str, Any]],
+    *,
+    disable_fallback_backends: bool = False,
+) -> list[dict[str, Any]]:
     configured = _json_env("SGLANG_VIDEO_BACKENDS_JSON", [])
     if isinstance(configured, list) and configured:
         placement_by_name = {
@@ -3515,6 +3534,8 @@ def _backend_profiles_from_env(placement_profiles: list[dict[str, Any]]) -> list
             if not isinstance(backend, dict):
                 continue
             merged = dict(backend)
+            if disable_fallback_backends and _is_h100_backend(merged):
+                continue
             placement = placement_by_name.get(_backend_name(merged))
             if (
                 isinstance(placement, dict)
@@ -3531,6 +3552,8 @@ def _backend_profiles_from_env(placement_profiles: list[dict[str, Any]]) -> list
         if not isinstance(profile, dict):
             continue
         backend = dict(profile)
+        if disable_fallback_backends and _is_h100_backend(backend):
+            continue
         if _is_h100_backend(backend):
             backend.setdefault("scale_nodegroup", True)
         backends.append(backend)
@@ -3539,6 +3562,9 @@ def _backend_profiles_from_env(placement_profiles: list[dict[str, Any]]) -> list
 
 def _env_config() -> dict[str, Any]:
     placement_profiles = _json_env("SGLANG_VIDEO_JOB_PLACEMENT_PROFILES_JSON", [])
+    disable_fallback_backends = _truthy(
+        os.environ.get("SGLANG_VIDEO_DISABLE_FALLBACK_BACKENDS")
+    )
     return {
         "namespace": os.environ.get("SGLANG_VIDEO_NAMESPACE", "default"),
         "job_image": os.environ["SGLANG_VIDEO_JOB_IMAGE"],
@@ -3602,6 +3628,7 @@ def _env_config() -> dict[str, Any]:
         "h100_cluster_name": os.environ.get("SGLANG_VIDEO_H100_EKS_CLUSTER_NAME", ""),
         "h100_nodegroup_name": os.environ.get("SGLANG_VIDEO_H100_NODEGROUP_NAME", ""),
         "allow_h100_demand": os.environ.get("SGLANG_VIDEO_ALLOW_H100_DEMAND", "false"),
+        "disable_fallback_backends": disable_fallback_backends,
         "defer_visibility_timeout": os.environ.get(
             "SGLANG_VIDEO_DEFER_VISIBILITY_TIMEOUT",
             "60",
@@ -3644,7 +3671,10 @@ def _env_config() -> dict[str, Any]:
         "node_selector": _json_env("SGLANG_VIDEO_JOB_NODE_SELECTOR_JSON", {}),
         "affinity": _json_env("SGLANG_VIDEO_JOB_AFFINITY_JSON", {}),
         "placement_profiles": placement_profiles,
-        "backends": _backend_profiles_from_env(placement_profiles),
+        "backends": _backend_profiles_from_env(
+            placement_profiles,
+            disable_fallback_backends=disable_fallback_backends,
+        ),
         "tolerations": _json_env("SGLANG_VIDEO_JOB_TOLERATIONS_JSON", []),
         "security_context": _json_env("SGLANG_VIDEO_JOB_SECURITY_CONTEXT_JSON", {}),
         "request_cpu": os.environ.get("SGLANG_VIDEO_JOB_REQUEST_CPU", ""),
