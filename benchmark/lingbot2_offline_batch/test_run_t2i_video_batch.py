@@ -191,21 +191,36 @@ def test_run_benchmark_forwards_request_video_dimensions_to_runner(tmp_path, mon
     )
     captured = {}
 
-    def fake_run(command, env, check):
+    class FakeProcess:
+        returncode = 0
+
+        def poll(self):
+            return self.returncode
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+        def terminate(self):
+            raise AssertionError("completed runner should not be terminated")
+
+        def kill(self):
+            raise AssertionError("completed runner should not be killed")
+
+    def fake_popen(command, env, start_new_session):
         captured["command"] = command
         captured["env"] = env
-        captured["check"] = check
+        captured["start_new_session"] = start_new_session
         summary_path = runtime.results_root / "cases" / "summary.json"
         summary_path.parent.mkdir(parents=True, exist_ok=True)
         summary_path.write_text('{"results":[]}\n', encoding="utf-8")
-        return SimpleNamespace(returncode=0)
+        return FakeProcess()
 
-    monkeypatch.setattr("run_t2i_video_batch.subprocess.run", fake_run)
+    monkeypatch.setattr("run_t2i_video_batch.subprocess.Popen", fake_popen)
 
     summary = run_benchmark(runtime, request=request)
 
     assert summary == {"results": []}
-    assert captured["check"] is False
+    assert captured["start_new_session"] is True
     assert captured["env"]["SGLANG_VIDEO_WIDTH"] == "1024"
     assert captured["env"]["SGLANG_VIDEO_HEIGHT"] == "576"
     assert captured["env"]["SGLANG_VIDEO_FPS"] == "12"
@@ -221,7 +236,22 @@ def test_run_benchmark_returns_summary_when_runner_exits_nonzero(tmp_path, monke
         s3_client=FakeS3Client(),
     )
 
-    def fake_run(command, env, check):
+    class FakeProcess:
+        returncode = 1
+
+        def poll(self):
+            return self.returncode
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+        def terminate(self):
+            raise AssertionError("completed runner should not be terminated")
+
+        def kill(self):
+            raise AssertionError("completed runner should not be killed")
+
+    def fake_popen(command, env, start_new_session):
         summary_path = runtime.results_root / "cases" / "summary.json"
         summary_path.parent.mkdir(parents=True, exist_ok=True)
         summary_path.write_text(
@@ -234,9 +264,9 @@ def test_run_benchmark_returns_summary_when_runner_exits_nonzero(tmp_path, monke
             + "\n",
             encoding="utf-8",
         )
-        return SimpleNamespace(returncode=1)
+        return FakeProcess()
 
-    monkeypatch.setattr("run_t2i_video_batch.subprocess.run", fake_run)
+    monkeypatch.setattr("run_t2i_video_batch.subprocess.Popen", fake_popen)
 
     summary = run_benchmark(runtime, request=request)
 
@@ -244,6 +274,69 @@ def test_run_benchmark_returns_summary_when_runner_exits_nonzero(tmp_path, monke
     assert summary["summary"]["failed_samples"] == 1
     assert summary["summary"]["benchmark_exit_code"] == 1
     assert summary["summary"]["benchmark_error"] == "benchmark failed with exit code 1"
+
+
+def test_run_benchmark_returns_terminal_summary_when_runner_hangs_after_generation(
+    tmp_path, monkeypatch
+):
+    request = _request()
+    cases = build_case_records(request, _rows(), action_trajectories=_trajs())
+    runtime = build_runtime_inputs(
+        request=request,
+        cases=cases,
+        work_dir=tmp_path,
+        s3_client=FakeS3Client(),
+    )
+    summary_path = runtime.results_root / "cases" / "summary.json"
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
+    summary_path.write_text(
+        json.dumps(
+            {
+                "summary": {
+                    "selected_samples": 1,
+                    "successful_samples": 1,
+                    "failed_samples": 0,
+                },
+                "results": [{"sample_id": "sample/img001", "success": True}],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    class HangingProcess:
+        returncode = None
+        terminated = False
+
+        def poll(self):
+            return self.returncode
+
+        def wait(self, timeout=None):
+            if self.returncode is None:
+                raise TimeoutError("still running")
+            return self.returncode
+
+        def terminate(self):
+            self.terminated = True
+            self.returncode = -15
+
+        def kill(self):
+            self.returncode = -9
+
+    process = HangingProcess()
+
+    def fake_popen(command, env, start_new_session):
+        return process
+
+    monkeypatch.setenv("SGLANG_VIDEO_BENCHMARK_EXIT_GRACE_SECONDS", "0")
+    monkeypatch.setenv("SGLANG_VIDEO_BENCHMARK_POLL_SECONDS", "0")
+    monkeypatch.setattr("run_t2i_video_batch.subprocess.Popen", fake_popen)
+
+    summary = run_benchmark(runtime, request=request)
+
+    assert process.terminated is True
+    assert summary["summary"]["successful_samples"] == 1
+    assert summary["summary"]["benchmark_terminated_after_terminal_summary"] is True
 
 
 def test_collect_upload_results_uploads_successes_and_reports_failures(tmp_path):

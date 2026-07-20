@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import shutil
 import subprocess
 import threading
@@ -135,6 +136,64 @@ def _video_env(request: dict[str, Any]) -> dict[str, str]:
     return env
 
 
+def _read_json_file(path: Path) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return None
+
+
+def _int_value(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _benchmark_summary_is_terminal(summary: dict[str, Any]) -> bool:
+    summary_counts = (
+        summary.get("summary") if isinstance(summary.get("summary"), dict) else {}
+    )
+    selected = _int_value(summary_counts.get("selected_samples"))
+    if selected <= 0:
+        selected = len(summary.get("results") or [])
+    succeeded = _int_value(summary_counts.get("successful_samples"))
+    failed = _int_value(summary_counts.get("failed_samples"))
+    return selected > 0 and succeeded + failed >= selected
+
+
+def _terminate_process(process: subprocess.Popen[Any], *, timeout: float) -> None:
+    pid = getattr(process, "pid", None)
+    try:
+        if pid:
+            os.killpg(pid, signal.SIGTERM)
+        else:
+            process.terminate()
+    except ProcessLookupError:
+        return
+    except Exception:
+        process.terminate()
+
+    try:
+        process.wait(timeout=max(timeout, 0.0))
+        return
+    except (subprocess.TimeoutExpired, TimeoutError):
+        pass
+
+    try:
+        if pid:
+            os.killpg(pid, signal.SIGKILL)
+        else:
+            process.kill()
+    except ProcessLookupError:
+        return
+    except Exception:
+        process.kill()
+    process.wait()
+
+
 def run_benchmark(runtime: RuntimeInputs, *, request: dict[str, Any]) -> dict[str, Any]:
     env = os.environ.copy()
     env.update(
@@ -147,22 +206,47 @@ def run_benchmark(runtime: RuntimeInputs, *, request: dict[str, Any]) -> dict[st
         }
     )
     env.update(_video_env(request))
-    completed = subprocess.run(
+    summary_path = runtime.results_root / "cases" / "summary.json"
+    process = subprocess.Popen(
         ["bash", str(benchmark_run_script())],
         env=env,
-        check=False,
+        start_new_session=True,
     )
-    summary_path = runtime.results_root / "cases" / "summary.json"
+    terminal_summary_seen_at: float | None = None
+    terminated_after_terminal_summary = False
+    exit_grace_seconds = _float_env("SGLANG_VIDEO_BENCHMARK_EXIT_GRACE_SECONDS", 30.0)
+    poll_seconds = _float_env("SGLANG_VIDEO_BENCHMARK_POLL_SECONDS", 1.0)
+    terminate_timeout = _float_env("SGLANG_VIDEO_BENCHMARK_TERMINATE_TIMEOUT_SECONDS", 15.0)
+    while process.poll() is None:
+        summary = _read_json_file(summary_path)
+        if summary is not None and _benchmark_summary_is_terminal(summary):
+            now = time.monotonic()
+            if terminal_summary_seen_at is None:
+                terminal_summary_seen_at = now
+            elif now - terminal_summary_seen_at >= exit_grace_seconds:
+                _terminate_process(process, timeout=terminate_timeout)
+                terminated_after_terminal_summary = True
+                break
+        if poll_seconds > 0:
+            time.sleep(poll_seconds)
+        else:
+            time.sleep(0)
+
     if not summary_path.exists():
         raise RuntimeError(
-            f"benchmark failed with exit code {completed.returncode}; "
+            f"benchmark failed with exit code {process.returncode}; "
             f"summary not found: {summary_path}"
         )
     summary = json.loads(summary_path.read_text(encoding="utf-8"))
-    if completed.returncode != 0:
-        summary.setdefault("summary", {})["benchmark_exit_code"] = completed.returncode
+    if terminated_after_terminal_summary:
+        summary.setdefault("summary", {})[
+            "benchmark_terminated_after_terminal_summary"
+        ] = True
+        summary["summary"]["benchmark_exit_code"] = process.returncode
+    elif process.returncode != 0:
+        summary.setdefault("summary", {})["benchmark_exit_code"] = process.returncode
         summary["summary"]["benchmark_error"] = (
-            f"benchmark failed with exit code {completed.returncode}"
+            f"benchmark failed with exit code {process.returncode}"
         )
     return summary
 

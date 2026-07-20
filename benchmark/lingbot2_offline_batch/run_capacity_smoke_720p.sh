@@ -17,6 +17,8 @@ upload_workers=${UPLOAD_WORKERS:-16}
 width=${SGLANG_VIDEO_WIDTH:-${WIDTH:-1280}}
 height=${SGLANG_VIDEO_HEIGHT:-${HEIGHT:-704}}
 fps=${SGLANG_VIDEO_FPS:-${FPS:-24}}
+ws_close_timeout=${SGLANG_VIDEO_WS_CLOSE_TIMEOUT:-${WS_CLOSE_TIMEOUT:-10}}
+server_stop_grace_seconds=${SGLANG_VIDEO_SERVER_STOP_GRACE_SECONDS:-5}
 
 mkdir -p "${results_root}"
 server_pids=()
@@ -26,7 +28,7 @@ stop_servers() {
   for pid in "${server_pids[@]:-}"; do
     kill -TERM -- "-${pid}" >/dev/null 2>&1 || true
   done
-  sleep 15
+  sleep "${server_stop_grace_seconds}"
   for pid in "${server_pids[@]:-}"; do
     kill -KILL -- "-${pid}" >/dev/null 2>&1 || true
     wait "${pid}" >/dev/null 2>&1 || true
@@ -136,6 +138,7 @@ python3 /opt/bench/benchmark_evalset.py \
   --height "${height}" \
   --fps "${fps}" \
   --warmup-chunks 3 \
+  --close-timeout "${ws_close_timeout}" \
   --output-dir "${results_root}/cases" \
   --output "${results_root}/cases/summary.json" \
   "${resume_args[@]}" \

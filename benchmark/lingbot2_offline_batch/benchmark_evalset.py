@@ -322,6 +322,7 @@ async def generate_video(
     height: int,
     fps: float,
     timeout: float,
+    close_timeout: float,
 ) -> dict[str, Any]:
     temp_output = (
         output.with_name(f"{output.stem}.partial.mp4") if output is not None else None
@@ -371,7 +372,7 @@ async def generate_video(
             max_size=None,
             ping_interval=None,
             open_timeout=timeout,
-            close_timeout=timeout,
+            close_timeout=close_timeout,
         ) as ws:
             await ws.send(msgspec.msgpack.encode(init_payload))
             while len(stats) < item.chunks or len(frame_chunks) < item.chunks:
@@ -565,6 +566,7 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
                     height=args.height,
                     fps=args.fps,
                     timeout=args.timeout,
+                    close_timeout=args.close_timeout,
                 )
                 for index, url in enumerate(urls)
             ]
@@ -621,6 +623,7 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
                     height=args.height,
                     fps=args.fps,
                     timeout=args.timeout,
+                    close_timeout=args.close_timeout,
                 )
             except Exception as exc:
                 result = {
@@ -738,6 +741,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fps", type=float, default=16.0)
     parser.add_argument("--warmup-chunks", type=int, default=3)
     parser.add_argument("--timeout", type=float, default=1200.0)
+    parser.add_argument("--close-timeout", type=float, default=10.0)
     parser.add_argument("--sample-id-regex")
     parser.add_argument("--limit", type=int)
     parser.add_argument("--resume", action=argparse.BooleanOptionalAction, default=True)
