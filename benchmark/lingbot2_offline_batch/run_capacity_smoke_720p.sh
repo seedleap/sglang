@@ -2,8 +2,26 @@
 set -euo pipefail
 
 results_root=${RESULTS_ROOT:-/results/capacity-smoke-720p}
-gpu_total=8
-gpus_per_server=2
+gpu_total=${SGLANG_VIDEO_GPU_TOTAL:-${GPU_TOTAL:-8}}
+gpus_per_server=${SGLANG_VIDEO_GPUS_PER_SERVER:-${GPUS_PER_SERVER:-2}}
+topology=${SGLANG_VIDEO_TOPOLOGY:-}
+case "${topology}" in
+  "") ;;
+  4x2) gpus_per_server=2 ;;
+  8x1) gpus_per_server=1 ;;
+  *)
+    echo "unsupported SGLANG_VIDEO_TOPOLOGY: ${topology}" >&2
+    exit 2
+    ;;
+esac
+if ! [[ "${gpu_total}" =~ ^[1-9][0-9]*$ ]] || ! [[ "${gpus_per_server}" =~ ^[1-9][0-9]*$ ]]; then
+  echo "GPU_TOTAL and GPUS_PER_SERVER must be positive integers" >&2
+  exit 2
+fi
+if (( gpu_total % gpus_per_server != 0 )); then
+  echo "GPU_TOTAL=${gpu_total} is not divisible by GPUS_PER_SERVER=${gpus_per_server}" >&2
+  exit 2
+fi
 server_count=$((gpu_total / gpus_per_server))
 model_id=${MODEL_ID:-robbyant/lingbot-world-v2-14b-causal-fast-diffusers}
 model_revision=${MODEL_REVISION:-59cccf49f2d2dd27418ae7a04b82b10868d455c2}
@@ -21,6 +39,10 @@ ws_close_timeout=${SGLANG_VIDEO_WS_CLOSE_TIMEOUT:-${WS_CLOSE_TIMEOUT:-10}}
 server_stop_grace_seconds=${SGLANG_VIDEO_SERVER_STOP_GRACE_SECONDS:-5}
 
 mkdir -p "${results_root}"
+printf '{"gpu_total":%s,"gpus_per_server":%s,"server_count":%s,"topology":"%s"}\n' \
+  "${gpu_total}" "${gpus_per_server}" "${server_count}" \
+  "${topology:-${server_count}x${gpus_per_server}}" \
+  > "${results_root}/topology.json"
 server_pids=()
 
 stop_servers() {
@@ -67,7 +89,7 @@ for ((server_index = 0; server_index < server_count; server_index++)); do
   port=$((30000 + server_index * 100))
   ports+=("${port}")
   urls+=("ws://127.0.0.1:${port}/v1/realtime_video/generate")
-  cache_dir="${server_cache_root}/${server_index}"
+  cache_dir="${server_cache_root}/gpus-per-server-${gpus_per_server}/server-${server_index}"
   mkdir -p "${cache_dir}"
 
   CUDA_VISIBLE_DEVICES="${devices}" \

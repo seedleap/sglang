@@ -56,6 +56,7 @@ class FakeS3Client:
         self.uploads = []
         self.objects = []
         self.existing = set()
+        self.head_calls = 0
 
     def generate_presigned_url(self, operation, Params, ExpiresIn):
         assert operation == "get_object"
@@ -76,6 +77,7 @@ class FakeS3Client:
         self.objects.append(kwargs)
 
     def head_object(self, **kwargs):
+        self.head_calls += 1
         key = (kwargs["Bucket"], kwargs["Key"])
         if key not in self.existing:
             error = Exception("Not Found")
@@ -527,6 +529,43 @@ def test_run_video_batch_streams_progress_uploads_before_benchmark_returns(
 
     assert result.results[0]["status"] == "succeeded"
     assert len(fake_s3.uploads) == 1
+    # One preflight probe and one streaming-upload probe are sufficient. The
+    # terminal collector must reuse the watcher's persisted result.
+    assert fake_s3.head_calls == 2
+
+
+def test_run_video_batch_reports_preflight_and_attempt_stage_timings(tmp_path, monkeypatch):
+    request = _request()
+    cases = build_case_records(request, _rows(), action_trajectories=_trajs())
+
+    monkeypatch.setenv("SGLANG_VIDEO_BATCH_STREAM_UPLOAD", "false")
+    monkeypatch.setattr(
+        "run_t2i_video_batch.run_benchmark",
+        lambda runtime, request: {
+            "summary": {"successful_samples": 1, "failed_samples": 0},
+            "results": [
+                {
+                    "sample_id": cases[0]["sample_id"],
+                    "success": True,
+                    "output": str(tmp_path / "video.mp4"),
+                }
+            ],
+        },
+    )
+
+    output = tmp_path / "video.mp4"
+    output.write_bytes(b"mp4")
+    result = run_video_batch(
+        request=request,
+        cases=cases,
+        work_dir=tmp_path / "work",
+        s3_client=FakeS3Client(),
+    )
+
+    assert result.timings["resume_preflight_sec"] >= 0
+    assert result.attempts[0]["runtime_input_sec"] >= 0
+    assert result.attempts[0]["benchmark_sec"] >= 0
+    assert result.attempts[0]["finalize_sec"] >= 0
 
 
 def test_run_video_batch_posts_incremental_callback_after_stream_upload(
@@ -921,3 +960,42 @@ def test_main_accepts_completed_batch_with_failed_videos_and_keeps_failure_workd
     assert callback_payloads[0]["summary"]["video_status"] == "completed_with_failures"
     assert reports[0]["summary"]["video_failed_count"] == 1
     assert cleaned == []
+
+
+def test_main_can_defer_final_callback_to_controller(tmp_path, monkeypatch):
+    request = _request()
+    cases = build_case_records(request, _rows(), action_trajectories=_trajs())
+    callback_payloads = []
+    reports = []
+
+    monkeypatch.setenv("SGLANG_VIDEO_BATCH_WORK_DIR", str(tmp_path / "work"))
+    monkeypatch.setenv("SGLANG_VIDEO_BATCH_DEFER_FINAL_CALLBACK", "true")
+    monkeypatch.setattr("run_t2i_video_batch._load_request", lambda: request)
+    monkeypatch.setattr("run_t2i_video_batch._make_s3_client", FakeS3Client)
+    monkeypatch.setattr("run_t2i_video_batch.read_jsonl_uri", lambda *_args: _rows())
+    monkeypatch.setattr("run_t2i_video_batch.read_action_trajectories", lambda *_args: _trajs())
+    monkeypatch.setattr(
+        "run_t2i_video_batch.build_case_records",
+        lambda *_args, **_kwargs: cases,
+    )
+    monkeypatch.setattr(
+        "run_t2i_video_batch.run_video_batch",
+        lambda **_kwargs: SimpleNamespace(
+            attempts=[{"attempt": 1, "status": "succeeded"}],
+            results=[{"case_id": cases[0]["case_id"], "status": "succeeded"}],
+            timings={"resume_preflight_sec": 0.01},
+        ),
+    )
+    monkeypatch.setattr(
+        "run_t2i_video_batch.upload_report",
+        lambda report, *_args: reports.append(report),
+    )
+    monkeypatch.setattr(
+        "run_t2i_video_batch.post_callback",
+        lambda _request, payload: callback_payloads.append(payload),
+    )
+
+    main()
+
+    assert reports[0]["summary"]["video_succeeded_count"] == 1
+    assert callback_payloads == []

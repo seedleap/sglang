@@ -12,6 +12,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -41,6 +42,7 @@ class RuntimeInputs:
 class BatchRunResult:
     results: list[dict[str, Any]]
     attempts: list[dict[str, Any]]
+    timings: dict[str, float]
 
 
 def parse_s3_uri(uri: str) -> tuple[str, str]:
@@ -150,6 +152,10 @@ def _int_value(value: Any, default: int = 0) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def _int_env(name: str, default: int, *, minimum: int = 1) -> int:
+    return max(minimum, _int_value(os.environ.get(name), default))
 
 
 def _benchmark_summary_is_terminal(summary: dict[str, Any]) -> bool:
@@ -445,17 +451,31 @@ def split_completed_cases(
     cases: list[dict[str, Any]],
     request: dict[str, Any],
     s3_client: Any,
+    *,
+    max_workers: int = 1,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    def check_case(case: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any] | None]:
+        if not _s3_object_exists(case["video_s3_uri"], s3_client):
+            return case, None
+        result = _case_result_from_case(case, resumed=True)
+        if not _s3_object_exists(case_checkpoint_s3_uri(request, case), s3_client):
+            _write_case_checkpoint(request, case, result, s3_client)
+        return case, result
+
     pending: list[dict[str, Any]] = []
     resumed_results: list[dict[str, Any]] = []
-    for case in cases:
-        if _s3_object_exists(case["video_s3_uri"], s3_client):
-            result = _case_result_from_case(case, resumed=True)
-            if not _s3_object_exists(case_checkpoint_s3_uri(request, case), s3_client):
-                _write_case_checkpoint(request, case, result, s3_client)
+    workers = max(1, min(max_workers, len(cases) or 1))
+    if workers == 1:
+        checked_cases = (check_case(case) for case in cases)
+    else:
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="video-resume") as pool:
+            checked_cases = list(pool.map(check_case, cases))
+
+    for case, result in checked_cases:
+        if result is None:
+            pending.append(case)
+        else:
             resumed_results.append(result)
-            continue
-        pending.append(case)
     return pending, resumed_results
 
 
@@ -465,10 +485,12 @@ def collect_upload_results(
     s3_client: Any,
     request: dict[str, Any] | None = None,
     delete_local_outputs: bool = False,
+    already_persisted_by_case_id: dict[str, dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     cases_by_sample_id = {case["sample_id"]: case for case in cases}
     results: list[dict[str, Any]] = []
     seen: set[str] = set()
+    already_persisted = already_persisted_by_case_id or {}
 
     for row in benchmark_summary.get("results", []):
         sample_id = row["sample_id"]
@@ -476,6 +498,10 @@ def collect_upload_results(
             raise ValueError(f"unknown benchmark sample_id: {sample_id}")
         case = cases_by_sample_id[sample_id]
         seen.add(sample_id)
+        persisted = already_persisted.get(str(case["case_id"]))
+        if persisted is not None:
+            results.append(persisted)
+            continue
         if row.get("success"):
             try:
                 results.append(
@@ -512,6 +538,10 @@ def collect_upload_results(
 
     for case in cases:
         if case["sample_id"] in seen:
+            continue
+        persisted = already_persisted.get(str(case["case_id"]))
+        if persisted is not None:
+            results.append(persisted)
             continue
         results.append(
             {
@@ -708,7 +738,28 @@ def run_video_batch(
     s3_client: Any,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> BatchRunResult:
-    pending_cases, resumed_results = split_completed_cases(cases, request, s3_client)
+    total_started_at = time.perf_counter()
+    preflight_started_at = time.perf_counter()
+    pending_cases, resumed_results = split_completed_cases(
+        cases,
+        request,
+        s3_client,
+        max_workers=_int_env("SGLANG_VIDEO_BATCH_RESUME_WORKERS", 16),
+    )
+    resume_preflight_sec = time.perf_counter() - preflight_started_at
+    print(
+        json.dumps(
+            {
+                "event": "resume_preflight_complete",
+                "total_cases": len(cases),
+                "pending_cases": len(pending_cases),
+                "resumed_cases": len(resumed_results),
+                "elapsed_sec": round(resume_preflight_sec, 3),
+            },
+            sort_keys=True,
+        ),
+        flush=True,
+    )
     completed_by_case_id = {
         str(result["case_id"]): result for result in resumed_results
     }
@@ -725,12 +776,14 @@ def run_video_batch(
         if not pending_cases:
             break
 
+        runtime_started_at = time.perf_counter()
         runtime = build_runtime_inputs(
             request=request,
             cases=pending_cases,
             work_dir=work_dir / f"attempt-{attempt:03d}",
             s3_client=s3_client,
         )
+        runtime_input_sec = time.perf_counter() - runtime_started_at
         watcher = (
             ProgressUploadWatcher(
                 runtime=runtime,
@@ -748,9 +801,11 @@ def run_video_batch(
         )
         if watcher is not None:
             watcher.start()
+        benchmark_started_at = time.perf_counter()
         try:
             benchmark_summary = run_benchmark(runtime, request=request)
         except Exception as error:
+            benchmark_sec = time.perf_counter() - benchmark_started_at
             if watcher is not None:
                 watcher.stop()
                 for result in watcher.uploaded_results():
@@ -762,6 +817,8 @@ def run_video_batch(
                     "status": "failed",
                     "pending_count": len(pending_cases),
                     "error": error_text,
+                    "runtime_input_sec": runtime_input_sec,
+                    "benchmark_sec": benchmark_sec,
                     "stream_upload_errors": watcher.errors() if watcher is not None else [],
                 }
             )
@@ -773,15 +830,24 @@ def run_video_batch(
                     error_text,
                 )
         else:
+            benchmark_sec = time.perf_counter() - benchmark_started_at
+            finalize_started_at = time.perf_counter()
+            streamed_by_case_id: dict[str, dict[str, Any]] = {}
             if watcher is not None:
                 watcher.stop()
+                streamed_by_case_id = {
+                    str(result["case_id"]): result for result in watcher.uploaded_results()
+                }
+                completed_by_case_id.update(streamed_by_case_id)
             attempt_results = collect_upload_results(
                 pending_cases,
                 benchmark_summary,
                 s3_client,
                 request=request,
                 delete_local_outputs=delete_local_outputs,
+                already_persisted_by_case_id=streamed_by_case_id,
             )
+            finalize_sec = time.perf_counter() - finalize_started_at
             succeeded_count = 0
             failed_count = 0
             for result in attempt_results:
@@ -800,6 +866,9 @@ def run_video_batch(
                     "pending_count": len(pending_cases),
                     "succeeded_count": succeeded_count,
                     "failed_count": failed_count,
+                    "runtime_input_sec": runtime_input_sec,
+                    "benchmark_sec": benchmark_sec,
+                    "finalize_sec": finalize_sec,
                     "stream_uploaded_count": len(watcher.uploaded_results())
                     if watcher is not None
                     else 0,
@@ -825,7 +894,14 @@ def run_video_batch(
         for case in cases
         if case["case_id"] not in completed_by_case_id
     )
-    return BatchRunResult(results=final_results, attempts=attempt_summaries)
+    return BatchRunResult(
+        results=final_results,
+        attempts=attempt_summaries,
+        timings={
+            "resume_preflight_sec": resume_preflight_sec,
+            "total_sec": time.perf_counter() - total_started_at,
+        },
+    )
 
 
 def upload_report(report: dict[str, Any], request: dict[str, Any], s3_client: Any) -> None:
@@ -962,6 +1038,7 @@ def main() -> None:
             "summary": callback_payload["summary"],
             "counters": callback_payload["counters"],
             "attempts": batch_result.attempts,
+            "timings": getattr(batch_result, "timings", {}),
             "results": upload_results,
             "callback_payload": callback_payload,
         }
@@ -972,7 +1049,19 @@ def main() -> None:
             encoding="utf-8",
         )
         upload_report(report, request, s3_client)
-        post_callback(request, callback_payload)
+        if _env_flag("SGLANG_VIDEO_BATCH_DEFER_FINAL_CALLBACK", False):
+            print(
+                json.dumps(
+                    {
+                        "event": "final_callback_deferred_to_controller",
+                        "generation_job_id": request.get("generation_job_id"),
+                    },
+                    sort_keys=True,
+                ),
+                flush=True,
+            )
+        else:
+            post_callback(request, callback_payload)
         completed_successfully = callback_payload["status"] == "succeeded"
     finally:
         cleanup_enabled = _env_flag("SGLANG_VIDEO_BATCH_CLEANUP", True)
