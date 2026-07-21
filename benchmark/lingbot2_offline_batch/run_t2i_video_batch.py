@@ -649,10 +649,17 @@ class ProgressUploadWatcher:
             results = list(self._uploaded_by_case_id.values())
             self._last_callback_at = now
         payload = build_callback_progress_payload(self.request, self.cases, results)
-        try:
-            self.progress_callback(payload)
-        except Exception as error:
-            self._record_error(error)
+
+        # Progress is advisory. It must never make the uploader wait on an
+        # unhealthy public callback path while the GPU servers are otherwise
+        # ready to exit. The final report is repaired by the controller.
+        def send_progress() -> None:
+            try:
+                self.progress_callback(payload)
+            except Exception as error:
+                self._record_error(error)
+
+        threading.Thread(target=send_progress, daemon=True).start()
 
     def _handle_row(self, row: dict[str, Any], submitted: set[str]) -> None:
         sample_id = str(row.get("sample_id") or "")
@@ -954,9 +961,10 @@ def post_callback(request: dict[str, Any], payload: dict[str, Any]) -> None:
     )
     attempts = _callback_retry_attempts()
     base_sleep = _float_env("SGLANG_VIDEO_CALLBACK_RETRY_BASE_SECONDS", 1.0)
+    timeout_seconds = _float_env("SGLANG_VIDEO_CALLBACK_TIMEOUT_SECONDS", 15.0)
     for attempt in range(1, attempts + 1):
         try:
-            with urllib.request.urlopen(http_request, timeout=60) as response:
+            with urllib.request.urlopen(http_request, timeout=timeout_seconds) as response:
                 if response.status >= 300:
                     raise RuntimeError(f"callback failed with HTTP {response.status}")
                 return

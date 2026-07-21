@@ -1,11 +1,14 @@
 import json
 import sys
+import threading
 import time
 from types import SimpleNamespace
 import urllib.request
 
 from run_t2i_video_batch import (
     _make_s3_client,
+    ProgressUploadWatcher,
+    RuntimeInputs,
     build_runtime_inputs,
     case_checkpoint_s3_uri,
     collect_upload_results,
@@ -176,6 +179,26 @@ def test_read_action_trajectories_supports_compressed_bundled_trajs(tmp_path, mo
     trajs = read_action_trajectories({}, object())
 
     assert [traj["traj_id"] for traj in trajs] == ["compressed-traj"]
+
+
+def test_progress_callback_does_not_block_upload_watcher(tmp_path):
+    started = threading.Event()
+    unblock = threading.Event()
+    watcher = ProgressUploadWatcher(
+        runtime=RuntimeInputs(tmp_path / "messages", tmp_path / "urls", tmp_path / "results"),
+        cases=[],
+        request=_request(),
+        s3_client=FakeS3Client(),
+        delete_local_outputs=True,
+        progress_callback=lambda _payload: (started.set(), unblock.wait(5)),
+    )
+
+    started_at = time.monotonic()
+    watcher._emit_progress_callback(force=True)
+
+    assert time.monotonic() - started_at < 0.1
+    assert started.wait(1)
+    unblock.set()
 
 
 def test_make_s3_client_forces_sigv4_presigned_urls(monkeypatch):
@@ -866,7 +889,7 @@ def test_post_callback_uses_generation_progress_put_with_bearer_token(monkeypatc
     assert sent["authorization"] == "Bearer callback-token"
     assert sent["content_type"] == "application/json"
     assert sent["body"] == b'{"status": "succeeded"}'
-    assert sent["timeout"] == 60
+    assert sent["timeout"] == 15.0
 
 
 def test_post_callback_retries_transient_http_failures(monkeypatch):
