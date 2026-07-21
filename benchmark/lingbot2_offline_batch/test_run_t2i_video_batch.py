@@ -164,6 +164,20 @@ def test_read_action_trajectories_always_uses_bundled_trajs(tmp_path, monkeypatc
     assert [traj["traj_id"] for traj in trajs] == ["bundled-traj"]
 
 
+def test_read_action_trajectories_supports_compressed_bundled_trajs(tmp_path, monkeypatch):
+    bundled_trajs = tmp_path / "trajs.jsonl.gz"
+    import gzip
+
+    with gzip.open(bundled_trajs, "wt", encoding="utf-8") as file:
+        file.write(json.dumps(_traj("compressed-traj", "w", "d")) + "\n")
+
+    monkeypatch.setattr("run_t2i_video_batch.DEFAULT_ACTION_TRAJS_PATH", bundled_trajs)
+
+    trajs = read_action_trajectories({}, object())
+
+    assert [traj["traj_id"] for traj in trajs] == ["compressed-traj"]
+
+
 def test_make_s3_client_forces_sigv4_presigned_urls(monkeypatch):
     calls = []
 

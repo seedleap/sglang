@@ -1306,6 +1306,27 @@ def render_job_manifest(request: dict[str, Any], config: dict[str, Any]) -> dict
         volume_mounts.append({"name": "shm", "mountPath": "/dev/shm"})
         volumes.append({"name": "shm", "emptyDir": {"medium": "Memory", "sizeLimit": shm_size}})
 
+    runner_config_map_name = str(config.get("runner_config_map_name") or "").strip()
+    runner_mount_path = str(config.get("runner_mount_path") or "/opt/bench").strip()
+    if runner_config_map_name:
+        volume_mounts.append(
+            {
+                "name": "sglang-video-runner",
+                "mountPath": runner_mount_path,
+                "readOnly": True,
+            }
+        )
+        volumes.append(
+            {
+                "name": "sglang-video-runner",
+                "configMap": {
+                    "name": runner_config_map_name,
+                    # The capacity runner invokes its shell entrypoint directly.
+                    "defaultMode": 0o755,
+                },
+            }
+        )
+
     container = {
         "name": "sglang-video-batch",
         "image": config["job_image"],
@@ -3572,6 +3593,14 @@ def _env_config() -> dict[str, Any]:
         "fsx_claim_name": os.environ.get("SGLANG_VIDEO_FSX_CLAIM", "fsx-claim"),
         "fsx_mount_path": os.environ.get("SGLANG_VIDEO_FSX_MOUNT", "/fsx"),
         "work_dir_prefix": os.environ.get("SGLANG_VIDEO_WORK_DIR_PREFIX", "/fsx/sglang-video"),
+        "runner_config_map_name": os.environ.get(
+            "SGLANG_VIDEO_RUNNER_CONFIG_MAP_NAME",
+            "",
+        ).strip(),
+        "runner_mount_path": os.environ.get(
+            "SGLANG_VIDEO_RUNNER_MOUNT_PATH",
+            "/opt/bench",
+        ),
         "max_active_gpus": os.environ.get("SGLANG_VIDEO_MAX_ACTIVE_GPUS", "8"),
         "gpu_per_pod": os.environ.get("SGLANG_VIDEO_GPU_PER_POD", "8"),
         "job_parallelism": os.environ.get("SGLANG_VIDEO_JOB_PARALLELISM", "1"),

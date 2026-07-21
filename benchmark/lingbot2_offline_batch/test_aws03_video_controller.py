@@ -111,6 +111,33 @@ def test_render_job_manifest_ignores_request_gpu_limits_and_uses_controller_conf
     assert container["resources"]["limits"]["nvidia.com/gpu"] == 2
 
 
+def test_render_job_manifest_mounts_versioned_runner_config_map_read_only():
+    manifest = render_job_manifest(
+        _request(),
+        {
+            "namespace": "default",
+            "job_image": "lmsysorg/sglang:dev@sha256:test",
+            "runner_config_map_name": "sglang-video-runner-abc123",
+            "runner_mount_path": "/opt/bench",
+        },
+    )
+
+    pod = manifest["spec"]["template"]["spec"]
+    container = pod["containers"][0]
+    assert {
+        "name": "sglang-video-runner",
+        "mountPath": "/opt/bench",
+        "readOnly": True,
+    } in container["volumeMounts"]
+    assert {
+        "name": "sglang-video-runner",
+        "configMap": {
+            "name": "sglang-video-runner-abc123",
+            "defaultMode": 0o755,
+        },
+    } in pod["volumes"]
+
+
 def test_render_job_manifest_can_match_existing_b300_batch_runtime_shape():
     manifest = render_job_manifest(
         _request(),
@@ -327,6 +354,8 @@ def test_env_config_reads_placement_profiles_and_job_ttl(monkeypatch):
     monkeypatch.setenv("SGLANG_VIDEO_JOB_TTL_SECONDS_AFTER_FINISHED", "900")
     monkeypatch.setenv("SGLANG_VIDEO_B300_MAX_ACTIVE_GPUS", "32")
     monkeypatch.setenv("SGLANG_VIDEO_FALLBACK_MAX_ACTIVE_GPUS", "160")
+    monkeypatch.setenv("SGLANG_VIDEO_RUNNER_CONFIG_MAP_NAME", "sglang-video-runner-abc123")
+    monkeypatch.setenv("SGLANG_VIDEO_RUNNER_MOUNT_PATH", "/runner")
 
     config = _env_config()
 
@@ -348,6 +377,8 @@ def test_env_config_reads_placement_profiles_and_job_ttl(monkeypatch):
     assert config["job_parallelism"] == "1"
     assert config["placement_profiles"] == placement_profiles
     assert config["ttl_seconds_after_finished"] == "900"
+    assert config["runner_config_map_name"] == "sglang-video-runner-abc123"
+    assert config["runner_mount_path"] == "/runner"
 
 
 def test_env_config_merges_scheduler_name_from_matching_placement_profile(monkeypatch):

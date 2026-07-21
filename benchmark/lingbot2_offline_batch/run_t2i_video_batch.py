@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import gzip
 import json
 import os
 import signal
@@ -28,7 +29,8 @@ from t2i_video_batch import (
 DEFAULT_PRESIGN_SECONDS = 7 * 24 * 60 * 60
 DEFAULT_RUN_SCRIPT = "/opt/bench/run_capacity_smoke_720p.sh"
 DEFAULT_S3_REGION = "us-east-2"
-DEFAULT_ACTION_TRAJS_PATH = Path(__file__).with_name("trajs.jsonl")
+DEFAULT_ACTION_TRAJS_PATH = Path(__file__).with_name("trajs.jsonl.gz")
+LEGACY_ACTION_TRAJS_PATH = Path(__file__).with_name("trajs.jsonl")
 
 
 @dataclass(frozen=True)
@@ -66,14 +68,22 @@ def read_jsonl_uri(uri: str, s3_client: Any) -> list[dict[str, Any]]:
         with urllib.request.urlopen(uri, timeout=300) as response:
             text = response.read().decode("utf-8")
     else:
-        text = Path(uri).read_text(encoding="utf-8")
+        path = Path(uri)
+        if path.suffix == ".gz":
+            with gzip.open(path, "rt", encoding="utf-8") as file:
+                text = file.read()
+        else:
+            text = path.read_text(encoding="utf-8")
     return [json.loads(line) for line in text.splitlines() if line.strip()]
 
 
 def read_action_trajectories(request: dict[str, Any], s3_client: Any) -> list[dict[str, Any]]:
-    if not DEFAULT_ACTION_TRAJS_PATH.exists():
+    bundled_path = DEFAULT_ACTION_TRAJS_PATH
+    if not bundled_path.exists() and LEGACY_ACTION_TRAJS_PATH.exists():
+        bundled_path = LEGACY_ACTION_TRAJS_PATH
+    if not bundled_path.exists():
         raise FileNotFoundError(f"bundled action trajectories not found: {DEFAULT_ACTION_TRAJS_PATH}")
-    return read_jsonl_uri(str(DEFAULT_ACTION_TRAJS_PATH), s3_client)
+    return read_jsonl_uri(str(bundled_path), s3_client)
 
 
 def _presigned_image_url(image_uri: str, s3_client: Any, expires_in: int) -> str:
