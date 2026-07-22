@@ -77,18 +77,29 @@ def render_job(
             "command": ["bash", "-ceu"],
             "args": [
                 """
+set -x
 python3 -m pip install --no-cache-dir --target /bootstrap/python boto3
+echo "source-init: boto3 installation completed"
 PYTHONPATH=/bootstrap/python python3 - <<'PY'
 import os
+import traceback
 from pathlib import Path
 import boto3
 
-uri = os.environ["TAEHV_AB_SOURCE_BUNDLE_S3_URI"]
-if not uri.startswith("s3://"):
-    raise SystemExit(f"expected s3 uri, got {uri!r}")
-bucket, key = uri[5:].split("/", 1)
-target = Path("/bootstrap/source.tar.gz")
-boto3.client("s3").download_file(bucket, key, str(target))
+try:
+    uri = os.environ["TAEHV_AB_SOURCE_BUNDLE_S3_URI"]
+    print(f"source-init: requested bundle={uri}", flush=True)
+    if not uri.startswith("s3://"):
+        raise RuntimeError(f"expected s3 uri, got {uri!r}")
+    bucket, key = uri[5:].split("/", 1)
+    target = Path("/bootstrap/source.tar.gz")
+    identity = boto3.client("sts").get_caller_identity()["Arn"]
+    print(f"source-init: caller={identity}", flush=True)
+    boto3.client("s3").download_file(bucket, key, str(target))
+    print(f"source-init: downloaded_bytes={target.stat().st_size}", flush=True)
+except Exception:
+    traceback.print_exc()
+    raise
 PY
 tar -xzf /bootstrap/source.tar.gz -C /opt/sglang
 test -f /opt/sglang/python/sglang/multimodal_gen/vae/vae_decoder.py
