@@ -17,6 +17,8 @@ def test_rendered_ab_job_keeps_b300_topology_and_only_enables_taehv_for_candidat
         variant="baseline",
         run_id="20260722-a",
         output_s3_prefix="s3://leap-world-us-east-2/world-model/eval/lingbot2/taehv_ab/20260722-a",
+        source_s3_uri="s3://leap-world-us-east-2/world-model/eval/lingbot2/taehv_ab/20260722-a/source.tar.gz",
+        source_revision="deadbeef",
     )
     candidate = render_job(
         name="codex-lingbot-taehv-ab-taehv",
@@ -24,6 +26,8 @@ def test_rendered_ab_job_keeps_b300_topology_and_only_enables_taehv_for_candidat
         variant="taehv",
         run_id="20260722-a",
         output_s3_prefix="s3://leap-world-us-east-2/world-model/eval/lingbot2/taehv_ab/20260722-a",
+        source_s3_uri="s3://leap-world-us-east-2/world-model/eval/lingbot2/taehv_ab/20260722-a/source.tar.gz",
+        source_revision="deadbeef",
     )
 
     baseline_pod = baseline["spec"]["template"]["spec"]
@@ -41,6 +45,18 @@ def test_rendered_ab_job_keeps_b300_topology_and_only_enables_taehv_for_candidat
     assert _env(baseline)["SGLANG_VIDEO_CASE_LIMIT"] == "100"
     assert "TAEHV_CHECKPOINT_PATH" not in _env(baseline)
     assert _env(candidate)["TAEHV_CHECKPOINT_PATH"] == "/opt/taehv/taew2_1.pth"
+    assert baseline_pod["initContainers"][0]["name"] == "prepare-sglang-source"
+    assert "install-taehv" not in {
+        item["name"] for item in baseline_pod["initContainers"]
+    }
+    assert "install-taehv" in {
+        item["name"] for item in candidate["spec"]["template"]["spec"]["initContainers"]
+    }
+    assert "/opt/sglang/python" in _env(candidate)["PYTHONPATH"]
+    taehv_install = candidate["spec"]["template"]["spec"]["initContainers"][1]["args"][
+        0
+    ]
+    assert "--no-deps" in taehv_install
 
 
 def test_ab_runner_and_uploader_keep_presigned_input_urls_out_of_artifacts():

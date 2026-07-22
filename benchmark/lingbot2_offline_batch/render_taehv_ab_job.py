@@ -19,6 +19,8 @@ def render_job(
     variant: str,
     run_id: str,
     output_s3_prefix: str,
+    source_s3_uri: str,
+    source_revision: str,
 ) -> dict[str, Any]:
     if variant not in {"baseline", "taehv"}:
         raise ValueError("variant must be baseline or taehv")
@@ -48,7 +50,101 @@ def render_job(
         env("HF_HUB_ENABLE_HF_TRANSFER", "1"),
     ]
     if variant == "taehv":
-        variables.append(env("TAEHV_CHECKPOINT_PATH", "/opt/taehv/taew2_1.pth"))
+        variables.extend(
+            [
+                env("TAEHV_CHECKPOINT_PATH", "/opt/taehv/taew2_1.pth"),
+                env("PYTHONPATH", "/opt/taehv/python:/opt/sglang/python"),
+            ]
+        )
+    else:
+        variables.append(env("PYTHONPATH", "/opt/sglang/python"))
+
+    runtime_volume_mounts = [
+        {"name": "fsx", "mountPath": "/fsx"},
+        {"name": "shm", "mountPath": "/dev/shm"},
+        {"name": "sglang-source", "mountPath": "/opt/sglang"},
+        {
+            "name": "sglang-source",
+            "mountPath": "/opt/bench",
+            "subPath": "benchmark/lingbot2_offline_batch",
+        },
+    ]
+    init_containers = [
+        {
+            "name": "prepare-sglang-source",
+            "image": image,
+            "imagePullPolicy": "Always",
+            "command": ["bash", "-ceu"],
+            "args": [
+                """
+python3 -m pip install --no-cache-dir --target /bootstrap/python boto3
+PYTHONPATH=/bootstrap/python python3 - <<'PY'
+import os
+from pathlib import Path
+import boto3
+
+uri = os.environ["TAEHV_AB_SOURCE_BUNDLE_S3_URI"]
+if not uri.startswith("s3://"):
+    raise SystemExit(f"expected s3 uri, got {uri!r}")
+bucket, key = uri[5:].split("/", 1)
+target = Path("/bootstrap/source.tar.gz")
+boto3.client("s3").download_file(bucket, key, str(target))
+PY
+tar -xzf /bootstrap/source.tar.gz -C /opt/sglang
+test -f /opt/sglang/python/sglang/multimodal_gen/vae/vae_decoder.py
+printf '%s\\n' "$TAEHV_AB_SOURCE_REVISION" > /opt/sglang/TAEHV_AB_SOURCE_REVISION
+""",
+            ],
+            "env": [
+                env("TAEHV_AB_SOURCE_BUNDLE_S3_URI", source_s3_uri),
+                env("TAEHV_AB_SOURCE_REVISION", source_revision),
+            ],
+            "resources": {
+                "requests": {"cpu": "8", "memory": "24Gi"},
+                "limits": {"cpu": "16", "memory": "48Gi"},
+            },
+            "volumeMounts": [
+                {"name": "sglang-source", "mountPath": "/opt/sglang"},
+                {"name": "bootstrap", "mountPath": "/bootstrap"},
+            ],
+        }
+    ]
+    if variant == "taehv":
+        init_containers.append(
+            {
+                "name": "install-taehv",
+                "image": image,
+                "imagePullPolicy": "Always",
+                "command": ["bash", "-ceu"],
+                "args": [
+                    """
+python3 -m pip install --no-cache-dir --no-deps --target /opt/taehv/python \\
+  'taehv @ git+https://github.com/madebyollin/taehv.git@093b918971d59001a0bad6dfd6e0409b5e1752cf'
+python3 - <<'PY'
+import hashlib
+import urllib.request
+from pathlib import Path
+
+url = "https://raw.githubusercontent.com/madebyollin/taehv/093b918971d59001a0bad6dfd6e0409b5e1752cf/taew2_1.pth"
+target = Path("/opt/taehv/taew2_1.pth")
+urllib.request.urlretrieve(url, target)
+digest = hashlib.sha256(target.read_bytes()).hexdigest()
+expected = "d26151e76cdc2c9424bef988de874b33d9a53f30ef3060cd556c429c469c797e"
+if digest != expected:
+    raise SystemExit(f"TAEHV checkpoint sha256 mismatch: {digest}")
+PY
+""",
+                ],
+                "resources": {
+                    "requests": {"cpu": "8", "memory": "24Gi"},
+                    "limits": {"cpu": "16", "memory": "48Gi"},
+                },
+                "volumeMounts": [{"name": "taehv-runtime", "mountPath": "/opt/taehv"}],
+            }
+        )
+        runtime_volume_mounts.append(
+            {"name": "taehv-runtime", "mountPath": "/opt/taehv"}
+        )
     return {
         "apiVersion": "batch/v1",
         "kind": "Job",
@@ -89,6 +185,7 @@ def render_job(
                         "node.kubernetes.io/instance-type": "p6-b300.48xlarge",
                     },
                     "tolerations": [{"operator": "Exists"}],
+                    "initContainers": init_containers,
                     "containers": [
                         {
                             "name": "benchmark",
@@ -109,10 +206,7 @@ def render_job(
                                 },
                             },
                             "securityContext": {"capabilities": {"add": ["SYS_ADMIN"]}},
-                            "volumeMounts": [
-                                {"name": "fsx", "mountPath": "/fsx"},
-                                {"name": "shm", "mountPath": "/dev/shm"},
-                            ],
+                            "volumeMounts": runtime_volume_mounts,
                         }
                     ],
                     "volumes": [
@@ -124,6 +218,9 @@ def render_job(
                             "name": "shm",
                             "emptyDir": {"medium": "Memory", "sizeLimit": "512Gi"},
                         },
+                        {"name": "sglang-source", "emptyDir": {}},
+                        {"name": "bootstrap", "emptyDir": {}},
+                        {"name": "taehv-runtime", "emptyDir": {}},
                     ],
                 },
             },
@@ -138,6 +235,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--variant", choices=("baseline", "taehv"), required=True)
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--output-s3-prefix", required=True)
+    parser.add_argument("--source-s3-uri", required=True)
+    parser.add_argument("--source-revision", required=True)
     return parser.parse_args()
 
 
@@ -151,6 +250,8 @@ def main() -> None:
                 variant=args.variant,
                 run_id=args.run_id,
                 output_s3_prefix=args.output_s3_prefix,
+                source_s3_uri=args.source_s3_uri,
+                source_revision=args.source_revision,
             ),
             indent=2,
         )
