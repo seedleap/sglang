@@ -39,9 +39,7 @@ for file in "${files[@]}"; do
 done
 
 kubectl --context "${context}" -n "${namespace}" create configmap "${name}" \
-  "${args[@]}" \
-  --dry-run=client -o yaml \
-  | kubectl --context "${context}" -n "${namespace}" apply -f -
+  "${args[@]}"
 kubectl --context "${context}" -n "${namespace}" patch configmap "${name}" \
   --type merge --patch '{"immutable":true}'
 printf '%s\n' "${name}"
