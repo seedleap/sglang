@@ -39,6 +39,12 @@ def render_job(
         env("SGLANG_VIDEO_GPU_TOTAL", "8"),
         env("SGLANG_VIDEO_GPUS_PER_SERVER", "1"),
         env("SGLANG_VIDEO_TOPOLOGY", "8x1"),
+        # The A/B runner has its own explicit websocket warmup. Disable the
+        # service-side synthetic warmup so it cannot overlap realtime sessions.
+        env("SGLANG_VIDEO_WARMUP_MODE", "off"),
+        # The test drives one realtime stream per 1-GPU replica. Keep all
+        # concurrently scheduled session state until their websocket cleanup.
+        env("SGLANG_REALTIME_MAX_SESSIONS", "8"),
         env("SGLANG_VIDEO_WIDTH", "832"),
         env("SGLANG_VIDEO_HEIGHT", "480"),
         env("SGLANG_VIDEO_FPS", "16"),

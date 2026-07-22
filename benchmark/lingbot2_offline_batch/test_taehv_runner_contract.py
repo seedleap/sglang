@@ -38,3 +38,10 @@ def test_runner_accepts_an_opt_in_fixed_case_limit():
     assert "SGLANG_VIDEO_CASE_LIMIT" in script
     assert "case_limit_args" in script
     assert "--limit" in script
+
+
+def test_runner_exposes_a_service_warmup_mode_override():
+    script = (ROOT / "run_capacity_smoke_720p.sh").read_text(encoding="utf-8")
+
+    assert "SGLANG_VIDEO_WARMUP_MODE" in script
+    assert '--warmup-mode "${warmup_mode}"' in script

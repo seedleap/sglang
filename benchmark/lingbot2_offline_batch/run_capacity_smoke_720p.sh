@@ -39,6 +39,7 @@ ws_close_timeout=${SGLANG_VIDEO_WS_CLOSE_TIMEOUT:-${WS_CLOSE_TIMEOUT:-10}}
 server_stop_grace_seconds=${SGLANG_VIDEO_SERVER_STOP_GRACE_SECONDS:-5}
 taehv_checkpoint_path=${TAEHV_CHECKPOINT_PATH:-}
 case_limit=${SGLANG_VIDEO_CASE_LIMIT:-}
+warmup_mode=${SGLANG_VIDEO_WARMUP_MODE:-server}
 
 mkdir -p "${results_root}"
 runner_started_epoch=$(date +%s)
@@ -167,6 +168,7 @@ for ((server_index = 0; server_index < server_count; server_index++)); do
     "${taehv_args[@]}" \
     --enable-torch-compile false \
     --enable-layerwise-nvtx-marker false \
+    --warmup-mode "${warmup_mode}" \
     --attention-backend-config lingbot_causal_fa_num_splits=0 \
     --master-port "$((port + 5))" \
     --host 127.0.0.1 \

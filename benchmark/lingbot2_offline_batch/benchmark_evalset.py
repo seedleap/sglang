@@ -17,7 +17,6 @@ import json
 import math
 import re
 import statistics
-import sys
 import time
 from collections import Counter
 from dataclasses import dataclass
@@ -317,6 +316,7 @@ async def generate_video(
     *,
     url: str,
     item: EvalItem,
+    phase: str,
     output: Path | None,
     width: int,
     height: int,
@@ -366,6 +366,19 @@ async def generate_video(
     persisted_frames = 0
     frame_bytes = width * height * 3
     start = time.perf_counter()
+    print(
+        json.dumps(
+            {
+                "event": "realtime_client_connect",
+                "phase": phase,
+                "sample_id": item.sample_id,
+                "url": url,
+                "chunks": item.chunks,
+            },
+            ensure_ascii=False,
+        ),
+        flush=True,
+    )
     try:
         async with websockets.connect(
             url,
@@ -561,6 +574,7 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
                 generate_video(
                     url=url,
                     item=warmup_item(items[index % len(items)], args.warmup_chunks),
+                    phase="warmup",
                     output=None,
                     width=args.width,
                     height=args.height,
@@ -618,6 +632,7 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
                 result = await generate_video(
                     url=url,
                     item=item,
+                    phase="measurement",
                     output=output,
                     width=args.width,
                     height=args.height,

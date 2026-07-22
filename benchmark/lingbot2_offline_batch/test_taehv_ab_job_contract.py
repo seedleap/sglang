@@ -43,6 +43,8 @@ def test_rendered_ab_job_keeps_b300_topology_and_only_enables_taehv_for_candidat
     )
     assert _env(baseline)["SGLANG_VIDEO_TOPOLOGY"] == "8x1"
     assert _env(baseline)["SGLANG_VIDEO_CASE_LIMIT"] == "100"
+    assert _env(baseline)["SGLANG_VIDEO_WARMUP_MODE"] == "off"
+    assert _env(baseline)["SGLANG_REALTIME_MAX_SESSIONS"] == "8"
     assert "TAEHV_CHECKPOINT_PATH" not in _env(baseline)
     assert _env(candidate)["TAEHV_CHECKPOINT_PATH"] == "/opt/taehv/taew2_1.pth"
     assert baseline_pod["initContainers"][0]["name"] == "prepare-sglang-source"
