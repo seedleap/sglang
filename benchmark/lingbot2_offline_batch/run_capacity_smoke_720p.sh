@@ -37,6 +37,7 @@ height=${SGLANG_VIDEO_HEIGHT:-${HEIGHT:-704}}
 fps=${SGLANG_VIDEO_FPS:-${FPS:-24}}
 ws_close_timeout=${SGLANG_VIDEO_WS_CLOSE_TIMEOUT:-${WS_CLOSE_TIMEOUT:-10}}
 server_stop_grace_seconds=${SGLANG_VIDEO_SERVER_STOP_GRACE_SECONDS:-5}
+taehv_checkpoint_path=${TAEHV_CHECKPOINT_PATH:-}
 
 mkdir -p "${results_root}"
 printf '{"gpu_total":%s,"gpus_per_server":%s,"server_count":%s,"topology":"%s"}\n' \
@@ -80,6 +81,54 @@ nvidia-smi --query-gpu=index,name,uuid,memory.total,compute_cap,driver_version -
 python3 -m pip show flash-attn-4 kernels sglang-kernel torch \
   > "${results_root}/runtime-packages.txt"
 
+taehv_enabled=false
+taehv_args=()
+taehv_checkpoint_sha256=""
+taehv_package_version=""
+if [[ -n "${taehv_checkpoint_path}" ]]; then
+  if [[ ! -r "${taehv_checkpoint_path}" ]]; then
+    echo "TAEHV checkpoint is not readable: ${taehv_checkpoint_path}" >&2
+    exit 2
+  fi
+  python3 -c 'import taehv' || {
+    echo "TAEHV package is unavailable" >&2
+    exit 2
+  }
+  taehv_enabled=true
+  taehv_checkpoint_sha256=$(sha256sum "${taehv_checkpoint_path}" | awk '{print $1}')
+  taehv_package_version=$(python3 - <<'PY'
+from importlib.metadata import version
+
+print(version("taehv"))
+PY
+)
+  taehv_args=(--vae-config.taehv-checkpoint-path "${taehv_checkpoint_path}")
+fi
+python3 - \
+  "${results_root}/taehv-runtime.json" \
+  "${taehv_enabled}" \
+  "${taehv_checkpoint_path}" \
+  "${taehv_checkpoint_sha256}" \
+  "${taehv_package_version}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+Path(sys.argv[1]).write_text(
+    json.dumps(
+        {
+            "enabled": sys.argv[2] == "true",
+            "checkpoint_path": sys.argv[3] or None,
+            "checkpoint_sha256": sys.argv[4] or None,
+            "package_version": sys.argv[5] or None,
+        },
+        indent=2,
+    )
+    + "\n",
+    encoding="utf-8",
+)
+PY
+
 urls=()
 ports=()
 for ((server_index = 0; server_index < server_count; server_index++)); do
@@ -112,6 +161,7 @@ for ((server_index = 0; server_index < server_count; server_index++)); do
     --text-encoder-cpu-offload false \
     --vae-config.use-parallel-decode true \
     --vae-config.parallel-decode-mode spatial \
+    "${taehv_args[@]}" \
     --enable-torch-compile false \
     --enable-layerwise-nvtx-marker false \
     --attention-backend-config lingbot_causal_fa_num_splits=0 \

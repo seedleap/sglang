@@ -20,6 +20,9 @@ RUN python3 -m pip install --no-cache-dir -e "python[diffusion]" --root-user-act
     && python3 -m pip install --no-cache-dir --force-reinstall --no-deps \
         --index-url https://flashinfer.ai/whl/cu130 \
         'flashinfer-jit-cache==0.6.12+cu130' \
+    && python3 -m pip install --no-cache-dir \
+        'taehv @ git+https://github.com/madebyollin/taehv.git@093b918971d59001a0bad6dfd6e0409b5e1752cf' \
+        --root-user-action=ignore \
     && python3 -m pip install --no-cache-dir boto3 --root-user-action=ignore \
     && mkdir -p /opt/bench \
     && cp -a benchmark/lingbot2_offline_batch/. /opt/bench/
