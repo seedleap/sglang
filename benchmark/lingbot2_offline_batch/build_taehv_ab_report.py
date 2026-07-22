@@ -192,10 +192,10 @@ def render_html(
             """
 <article>
   <div class="case-header"><strong>{sample_id}</strong><span>{status}</span></div>
-  <img src="{image_url}" alt="{sample_id} original image" loading="lazy">
   <p class="prompt">{prompt}</p>
   <pre>{action}</pre>
-  <div class="videos">
+  <div class="media-row">
+    <section><h2>原始 Image</h2><img src="{image_url}" alt="{sample_id} original image" loading="lazy"></section>
     <section><h2>原 VAE</h2>{baseline_video}</section>
     <section><h2>TAEHV</h2>{candidate_video}</section>
   </div>
@@ -237,11 +237,11 @@ def render_html(
 *{{box-sizing:border-box}} body{{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 system-ui,-apple-system,"PingFang SC",sans-serif}}
 header{{padding:26px max(24px,calc((100vw - 1600px)/2));border-bottom:1px solid var(--line)}}h1{{margin:0;font-size:25px}}p{{color:var(--muted)}}
 table{{border-collapse:collapse;margin-top:14px;width:min(920px,100%);background:var(--panel)}}td,th{{padding:8px 10px;border:1px solid var(--line);text-align:left}}main{{max-width:1700px;margin:auto;padding:22px}}
-#cases{{display:grid;grid-template-columns:repeat(auto-fill,minmax(520px,1fr));gap:16px}}article{{border:1px solid var(--line);background:var(--panel);overflow:hidden;border-radius:8px}}
-.case-header{{padding:10px 12px;display:flex;justify-content:space-between;gap:12px;overflow-wrap:anywhere}}article>img{{display:block;width:100%;max-height:430px;object-fit:contain;background:#05070a}}
+#cases{{display:grid;grid-template-columns:1fr;gap:16px}}article{{border:1px solid var(--line);background:var(--panel);overflow:hidden;border-radius:8px}}
+.case-header{{padding:10px 12px;display:flex;justify-content:space-between;gap:12px;overflow-wrap:anywhere}}
 .prompt{{padding:0 12px;margin:10px 0;color:var(--text)}}pre{{margin:0 12px 12px;padding:8px;white-space:pre-wrap;word-break:break-word;background:#0b1119;border:1px solid var(--line);color:var(--muted)}}
-.videos{{display:grid;grid-template-columns:1fr 1fr;gap:1px;background:var(--line)}}.videos section{{background:var(--panel);padding:10px}}h2{{font-size:14px;margin:0 0 8px;color:var(--accent)}}video{{display:block;width:100%;aspect-ratio:832/480;background:#05070a}}.missing{{min-height:150px;padding:20px}}
-@media(max-width:700px){{header,main{{padding-left:12px;padding-right:12px}}#cases,.videos{{grid-template-columns:1fr}}}}
+.media-row{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:1px;background:var(--line)}}.media-row section{{min-width:0;background:var(--panel);padding:10px}}h2{{font-size:14px;margin:0 0 8px;color:var(--accent)}}.media-row img,video{{display:block;width:100%;aspect-ratio:832/480;object-fit:contain;background:#05070a}}.missing{{min-height:150px;padding:20px}}
+@media(max-width:900px){{header,main{{padding-left:12px;padding-right:12px}}.media-row{{grid-template-columns:1fr}}}}
 </style></head><body><header><h1>LingBot 原 VAE vs TAEHV A/B</h1><p>固定 testset100_v2 前 100 个 case；预签名链接有效期 {expires_in // 3600} 小时。TAEHV 只用于该测试 Job，线上服务未切换。</p>
 <table><thead><tr><th>指标</th><th>原 VAE</th><th>TAEHV</th><th>TAEHV 改善</th></tr></thead><tbody>{metric_rows}</tbody></table></header>
 <main><div id="cases">{''.join(cards)}</div></main></body></html>"""

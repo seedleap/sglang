@@ -110,6 +110,8 @@ def test_build_report_pairs_artifacts_and_exposes_prompt_action_and_delta(
     assert "a test prompt" in html
     assert "w x2" in html
     assert "a x1" in html
+    assert 'class="media-row"' in html
+    assert "原始 Image" in html
     assert "baseline/cases/videos/G1/case-1.mp4" in html
     assert "taehv/cases/videos/G1/case-1.mp4" in html
     assert report["metrics"]["measured_wall_sec"]["improvement_percent"] == 10.0
