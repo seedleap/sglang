@@ -38,8 +38,10 @@ fps=${SGLANG_VIDEO_FPS:-${FPS:-24}}
 ws_close_timeout=${SGLANG_VIDEO_WS_CLOSE_TIMEOUT:-${WS_CLOSE_TIMEOUT:-10}}
 server_stop_grace_seconds=${SGLANG_VIDEO_SERVER_STOP_GRACE_SECONDS:-5}
 taehv_checkpoint_path=${TAEHV_CHECKPOINT_PATH:-}
+case_limit=${SGLANG_VIDEO_CASE_LIMIT:-}
 
 mkdir -p "${results_root}"
+runner_started_epoch=$(date +%s)
 printf '{"gpu_total":%s,"gpus_per_server":%s,"server_count":%s,"topology":"%s"}\n' \
   "${gpu_total}" "${gpus_per_server}" "${server_count}" \
   "${topology:-${server_count}x${gpus_per_server}}" \
@@ -131,6 +133,7 @@ PY
 
 urls=()
 ports=()
+server_start_epoch=$(date +%s)
 for ((server_index = 0; server_index < server_count; server_index++)); do
   first_gpu=$((server_index * gpus_per_server))
   last_gpu=$((first_gpu + gpus_per_server - 1))
@@ -178,6 +181,9 @@ for ((server_index = 0; server_index < server_count; server_index++)); do
     exit 1
   fi
 done
+server_ready_epoch=$(date +%s)
+server_startup_seconds=$((server_ready_epoch - server_start_epoch))
+printf '%s\n' "${server_startup_seconds}" > "${results_root}/server-startup-seconds"
 
 nvidia-smi dmon -s pucvmet -d 1 -o DT > "${results_root}/nvidia-dmon.log" 2>&1 &
 dmon_pid=$!
@@ -187,6 +193,14 @@ set +e
 resume_args=()
 if [[ "${resume}" == "true" ]]; then
   resume_args+=(--resume)
+fi
+case_limit_args=()
+if [[ -n "${case_limit}" ]]; then
+  if ! [[ "${case_limit}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "SGLANG_VIDEO_CASE_LIMIT must be a positive integer" >&2
+    exit 2
+  fi
+  case_limit_args+=(--limit "${case_limit}")
 fi
 stream_upload_pid=""
 stream_upload_done="${results_root}/stream-upload-generation-finished"
@@ -201,6 +215,7 @@ if [[ "${stream_upload}" == "true" && -n "${put_urls_path}" ]]; then
     > "${results_root}/upload.log" 2>&1 &
   stream_upload_pid=$!
 fi
+benchmark_started_epoch=$(date +%s)
 python3 /opt/bench/benchmark_evalset.py \
   --messages "${messages_path}" \
   --image-urls "${image_urls_path}" \
@@ -213,9 +228,11 @@ python3 /opt/bench/benchmark_evalset.py \
   --close-timeout "${ws_close_timeout}" \
   --output-dir "${results_root}/cases" \
   --output "${results_root}/cases/summary.json" \
+  "${case_limit_args[@]}" \
   "${resume_args[@]}" \
   2>&1 | tee "${results_root}/benchmark.log"
 benchmark_status=${PIPESTATUS[0]}
+benchmark_finished_epoch=$(date +%s)
 set -e
 
 upload_status=0
@@ -236,9 +253,50 @@ elif [[ "${benchmark_status}" -eq 0 && -n "${put_urls_path}" ]]; then
   upload_status=${PIPESTATUS[0]}
   set -e
 fi
+upload_finished_epoch=$(date +%s)
 
 kill -TERM "${dmon_pid}" >/dev/null 2>&1 || true
 wait "${dmon_pid}" >/dev/null 2>&1 || true
+runner_finished_epoch=$(date +%s)
+python3 - \
+  "${results_root}/lifecycle.json" \
+  "${runner_started_epoch}" \
+  "${server_start_epoch}" \
+  "${server_ready_epoch}" \
+  "${benchmark_started_epoch}" \
+  "${benchmark_finished_epoch}" \
+  "${upload_finished_epoch}" \
+  "${runner_finished_epoch}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+labels = (
+    "runner_started_epoch",
+    "server_start_epoch",
+    "server_ready_epoch",
+    "benchmark_started_epoch",
+    "benchmark_finished_epoch",
+    "upload_finished_epoch",
+    "runner_finished_epoch",
+)
+values = dict(zip(labels, (int(value) for value in sys.argv[2:])))
+values["server_startup_sec"] = (
+    values["server_ready_epoch"] - values["server_start_epoch"]
+)
+values["benchmark_wall_sec"] = (
+    values["benchmark_finished_epoch"] - values["benchmark_started_epoch"]
+)
+values["upload_and_finalize_sec"] = (
+    values["runner_finished_epoch"] - values["benchmark_finished_epoch"]
+)
+values["runner_wall_sec"] = (
+    values["runner_finished_epoch"] - values["runner_started_epoch"]
+)
+Path(sys.argv[1]).write_text(
+    json.dumps(values, indent=2) + "\n", encoding="utf-8"
+)
+PY
 echo "${benchmark_status}" > "${results_root}/exit-code"
 echo "${upload_status}" > "${results_root}/upload-exit-code"
 touch "${results_root}/finished"
