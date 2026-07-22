@@ -102,7 +102,7 @@ except Exception:
     raise
 PY
 tar -xzf /bootstrap/source.tar.gz -C /opt/sglang
-test -f /opt/sglang/python/sglang/multimodal_gen/vae/vae_decoder.py
+test -f /opt/sglang/python/sglang/multimodal_gen/runtime/pipelines_core/stages/realtime/vae.py
 printf '%s\\n' "$TAEHV_AB_SOURCE_REVISION" > /opt/sglang/TAEHV_AB_SOURCE_REVISION
 """,
             ],

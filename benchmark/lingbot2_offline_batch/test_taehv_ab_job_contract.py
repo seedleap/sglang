@@ -57,6 +57,8 @@ def test_rendered_ab_job_keeps_b300_topology_and_only_enables_taehv_for_candidat
         0
     ]
     assert "--no-deps" in taehv_install
+    source_init = baseline_pod["initContainers"][0]["args"][0]
+    assert "runtime/pipelines_core/stages/realtime/vae.py" in source_init
 
 
 def test_ab_runner_and_uploader_keep_presigned_input_urls_out_of_artifacts():
