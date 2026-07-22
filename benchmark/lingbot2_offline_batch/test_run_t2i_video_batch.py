@@ -851,7 +851,7 @@ def test_upload_report_writes_report_to_requested_s3_uri():
     assert b'"video_status": "succeeded"' in fake_s3.objects[0]["Body"]
 
 
-def test_post_callback_uses_generation_progress_put_with_bearer_token(monkeypatch):
+def test_post_callback_uses_generation_progress_put_with_callback_token_headers(monkeypatch):
     sent = {}
 
     class FakeResponse:
@@ -867,6 +867,7 @@ def test_post_callback_uses_generation_progress_put_with_bearer_token(monkeypatc
         sent["method"] = request.get_method()
         sent["url"] = request.full_url
         sent["authorization"] = request.headers.get("Authorization")
+        sent["x_lwdp_token"] = request.headers.get("X-lwdp-token")
         sent["content_type"] = request.headers.get("Content-type")
         sent["body"] = request.data
         sent["timeout"] = timeout
@@ -887,6 +888,7 @@ def test_post_callback_uses_generation_progress_put_with_bearer_token(monkeypatc
     assert sent["method"] == "PUT"
     assert sent["url"].endswith("/api/v1/generation/jobs/gen/progress")
     assert sent["authorization"] == "Bearer callback-token"
+    assert sent["x_lwdp_token"] == "callback-token"
     assert sent["content_type"] == "application/json"
     assert sent["body"] == b'{"status": "succeeded"}'
     assert sent["timeout"] == 15.0

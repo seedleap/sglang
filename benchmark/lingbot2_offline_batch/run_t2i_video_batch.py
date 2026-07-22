@@ -953,6 +953,7 @@ def post_callback(request: dict[str, Any], payload: dict[str, Any]) -> None:
     token = os.environ.get("SGLANG_VIDEO_CALLBACK_TOKEN")
     if token:
         headers["Authorization"] = f"Bearer {token}"
+        headers["X-LWDP-Token"] = token
     http_request = urllib.request.Request(
         str(url),
         data=body,
