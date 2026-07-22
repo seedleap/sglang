@@ -1327,6 +1327,15 @@ def render_job_manifest(request: dict[str, Any], config: dict[str, Any]) -> dict
             }
         )
 
+    extra_volume_mounts = config.get("extra_volume_mounts")
+    if isinstance(extra_volume_mounts, list):
+        volume_mounts.extend(
+            mount for mount in extra_volume_mounts if isinstance(mount, dict)
+        )
+    extra_volumes = config.get("extra_volumes")
+    if isinstance(extra_volumes, list):
+        volumes.extend(volume for volume in extra_volumes if isinstance(volume, dict))
+
     container = {
         "name": "sglang-video-batch",
         "image": config["job_image"],
@@ -1362,6 +1371,11 @@ def render_job_manifest(request: dict[str, Any], config: dict[str, Any]) -> dict
         "containers": [container],
         "volumes": volumes,
     }
+    init_containers = config.get("init_containers")
+    if isinstance(init_containers, list) and init_containers:
+        pod_spec["initContainers"] = [
+            container for container in init_containers if isinstance(container, dict)
+        ]
     if config.get("node_selector"):
         pod_spec["nodeSelector"] = config["node_selector"]
     affinity = _configured_affinity(config)
@@ -3697,6 +3711,12 @@ def _env_config() -> dict[str, Any]:
         "command": _json_env("SGLANG_VIDEO_JOB_COMMAND_JSON", DEFAULT_CONTAINER_COMMAND),
         "args": _json_env("SGLANG_VIDEO_JOB_ARGS_JSON", []),
         "extra_env": _json_env("SGLANG_VIDEO_JOB_EXTRA_ENV_JSON", []),
+        "extra_volume_mounts": _json_env(
+            "SGLANG_VIDEO_JOB_EXTRA_VOLUME_MOUNTS_JSON",
+            [],
+        ),
+        "extra_volumes": _json_env("SGLANG_VIDEO_JOB_EXTRA_VOLUMES_JSON", []),
+        "init_containers": _json_env("SGLANG_VIDEO_JOB_INIT_CONTAINERS_JSON", []),
         "node_selector": _json_env("SGLANG_VIDEO_JOB_NODE_SELECTOR_JSON", {}),
         "affinity": _json_env("SGLANG_VIDEO_JOB_AFFINITY_JSON", {}),
         "placement_profiles": placement_profiles,

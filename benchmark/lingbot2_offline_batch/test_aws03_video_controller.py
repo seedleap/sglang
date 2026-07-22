@@ -138,6 +138,46 @@ def test_render_job_manifest_mounts_versioned_runner_config_map_read_only():
     } in pod["volumes"]
 
 
+def test_render_job_manifest_includes_configured_runtime_bootstrap_containers():
+    source_mount = {"name": "sglang-source", "mountPath": "/opt/sglang"}
+    taehv_mount = {"name": "taehv-runtime", "mountPath": "/opt/taehv"}
+    init_containers = [
+        {
+            "name": "prepare-sglang-source",
+            "image": "lmsysorg/sglang:dev@sha256:test",
+            "command": ["/bin/sh", "-c", "download source"],
+            "volumeMounts": [source_mount],
+        },
+        {
+            "name": "install-taehv",
+            "image": "lmsysorg/sglang:dev@sha256:test",
+            "command": ["/bin/sh", "-c", "install taehv"],
+            "volumeMounts": [taehv_mount],
+        },
+    ]
+    manifest = render_job_manifest(
+        _request(),
+        {
+            "namespace": "default",
+            "job_image": "lmsysorg/sglang:dev@sha256:test",
+            "extra_volume_mounts": [source_mount, taehv_mount],
+            "extra_volumes": [
+                {"name": "sglang-source", "emptyDir": {}},
+                {"name": "taehv-runtime", "emptyDir": {}},
+            ],
+            "init_containers": init_containers,
+        },
+    )
+
+    pod = manifest["spec"]["template"]["spec"]
+    container = pod["containers"][0]
+    assert pod["initContainers"] == init_containers
+    assert source_mount in container["volumeMounts"]
+    assert taehv_mount in container["volumeMounts"]
+    assert {"name": "sglang-source", "emptyDir": {}} in pod["volumes"]
+    assert {"name": "taehv-runtime", "emptyDir": {}} in pod["volumes"]
+
+
 def test_render_job_manifest_can_match_existing_b300_batch_runtime_shape():
     manifest = render_job_manifest(
         _request(),
@@ -356,6 +396,18 @@ def test_env_config_reads_placement_profiles_and_job_ttl(monkeypatch):
     monkeypatch.setenv("SGLANG_VIDEO_FALLBACK_MAX_ACTIVE_GPUS", "160")
     monkeypatch.setenv("SGLANG_VIDEO_RUNNER_CONFIG_MAP_NAME", "sglang-video-runner-abc123")
     monkeypatch.setenv("SGLANG_VIDEO_RUNNER_MOUNT_PATH", "/runner")
+    monkeypatch.setenv(
+        "SGLANG_VIDEO_JOB_EXTRA_VOLUME_MOUNTS_JSON",
+        json.dumps([{"name": "taehv-runtime", "mountPath": "/opt/taehv"}]),
+    )
+    monkeypatch.setenv(
+        "SGLANG_VIDEO_JOB_EXTRA_VOLUMES_JSON",
+        json.dumps([{"name": "taehv-runtime", "emptyDir": {}}]),
+    )
+    monkeypatch.setenv(
+        "SGLANG_VIDEO_JOB_INIT_CONTAINERS_JSON",
+        json.dumps([{"name": "install-taehv", "image": "sglang:test"}]),
+    )
 
     config = _env_config()
 
@@ -379,6 +431,11 @@ def test_env_config_reads_placement_profiles_and_job_ttl(monkeypatch):
     assert config["ttl_seconds_after_finished"] == "900"
     assert config["runner_config_map_name"] == "sglang-video-runner-abc123"
     assert config["runner_mount_path"] == "/runner"
+    assert config["extra_volume_mounts"] == [
+        {"name": "taehv-runtime", "mountPath": "/opt/taehv"}
+    ]
+    assert config["extra_volumes"] == [{"name": "taehv-runtime", "emptyDir": {}}]
+    assert config["init_containers"] == [{"name": "install-taehv", "image": "sglang:test"}]
 
 
 def test_env_config_merges_scheduler_name_from_matching_placement_profile(monkeypatch):
