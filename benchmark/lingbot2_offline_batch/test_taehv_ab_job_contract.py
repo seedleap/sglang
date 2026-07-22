@@ -69,5 +69,6 @@ def test_ab_runner_and_uploader_keep_presigned_input_urls_out_of_artifacts():
     assert "prepare_taehv_ab_inputs.py" in runner
     assert "upload_taehv_ab_results.py" in runner
     assert "SGLANG_VIDEO_CASE_LIMIT" in runner
+    assert "bash /opt/bench/run_capacity_smoke_720p.sh" in runner
     assert "image-urls.json" in uploader
     assert "server-cache" in uploader

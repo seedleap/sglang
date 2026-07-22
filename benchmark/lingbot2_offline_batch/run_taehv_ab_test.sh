@@ -30,7 +30,7 @@ export RESUME=false
 export STREAM_UPLOAD=false
 
 set +e
-/opt/bench/run_capacity_smoke_720p.sh
+bash /opt/bench/run_capacity_smoke_720p.sh
 benchmark_status=$?
 set -e
 
