@@ -7,6 +7,7 @@ import argparse
 import json
 from collections import Counter
 from pathlib import Path
+from typing import Sequence
 
 from thirdperson_actions import ACTION_SEED, build_action_trajectory
 
@@ -40,14 +41,36 @@ def load_label(path: Path, image_id: str) -> dict:
     raise ValueError(f"missing label for {image_id}")
 
 
-def quantize_actions(row: dict) -> tuple[list[list[int]], list[list[str]]]:
+def action_keys_for_trajectory(
+    row: dict,
+    base_keys: Sequence[str] = ACTION_KEYS,
+) -> list[str]:
+    action_keys = [str(key) for key in base_keys]
+    seen = set(action_keys)
+    camera_actions = row.get("condition_inputs", {}).get("camera_actions", [])
+    for frame, keys in enumerate(camera_actions):
+        if not isinstance(keys, list):
+            raise ValueError(f"{row.get('traj_id')}: invalid action at frame {frame}")
+        for key in keys:
+            key = str(key)
+            if key not in seen:
+                seen.add(key)
+                action_keys.append(key)
+    return action_keys
+
+
+def quantize_actions(
+    row: dict,
+    action_keys: Sequence[str] | None = None,
+) -> tuple[list[list[int]], list[list[str]]]:
     if row.get("fps") != FPS or row.get("num_frames") != OUTPUT_VIDEO_FRAMES:
         raise ValueError(f"{row.get('traj_id')}: expected {FPS} FPS and 129 frames")
     camera_actions = row.get("condition_inputs", {}).get("camera_actions", [])
     if len(camera_actions) != OUTPUT_VIDEO_FRAMES:
         raise ValueError(f"{row.get('traj_id')}: camera action length mismatch")
+    action_keys = list(action_keys or action_keys_for_trajectory(row))
     for frame, keys in enumerate(camera_actions):
-        if len(keys) > 1 or any(key not in ACTION_KEYS for key in keys):
+        if not isinstance(keys, list):
             raise ValueError(f"{row.get('traj_id')}: invalid action at frame {frame}")
 
     # Frame zero is the conditioning image. Quantize the 128 generated frames
@@ -55,14 +78,17 @@ def quantize_actions(row: dict) -> tuple[list[list[int]], list[list[str]]]:
     # block, then expand again for benchmark_evalset's native fixture format.
     latent_keys = []
     for offset in range(1, OUTPUT_VIDEO_FRAMES, 4):
-        block = [tuple(keys) for keys in camera_actions[offset : offset + 4]]
+        block = [
+            tuple(str(key) for key in keys)
+            for keys in camera_actions[offset : offset + 4]
+        ]
         counts = Counter(block)
         winner = max(counts, key=lambda keys: (counts[keys], not keys, keys))
         latent_keys.append(list(winner))
     if len(latent_keys) != GENERATED_LATENT_FRAMES:
         raise AssertionError("latent action length mismatch")
     video_actions = [
-        [int(key in keys) for key in ACTION_KEYS]
+        [int(key in keys) for key in action_keys]
         for keys in latent_keys
         for _ in range(4)
     ]

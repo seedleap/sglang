@@ -92,3 +92,13 @@ def test_validate_action_trajectories_rejects_bad_shape() -> None:
         assert "expected 24 FPS and 129 frames" in str(error)
     else:
         raise AssertionError("expected invalid trajectory to be rejected")
+
+
+def test_validate_action_trajectories_allows_non_wasd_action_content() -> None:
+    trajectory = _traj("look-left-then-right", "l", "j")
+
+    validated = validate_action_trajectories([trajectory])
+
+    camera_actions = validated[0]["condition_inputs"]["camera_actions"]
+    assert camera_actions[0] == ["l"]
+    assert camera_actions[-1] == ["j"]

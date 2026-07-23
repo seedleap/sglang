@@ -112,8 +112,6 @@ def validate_action_trajectories(
         for frame, keys in enumerate(camera_actions):
             if not isinstance(keys, list):
                 raise ValueError(f"{traj_id}: invalid action at frame {frame}")
-            if len(keys) > 1 or any(key not in MOVEMENT_KEYS for key in keys):
-                raise ValueError(f"{traj_id}: invalid action at frame {frame}")
         validated.append(copy.deepcopy(row))
     return tuple(validated)
 

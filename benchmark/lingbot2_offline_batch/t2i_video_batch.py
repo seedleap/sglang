@@ -10,11 +10,11 @@ from pathlib import Path
 from typing import Any
 
 from prepare_capacity_smoke_720p import (
-    ACTION_KEYS,
     GENERATED_LATENT_FRAMES,
     HEIGHT,
     OUTPUT_VIDEO_FRAMES,
     WIDTH,
+    action_keys_for_trajectory,
     quantize_actions,
 )
 from thirdperson_actions import (
@@ -144,7 +144,11 @@ def build_case_records(
                     trajectories=trajectory_pool,
                     validate=False,
                 )
-            video_actions, latent_keys = quantize_actions(trajectory)
+            case_action_keys = action_keys_for_trajectory(trajectory)
+            video_actions, latent_keys = quantize_actions(
+                trajectory,
+                action_keys=case_action_keys,
+            )
             movement_key = trajectory["movement_key"]
             ending_movement_key = trajectory["ending_movement_key"]
             movement_pair = trajectory["movement_pair"]
@@ -218,7 +222,7 @@ def build_case_records(
                             {
                                 "type": "keyboard_direction_frame_interval",
                                 "actions": video_actions,
-                                "action_keys": ACTION_KEYS,
+                                "action_keys": case_action_keys,
                             }
                         ],
                         "metadata": {

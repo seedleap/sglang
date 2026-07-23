@@ -168,6 +168,31 @@ def test_build_case_records_uses_manifest_action_before_random_trajs():
     assert cases[0]["messages"][1]["controls"][0]["actions"][-1] == [0, 0, 0, 1]
 
 
+def test_build_case_records_passes_through_non_wasd_action_keys():
+    forced = _traj("api-look-left-right", "l", "j")
+    forced["traj_type"] = "api_custom"
+    rows = [
+        {
+            "item_id": "img001",
+            "image_uri": "s3://bucket/t2i/images/img001.png",
+            "image_prompt": "A quiet workshop.",
+            "video_prompt": "A quiet workshop.",
+            "video_prompt_source": "image_prompt_fallback",
+            "action": forced,
+            "action_source": "api",
+        }
+    ]
+
+    cases = build_case_records(_request(), rows, action_trajectories=None)
+
+    control = cases[0]["messages"][1]["controls"][0]
+    assert control["action_keys"] == ["w", "a", "s", "d", "l", "j"]
+    assert control["actions"][0] == [0, 0, 0, 0, 1, 0]
+    assert control["actions"][-1] == [0, 0, 0, 0, 0, 1]
+    assert cases[0]["metadata"]["latent_camera_actions"][0] == ["l"]
+    assert cases[0]["metadata"]["latent_camera_actions"][-1] == ["j"]
+
+
 def test_callback_progress_payload_groups_one_video_per_image():
     cases = build_case_records(
         _request(),
