@@ -123,7 +123,7 @@ def _rows() -> list[dict]:
     ]
 
 
-def test_build_runtime_inputs_writes_messages_and_presigned_image_urls(tmp_path):
+def test_build_runtime_inputs_writes_messages_and_stable_image_sources(tmp_path):
     cases = build_case_records(_request(), _rows(), action_trajectories=_trajs())
 
     runtime = build_runtime_inputs(
@@ -140,9 +140,7 @@ def test_build_runtime_inputs_writes_messages_and_presigned_image_urls(tmp_path)
     image_urls = json.loads(runtime.image_urls_path.read_text(encoding="utf-8"))
     assert len(message_rows) == 1
     assert message_rows[0]["sample_id"] == cases[0]["sample_id"]
-    assert image_urls == {
-        "img001": "https://signed.example.com/bucket/t2i/images/img001.png?ttl=604800"
-    }
+    assert image_urls == {"img001": "s3://bucket/t2i/images/img001.png"}
 
 
 def test_read_action_trajectories_always_uses_bundled_trajs(tmp_path, monkeypatch):

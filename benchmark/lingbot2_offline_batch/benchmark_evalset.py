@@ -31,6 +31,7 @@ TEMPORAL_COMPRESSION = 4
 LINGBOT_LATENTS_PER_CHUNK = 3
 FIRST_CHUNK_VIDEO_FRAMES = 9
 LATER_CHUNK_VIDEO_FRAMES = 12
+_S3_CLIENT: Any | None = None
 
 
 def percentile(values: list[float], q: float) -> float:
@@ -83,6 +84,41 @@ def read_jsonl(path: Path) -> Iterable[dict[str, Any]]:
                     yield json.loads(line)
                 except json.JSONDecodeError as exc:
                     raise ValueError(f"{path}:{line_number}: {exc}") from exc
+
+
+def parse_s3_uri(uri: str) -> tuple[str, str]:
+    if not uri.startswith("s3://"):
+        raise ValueError(f"not an S3 URI: {uri}")
+    bucket_key = uri[5:]
+    if "/" not in bucket_key:
+        raise ValueError(f"S3 URI has no key: {uri}")
+    bucket, key = bucket_key.split("/", 1)
+    if not bucket or not key:
+        raise ValueError(f"invalid S3 URI: {uri}")
+    return bucket, key
+
+
+def _get_s3_client() -> Any:
+    global _S3_CLIENT
+    if _S3_CLIENT is None:
+        import boto3
+
+        _S3_CLIENT = boto3.client("s3")
+    return _S3_CLIENT
+
+
+def _read_s3_bytes(uri: str, s3_client: Any | None = None) -> bytes:
+    bucket, key = parse_s3_uri(uri)
+    client = s3_client or _get_s3_client()
+    return client.get_object(Bucket=bucket, Key=key)["Body"].read()
+
+
+async def load_first_frame_payload(
+    image_url: str, *, s3_client: Any | None = None
+) -> str | bytes:
+    if not image_url.startswith("s3://"):
+        return image_url
+    return await asyncio.to_thread(_read_s3_bytes, image_url, s3_client)
 
 
 def _control_by_type(target: dict[str, Any], kind: str) -> dict[str, Any] | None:
@@ -204,7 +240,7 @@ def load_items(messages: Path, image_urls: Path) -> list[EvalItem]:
         image_id = row["metadata"]["image_id"]
         image_url = url_map.get(image_id)
         if not image_url:
-            raise ValueError(f"{sample_id}: no signed image URL for {image_id}")
+            raise ValueError(f"{sample_id}: no image source for {image_id}")
         items.append(
             EvalItem(
                 index=index,
@@ -324,6 +360,9 @@ async def generate_video(
     timeout: float,
     close_timeout: float,
 ) -> dict[str, Any]:
+    first_frame_load_start = time.perf_counter()
+    first_frame = await load_first_frame_payload(item.image_url)
+    first_frame_load_sec = time.perf_counter() - first_frame_load_start
     temp_output = (
         output.with_name(f"{output.stem}.partial.mp4") if output is not None else None
     )
@@ -338,7 +377,7 @@ async def generate_video(
         "type": "init",
         "prompt": item.prompt,
         "negative_prompt": item.negative_prompt,
-        "first_frame": item.image_url,
+        "first_frame": first_frame,
         "size": f"{width}x{height}",
         "fps": fps,
         "num_frames": FIRST_CHUNK_VIDEO_FRAMES,
@@ -501,6 +540,7 @@ async def generate_video(
             "scheduler_generated_fps": received_service_frames / scheduler_seconds,
             "delivered_and_persisted_fps": persisted_frames / (persist_end - start),
             "realtime_factor": (persisted_frames / fps) / (persist_end - start),
+            "first_frame_load_sec": first_frame_load_sec,
             "prompt_events": sent_prompt_events,
             "media": media,
             "resumed": False,

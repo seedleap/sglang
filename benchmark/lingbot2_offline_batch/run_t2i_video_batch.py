@@ -26,7 +26,6 @@ from t2i_video_batch import (
 )
 
 
-DEFAULT_PRESIGN_SECONDS = 7 * 24 * 60 * 60
 DEFAULT_RUN_SCRIPT = "/opt/bench/run_capacity_smoke_720p.sh"
 DEFAULT_S3_REGION = "us-east-2"
 DEFAULT_ACTION_TRAJS_PATH = Path(__file__).with_name("trajs.jsonl.gz")
@@ -86,15 +85,8 @@ def read_action_trajectories(request: dict[str, Any], s3_client: Any) -> list[di
     return read_jsonl_uri(str(bundled_path), s3_client)
 
 
-def _presigned_image_url(image_uri: str, s3_client: Any, expires_in: int) -> str:
-    if not image_uri.startswith("s3://"):
-        return image_uri
-    bucket, key = parse_s3_uri(image_uri)
-    return s3_client.generate_presigned_url(
-        "get_object",
-        Params={"Bucket": bucket, "Key": key},
-        ExpiresIn=expires_in,
-    )
+def _image_source_for_benchmark(image_uri: str) -> str:
+    return image_uri
 
 
 def build_runtime_inputs(
@@ -109,13 +101,12 @@ def build_runtime_inputs(
     results_root = work_dir / "results"
     write_jsonl(messages_path, cases)
 
-    expires_in = int(request.get("input", {}).get("image_url_expires_in") or DEFAULT_PRESIGN_SECONDS)
     image_urls = {}
     for case in cases:
         image_id = case["image_id"]
         image_urls.setdefault(
             image_id,
-            _presigned_image_url(case["image_uri"], s3_client, expires_in),
+            _image_source_for_benchmark(case["image_uri"]),
         )
     image_urls_path.parent.mkdir(parents=True, exist_ok=True)
     image_urls_path.write_text(
