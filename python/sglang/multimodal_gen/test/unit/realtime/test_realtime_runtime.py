@@ -746,6 +746,54 @@ def test_realtime_trace_log_notifies_registered_sink():
     assert received[0]["chunk_index"] == 2
 
 
+def test_realtime_result_stage_metrics_are_emitted_from_api_process(monkeypatch):
+    logged = []
+
+    def fake_log(_logger, session, event, **fields):
+        logged.append((session.trace_id, event, fields))
+
+    session = GenerateSession()
+    session.trace_id = "trace-worker-metrics-1"
+    chunk = SimpleNamespace(request_id="req-worker-metrics-1")
+    batch = SimpleNamespace(block_idx=7, realtime_event_id=23)
+    metrics = SimpleNamespace(
+        request_id="req-worker-metrics-1",
+        stages={
+            "RealtimeImageVAEEncodingStage": 0.173,
+            "LingBotWorldCausalDMDDenoisingStage": 397.822,
+            "CausalVaeDecodingStage": 24.869,
+            "Scheduler.return_result.send": 0.114,
+        },
+    )
+    result = SimpleNamespace(metrics=metrics, metrics_list=None)
+
+    monkeypatch.setattr(realtime_video_api, "log_realtime_trace", fake_log)
+
+    realtime_video_api._emit_realtime_result_stage_traces(
+        session, chunk, batch, result
+    )
+
+    assert [entry[1] for entry in logged] == [
+        "server.pipeline_stage_complete",
+        "server.pipeline_stage_complete",
+        "server.pipeline_stage_complete",
+    ]
+    assert [entry[2]["stage"] for entry in logged] == [
+        "RealtimeImageVAEEncodingStage",
+        "LingBotWorldCausalDMDDenoisingStage",
+        "CausalVaeDecodingStage",
+    ]
+    assert [entry[2]["duration_ms"] for entry in logged] == [
+        0.173,
+        397.822,
+        24.869,
+    ]
+    assert all(entry[0] == "trace-worker-metrics-1" for entry in logged)
+    assert all(entry[2]["chunk_index"] == 7 for entry in logged)
+    assert all(entry[2]["event_id"] == 23 for entry in logged)
+    assert all(entry[2]["source"] == "scheduler_result_metrics" for entry in logged)
+
+
 def test_listen_events_logs_client_trace_without_adapter_ingest(monkeypatch):
     sent_messages = []
     logged = []

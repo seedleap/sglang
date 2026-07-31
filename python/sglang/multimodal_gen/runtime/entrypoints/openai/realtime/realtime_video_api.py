@@ -3,7 +3,7 @@
 import asyncio
 import shutil
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import msgspec.msgpack
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
@@ -52,6 +52,7 @@ _ACTIVE_SESSION_IDS: set[str] = set()
 _ACTIVE_SESSION_WAIT_SECONDS = 1.0
 _ACTIVE_SESSION_WAIT_INTERVAL_SECONDS = 0.1
 _TRACE_EVENT_QUEUE_LIMIT = 256
+_REALTIME_RESULT_STAGE_MARKERS = ("vae", "denois")
 
 
 class _LockedRealtimeWebSocket:
@@ -200,6 +201,82 @@ async def _wait_for_active_session_slot(
     while _ACTIVE_SESSION_IDS and time.monotonic() < deadline:
         await asyncio.sleep(interval_s)
     return not _ACTIVE_SESSION_IDS
+
+
+def _coerce_metric_ms(value: Any) -> float | None:
+    try:
+        metric = float(value)
+    except (TypeError, ValueError):
+        return None
+    if metric != metric:
+        return None
+    return metric
+
+
+def _is_realtime_result_stage_metric(stage_name: str) -> bool:
+    normalized = stage_name.lower()
+    return any(marker in normalized for marker in _REALTIME_RESULT_STAGE_MARKERS)
+
+
+def _iter_realtime_result_stage_metrics(result: Any):
+    metrics_candidates = []
+    metrics_list = getattr(result, "metrics_list", None)
+    if metrics_list:
+        metrics_candidates.extend(
+            metrics for metrics in metrics_list if metrics is not None
+        )
+    metrics = getattr(result, "metrics", None)
+    if metrics is not None:
+        metrics_candidates.append(metrics)
+
+    seen_metrics: set[int] = set()
+    seen_stages: set[str] = set()
+    for metrics in metrics_candidates:
+        metrics_id = id(metrics)
+        if metrics_id in seen_metrics:
+            continue
+        seen_metrics.add(metrics_id)
+
+        stages = getattr(metrics, "stages", None)
+        if not isinstance(stages, dict):
+            continue
+        for stage_name, duration_ms in stages.items():
+            stage_name = str(stage_name)
+            if stage_name in seen_stages:
+                continue
+            if not _is_realtime_result_stage_metric(stage_name):
+                continue
+            metric_ms = _coerce_metric_ms(duration_ms)
+            if metric_ms is None:
+                continue
+            seen_stages.add(stage_name)
+            yield stage_name, metric_ms, getattr(metrics, "request_id", None)
+
+
+def _emit_realtime_result_stage_traces(
+    session: GenerateSession,
+    chunk: RealtimeChunkContext,
+    batch: "Req",
+    result: Any,
+) -> None:
+    """Replay worker-side stage metrics from scheduler result in the API process."""
+    if not getattr(session, "trace_id", None):
+        return
+
+    for stage_name, duration_ms, metrics_request_id in _iter_realtime_result_stage_metrics(
+        result
+    ):
+        log_realtime_trace(
+            logger,
+            session,
+            "server.pipeline_stage_complete",
+            request_id=getattr(chunk, "request_id", None) or metrics_request_id,
+            chunk_index=getattr(batch, "block_idx", None),
+            event_id=getattr(batch, "realtime_event_id", None),
+            stage=stage_name,
+            duration_ms=round(duration_ms, 3),
+            source="scheduler_result_metrics",
+        )
 
 
 def _log_realtime_chunk_timing(
@@ -378,6 +455,7 @@ async def _generate_loop(ws: WebSocket, session: GenerateSession):
                 chunk_index=batch.block_idx,
                 scheduler_forward_ms=round(scheduler_forward_ms, 3),
             )
+            _emit_realtime_result_stage_traces(session, chunk, batch, result)
 
             # finish
             adapter.on_chunk_complete(session, result)
