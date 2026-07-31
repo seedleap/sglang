@@ -419,7 +419,7 @@ spec:
               exit "${status}"
           env:
             - name: CODE_GIT_REF
-              value: 369bd9d8d0645df038468fd4e24fc2e8df68095e
+              value: 15db3065100c47a84b11c48edede9c5e31cebd3c
             - name: CODE_GIT_BRANCH
               value: codex/lingbot-action-override
             - name: CODE_GIT_REPO
