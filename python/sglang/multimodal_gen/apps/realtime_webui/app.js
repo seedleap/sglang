@@ -413,11 +413,12 @@ function updateTraceSummary(summary) {
   $("traceChunkText").textContent = chunk ? `#${chunk.chunkIndex}` : "-";
   $("traceChunkTotalText").textContent = chunk ? formatTraceDuration(chunk.chunkTotalMs) : "-";
   $("traceSchedulerText").textContent = chunk ? formatTraceDuration(chunk.schedulerForwardMs) : "-";
+  $("traceVaeEncodeText").textContent = chunk ? formatTraceDuration(chunk.vaeEncodeMs) : "-";
   $("traceDenoiseText").textContent = chunk ? formatTraceDuration(chunk.denoiseMs) : "-";
-  const vaeMs = chunk
-    ? sumTraceNumbers(chunk.vaeEncodeMs, chunk.vaeDecodeMs, chunk.postDecodeMs)
+  const vaeDecodeMs = chunk
+    ? sumTraceNumbers(chunk.vaeDecodeMs, chunk.postDecodeMs)
     : null;
-  $("traceVaeText").textContent = formatTraceDuration(vaeMs);
+  $("traceVaeDecodeText").textContent = formatTraceDuration(vaeDecodeMs);
   $("traceAsyncEstimateText").textContent = formatAsyncEstimate(summary.asyncEstimate);
 }
 
@@ -432,7 +433,7 @@ function renderTraceSvg(summary) {
   const width = 1180;
   const height = 240;
   const marginX = 28;
-  const nodeW = 124;
+  const nodeW = nodes.length > 8 ? 112 : 124;
   const nodeH = 74;
   const gap = (width - marginX * 2 - nodeW * nodes.length) / Math.max(1, nodes.length - 1);
   const nodeY = 72;

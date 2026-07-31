@@ -11,8 +11,9 @@
     { id: "gateway", title: "Gateway", subtitle: "WS edge" },
     { id: "api", title: "Realtime API", subtitle: "session + batch" },
     { id: "scheduler", title: "Scheduler", subtitle: "forward" },
+    { id: "vae_encode", title: "VAE Encode", subtitle: "input latents" },
     { id: "denoise", title: "Denoising", subtitle: "DiT / model" },
-    { id: "vae", title: "VAE", subtitle: "encode + decode" },
+    { id: "vae_decode", title: "VAE Decode", subtitle: "output frames" },
     { id: "transport", title: "Transport", subtitle: "WebP + WS" },
     { id: "frontend", title: "Frontend", subtitle: "decode + canvas" },
   ];
@@ -227,12 +228,12 @@
     if (eventName === "server.pipeline_stage_complete") {
       return pipelineStageGroup(eventOrName) || "scheduler";
     }
+    if (eventName === "server.vae_encode_complete") return "vae_encode";
     if (eventName === "server.model_denoise_complete") return "denoise";
     if (
-      eventName === "server.vae_encode_complete" ||
       eventName === "server.vae_decode_complete" ||
       eventName === "server.post_decode_complete"
-    ) return "vae";
+    ) return "vae_decode";
     if (
       eventName === "server.output_send_start" ||
       eventName === "server.chunk_complete" ||
@@ -246,10 +247,9 @@
     if (!chunk) return "-";
     if (stageId === "api") return formatTraceDuration(chunk.requestPrepareMs);
     if (stageId === "scheduler") return formatTraceDuration(chunk.schedulerForwardMs);
+    if (stageId === "vae_encode") return formatTraceDuration(chunk.vaeEncodeMs);
     if (stageId === "denoise") return formatTraceDuration(chunk.denoiseMs);
-    if (stageId === "vae") {
-      return formatTraceDuration(sumNumbers(chunk.vaeEncodeMs, chunk.vaeDecodeMs, chunk.postDecodeMs));
-    }
+    if (stageId === "vae_decode") return formatTraceDuration(sumNumbers(chunk.vaeDecodeMs, chunk.postDecodeMs));
     if (stageId === "transport") {
       return formatTraceDuration(sumNumbers(chunk.rawPayloadBuildMs, chunk.wsWriteMs));
     }
@@ -263,9 +263,12 @@
 
   function edgeMetric(from, to, chunk, events) {
     if (from === "api" && to === "scheduler" && chunk) return formatTraceDuration(chunk.requestPrepareMs);
-    if (from === "scheduler" && to === "denoise" && chunk) return formatTraceDuration(chunk.schedulerForwardMs);
-    if (from === "denoise" && to === "vae" && chunk) return formatTraceDuration(chunk.vaeDecodeMs);
-    if (from === "vae" && to === "transport" && chunk) {
+    if (from === "scheduler" && to === "vae_encode" && chunk) return formatTraceDuration(chunk.schedulerForwardMs);
+    if (from === "vae_encode" && to === "denoise" && chunk) return formatTraceDuration(chunk.vaeEncodeMs);
+    if (from === "denoise" && to === "vae_decode" && chunk) {
+      return formatTraceDuration(sumNumbers(chunk.vaeDecodeMs, chunk.postDecodeMs));
+    }
+    if (from === "vae_decode" && to === "transport" && chunk) {
       return formatTraceDuration(sumNumbers(chunk.rawPayloadBuildMs, chunk.wsWriteMs));
     }
     if (from === "transport" && to === "frontend" && chunk) return formatTraceDuration(chunk.displayLagMs);
@@ -370,9 +373,9 @@
   function pipelineStageGroup(event) {
     const stage = String(event?.stage || event?.component || "").toLowerCase();
     if (stage.includes("denois")) return "denoise";
-    if (stage.includes("vae") || (stage.includes("post") && stage.includes("decod"))) {
-      return "vae";
-    }
+    if (stage.includes("vae") && stage.includes("encod")) return "vae_encode";
+    if (stage.includes("vae") && stage.includes("decod")) return "vae_decode";
+    if (stage.includes("post") && stage.includes("decod")) return "vae_decode";
     return "";
   }
 

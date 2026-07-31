@@ -1,5 +1,9 @@
 const assert = require("node:assert/strict");
-const { createRealtimeTraceTopology, formatTraceDuration } = require("./trace_topology.js");
+const {
+  TRACE_TOPOLOGY_STAGES,
+  createRealtimeTraceTopology,
+  formatTraceDuration,
+} = require("./trace_topology.js");
 
 function recordsChunkCriticalPathAndAsyncEstimate() {
   const topology = createRealtimeTraceTopology({ maxEvents: 16 });
@@ -61,7 +65,11 @@ function recordsChunkCriticalPathAndAsyncEstimate() {
   assert.equal(summary.asyncEstimate.savedMs, 180);
   assert.equal(summary.asyncEstimate.speedup, 1.29);
   assert.ok(summary.nodes.find((node) => node.id === "denoise").metric.includes("620ms"));
-  assert.ok(summary.edges.find((edge) => edge.from === "denoise" && edge.to === "vae").label.includes("180ms"));
+  const decodeEdge = summary.edges.find(
+    (edge) => edge.from === "denoise" && edge.to === "vae_decode",
+  );
+  assert.ok(decodeEdge);
+  assert.ok(decodeEdge.label.includes("180ms"));
 }
 
 function keepsOnlyCurrentTraceAndRecentEvents() {
@@ -126,6 +134,13 @@ function mapsGenericPipelineStageEventsToChunkMetrics() {
     event: "server.pipeline_stage_complete",
     trace_id: "trace-d",
     chunk_index: 9,
+    stage: "RealtimeImageVAEEncodingStage",
+    duration_ms: 75,
+  });
+  topology.addEvent({
+    event: "server.pipeline_stage_complete",
+    trace_id: "trace-d",
+    chunk_index: 9,
     stage: "LingBotWorldCausalDMDDenoisingStage",
     duration_ms: 630,
   });
@@ -139,9 +154,52 @@ function mapsGenericPipelineStageEventsToChunkMetrics() {
 
   const summary = topology.summary();
   assert.equal(summary.latestChunk.chunkIndex, 9);
+  assert.equal(summary.latestChunk.vaeEncodeMs, 75);
   assert.equal(summary.latestChunk.denoiseMs, 630);
   assert.equal(summary.latestChunk.vaeDecodeMs, 185);
   assert.equal(summary.asyncEstimate.savedMs, 185);
+}
+
+function separatesVaeEncodeAndDecodeInTopologyOrder() {
+  assert.deepEqual(TRACE_TOPOLOGY_STAGES.map((stage) => stage.id), [
+    "browser",
+    "gateway",
+    "api",
+    "scheduler",
+    "vae_encode",
+    "denoise",
+    "vae_decode",
+    "transport",
+    "frontend",
+  ]);
+
+  const topology = createRealtimeTraceTopology({ maxEvents: 16 });
+  topology.reset("trace-e");
+  topology.addEvent({
+    event: "server.vae_encode_complete",
+    trace_id: "trace-e",
+    chunk_index: 4,
+    duration_ms: 75,
+  });
+  topology.addEvent({
+    event: "server.model_denoise_complete",
+    trace_id: "trace-e",
+    chunk_index: 4,
+    duration_ms: 630,
+  });
+  topology.addEvent({
+    event: "server.vae_decode_complete",
+    trace_id: "trace-e",
+    chunk_index: 4,
+    duration_ms: 185,
+  });
+
+  const summary = topology.summary();
+  assert.equal(summary.nodes.find((node) => node.id === "vae_encode").metric, "75ms");
+  assert.equal(summary.nodes.find((node) => node.id === "denoise").metric, "630ms");
+  assert.equal(summary.nodes.find((node) => node.id === "vae_decode").metric, "185ms");
+  assert.ok(summary.edges.find((edge) => edge.from === "vae_encode" && edge.to === "denoise"));
+  assert.ok(summary.edges.find((edge) => edge.from === "denoise" && edge.to === "vae_decode"));
 }
 
 function formatsReadableDurations() {
@@ -155,6 +213,7 @@ recordsChunkCriticalPathAndAsyncEstimate();
 keepsOnlyCurrentTraceAndRecentEvents();
 usesLatestCompletedChunkWhenNextChunkIsInFlight();
 mapsGenericPipelineStageEventsToChunkMetrics();
+separatesVaeEncodeAndDecodeInTopologyOrder();
 formatsReadableDurations();
 
 console.log("trace topology tests ok");

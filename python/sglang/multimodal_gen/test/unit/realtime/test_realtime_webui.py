@@ -29,6 +29,9 @@ def test_realtime_webui_presets_do_not_emit_camera_scripts():
     assert 'data-workspace-view="trace"' in index_html
     assert 'id="traceTopology"' in index_html
     assert 'id="traceEventList"' in index_html
+    assert 'id="traceVaeEncodeText"' in index_html
+    assert 'id="traceVaeDecodeText"' in index_html
+    assert 'id="traceVaeText"' not in index_html
     assert 'class="preview-frame"' in index_html
     assert 'id="previewOverlay" class="preview-overlay"' in index_html
     assert 'id="previewScale" type="range" min="80" max="170" value="100"' in index_html
@@ -53,8 +56,8 @@ def test_realtime_webui_presets_do_not_emit_camera_scripts():
     assert 'id="steps" type="number" value="4"' in index_html
     assert 'id="guidance" type="number" value="1"' in index_html
     assert "styles.css?v=realtime-record-v50" in index_html
-    assert "trace_topology.js?v=realtime-trace-topology-v2" in index_html
-    assert "app.js?v=realtime-trace-v98" in index_html
+    assert "trace_topology.js?v=realtime-trace-topology-v3" in index_html
+    assert "app.js?v=realtime-trace-v99" in index_html
     assert 'const DECODER_WORKER_URL = "./decoder_worker.js?v=rgb-worker-v10";' in app_js
     assert "const DEFAULT_TARGET_FPS = 16;" in app_js
     assert "const DEFAULT_FRAME_INTERPOLATION_EXP = 1;" in app_js
