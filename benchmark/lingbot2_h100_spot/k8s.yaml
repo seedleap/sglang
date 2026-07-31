@@ -202,7 +202,7 @@ spec:
                 git clone --filter=blob:none --branch "${CODE_GIT_BRANCH}" "https://github.com/${CODE_GIT_REPO}.git" /workspace/sglang
               rm -f /tmp/git-askpass
               cd /workspace/sglang
-              git checkout --detach "${CODE_GIT_REF}"
+              git checkout "${CODE_GIT_REF}"
               test "$(git rev-parse HEAD)" = "${CODE_GIT_REF}"
               python3 -m pip install -e "python[diffusion]" --root-user-action=ignore
               python3 -m pip install \
