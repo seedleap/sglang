@@ -83,6 +83,67 @@ function keepsOnlyCurrentTraceAndRecentEvents() {
   ]);
 }
 
+function usesLatestCompletedChunkWhenNextChunkIsInFlight() {
+  const topology = createRealtimeTraceTopology({ maxEvents: 16 });
+  topology.reset("trace-c");
+
+  topology.addEvent({
+    event: "server.chunk_complete",
+    trace_id: "trace-c",
+    chunk_index: 206,
+    request_prepare_ms: 11,
+    scheduler_forward_ms: 491,
+    raw_payload_build_ms: 5,
+    ws_write_ms: 1,
+    chunk_total_ms: 508,
+    num_frames: 9,
+  });
+  topology.addEvent({
+    event: "client.decode_batch_done",
+    trace_id: "trace-c",
+    chunk_index: 206,
+    decode_ms: 8,
+  });
+  topology.addEvent({
+    event: "server.scheduler_forward_start",
+    trace_id: "trace-c",
+    chunk_index: 207,
+    server_elapsed_ms: 94070,
+  });
+
+  const summary = topology.summary();
+  assert.equal(summary.latestObservedChunk.chunkIndex, 207);
+  assert.equal(summary.latestChunk.chunkIndex, 206);
+  assert.equal(summary.latestChunk.chunkTotalMs, 508);
+  assert.ok(summary.nodes.find((node) => node.id === "scheduler").metric.includes("491ms"));
+}
+
+function mapsGenericPipelineStageEventsToChunkMetrics() {
+  const topology = createRealtimeTraceTopology({ maxEvents: 16 });
+  topology.reset("trace-d");
+
+  topology.addEvent({
+    event: "server.pipeline_stage_complete",
+    trace_id: "trace-d",
+    chunk_index: 9,
+    stage: "LingBotWorldCausalDMDDenoisingStage",
+    duration_ms: 630,
+  });
+  topology.addEvent({
+    event: "server.pipeline_stage_complete",
+    trace_id: "trace-d",
+    chunk_index: 9,
+    stage: "CausalVaeDecodingStage",
+    duration_ms: 185,
+  });
+
+  const summary = topology.summary();
+  assert.equal(summary.latestChunk.chunkIndex, 9);
+  assert.equal(summary.latestChunk.denoiseMs, 630);
+  assert.equal(summary.latestChunk.vaeDecodeMs, 185);
+  assert.equal(summary.asyncEstimate.savedMs, 185);
+}
+
 function formatsReadableDurations() {
   assert.equal(formatTraceDuration(0), "0ms");
   assert.equal(formatTraceDuration(12.4), "12ms");
@@ -92,6 +153,8 @@ function formatsReadableDurations() {
 
 recordsChunkCriticalPathAndAsyncEstimate();
 keepsOnlyCurrentTraceAndRecentEvents();
+usesLatestCompletedChunkWhenNextChunkIsInFlight();
+mapsGenericPipelineStageEventsToChunkMetrics();
 formatsReadableDurations();
 
 console.log("trace topology tests ok");

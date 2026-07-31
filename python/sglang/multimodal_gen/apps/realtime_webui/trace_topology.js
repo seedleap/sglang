@@ -67,7 +67,8 @@
       const sortedChunks = Array.from(chunks.values()).sort(
         (left, right) => Number(left.chunkIndex) - Number(right.chunkIndex),
       );
-      const latestChunk = sortedChunks[sortedChunks.length - 1] || null;
+      const latestObservedChunk = sortedChunks[sortedChunks.length - 1] || null;
+      const latestChunk = latestTimedChunk(sortedChunks) || latestObservedChunk;
       const nodes = buildNodes(latestChunk, events);
       const edges = buildEdges(latestChunk, events);
       return {
@@ -75,6 +76,7 @@
         eventCount: events.length,
         recentEvents: events.slice(-10),
         chunks: sortedChunks,
+        latestObservedChunk,
         latestChunk,
         nodes,
         edges,
@@ -103,10 +105,12 @@
     return [
       event.trace_id || "",
       event.event || "",
+      event.stage || event.component || "",
       event.chunk_index ?? "",
       event.event_id ?? "",
       event.server_elapsed_ms ?? "",
       event.client_perf_ms ?? "",
+      event.duration_ms ?? event.cuda_ms ?? "",
       event.seq ?? "",
     ].join(":");
   }
@@ -154,6 +158,8 @@
       assignNumber(chunk, "vaeDecodeMs", preferredDuration(event));
     } else if (event.event === "server.post_decode_complete") {
       assignNumber(chunk, "postDecodeMs", preferredDuration(event));
+    } else if (event.event === "server.pipeline_stage_complete") {
+      applyPipelineStageDuration(chunk, event);
     } else if (event.event === "client.decode_batch_done") {
       assignNumber(chunk, "clientDecodeMs", event.decode_ms);
     } else if (event.event === "client.chunk_first_rendered") {
@@ -187,14 +193,17 @@
   function latestEventsByStage(events) {
     const latest = new Map();
     for (const event of events) {
-      const stage = stageForEvent(event.event);
+      const stage = stageForEvent(event);
       if (!stage) continue;
       latest.set(stage, event);
     }
     return latest;
   }
 
-  function stageForEvent(eventName) {
+  function stageForEvent(eventOrName) {
+    const eventName = typeof eventOrName === "string"
+      ? eventOrName
+      : String(eventOrName?.event || "");
     if (!eventName) return "";
     if (eventName.startsWith("client.")) {
       if (
@@ -213,9 +222,11 @@
     ) return "api";
     if (
       eventName === "server.scheduler_forward_start" ||
-      eventName === "server.scheduler_forward_done" ||
-      eventName === "server.pipeline_stage_complete"
+      eventName === "server.scheduler_forward_done"
     ) return "scheduler";
+    if (eventName === "server.pipeline_stage_complete") {
+      return pipelineStageGroup(eventOrName) || "scheduler";
+    }
     if (eventName === "server.model_denoise_complete") return "denoise";
     if (
       eventName === "server.vae_encode_complete" ||
@@ -267,7 +278,7 @@
 
   function lastEventForStage(events, stage) {
     for (let i = events.length - 1; i >= 0; i -= 1) {
-      if (stageForEvent(events[i].event) === stage) return events[i];
+      if (stageForEvent(events[i]) === stage) return events[i];
     }
     return null;
   }
@@ -316,6 +327,53 @@
 
   function preferredDuration(event) {
     return isFiniteNumber(event.cuda_ms) ? Number(event.cuda_ms) : numericOrNull(event.duration_ms);
+  }
+
+  function latestTimedChunk(sortedChunks) {
+    for (let i = sortedChunks.length - 1; i >= 0; i -= 1) {
+      if (hasChunkTiming(sortedChunks[i])) return sortedChunks[i];
+    }
+    return null;
+  }
+
+  function hasChunkTiming(chunk) {
+    return [
+      chunk.requestPrepareMs,
+      chunk.schedulerForwardMs,
+      chunk.denoiseMs,
+      chunk.vaeEncodeMs,
+      chunk.vaeDecodeMs,
+      chunk.postDecodeMs,
+      chunk.rawPayloadBuildMs,
+      chunk.wsWriteMs,
+      chunk.chunkTotalMs,
+      chunk.clientDecodeMs,
+      chunk.displayLagMs,
+    ].some(isFiniteNumber);
+  }
+
+  function applyPipelineStageDuration(chunk, event) {
+    const durationMs = preferredDuration(event);
+    if (!isFiniteNumber(durationMs)) return;
+    const stage = String(event.stage || event.component || "").toLowerCase();
+    if (stage.includes("denois")) {
+      assignNumber(chunk, "denoiseMs", durationMs);
+    } else if (stage.includes("vae") && stage.includes("encod")) {
+      assignNumber(chunk, "vaeEncodeMs", durationMs);
+    } else if (stage.includes("vae") && stage.includes("decod")) {
+      assignNumber(chunk, "vaeDecodeMs", durationMs);
+    } else if (stage.includes("post") && stage.includes("decod")) {
+      assignNumber(chunk, "postDecodeMs", durationMs);
+    }
+  }
+
+  function pipelineStageGroup(event) {
+    const stage = String(event?.stage || event?.component || "").toLowerCase();
+    if (stage.includes("denois")) return "denoise";
+    if (stage.includes("vae") || (stage.includes("post") && stage.includes("decod"))) {
+      return "vae";
+    }
+    return "";
   }
 
   function assignNumber(target, key, value) {
