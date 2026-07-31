@@ -50,6 +50,10 @@ from sglang.multimodal_gen.runtime.utils.precision import (
     resolve_precision,
     temporary_module_dtype,
 )
+from sglang.multimodal_gen.runtime.utils.realtime_trace import (
+    realtime_trace_span,
+    tensor_trace_metadata,
+)
 
 logger = init_logger(__name__)
 
@@ -966,9 +970,31 @@ class ImageVAEEncodingStage(PipelineStage):
                     with temporary_module_dtype(
                         self.vae, vae_dtype, enabled=should_cast_vae
                     ) as vae:
-                        latent_dist: DiagonalGaussianDistribution = vae.encode(
-                            video_condition
-                        )
+                        with realtime_trace_span(
+                            logger,
+                            batch,
+                            "server.vae_encode_complete",
+                            component="vae_encoder",
+                            input_tensor=video_condition,
+                            chunk_index=getattr(batch, "block_idx", None),
+                            first_chunk=getattr(batch, "block_idx", 0) == 0,
+                            image_index=len(all_image_latents),
+                            num_images=len(images),
+                            num_frames=num_frames,
+                            vae_precision=str(vae_dtype),
+                            vae_tiling=bool(server_args.pipeline_config.vae_tiling),
+                            component_name=self.component_name,
+                        ) as trace_span:
+                            latent_dist: DiagonalGaussianDistribution = vae.encode(
+                                video_condition
+                            )
+                            trace_span.add_fields(
+                                latent_dist_type=latent_dist.__class__.__name__,
+                                **tensor_trace_metadata(
+                                    getattr(latent_dist, "mean", None),
+                                    prefix="latent_dist",
+                                ),
+                            )
                     # for auto_encoder from diffusers
                     if isinstance(latent_dist, AutoencoderKLOutput):
                         latent_dist = latent_dist.latent_dist

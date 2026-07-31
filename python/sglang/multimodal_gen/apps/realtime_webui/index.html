@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>sglang-diffusion Realtime Studio</title>
-    <link rel="stylesheet" href="./styles.css?v=realtime-record-v49" />
+    <link rel="stylesheet" href="./styles.css?v=realtime-record-v50" />
   </head>
   <body>
     <main class="shell">
@@ -86,7 +86,33 @@
       </section>
 
       <section class="workspace" aria-label="Realtime workspace">
-        <section class="stage" aria-label="Realtime preview">
+        <div class="workspace-switcher" role="tablist" aria-label="Workspace view">
+          <button
+            id="previewPaneButton"
+            class="workspace-switch is-active"
+            type="button"
+            role="tab"
+            aria-selected="true"
+            aria-controls="previewPane"
+            data-workspace-view="preview"
+          >
+            Preview
+          </button>
+          <button
+            id="tracePaneButton"
+            class="workspace-switch"
+            type="button"
+            role="tab"
+            aria-selected="false"
+            aria-controls="tracePane"
+            data-workspace-view="trace"
+          >
+            Trace
+          </button>
+        </div>
+
+        <div id="previewPane" class="workspace-pane is-active" role="tabpanel" aria-labelledby="previewPaneButton">
+          <section class="stage" aria-label="Realtime preview">
           <div class="topbar">
             <span id="statusDot" class="dot"></span>
             <span id="statusText">Idle</span>
@@ -150,9 +176,9 @@
             <span>Decode<b id="decodeText">-</b></span>
             <span>Display lag<b id="displayLagText">-</b></span>
           </div>
-        </section>
+          </section>
 
-        <section class="panel presets" aria-label="Presets and camera">
+          <section class="panel presets" aria-label="Presets and camera">
           <div class="section-title">LingBot</div>
           <div class="spec-grid">
             <span><b>16 fps</b> target</span>
@@ -164,10 +190,36 @@
           <div id="presetList" class="preset-list"></div>
           <div class="section-title">History</div>
           <div id="historyList" class="history-list"></div>
+          </section>
+        </div>
+
+        <section id="tracePane" class="workspace-pane panel trace-panel" role="tabpanel" aria-labelledby="tracePaneButton" hidden>
+          <div class="trace-header">
+            <div>
+              <div class="section-title">Realtime Trace</div>
+              <h2>Current Request Topology</h2>
+            </div>
+            <div class="trace-summary">
+              <span>Trace<b id="traceIdText">-</b></span>
+              <span>Chunk<b id="traceChunkText">-</b></span>
+              <span>Events<b id="traceEventCountText">0</b></span>
+            </div>
+          </div>
+          <div id="traceTopology" class="trace-topology" aria-live="polite"></div>
+          <div class="trace-insights">
+            <span><b id="traceChunkTotalText">-</b> chunk total</span>
+            <span><b id="traceSchedulerText">-</b> scheduler</span>
+            <span><b id="traceDenoiseText">-</b> denoise</span>
+            <span><b id="traceVaeText">-</b> VAE</span>
+            <span><b id="traceAsyncEstimateText">-</b> async VAE estimate</span>
+          </div>
+          <div class="section-title">Recent Trace Events</div>
+          <div id="traceEventList" class="trace-event-list"></div>
         </section>
       </section>
     </main>
   <script src="./playback_controller.js?v=realtime-playback-v21"></script>
-  <script src="./app.js?v=realtime-record-v94"></script>
+    <script src="./trace_topology.js?v=realtime-trace-topology-v1"></script>
+    <script src="./app.js?v=realtime-trace-v97"></script>
 </body>
 </html>

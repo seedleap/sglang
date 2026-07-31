@@ -313,6 +313,8 @@ spec:
               value: /results/sgl-diffusion-cache
             - name: SGLANG_DIFFUSION_STAGE_LOGGING
               value: "true"
+            - name: SGLANG_REALTIME_TRACE_SYNC_CUDA
+              value: "1"
             - name: SGLANG_DIFFUSION_BENCHMARK_BYPASS_USP_A2A
               value: "false"
             - name: PYTHONUNBUFFERED

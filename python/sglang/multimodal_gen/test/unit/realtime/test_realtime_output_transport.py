@@ -262,6 +262,48 @@ def test_raw_rgb_realtime_output_adapter_defaults_to_webp_preview_frames():
     assert first_payload.startswith(b"RIFF")
 
 
+def test_raw_rgb_realtime_output_adapter_includes_trace_id_in_frame_headers():
+    class _WebSocket:
+        def __init__(self):
+            self.payloads = []
+
+        async def send_bytes(self, payload):
+            self.payloads.append(payload)
+
+    async def run():
+        ws = _WebSocket()
+        adapter = RawRGBRealtimeOutputAdapter()
+        batch = SimpleNamespace(
+            block_idx=0,
+            request_id="req-trace",
+            width=2,
+            height=1,
+            enable_upscaling=False,
+            realtime_event_id=3,
+            realtime_trace_id="trace-frame-1",
+            realtime_output_format="raw",
+        )
+        result = OutputBatch(
+            raw_frame_batches=[[bytes([255, 0, 0, 0, 255, 0])]],
+            raw_frame_content_type=RAW_RGB_CONTENT_TYPE,
+            raw_frame_metadata={
+                "format": "rgb24",
+                "width": 2,
+                "height": 1,
+                "channels": 3,
+                "bytes_per_frame": 6,
+            },
+        )
+
+        await adapter.send(ws, SimpleNamespace(trace_id="trace-frame-1"), result, batch)
+        return ws.payloads
+
+    payloads = asyncio.run(run())
+
+    [(header, _frame_payload)] = _unpack_frame_batch_messages(payloads)
+    assert header["trace_id"] == "trace-frame-1"
+
+
 def test_raw_rgb_realtime_output_adapter_can_send_uncompressed_raw_frames():
     class _WebSocket:
         def __init__(self):

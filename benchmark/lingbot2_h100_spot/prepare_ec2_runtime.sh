@@ -29,6 +29,7 @@ docker run --detach \
   --env SGLANG_LINGBOT_ENABLE_INTERACTIVE_KV_WINDOW=true \
   --env SGLANG_DIFFUSION_CACHE_ROOT=/results/sgl-diffusion-cache \
   --env SGLANG_DIFFUSION_STAGE_LOGGING=true \
+  --env SGLANG_REALTIME_TRACE_SYNC_CUDA=1 \
   --entrypoint sleep \
   "${base_image}" infinity
 

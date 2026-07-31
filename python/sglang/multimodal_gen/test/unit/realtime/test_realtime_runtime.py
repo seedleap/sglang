@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import json
 import time
 from types import SimpleNamespace
 
@@ -29,6 +30,7 @@ from sglang.multimodal_gen.runtime.entrypoints.openai.realtime.adapters import (
 )
 from sglang.multimodal_gen.runtime.entrypoints.openai.realtime.generate_session import (
     GenerateSession,
+    RealtimeChunkContext,
 )
 from sglang.multimodal_gen.runtime.entrypoints.openai.realtime.realtime_output_adapter import (
     empty_frame_send_stats,
@@ -37,6 +39,13 @@ from sglang.multimodal_gen.runtime.entrypoints.openai.realtime.registry import (
     get_realtime_model_adapter,
 )
 from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import OutputBatch
+from sglang.multimodal_gen.runtime.utils.realtime_trace import (
+    realtime_trace_payload,
+    realtime_trace_span,
+    register_realtime_trace_sink,
+    tensor_trace_metadata,
+    unregister_realtime_trace_sink,
+)
 from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.lingbot_world.lingbot_world_causal_denoising import (
     LingBotWorldCausalDMDDenoisingStage,
 )
@@ -576,6 +585,7 @@ def test_send_output_emits_chunk_stats_message():
     message = msgspec.msgpack.decode(sent_messages[-1])
     assert stats["raw_write_ms"] == 42.0
     assert message["type"] == "chunk_stats"
+    assert message["trace_id"] == session.trace_id
     assert message["chunk_index"] == 7
     assert message["event_id"] == 11
     assert message["raw_write_ms"] == 42
@@ -583,6 +593,209 @@ def test_send_output_emits_chunk_stats_message():
     assert message["ws_payload_bytes"] == 450
     assert message["content_type"] == "image/webp"
     assert bytes([0xCB]) not in sent_messages[-1]
+
+
+def test_realtime_request_accepts_client_trace_context():
+    request = RealtimeVideoGenerationsRequest(
+        type="init",
+        prompt="walk forward",
+        trace_id="trace-client-1",
+        client_trace={
+            "time_origin_ms": 123.0,
+            "events": [
+                {
+                    "name": "client.generate_clicked",
+                    "client_perf_ms": 10.0,
+                    "client_epoch_ms": 456.0,
+                }
+            ],
+        },
+    )
+    event = RealtimeEvent(
+        type="event",
+        kind="camera_actions",
+        payload={"mode": "state", "transitions": []},
+        event_id=1,
+        trace_id="trace-client-1",
+        client_sent_perf_ms=20.0,
+        client_sent_epoch_ms=466.0,
+    )
+
+    assert request.trace_id == "trace-client-1"
+    assert request.client_trace["events"][0]["name"] == "client.generate_clicked"
+    assert event.trace_id == "trace-client-1"
+    assert event.client_sent_perf_ms == 20.0
+
+
+def test_realtime_adapter_propagates_trace_id_to_batch():
+    session = GenerateSession()
+    session.trace_id = "trace-batch-1"
+    session.set_request(
+        RealtimeVideoGenerationsRequest(
+            type="init",
+            prompt="walk forward",
+            realtime_output_format="webp",
+        )
+    )
+    batch = SimpleNamespace()
+
+    realtime_adapter.BaseRealtimeModelAdapter().apply_realtime_request_fields(
+        batch,
+        session,
+        RealtimeChunkContext(
+            session_id=session.id,
+            index=4,
+            request_id="chunk-request-4",
+        ),
+        event_id=9,
+    )
+
+    assert batch.realtime_trace_id == "trace-batch-1"
+    assert batch.realtime_trace_started_at == session.trace_started_at
+    assert batch.realtime_session_id == session.id
+    assert batch.block_idx == 4
+    assert batch.realtime_event_id == 9
+
+
+def test_realtime_trace_payload_keeps_session_trace_id_canonical():
+    session = GenerateSession()
+    session.trace_id = "server-trace"
+
+    payload = realtime_trace_payload(
+        session,
+        "client.frame_batch_received",
+        trace_id="client-sent-trace",
+        chunk_index=2,
+    )
+
+    assert payload["trace_id"] == "server-trace"
+    assert payload["chunk_index"] == 2
+
+
+def test_realtime_trace_span_logs_component_duration_and_tensor_metadata():
+    messages = []
+
+    class _Logger:
+        def info(self, *args):
+            messages.append(args)
+
+    batch = SimpleNamespace(
+        realtime_trace_id="trace-span-1",
+        realtime_session_id="session-span-1",
+        realtime_trace_started_at=time.perf_counter(),
+    )
+    tensor = torch.zeros((1, 16, 3, 60, 104), dtype=torch.bfloat16)
+
+    with realtime_trace_span(
+        _Logger(),
+        batch,
+        "server.vae_decode_complete",
+        component="vae_decoder",
+        measure_cuda=False,
+        input_tensor=tensor,
+        chunk_index=4,
+    ) as span:
+        span.add_fields(output_shape=(1, 3, 12, 480, 832))
+
+    assert len(messages) == 1
+    assert messages[0][0] == "%s %s"
+    assert messages[0][1] == "realtime_trace"
+    payload = json.loads(messages[0][2])
+    assert payload["trace_id"] == "trace-span-1"
+    assert payload["session_id"] == "session-span-1"
+    assert payload["event"] == "server.vae_decode_complete"
+    assert payload["component"] == "vae_decoder"
+    assert payload["chunk_index"] == 4
+    assert payload["input_shape"] == [1, 16, 3, 60, 104]
+    assert payload["input_dtype"] == "torch.bfloat16"
+    assert payload["input_bytes"] == tensor.numel() * tensor.element_size()
+    assert payload["output_shape"] == [1, 3, 12, 480, 832]
+    assert payload["duration_ms"] >= 0
+    assert payload["component_end_elapsed_ms"] >= payload["component_start_elapsed_ms"]
+
+
+def test_tensor_trace_metadata_handles_missing_tensor():
+    assert tensor_trace_metadata(None, prefix="latent") == {}
+
+
+def test_realtime_trace_log_notifies_registered_sink():
+    received = []
+
+    class _Logger:
+        def info(self, *_args):
+            pass
+
+    session = GenerateSession()
+    session.trace_id = "trace-sink-1"
+    sink = received.append
+
+    register_realtime_trace_sink(session.trace_id, sink)
+    try:
+        realtime_video_api.log_realtime_trace(
+            _Logger(),
+            session,
+            "server.scheduler_forward_done",
+            chunk_index=2,
+        )
+    finally:
+        unregister_realtime_trace_sink(session.trace_id, sink)
+
+    assert len(received) == 1
+    assert received[0]["trace_id"] == "trace-sink-1"
+    assert received[0]["event"] == "server.scheduler_forward_done"
+    assert received[0]["chunk_index"] == 2
+
+
+def test_listen_events_logs_client_trace_without_adapter_ingest(monkeypatch):
+    sent_messages = []
+    logged = []
+
+    class _Ws:
+        def __init__(self):
+            self.messages = [
+                msgspec.msgpack.encode(
+                    {
+                        "type": "event",
+                        "kind": "client_trace",
+                        "trace_id": "trace-client-1",
+                        "payload": {
+                            "name": "client.first_frame_rendered",
+                            "chunk_index": 0,
+                            "client_perf_ms": 100.0,
+                        },
+                    }
+                )
+            ]
+
+        async def iter_bytes(self):
+            for message in self.messages:
+                yield message
+
+        async def send_bytes(self, message):
+            sent_messages.append(message)
+
+    class _Adapter:
+        def ingest_event(self, *_args):
+            raise AssertionError("client trace events should not reach adapter")
+
+    def fake_log(_logger, session, event, **fields):
+        logged.append((session.trace_id, event, fields))
+
+    session = GenerateSession()
+    session.trace_id = "trace-client-1"
+    session.adapter = _Adapter()
+    monkeypatch.setattr(realtime_video_api, "log_realtime_trace", fake_log)
+
+    asyncio.run(realtime_video_api._listen_events(_Ws(), session))
+
+    assert sent_messages == []
+    assert logged == [
+        (
+            "trace-client-1",
+            "client.first_frame_rendered",
+            {"chunk_index": 0, "client_perf_ms": 100.0},
+        )
+    ]
 
 
 def test_listen_generate_request_propagates_disconnect_without_error_write():

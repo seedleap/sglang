@@ -1,0 +1,97 @@
+const assert = require("node:assert/strict");
+const { createRealtimeTraceTopology, formatTraceDuration } = require("./trace_topology.js");
+
+function recordsChunkCriticalPathAndAsyncEstimate() {
+  const topology = createRealtimeTraceTopology({ maxEvents: 16 });
+  topology.reset("trace-a");
+
+  topology.addEvent({
+    name: "client.generate_clicked",
+    trace_id: "trace-a",
+    client_perf_ms: 1000,
+  });
+  topology.addEvent({
+    event: "server.chunk_complete",
+    trace_id: "trace-a",
+    chunk_index: 3,
+    request_prepare_ms: 12,
+    scheduler_forward_ms: 820,
+    raw_payload_build_ms: 34,
+    ws_write_ms: 8,
+    chunk_total_ms: 910,
+    num_frames: 9,
+    ws_payload_bytes: 500000,
+    content_type: "image/webp",
+  });
+  topology.addEvent({
+    event: "server.model_denoise_complete",
+    trace_id: "trace-a",
+    chunk_index: 3,
+    duration_ms: 620,
+  });
+  topology.addEvent({
+    event: "server.vae_decode_complete",
+    trace_id: "trace-a",
+    chunk_index: 3,
+    cuda_ms: 180,
+  });
+  topology.addEvent({
+    name: "client.decode_batch_done",
+    trace_id: "trace-a",
+    chunk_index: 3,
+    decode_ms: 9,
+  });
+  topology.addEvent({
+    name: "client.chunk_first_rendered",
+    trace_id: "trace-a",
+    chunk_index: 3,
+    display_lag_ms: 240,
+  });
+
+  const summary = topology.summary();
+  const chunk = summary.latestChunk;
+  assert.equal(chunk.chunkIndex, 3);
+  assert.equal(chunk.denoiseMs, 620);
+  assert.equal(chunk.vaeDecodeMs, 180);
+  assert.equal(chunk.schedulerForwardMs, 820);
+  assert.equal(chunk.chunkTotalMs, 910);
+  assert.equal(chunk.displayLagMs, 240);
+  assert.equal(summary.asyncEstimate.syncComputeMs, 800);
+  assert.equal(summary.asyncEstimate.asyncCriticalMs, 620);
+  assert.equal(summary.asyncEstimate.savedMs, 180);
+  assert.equal(summary.asyncEstimate.speedup, 1.29);
+  assert.ok(summary.nodes.find((node) => node.id === "denoise").metric.includes("620ms"));
+  assert.ok(summary.edges.find((edge) => edge.from === "denoise" && edge.to === "vae").label.includes("180ms"));
+}
+
+function keepsOnlyCurrentTraceAndRecentEvents() {
+  const topology = createRealtimeTraceTopology({ maxEvents: 3 });
+  topology.reset("trace-b");
+  topology.addEvent({ event: "server.ws_accepted", trace_id: "other", server_elapsed_ms: 0 });
+  topology.addEvent({ event: "server.ws_accepted", trace_id: "trace-b", server_elapsed_ms: 0 });
+  topology.addEvent({ event: "server.init_received", trace_id: "trace-b", server_elapsed_ms: 11 });
+  topology.addEvent({ event: "server.adapter_init_done", trace_id: "trace-b", server_elapsed_ms: 22 });
+  topology.addEvent({ event: "server.init_ready", trace_id: "trace-b", server_elapsed_ms: 33 });
+
+  const summary = topology.summary();
+  assert.equal(summary.eventCount, 3);
+  assert.equal(summary.traceId, "trace-b");
+  assert.deepEqual(summary.recentEvents.map((event) => event.event), [
+    "server.init_received",
+    "server.adapter_init_done",
+    "server.init_ready",
+  ]);
+}
+
+function formatsReadableDurations() {
+  assert.equal(formatTraceDuration(0), "0ms");
+  assert.equal(formatTraceDuration(12.4), "12ms");
+  assert.equal(formatTraceDuration(1250), "1.25s");
+  assert.equal(formatTraceDuration(null), "-");
+}
+
+recordsChunkCriticalPathAndAsyncEstimate();
+keepsOnlyCurrentTraceAndRecentEvents();
+formatsReadableDurations();
+
+console.log("trace topology tests ok");
