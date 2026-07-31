@@ -20,6 +20,7 @@ const DEFAULT_UPSCALING_MODEL =
   "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesr-general-x4v3.pth";
 const DEFAULT_PREVIEW_SCALE = 100;
 const RECONNECT_CLOSE_TIMEOUT_MS = 15000;
+const CLIENT_ERROR_CLOSE_CODE = 4000;
 const DECODE_QUEUE_SECONDS = 0.5;
 const STARTUP_DECODE_QUEUE_SECONDS = 0.75;
 const RECENT_DROP_DISPLAY_MS = 1800;
@@ -1726,7 +1727,7 @@ function abortCurrentSession(reason = "session closed by client", {
   setStatus(expectedClose ? "Closing" : "Aborting");
   if (!renderedPreviewFrames) setPreviewState("idle");
   addHistory(reason);
-  socket.close(expectedClose ? 1000 : 1011, reason.slice(0, 120));
+  socket.close(expectedClose ? 1000 : CLIENT_ERROR_CLOSE_CODE, reason.slice(0, 120));
   return socket;
 }
 
@@ -2468,6 +2469,13 @@ function pack(value) {
 function unpack(buf) {
   let i = 0;
   const text = new TextDecoder();
+  const readU32 = () => (
+    (buf[i++] * 16777216) + (buf[i++] << 16) + (buf[i++] << 8) + buf[i++]
+  );
+  const readI32 = () => {
+    const value = readU32();
+    return value > 0x7fffffff ? value - 0x100000000 : value;
+  };
   const read = () => {
     const b = buf[i++];
     if (b <= 0x7f) return b;
@@ -2478,7 +2486,12 @@ function unpack(buf) {
     if (b === 0xc2 || b === 0xc3) return b === 0xc3;
     if (b === 0xcc) return buf[i++];
     if (b === 0xcd) return (buf[i++] << 8) | buf[i++];
-    if (b === 0xce) return (buf[i++] * 16777216) + (buf[i++] << 16) + (buf[i++] << 8) + buf[i++];
+    if (b === 0xce) return readU32();
+    if (b === 0xcf) {
+      const hi = readU32();
+      const lo = readU32();
+      return hi * 4294967296 + lo;
+    }
     if (b === 0xca) {
       const value = new DataView(buf.buffer, buf.byteOffset + i, 4).getFloat32(0);
       i += 4;
@@ -2492,15 +2505,17 @@ function unpack(buf) {
     if (b === 0xc4) return readBin(buf[i++]);
     if (b === 0xc5) return readBin((buf[i++] << 8) | buf[i++]);
     if (b === 0xc6) {
-      return readBin(
-        (buf[i++] * 16777216) + (buf[i++] << 16) + (buf[i++] << 8) + buf[i++],
-      );
+      return readBin(readU32());
+    }
+    if (b === 0xd2) return readI32();
+    if (b === 0xd3) {
+      const hi = readI32();
+      const lo = readU32();
+      return hi * 4294967296 + lo;
     }
     if (b === 0xdc) return Array.from({ length: (buf[i++] << 8) | buf[i++] }, read);
     if (b === 0xdd) {
-      return Array.from({
-        length: (buf[i++] * 16777216) + (buf[i++] << 16) + (buf[i++] << 8) + buf[i++],
-      }, read);
+      return Array.from({ length: readU32() }, read);
     }
     if (b === 0xd9) return readStr(buf[i++]);
     if (b === 0xda) return readStr((buf[i++] << 8) | buf[i++]);
