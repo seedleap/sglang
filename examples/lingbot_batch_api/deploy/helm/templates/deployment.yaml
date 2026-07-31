@@ -29,24 +29,47 @@ spec:
           imagePullPolicy: {{ .Values.sglangImage.pullPolicy }}
           command: ["/bin/bash", "-lc"]
           args:
-            - >-
-              exec sglang serve
-              --model-path {{ .Values.model.id | quote }}
-              --revision {{ .Values.model.revision | quote }}
-              --pipeline-class-name LingBotWorldCausalDMDPipeline
-              --num-gpus 2
-              --performance-mode speed
-              --tp-size 1
-              --sp-degree 2
-              --ulysses-degree 2
-              --dit-cpu-offload false
-              --text-encoder-cpu-offload false
-              --vae-config.use-parallel-decode true
-              --vae-config.parallel-decode-mode spatial
-              --enable-torch-compile false
-              --attention-backend-config lingbot_causal_fa_num_splits=0
-              --host 0.0.0.0
-              --port 30000
+            - |
+              set -euo pipefail
+              python3 -m pip install --no-cache-dir --no-deps \
+                "taehv @ git+https://github.com/madebyollin/taehv.git@{{ .Values.taehv.revision }}" \
+                --root-user-action=ignore
+              mkdir -p "$(dirname "{{ .Values.taehv.checkpointPath }}")"
+              python3 - <<'TAEHV_PY'
+              import hashlib
+              import urllib.request
+              from pathlib import Path
+
+              url = "https://raw.githubusercontent.com/madebyollin/taehv/{{ .Values.taehv.revision }}/taew2_1.pth"
+              target = Path("{{ .Values.taehv.checkpointPath }}")
+              urllib.request.urlretrieve(url, target)
+              digest = hashlib.sha256(target.read_bytes()).hexdigest()
+              expected = "{{ .Values.taehv.checkpointSha256 }}"
+              if digest != expected:
+                  raise SystemExit(f"TAEHV checkpoint sha256 mismatch: {digest}")
+              TAEHV_PY
+              python3 - <<'TAEHV_IMPORT_PY'
+              from taehv import StreamingTAEHV, TAEHV
+              print("TAEHV runtime ready")
+              TAEHV_IMPORT_PY
+              exec sglang serve \
+                --model-path {{ .Values.model.id | quote }} \
+                --revision {{ .Values.model.revision | quote }} \
+                --pipeline-class-name LingBotWorldCausalDMDPipeline \
+                --num-gpus 2 \
+                --performance-mode speed \
+                --tp-size 1 \
+                --sp-degree 2 \
+                --ulysses-degree 2 \
+                --dit-cpu-offload false \
+                --text-encoder-cpu-offload false \
+                --vae-config.use-parallel-decode true \
+                --vae-config.parallel-decode-mode spatial \
+                --vae-config.taehv-checkpoint-path {{ .Values.taehv.checkpointPath | quote }} \
+                --enable-torch-compile false \
+                --attention-backend-config {{ .Values.attentionBackendConfig | quote }} \
+                --host 0.0.0.0 \
+                --port 30000
           env:
             - name: HF_HOME
               value: {{ .Values.fsx.mountPath }}/hf-lb2
@@ -56,6 +79,8 @@ spec:
               value: "true"
             - name: SGLANG_DIFFUSION_CACHE_ROOT
               value: /server-cache
+            - name: TAEHV_CHECKPOINT_PATH
+              value: {{ .Values.taehv.checkpointPath | quote }}
           ports:
             - name: sglang
               containerPort: 30000

@@ -163,9 +163,14 @@ spec:
         instrumentation.opentelemetry.io/inject-java: "false"
         instrumentation.opentelemetry.io/inject-nodejs: "false"
         instrumentation.opentelemetry.io/inject-python: "false"
-        seedleap.ai/code-git-ref: afc619cc79a2960f9cab53b3823d904672f3c5c0
+        seedleap.ai/code-git-branch: codex/lingbot-action-override
+        seedleap.ai/code-git-ref: 644634498dfb0cdf59f3db023a908b8610f1bf26
+        seedleap.ai/code-git-repo: lkejun237-ops/sglang
+        seedleap.ai/attention-backend-config: lingbot_causal_fa_num_splits=2
         seedleap.ai/model-revision: 59cccf49f2d2dd27418ae7a04b82b10868d455c2
         seedleap.ai/runtime-image-ref: lmsysorg/sglang:dev@sha256:8f78575e03ab59a39191a4a6f718bbbe1726fa940f72a86a187a3f1628ada9a7
+        seedleap.ai/taehv: enabled
+        seedleap.ai/taehv-checkpoint-path: /opt/taehv/taew2_1.pth
     spec:
       nodeSelector:
         karpenter.sh/nodepool: codex-lingbot2-h100-perf
@@ -183,8 +188,19 @@ spec:
           args:
             - |
               set -euo pipefail
-              rm -rf /workspace/sglang
-              git clone --filter=blob:none "https://x-access-token:${GITHUB_TOKEN}@github.com/seedleap/sglang.git" /workspace/sglang
+              rm -rf /workspace/sglang /tmp/git-askpass
+              cat >/tmp/git-askpass <<'EOF'
+              #!/bin/sh
+              case "$1" in
+                *Username*) printf '%s\n' x-access-token ;;
+                *Password*) printf '%s\n' "$GITHUB_TOKEN" ;;
+                *) printf '\n' ;;
+              esac
+              EOF
+              chmod 700 /tmp/git-askpass
+              GIT_ASKPASS=/tmp/git-askpass GIT_TERMINAL_PROMPT=0 \
+                git clone --filter=blob:none --branch "${CODE_GIT_BRANCH}" "https://github.com/${CODE_GIT_REPO}.git" /workspace/sglang
+              rm -f /tmp/git-askpass
               cd /workspace/sglang
               git checkout --detach "${CODE_GIT_REF}"
               test "$(git rev-parse HEAD)" = "${CODE_GIT_REF}"
@@ -194,6 +210,27 @@ spec:
                 --no-deps \
                 --index-url https://flashinfer.ai/whl/cu130 \
                 'flashinfer-jit-cache==0.6.12+cu130'
+              python3 -m pip install --no-cache-dir --no-deps \
+                'taehv @ git+https://github.com/madebyollin/taehv.git@093b918971d59001a0bad6dfd6e0409b5e1752cf' \
+                --root-user-action=ignore
+              mkdir -p /opt/taehv
+              python3 - <<'TAEHV_PY'
+              import hashlib
+              import urllib.request
+              from pathlib import Path
+
+              url = "https://raw.githubusercontent.com/madebyollin/taehv/093b918971d59001a0bad6dfd6e0409b5e1752cf/taew2_1.pth"
+              target = Path("/opt/taehv/taew2_1.pth")
+              urllib.request.urlretrieve(url, target)
+              digest = hashlib.sha256(target.read_bytes()).hexdigest()
+              expected = "d26151e76cdc2c9424bef988de874b33d9a53f30ef3060cd556c429c469c797e"
+              if digest != expected:
+                  raise SystemExit(f"TAEHV checkpoint sha256 mismatch: {digest}")
+              TAEHV_PY
+              python3 - <<'TAEHV_IMPORT_PY'
+              from taehv import StreamingTAEHV, TAEHV
+              print("TAEHV runtime ready")
+              TAEHV_IMPORT_PY
               serve_cmd=(sglang serve \
                 --model-path "${MODEL_ID}" \
                 --revision "${MODEL_REVISION}" \
@@ -207,6 +244,7 @@ spec:
                 --text-encoder-cpu-offload false \
                 --vae-config.use-parallel-decode true \
                 --vae-config.parallel-decode-mode spatial \
+                --vae-config.taehv-checkpoint-path "${TAEHV_CHECKPOINT_PATH}" \
                 --enable-torch-compile "${ENABLE_TORCH_COMPILE}" \
                 --enable-layerwise-nvtx-marker "${ENABLE_NSYS_PROFILE}" \
                 --host 0.0.0.0 \
@@ -233,7 +271,11 @@ spec:
               wait "${server_pid}"
           env:
             - name: CODE_GIT_REF
-              value: afc619cc79a2960f9cab53b3823d904672f3c5c0
+              value: 644634498dfb0cdf59f3db023a908b8610f1bf26
+            - name: CODE_GIT_BRANCH
+              value: codex/lingbot-action-override
+            - name: CODE_GIT_REPO
+              value: lkejun237-ops/sglang
             - name: MODEL_ID
               value: robbyant/lingbot-world-v2-14b-causal-fast-diffusers
             - name: MODEL_REVISION
@@ -252,6 +294,8 @@ spec:
               value: "false"
             - name: ATTENTION_BACKEND_CONFIG
               value: lingbot_causal_fa_num_splits=2
+            - name: TAEHV_CHECKPOINT_PATH
+              value: /opt/taehv/taew2_1.pth
             - name: NSYS_NVTX_CAPTURE
               value: stage_LingBotWorldCausalDMDDenoisingStage
             - name: NSYS_OUTPUT_PATH

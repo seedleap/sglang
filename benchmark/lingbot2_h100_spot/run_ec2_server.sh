@@ -50,6 +50,7 @@ docker exec --detach \
     --text-encoder-cpu-offload false \
     --vae-config.use-parallel-decode true \
     --vae-config.parallel-decode-mode spatial \
+    --vae-config.taehv-checkpoint-path /opt/taehv/taew2_1.pth \
     --enable-torch-compile false \
     --enable-layerwise-nvtx-marker false \
     --attention-backend-config lingbot_causal_fa_num_splits=${num_splits} \

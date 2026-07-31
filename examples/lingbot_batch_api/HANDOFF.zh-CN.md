@@ -335,8 +335,9 @@ HTTP API -> SQS -> [worker + 2-GPU SGLang] x N -> S3
 --text-encoder-cpu-offload false
 --vae-config.use-parallel-decode true
 --vae-config.parallel-decode-mode spatial
+--vae-config.taehv-checkpoint-path /opt/taehv/taew2_1.pth
 --enable-torch-compile false
---attention-backend-config lingbot_causal_fa_num_splits=0
+--attention-backend-config lingbot_causal_fa_num_splits=2
 ```
 
 以及：
@@ -344,6 +345,7 @@ HTTP API -> SQS -> [worker + 2-GPU SGLang] x N -> S3
 ```text
 SGLANG_LINGBOT_LAZY_VAE_ENCODE_BLACK_FRAMES=60
 SGLANG_LINGBOT_ENABLE_INTERACTIVE_KV_WINDOW=true
+TAEHV_CHECKPOINT_PATH=/opt/taehv/taew2_1.pth
 ```
 
 升级任一版本或参数前，都要运行固定 smoke case 和小批量吞吐回归；不要只验证

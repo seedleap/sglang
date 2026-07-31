@@ -14,6 +14,13 @@ model:
   id: robbyant/lingbot-world-v2-14b-causal-fast-diffusers
   revision: 59cccf49f2d2dd27418ae7a04b82b10868d455c2
 
+attentionBackendConfig: lingbot_causal_fa_num_splits=2
+
+taehv:
+  revision: 093b918971d59001a0bad6dfd6e0409b5e1752cf
+  checkpointPath: /opt/taehv/taew2_1.pth
+  checkpointSha256: d26151e76cdc2c9424bef988de874b33d9a53f30ef3060cd556c429c469c797e
+
 api:
   existingSecret: lingbot-batch-api-key
   secretKey: api-key

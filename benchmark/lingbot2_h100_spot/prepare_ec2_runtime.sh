@@ -7,7 +7,7 @@ source_root=/opt/lingbot2/sglang
 results_root=/opt/lingbot2/results
 cache_root=/opt/lingbot2/cache
 
-test "$(cat "${source_root}/.source_sha")" = afc619cc79a2960f9cab53b3823d904672f3c5c0
+test "$(cat "${source_root}/.source_sha")" = 644634498dfb0cdf59f3db023a908b8610f1bf26
 mkdir -p "${results_root}" "${cache_root}"
 docker rm -f "${runtime}" >/dev/null 2>&1 || true
 
@@ -34,13 +34,34 @@ docker run --detach \
 
 docker exec "${runtime}" bash -lc '
   set -euo pipefail
-  test "$(cat .source_sha)" = afc619cc79a2960f9cab53b3823d904672f3c5c0
+  test "$(cat .source_sha)" = 644634498dfb0cdf59f3db023a908b8610f1bf26
   python3 -m pip install -e "python[diffusion]" --root-user-action=ignore
   python3 -m pip install \
     --force-reinstall \
     --no-deps \
     --index-url https://flashinfer.ai/whl/cu130 \
     "flashinfer-jit-cache==0.6.12+cu130"
+  python3 -m pip install --no-cache-dir --no-deps \
+    "taehv @ git+https://github.com/madebyollin/taehv.git@093b918971d59001a0bad6dfd6e0409b5e1752cf" \
+    --root-user-action=ignore
+  mkdir -p /opt/taehv
+  python3 - <<TAEHV_PY
+import hashlib
+import urllib.request
+from pathlib import Path
+
+url = "https://raw.githubusercontent.com/madebyollin/taehv/093b918971d59001a0bad6dfd6e0409b5e1752cf/taew2_1.pth"
+target = Path("/opt/taehv/taew2_1.pth")
+urllib.request.urlretrieve(url, target)
+digest = hashlib.sha256(target.read_bytes()).hexdigest()
+expected = "d26151e76cdc2c9424bef988de874b33d9a53f30ef3060cd556c429c469c797e"
+if digest != expected:
+    raise SystemExit(f"TAEHV checkpoint sha256 mismatch: {digest}")
+TAEHV_PY
+  python3 - <<TAEHV_IMPORT_PY
+from taehv import StreamingTAEHV, TAEHV
+print("TAEHV runtime ready")
+TAEHV_IMPORT_PY
   pytest -q \
     python/sglang/multimodal_gen/test/unit/test_flash_attention_num_splits.py \
     python/sglang/multimodal_gen/test/unit/test_usp_benchmark_bypass.py
