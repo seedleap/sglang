@@ -21,13 +21,20 @@ def test_realtime_webui_presets_do_not_emit_camera_scripts():
     assert "ControlStateController" in app_js
     assert 'const DEFAULT_PREVIEW_OUTPUT_FORMAT = "webp";' in app_js
     assert 'id="transportFormat"' in index_html
-    assert 'id="fps" type="number" value="25"' in index_html
+    assert 'id="fps" type="number" value="16"' in index_html
     assert 'id="superResolution" type="checkbox"' in index_html
     assert 'id="upscalingScale"' in index_html
     assert 'class="workspace"' in index_html
+    assert 'class="workspace-switcher"' in index_html
+    assert 'data-workspace-view="trace"' in index_html
+    assert 'id="traceTopology"' in index_html
+    assert 'id="traceEventList"' in index_html
+    assert 'id="traceVaeEncodeText"' in index_html
+    assert 'id="traceVaeDecodeText"' in index_html
+    assert 'id="traceVaeText"' not in index_html
     assert 'class="preview-frame"' in index_html
     assert 'id="previewOverlay" class="preview-overlay"' in index_html
-    assert 'id="previewScale" type="range" min="80" max="170" value="120"' in index_html
+    assert 'id="previewScale" type="range" min="80" max="170" value="100"' in index_html
     assert 'id="previewScaleText"' in index_html
     assert 'id="outputSizeText"' in index_html
     assert 'id="frameInterpolation" type="checkbox" />' in index_html
@@ -48,14 +55,15 @@ def test_realtime_webui_presets_do_not_emit_camera_scripts():
     assert "Info" not in index_html
     assert 'id="steps" type="number" value="4"' in index_html
     assert 'id="guidance" type="number" value="1"' in index_html
-    assert "styles.css?v=realtime-sr-v38" in index_html
-    assert "app.js?v=realtime-sr-v38" in index_html
-    assert 'const DECODER_WORKER_URL = "./decoder_worker.js?v=rgb-worker-v6";' in app_js
-    assert "const DEFAULT_TARGET_FPS = 25;" in app_js
+    assert "styles.css?v=realtime-record-v50" in index_html
+    assert "trace_topology.js?v=realtime-trace-topology-v3" in index_html
+    assert "app.js?v=realtime-trace-v99" in index_html
+    assert 'const DECODER_WORKER_URL = "./decoder_worker.js?v=rgb-worker-v10";' in app_js
+    assert "const DEFAULT_TARGET_FPS = 16;" in app_js
     assert "const DEFAULT_FRAME_INTERPOLATION_EXP = 1;" in app_js
     assert "const DEFAULT_FRAME_INTERPOLATION_SCALE = 1.0;" in app_js
     assert "const DEFAULT_UPSCALING_SCALE = 2;" in app_js
-    assert "const DEFAULT_PREVIEW_SCALE = 120;" in app_js
+    assert "const DEFAULT_PREVIEW_SCALE = 100;" in app_js
     assert 'setPreviewState("waiting")' in app_js
     assert "stage.dataset.previewState = state" in app_js
     assert "previewProgressSpin" in styles_css
@@ -73,18 +81,16 @@ def test_realtime_webui_presets_do_not_emit_camera_scripts():
     assert "setPreviewScale(DEFAULT_PREVIEW_SCALE)" in app_js
     assert "preview_scale" in app_js
     assert "sr_scale" in app_js
-    assert "elapsedMs % targetMs" in app_js
-    assert "liveQueueFrameFloor(header, chunkFrameCount)" in app_js
+    assert "RealtimePlaybackController" in app_js
+    assert "playbackController.observeServerStats(stats" in app_js
     assert (
         'const REACTOR_PRESET_BASE_URL = "https://www.reactor.inc/lingbot-world-fast-v1";'
         in app_js
     )
     assert "Dragon Dolly" in app_js
     assert "no creature morphing" in app_js
-    assert "A static locked-off view of the back side of Plastic Beach" in app_js
-    assert "clouds slowly drifting behind the island" in app_js
-    assert "occasional shooting star" in app_js
-    assert "tiny distant pigeons" in app_js
+    assert "A static album-cover view matching the reference image" in app_js
+    assert "no camera descent, no push-in, no orbit" in app_js
     assert "Ziggy Stardust" in app_js
     assert "blue K. West sign" in app_js
     assert "wet pavement reflecting a yellow streetlamp" in app_js
@@ -95,15 +101,38 @@ def test_realtime_webui_presets_do_not_emit_camera_scripts():
     assert app_js.index("Dragon Dolly") < app_js.index("Kid A")
     assert "dragon-ride.jpg" in app_js
     assert "stageRenderFps" not in app_js
-    assert 'setStatus("Receiving"' not in app_js
-    assert "decodeChain = decodeChain" in app_js
+    assert 'setStatus("Receiving"' in app_js
+    assert "pumpDecodeQueue()" in app_js
     assert "receiveChain" not in app_js
     assert 'message.type === "chunk_stats"' in app_js
+    assert 'message.type === "trace_event"' in app_js
+    assert "renderTraceTopology()" in app_js
+    assert "createRealtimeTraceTopology" in app_js
     assert "chunkTotal > 0 ? numFrames / chunkTotal" in app_js
     assert ".stage-stat" in styles_css
     assert ".workspace" in styles_css
     assert ".preview-frame" in styles_css
     assert ".preview-overlay" in styles_css
-    assert "@keyframes previewSweep" in styles_css
+    assert ".preview-loader" in styles_css
     assert ".preview-scale-control" in styles_css
     assert "--preview-scale" in styles_css
+
+
+def test_realtime_webui_emits_client_trace_context():
+    repo_root = Path(__file__).resolve().parents[6]
+    app_js = (
+        repo_root / "python/sglang/multimodal_gen/apps/realtime_webui/app.js"
+    ).read_text()
+
+    assert "createClientTrace()" in app_js
+    assert "function traceWebSocketUrl(baseUrl)" in app_js
+    assert "trace_id: currentTrace.traceId" in app_js
+    assert "client_trace: currentTracePayload()" in app_js
+    assert 'url.searchParams.set("trace_id", currentTrace.traceId)' in app_js
+    assert 'new WebSocket(traceWebSocketUrl($("serverUrl").value))' in app_js
+    assert 'kind: "client_trace"' in app_js
+    assert 'markClientTrace("client.ws_open"' in app_js
+    assert 'markClientTrace("client.init_sent"' in app_js
+    assert 'markClientTrace("client.frame_batch_received"' in app_js
+    assert 'markClientTrace("client.decode_batch_done"' in app_js
+    assert 'markClientTrace("client.chunk_first_rendered"' in app_js

@@ -1,0 +1,154 @@
+# LingBot-World 2.0 offline batch benchmark
+
+This benchmark measures production-like 15-second video synthesis on a single
+8-GPU node. It compares one 8-GPU server, two 4-GPU servers, four 2-GPU
+servers, and eight 1-GPU servers. The included manifest reproduces the H100
+deployment used by the recorded `2026-07-15-h100-final` run. Live B200 Spot
+capacity was unavailable during this test.
+
+Fixed request contract:
+
+- LingBot-World 2.0 14B causal-fast BF16, four DMD steps;
+- 832x480 at 25 FPS;
+- 32 chunks: 9 initial frames plus 31x12 steady frames = 381 frames = 15.24s;
+- four first-person and four third-person requests per topology;
+- no frame interpolation or upscaling;
+- raw RGB response persisted to H.264 MP4 with ffmpeg;
+- every fresh server receives a separate three-chunk warmup request;
+- startup and warmup are reported separately from steady-state throughput.
+
+Primary metrics are node videos/hour, videos/GPU-hour, generated video
+seconds/GPU-hour, aggregate realtime factor, per-video end-to-end latency, and
+failure rate. Semantic/visual quality is outside this performance benchmark.
+
+For a real mixed-perspective dataset, pass both
+`--first-frame-first-person` and `--first-frame-third-person`. A text prompt
+alone did not override the perspective embedded in the conditioning frame in
+the H100 run. If the two requests share one frame, the benchmark emits a
+warning and the performance numbers remain valid, but the labels must not be
+treated as visual-quality ground truth.
+
+`run_topologies.sh` forwards the equivalent `FIRST_FRAME_FIRST_PERSON` and
+`FIRST_FRAME_THIRD_PERSON` environment variables.
+
+The pod requests all eight GPUs, forcing Karpenter to place it on an isolated
+H100 node instead of sharing a partially occupied node. From this directory,
+create the ConfigMap,
+dry-run, and submit with:
+
+```bash
+kubectl create configmap codex-lingbot2-offline-batch-h100 \
+  --from-file=benchmark_batch.py \
+  --from-file=run_topologies.sh \
+  --from-file=summarize_topologies.py \
+  --dry-run=client -o yaml | kubectl apply -f -
+kubectl apply --server-side --dry-run=server -f k8s.yaml
+kubectl apply -f k8s.yaml
+```
+
+Copy `/results` before deleting the completed pod and ConfigMap.
+
+For the lightweight, externally callable AWS service built from this benchmark
+contract, see [`examples/lingbot_batch_api`](../../examples/lingbot_batch_api/README.md).
+It pairs one synchronous HTTP adapter with each SGLang instance, returns 429
+instead of building a server-side queue, and lets HPA/Karpenter resize GPU
+capacity while callers provide backpressure.
+
+## aws03 SQS video controller
+
+`aws03_video_controller.py` consumes one SQS message per SGLang video batch. It
+does not delete a message when the Kubernetes Job is created. Instead, the
+message is dynamically renewed until the Job succeeds, so pod failure,
+Kubernetes Job replacement, or controller restart does not lose work.
+
+Scheduling policy:
+
+- Production currently uses only the B300 capacity-block backend. Configure
+  `SGLANG_VIDEO_DISABLE_FALLBACK_BACKENDS=true` and include only
+  `b300-capacity-block` in `SGLANG_VIDEO_BACKENDS_JSON`.
+- A Job starts only when B300 has one full 8-GPU slot free and the B300 pool is
+  still below `SGLANG_VIDEO_B300_MAX_ACTIVE_GPUS` and
+  `SGLANG_VIDEO_B300_MAX_ACTIVE_JOBS`.
+- If B300 is full or already at its pool cap, the controller changes message
+  visibility and leaves the message in SQS for a later attempt. It does not
+  create B200/H100/H200 Spot Jobs in this mode.
+- The controller still supports fallback GPU backends for experiments, but they
+  must be explicitly enabled by setting
+  `SGLANG_VIDEO_DISABLE_FALLBACK_BACKENDS=false` and adding the fallback entries
+  to `SGLANG_VIDEO_BACKENDS_JSON`.
+
+The controller tracks inflight messages in memory. While a Job is pending or
+running it calls `ChangeMessageVisibility` every
+`SGLANG_VIDEO_MESSAGE_RENEW_INTERVAL_SECONDS`, extending the lease to
+`SGLANG_VIDEO_MESSAGE_VISIBILITY_SECONDS`. If the controller crashes, renewal
+stops and the message becomes visible again after the last visibility timeout.
+If an inflight Kubernetes Job disappears, for example after an accidental
+manual Job deletion, the controller waits
+`SGLANG_VIDEO_MISSING_JOB_GRACE_SECONDS` and then recreates the Job under the
+same SQS message receipt instead of renewing forever.
+The replacement Job resumes from S3 checkpoints written by the runner under:
+
+```text
+<output_prefix>/video_state/cases/<case_id>.json
+```
+
+The batch runner streams successful videos to S3 while benchmark generation is
+still running. Each successful `progress.jsonl` row is uploaded to
+`<output_prefix>/videos/`, followed by a checkpoint under `video_state/cases/`
+and metadata under `<output_prefix>/video_metadata/`. After the upload succeeds,
+the local FSX MP4 is deleted, leaving only progress, summaries, and logs for
+debugging. On retries or replacement Jobs, the runner checks S3 first and skips
+videos that were already persisted.
+
+The runner also posts live and final progress callbacks to LWDP. Callback PUTs
+are retried with `SGLANG_VIDEO_CALLBACK_RETRY_ATTEMPTS` and
+`SGLANG_VIDEO_CALLBACK_RETRY_BASE_SECONDS`. As a second guard, the controller
+reads `<output_prefix>/reports/sglang_video_report.json` before deleting a
+completed message and replays the final progress callback from that report. If
+the replay fails, the SQS message is kept in flight and retried later instead
+of being deleted with a stale LWDP status. Configure the controller with
+`SGLANG_VIDEO_CALLBACK_TOKEN` or `LWDP_GENERATION_API_TOKEN` so this final
+repair callback can authenticate to `lwdp.loopit.me`.
+
+Important controller environment variables:
+
+```text
+SGLANG_VIDEO_BATCH_STREAM_UPLOAD=true
+SGLANG_VIDEO_BATCH_DELETE_UPLOADED_LOCAL=true
+SGLANG_VIDEO_CALLBACK_RETRY_ATTEMPTS=5
+SGLANG_VIDEO_CALLBACK_RETRY_BASE_SECONDS=1
+SGLANG_VIDEO_CALLBACK_TOKEN=<from lwdp-generation-token>
+SGLANG_VIDEO_SQS_MAX_MESSAGES=10
+SGLANG_VIDEO_MESSAGE_VISIBILITY_SECONDS=900
+SGLANG_VIDEO_MESSAGE_RENEW_INTERVAL_SECONDS=60
+SGLANG_VIDEO_MESSAGE_MAX_LEASE_SECONDS=28800
+SGLANG_VIDEO_MAX_JOB_ATTEMPTS=5
+SGLANG_VIDEO_MISSING_JOB_GRACE_SECONDS=180
+SGLANG_VIDEO_DISABLE_FALLBACK_BACKENDS=true
+SGLANG_VIDEO_MAX_ACTIVE_JOBS=5
+SGLANG_VIDEO_B300_MAX_ACTIVE_JOBS=5
+SGLANG_VIDEO_B300_MAX_ACTIVE_GPUS=40
+SGLANG_VIDEO_FALLBACK_MAX_ACTIVE_JOBS=0
+SGLANG_VIDEO_FALLBACK_MAX_ACTIVE_GPUS=0
+```
+
+Use `SGLANG_VIDEO_BACKENDS_JSON` to make backend choice explicit. Current
+production B300-only example:
+
+```json
+[
+  {
+    "name": "b300-capacity-block",
+    "node_selector": {
+      "eks.amazonaws.com/capacityType": "CAPACITY_BLOCK",
+      "eks.amazonaws.com/nodegroup": "wan22-cb-p6b300-0715-20c",
+      "node.kubernetes.io/instance-type": "p6-b300.48xlarge"
+    }
+  }
+]
+```
+
+Apply `k8s-aws03-video-controller-rbac.yaml` with the controller deployment.
+The service account also needs AWS IAM permissions for SQS receive/delete/change
+visibility. `eks:UpdateNodegroupConfig` is only required when fallback GPU
+nodegroups are explicitly enabled.

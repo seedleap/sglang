@@ -1,0 +1,125 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: codex-lingbot2-capacity-preview10-720p
+  namespace: default
+  labels:
+    app.kubernetes.io/name: codex-lingbot2-capacity-preview10-720p
+    seedleap.ai/owner: chenshengdong
+    seedleap.ai/task: lingbot2-thirdperson1000x5-preview10
+  annotations:
+    seedleap.ai/code-git-ref: d9a7e0e6630ea8aea135191115a13e6451618a6f
+    seedleap.ai/model-revision: 59cccf49f2d2dd27418ae7a04b82b10868d455c2
+    seedleap.ai/benchmark-contract: 10-third-person-cases-1280x720-24fps-129frames-balanced-actions-4x2gpu
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 3600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: codex-lingbot2-capacity-preview10-720p
+        seedleap.ai/owner: chenshengdong
+        seedleap.ai/task: lingbot2-thirdperson1000x5-preview10
+    spec:
+      restartPolicy: Never
+      terminationGracePeriodSeconds: 30
+      schedulerName: volcano
+      priorityClassName: wan22-debug-low
+      nodeSelector:
+        eks.amazonaws.com/capacityType: CAPACITY_BLOCK
+        eks.amazonaws.com/nodegroup: wan22-cb-p6b300-0715-20c
+        node.kubernetes.io/instance-type: p6-b300.48xlarge
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: benchmark
+          image: lmsysorg/sglang:dev@sha256:8f78575e03ab59a39191a4a6f718bbbe1726fa940f72a86a187a3f1628ada9a7
+          imagePullPolicy: IfNotPresent
+          workingDir: /workspace
+          command: [/bin/bash, -lc]
+          args:
+            - |
+              set -euo pipefail
+              git clone --filter=blob:none "https://x-access-token:${GITHUB_TOKEN}@github.com/seedleap/sglang.git" /workspace/sglang
+              cd /workspace/sglang
+              git checkout --detach "${CODE_GIT_REF}"
+              test "$(git rev-parse HEAD)" = "${CODE_GIT_REF}"
+              mkdir -p "${HF_HOME}" "${PIP_CACHE_DIR}"
+              python3 -m pip install -e "python[diffusion]" --root-user-action=ignore
+              python3 -m pip install \
+                --force-reinstall \
+                --no-deps \
+                --index-url https://flashinfer.ai/whl/cu130 \
+                'flashinfer-jit-cache==0.6.12+cu130'
+              command -v ffmpeg
+              command -v ffprobe
+              /opt/bench/run_capacity_smoke_720p.sh
+          env:
+            - name: CODE_GIT_REF
+              value: d9a7e0e6630ea8aea135191115a13e6451618a6f
+            - name: MODEL_ID
+              value: robbyant/lingbot-world-v2-14b-causal-fast-diffusers
+            - name: MODEL_REVISION
+              value: 59cccf49f2d2dd27418ae7a04b82b10868d455c2
+            - name: RESULTS_ROOT
+              value: /results/preview10-720p
+            - name: MESSAGES_PATH
+              value: /opt/bench/messages-preview10.jsonl.gz
+            - name: IMAGE_URLS_PATH
+              value: /opt/bench/image-urls.json
+            - name: PUT_URLS_PATH
+              value: /opt/bench/put-urls-preview10.json
+            - name: GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: github-token
+                  key: token
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: minwm-hf-token
+                  key: HF_TOKEN
+                  optional: true
+            - name: HF_HOME
+              value: /fsx/hf-lb2
+            - name: PIP_CACHE_DIR
+              value: /fsx/world-model/cache/pip/sglang-d9a7e0e
+            - name: HF_HUB_ENABLE_HF_TRANSFER
+              value: "1"
+          resources:
+            requests:
+              cpu: "160"
+              memory: 1200Gi
+              nvidia.com/gpu: "8"
+            limits:
+              cpu: "180"
+              memory: 1600Gi
+              nvidia.com/gpu: "8"
+          securityContext:
+            capabilities:
+              add: [SYS_ADMIN]
+          volumeMounts:
+            - name: benchmark-input
+              mountPath: /opt/bench
+              readOnly: true
+            - name: results
+              mountPath: /results
+            - name: fsx
+              mountPath: /fsx
+            - name: shm
+              mountPath: /dev/shm
+      volumes:
+        - name: benchmark-input
+          configMap:
+            name: codex-lingbot2-capacity-preview10-720p
+            defaultMode: 0555
+        - name: results
+          emptyDir:
+            sizeLimit: 160Gi
+        - name: fsx
+          persistentVolumeClaim:
+            claimName: xacct-fsx-pvc
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 512Gi

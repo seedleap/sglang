@@ -61,9 +61,9 @@ def flash_attn_varlen_func_fake_out(
     head_dim_v = v.shape[-1]
 
     if cu_seqlens_q is not None:
-        assert cu_seqlens_q.shape == (
-            batch_size + 1,
-        ), "cu_seqlens_q must have shape (batch_size + 1,)"
+        assert cu_seqlens_q.shape == (batch_size + 1,), (
+            "cu_seqlens_q must have shape (batch_size + 1,)"
+        )
         assert cu_seqlens_q.dtype == torch.int32, "cu_seqlens_q must be int32"
         assert cu_seqlens_q.stride(0) == 1, "cu_seqlens_q must be contiguous"
 
@@ -123,9 +123,9 @@ def flash_attn_varlen_func_fake_out_lse(
     head_dim_v = v.shape[-1]
 
     if cu_seqlens_q is not None:
-        assert cu_seqlens_q.shape == (
-            batch_size + 1,
-        ), "cu_seqlens_q must have shape (batch_size + 1,)"
+        assert cu_seqlens_q.shape == (batch_size + 1,), (
+            "cu_seqlens_q must have shape (batch_size + 1,)"
+        )
         assert cu_seqlens_q.dtype == torch.int32, "cu_seqlens_q must be int32"
         assert cu_seqlens_q.stride(0) == 1, "cu_seqlens_q must be contiguous"
 
@@ -362,6 +362,7 @@ class FlashAttentionImpl(AttentionImpl):
         softmax_scale: float,
         num_kv_heads: int | None = None,
         prefix: str = "",
+        num_splits: int | None = None,
         **extra_impl_args,
     ) -> None:
         self.num_heads = num_heads
@@ -370,6 +371,22 @@ class FlashAttentionImpl(AttentionImpl):
         self.causal = causal
         self.softmax_scale = softmax_scale
         self.attention_metadata = FlashAttentionMetadata()
+        # FA3's automatic split heuristic is not always optimal for diffusion
+        # shapes with few heads and a long KV sequence. Keep the upstream
+        # default unless the operator is explicitly tuned for its workload.
+        from sglang.multimodal_gen.runtime.server_args import get_global_server_args
+
+        try:
+            backend_config = get_global_server_args().attention_backend_config or {}
+        except ValueError:
+            backend_config = {}
+        if num_splits is None:
+            num_splits = backend_config.get("fa_num_splits", 0)
+        self.num_splits = int(num_splits)
+        if self.num_splits < 0:
+            raise ValueError(
+                "attention_backend_config.fa_num_splits must be non-negative"
+            )
 
     def forward(
         self,
@@ -406,6 +423,7 @@ class FlashAttentionImpl(AttentionImpl):
                 max_seqlen_k=max_seqlen_k,
                 softmax_scale=self.softmax_scale,
                 causal=self.causal,
+                num_splits=self.num_splits,
                 return_softmax_lse=return_softmax_lse,
                 ver=fa_ver,
             )
@@ -423,6 +441,7 @@ class FlashAttentionImpl(AttentionImpl):
                     max_seqlen_k=max_seqlen_k,
                     softmax_scale=self.softmax_scale,
                     causal=self.causal,
+                    num_splits=self.num_splits,
                     return_softmax_lse=True,
                     ver=fa_ver,
                 )
@@ -437,6 +456,7 @@ class FlashAttentionImpl(AttentionImpl):
                 max_seqlen_k=max_seqlen_k,
                 softmax_scale=self.softmax_scale,
                 causal=self.causal,
+                num_splits=self.num_splits,
                 return_softmax_lse=False,
                 ver=fa_ver,
             )

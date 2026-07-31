@@ -28,6 +28,10 @@ from sglang.multimodal_gen.runtime.utils.precision import (
     resolve_precision,
     temporary_module_dtype,
 )
+from sglang.multimodal_gen.runtime.utils.realtime_trace import (
+    realtime_trace_span,
+    tensor_trace_metadata,
+)
 
 logger = init_logger(__name__)
 
@@ -121,7 +125,24 @@ class EncodingStage(PipelineStage):
                 with temporary_module_dtype(
                     self.vae, vae_dtype, enabled=should_cast_vae
                 ) as vae:
-                    latents = vae.encode(latents).mean
+                    with realtime_trace_span(
+                        logger,
+                        batch,
+                        "server.vae_encode_complete",
+                        component="vae_encoder",
+                        input_tensor=latents,
+                        chunk_index=getattr(batch, "block_idx", None),
+                        first_chunk=getattr(batch, "block_idx", 0) == 0,
+                        vae_precision=str(vae_dtype),
+                        vae_tiling=bool(server_args.pipeline_config.vae_tiling),
+                        component_name="vae",
+                    ) as trace_span:
+                        latent_dist = vae.encode(latents)
+                        latents = latent_dist.mean
+                        trace_span.add_fields(
+                            latent_dist_type=latent_dist.__class__.__name__,
+                            **tensor_trace_metadata(latents, prefix="latent"),
+                        )
 
         # Update batch with encoded latents
         batch.latents = latents

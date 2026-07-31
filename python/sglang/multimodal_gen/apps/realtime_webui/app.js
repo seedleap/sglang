@@ -6,24 +6,28 @@ const WEBP_FRAME_CONTENT_TYPE = "image/webp";
 const JPEG_FRAME_CONTENT_TYPE = "image/jpeg";
 const DECODER_WORKER_URL = "./decoder_worker.js?v=rgb-worker-v10";
 const DEFAULT_PREVIEW_OUTPUT_FORMAT = "webp";
-const DEFAULT_PREVIEW_OUTPUT_QUALITY = 80;
+const DEFAULT_PREVIEW_OUTPUT_QUALITY = 55;
 const MAX_WEBP_PREVIEW_OUTPUT_QUALITY = 80;
 const SMOOTH_PREVIEW_OUTPUT_QUALITY = 70;
 const SR_PREVIEW_OUTPUT_QUALITY = 70;
 const HEAVY_PREVIEW_OUTPUT_QUALITY = 60;
-const DEFAULT_TARGET_FPS = 25;
+const DEFAULT_TARGET_FPS = 16;
+const DEFAULT_PREVIEW_MAX_WIDTH = 560;
 const DEFAULT_FRAME_INTERPOLATION_EXP = 1;
 const DEFAULT_FRAME_INTERPOLATION_SCALE = 1.0;
 const DEFAULT_UPSCALING_SCALE = 2;
 const DEFAULT_UPSCALING_MODEL =
   "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesr-general-x4v3.pth";
-const DEFAULT_PREVIEW_SCALE = 120;
+const DEFAULT_PREVIEW_SCALE = 100;
 const RECONNECT_CLOSE_TIMEOUT_MS = 15000;
-const DECODE_QUEUE_SECONDS = 2.0;
-const STARTUP_DECODE_QUEUE_SECONDS = 2.5;
+const CLIENT_ERROR_CLOSE_CODE = 4000;
+const DECODE_QUEUE_SECONDS = 0.5;
+const STARTUP_DECODE_QUEUE_SECONDS = 0.75;
 const RECENT_DROP_DISPLAY_MS = 1800;
 const CONTROL_BUFFERED_AMOUNT_LIMIT = 1 << 20;
-const CONTROL_TRANSITION_FLUSH_DELAY_MS = 140;
+const CONTROL_TRANSITION_FLUSH_DELAY_MS = 50;
+const MIN_RENDER_TIMER_FPS = 30;
+const MAX_RENDER_TIMER_FPS = 60;
 const CONTROL_KEY_ACTIONS = new Map([
   ["w", "w"],
   ["a", "a"],
@@ -62,7 +66,7 @@ const reactorPresets = [
     name: "Dragon Ride",
     tone: "green",
     size: "832x480",
-    fps: 25,
+    fps: 16,
     prompt: "A locked first-person dragon-rider view matching the reference image: both tan forearms in brown leather gloves stay visible at the bottom, gripping leather reins around the green-brown scaled dragon neck; the dragon head, horns, and both wide wings frame the jungle valley, waterfalls, mist, and tall castle on the right. Smooth forward flight only, keep the same rider hands, dragon body, wing silhouette, castle placement, and humid daylight colors in every frame.",
     referenceUrl: `${REACTOR_PRESET_BASE_URL}/dragon-ride.jpg`,
     source: "Reactor LingBot preset",
@@ -71,7 +75,7 @@ const reactorPresets = [
     name: "Misted Kingdom",
     tone: "green",
     size: "832x480",
-    fps: 25,
+    fps: 16,
     prompt: "A third-person over-the-shoulder fantasy view following a sword-slung rider on a brown horse through curling valley mist, wildflower meadows, ruined stone arches, cottages, and a many-spired castle under a ringed gas giant and crescent moon.",
     referenceUrl: `${REACTOR_PRESET_BASE_URL}/misted-kingdom.jpg`,
     source: "Reactor LingBot preset",
@@ -80,7 +84,7 @@ const reactorPresets = [
     name: "Storm Crossing",
     tone: "blue",
     size: "832x480",
-    fps: 25,
+    fps: 16,
     prompt: "A third-person stern view of a battered grey aluminum work boat pushing through slate-black storm swells, wet wooden deck, warm cabin lamp, orange life rings, salt mist, churning wake, and a pale silver break in the dark horizon.",
     referenceUrl: `${REACTOR_PRESET_BASE_URL}/storm-crossing.jpg`,
     source: "Reactor LingBot preset",
@@ -89,7 +93,7 @@ const reactorPresets = [
     name: "Citadel Approach",
     tone: "accent",
     size: "832x480",
-    fps: 25,
+    fps: 16,
     prompt: "A third-person rear view of a mud-streaked vintage Defender 4x4 driving along a cobblestone-and-sand track through a coral-lit desert canyon toward a cliff-built sandstone citadel, with cacti, red poppies, ochre dunes, and peach sunset haze.",
     referenceUrl: `${REACTOR_PRESET_BASE_URL}/citadel-approach.jpg`,
     source: "Reactor LingBot preset",
@@ -98,7 +102,7 @@ const reactorPresets = [
     name: "Spring Valley",
     tone: "green",
     size: "832x480",
-    fps: 25,
+    fps: 16,
     prompt: "A third-person over-the-shoulder view following a golden retriever through a sunlit meadow with a patterned floral rug, stone bench, open book, potted seedling, cherry blossoms, rounded green oaks, soft hills, and a tender watercolor storybook atmosphere.",
     referenceUrl: `${REACTOR_PRESET_BASE_URL}/spring-valley.jpg`,
     source: "Reactor LingBot preset",
@@ -107,7 +111,7 @@ const reactorPresets = [
     name: "Reef Patrol",
     tone: "blue",
     size: "832x480",
-    fps: 25,
+    fps: 16,
     prompt: "A third-person follow view trailing a large grey reef shark through clear tropical water above a sunlit coral reef, with drifting sediment, shifting sun-ray lattices, clouds of reef fish, a sardine bait ball, and deep blue open-water haze.",
     referenceUrl: `${REACTOR_PRESET_BASE_URL}/reef-patrol.jpg`,
     source: "Reactor LingBot preset",
@@ -116,7 +120,7 @@ const reactorPresets = [
     name: "Alpine Run",
     tone: "blue",
     size: "832x480",
-    fps: 25,
+    fps: 16,
     prompt: "A third-person rear view of a yellow four-person whitewater raft plunging through churning rapids in an alpine canyon, red lifejackets, yellow helmets, wet paddles, dark boulders, conifer slopes, and a snow-capped mountain at the vanishing point.",
     referenceUrl: `${REACTOR_PRESET_BASE_URL}/alpine-run.jpg`,
     source: "Reactor LingBot preset",
@@ -125,7 +129,7 @@ const reactorPresets = [
     name: "Ice Kayak",
     tone: "blue",
     size: "832x480",
-    fps: 25,
+    fps: 16,
     prompt: "A centered elevated third-person game camera behind a lone kayaker in a bright red kayak crossing a calm deep blue alpine lake, scattered ice blocks, mirror reflections, huge snow-covered mountain ranges, vivid sky, and crisp cold wilderness scale.",
     referenceUrl: `${REACTOR_PRESET_BASE_URL}/ice-kayak.jpg`,
     source: "Reactor LingBot preset",
@@ -134,7 +138,7 @@ const reactorPresets = [
     name: "Penguin Colony",
     tone: "green",
     size: "832x480",
-    fps: 25,
+    fps: 16,
     prompt: "A third-person follow view of a single black-and-white penguin waddling across a windswept Antarctic ice shelf toward a distant colony, crystalline snow, small flippers, scattered dark boulders, rocky shoreline, and pale polar sky.",
     referenceUrl: `${REACTOR_PRESET_BASE_URL}/penguin.jpg`,
     source: "Reactor LingBot preset",
@@ -143,7 +147,7 @@ const reactorPresets = [
     name: "Mars Mountain",
     tone: "accent",
     size: "832x480",
-    fps: 25,
+    fps: 16,
     prompt: "A centered third-person rear view of a six-wheeled Martian rover marked XR-7A P-3317 crossing cracked basalt toward a vast volcanic mountain, dusty rose twilight, ochre wheel plumes, weathered grey panels, and a cold alien horizon.",
     referenceUrl: `${REACTOR_PRESET_BASE_URL}/mars-rover.jpg`,
     source: "Reactor LingBot preset",
@@ -152,7 +156,7 @@ const reactorPresets = [
     name: "Seaside Adventurer",
     tone: "green",
     size: "832x480",
-    fps: 25,
+    fps: 16,
     prompt: "A centered third-person anime view behind a young girl on a flower-covered coastal hillside overlooking a sparkling blue bay, rolling green hills, sailboats, dramatic cliffs, a small lighthouse, huge fluffy clouds, and warm hand-painted adventure atmosphere.",
     referenceUrl: `${REACTOR_PRESET_BASE_URL}/anime3.png`,
     source: "Reactor LingBot preset",
@@ -162,7 +166,7 @@ const reactorPresets = [
     name: "Roman Chariot",
     tone: "accent",
     size: "832x480",
-    fps: 25,
+    fps: 16,
     prompt: "A centered elevated third-person game camera behind a Roman warrior riding an ancient chariot pulled by two white horses across an open grassy field, worn stone path, Roman ruins, broken columns, bright midday sky, and epic historical scale.",
     referenceUrl: `${REACTOR_PRESET_BASE_URL}/chariot.png`,
     source: "Reactor LingBot preset",
@@ -172,7 +176,7 @@ const reactorPresets = [
     name: "Asylum Corridor",
     tone: "accent",
     size: "832x480",
-    fps: 25,
+    fps: 16,
     prompt: "A third-person over-the-shoulder traversal behind a man in a wet leather jacket holding a flashlight down a derelict asylum corridor, standing water, torn vinyl strips, rusted ceiling debris, bloodstains, a toppled wheelchair, and a distant cyan-grey doorway glow.",
     referenceUrl: `${REACTOR_PRESET_BASE_URL}/horror.jpg`,
     source: "Reactor LingBot preset",
@@ -180,14 +184,14 @@ const reactorPresets = [
 ];
 
 const examplePresets = [
-  { name: "Dragon Dolly", tone: "green", size: "832x480", fps: 25, prompt: "A stable first-person dolly from the same dragon-rider viewpoint, keeping the black dragon head, horns, wings, jungle canopy, and distant castle consistent; slow forward camera motion, natural parallax, no creature morphing, no scene replacement.", referenceUrl: "https://raw.githubusercontent.com/robbyant/lingbot-world/main/examples/00/image.jpg", source: "LingBot example 00" },
-  { name: "Stone Orbit", tone: "blue", size: "832x480", fps: 25, prompt: "A controlled look-around of the stone monument, overcast daylight, consistent geometry, subtle camera arc.", referenceUrl: "https://raw.githubusercontent.com/robbyant/lingbot-world/main/examples/01/image.jpg", source: "LingBot example 01" },
-  { name: "Urban Tilt", tone: "accent", size: "832x480", fps: 25, prompt: "A cinematic urban wall shot with a slow tilt and slight forward movement, warm backlight, stable architecture.", referenceUrl: "https://raw.githubusercontent.com/robbyant/lingbot-world/main/examples/02/image.jpg", source: "LingBot example 02" },
-  { name: "Lake Scout", tone: "green", size: "832x480", fps: 25, prompt: "A calm scouting shot across the lake, gentle camera drift, crisp mountains, stable reflections.", referenceUrl: "https://raw.githubusercontent.com/robbyant/lingbot-world/main/examples/03/image.jpg", source: "LingBot example 03" },
-  { name: "Ziggy Stardust", tone: "accent", size: "832x480", fps: 25, prompt: "A static night view of a narrow London alley in soft rain, wet pavement reflecting a yellow streetlamp, the blue K. West sign glowing above a doorway, cardboard boxes near the wall, a pale parked car in the distance, and a slender glam-rock figure holding a guitar under the lamp; preserve the album-cover composition, brick storefronts, muted teal and amber colors, subtle rain shimmer only.", referenceUrl: "https://upload.wikimedia.org/wikipedia/en/0/01/ZiggyStardust.jpg", source: "David Bowie Ziggy Stardust artwork", mime: "image/jpeg" },
-  { name: "Plastic Beach", tone: "blue", size: "832x480", fps: 25, prompt: "A static album-cover view matching the reference image: the Plastic Beach island stays centered above a dark midnight-blue ocean, the lighthouse remains on the left with its white reflection path, the starry navy sky stays unchanged, and the large white Plastic Beach title graphic stays in the lower foreground. Keep the original camera height, horizon, waterline, island silhouette, and deep blue color palette fixed; only tiny water shimmer, lighthouse glint, and subtle star twinkle, with no camera descent, no push-in, no orbit, and no turquoise color shift.", referenceUrl: "https://is1-ssl.mzstatic.com/image/thumb/Music/v4/b8/f9/b9/b8f9b9f8-a609-bde2-0302-349436ffc508/825646291038.jpg/600x600bb.jpg", source: "Gorillaz Plastic Beach artwork", mime: "image/jpeg" },
-  { name: "Plastic Ono Band", tone: "green", size: "832x480", fps: 25, prompt: "A quiet sunlit park under a massive tree, a solitary figure resting in the grass, soft summer haze, restrained documentary camera, intimate and naturalistic.", referenceUrl: "https://upload.wikimedia.org/wikipedia/en/a/a4/JLPOBCover.jpg", source: "John Lennon/Plastic Ono Band artwork", mime: "image/jpeg" },
-  { name: "Kid A", tone: "accent", size: "832x480", fps: 25, prompt: "A cold surreal mountain range with sharp icy peaks, black-red storm clouds, glacial light, slow lateral pan, abstract digital texture, uneasy atmospheric scale.", referenceUrl: "https://is1-ssl.mzstatic.com/image/thumb/Music122/v4/bd/8e/13/bd8e1358-b367-a689-cb84-cebd0b067dc4/634904078263.png/600x600bb.jpg", source: "Radiohead Kid A artwork", mime: "image/jpeg" },
+  { name: "Dragon Dolly", tone: "green", size: "832x480", fps: 16, prompt: "A stable first-person dolly from the same dragon-rider viewpoint, keeping the black dragon head, horns, wings, jungle canopy, and distant castle consistent; slow forward camera motion, natural parallax, no creature morphing, no scene replacement.", referenceUrl: "https://raw.githubusercontent.com/robbyant/lingbot-world/main/examples/00/image.jpg", source: "LingBot example 00" },
+  { name: "Stone Orbit", tone: "blue", size: "832x480", fps: 16, prompt: "A controlled look-around of the stone monument, overcast daylight, consistent geometry, subtle camera arc.", referenceUrl: "https://raw.githubusercontent.com/robbyant/lingbot-world/main/examples/01/image.jpg", source: "LingBot example 01" },
+  { name: "Urban Tilt", tone: "accent", size: "832x480", fps: 16, prompt: "A cinematic urban wall shot with a slow tilt and slight forward movement, warm backlight, stable architecture.", referenceUrl: "https://raw.githubusercontent.com/robbyant/lingbot-world/main/examples/02/image.jpg", source: "LingBot example 02" },
+  { name: "Lake Scout", tone: "green", size: "832x480", fps: 16, prompt: "A calm scouting shot across the lake, gentle camera drift, crisp mountains, stable reflections.", referenceUrl: "https://raw.githubusercontent.com/robbyant/lingbot-world/main/examples/03/image.jpg", source: "LingBot example 03" },
+  { name: "Ziggy Stardust", tone: "accent", size: "832x480", fps: 16, prompt: "A static night view of a narrow London alley in soft rain, wet pavement reflecting a yellow streetlamp, the blue K. West sign glowing above a doorway, cardboard boxes near the wall, a pale parked car in the distance, and a slender glam-rock figure holding a guitar under the lamp; preserve the album-cover composition, brick storefronts, muted teal and amber colors, subtle rain shimmer only.", referenceUrl: "https://upload.wikimedia.org/wikipedia/en/0/01/ZiggyStardust.jpg", source: "David Bowie Ziggy Stardust artwork", mime: "image/jpeg" },
+  { name: "Plastic Beach", tone: "blue", size: "832x480", fps: 16, prompt: "A static album-cover view matching the reference image: the Plastic Beach island stays centered above a dark midnight-blue ocean, the lighthouse remains on the left with its white reflection path, the starry navy sky stays unchanged, and the large white Plastic Beach title graphic stays in the lower foreground. Keep the original camera height, horizon, waterline, island silhouette, and deep blue color palette fixed; only tiny water shimmer, lighthouse glint, and subtle star twinkle, with no camera descent, no push-in, no orbit, and no turquoise color shift.", referenceUrl: "https://is1-ssl.mzstatic.com/image/thumb/Music/v4/b8/f9/b9/b8f9b9f8-a609-bde2-0302-349436ffc508/825646291038.jpg/600x600bb.jpg", source: "Gorillaz Plastic Beach artwork", mime: "image/jpeg" },
+  { name: "Plastic Ono Band", tone: "green", size: "832x480", fps: 16, prompt: "A quiet sunlit park under a massive tree, a solitary figure resting in the grass, soft summer haze, restrained documentary camera, intimate and naturalistic.", referenceUrl: "https://upload.wikimedia.org/wikipedia/en/a/a4/JLPOBCover.jpg", source: "John Lennon/Plastic Ono Band artwork", mime: "image/jpeg" },
+  { name: "Kid A", tone: "accent", size: "832x480", fps: 16, prompt: "A cold surreal mountain range with sharp icy peaks, black-red storm clouds, glacial light, slow lateral pan, abstract digital texture, uneasy atmospheric scale.", referenceUrl: "https://is1-ssl.mzstatic.com/image/thumb/Music122/v4/bd/8e/13/bd8e1358-b367-a689-cb84-cebd0b067dc4/634904078263.png/600x600bb.jpg", source: "Radiohead Kid A artwork", mime: "image/jpeg" },
 ];
 
 const presets = [
@@ -205,6 +209,7 @@ let frames = 0;
 let bytes = 0;
 let clearQueueOnClose = false;
 let fpsSamples = [];
+let renderLoopSamples = [];
 let decodeQueue = [];
 let queuedDecodeFrames = 0;
 let decodeInProgress = false;
@@ -238,6 +243,18 @@ let recordingSaving = false;
 let recordingEncodeChain = Promise.resolve();
 const decodeRequests = new Map();
 let controlStateController = null;
+let lastSentEventId = 0;
+let lastSampledEventId = 0;
+let currentTrace = null;
+let traceInitSent = false;
+let renderedTraceChunks = new Set();
+const traceTopologyApi = window.SGLangRealtimeTraceTopology || {};
+const traceTopology = traceTopologyApi.createRealtimeTraceTopology
+  ? traceTopologyApi.createRealtimeTraceTopology({ maxEvents: 220 })
+  : null;
+const formatTraceDuration = traceTopologyApi.formatTraceDuration || formatMs;
+let activeWorkspaceView = "preview";
+let traceRenderFrame = 0;
 
 const stage = document.querySelector(".stage");
 const previewFrame = document.querySelector(".preview-frame");
@@ -249,6 +266,17 @@ const recordingCanvas = document.createElement("canvas");
 const recordingCtx = recordingCanvas.getContext("2d", { alpha: false });
 const playbackController = new RealtimePlaybackController({
   targetFps: DEFAULT_TARGET_FPS,
+  holdForTargetLead: true,
+  targetLeadChunkRatio: 0.34,
+  minTargetLeadMs: 220,
+  maxTargetLeadMs: 420,
+  startLeadChunkRatio: 0.28,
+  minStartLeadMs: 160,
+  resumeLeadChunkRatio: 0.3,
+  minResumeLeadMs: 140,
+  maxResumeLeadMs: 320,
+  maxDeliveryLeadBoostMs: 220,
+  deliveryStallExpectedMultiplier: 1.12,
 });
 
 function setStatus(text, kind = "") {
@@ -264,9 +292,290 @@ function setPreviewState(state) {
 
 function addHistory(text) {
   const item = document.createElement("span");
-  item.textContent = text;
+  const now = new Date();
+  const ms = String(now.getMilliseconds()).padStart(3, "0");
+  item.textContent = `${now.toLocaleTimeString("zh-CN", { hour12: false })}.${ms} ${text}`;
   $("historyList").prepend(item);
   while ($("historyList").children.length > 8) $("historyList").lastChild.remove();
+}
+
+function createClientTrace() {
+  return {
+    traceId: createTraceId(),
+    seq: 0,
+    createdPerfMs: performance.now(),
+    createdEpochMs: Date.now(),
+    events: [],
+  };
+}
+
+function createTraceId() {
+  if (crypto.randomUUID) return crypto.randomUUID().replaceAll("-", "");
+  const random = crypto.getRandomValues(new Uint32Array(4));
+  return Array.from(random, (part) => part.toString(16).padStart(8, "0")).join("");
+}
+
+function currentTracePayload() {
+  if (!currentTrace) return undefined;
+  return {
+    trace_id: currentTrace.traceId,
+    time_origin_ms: performance.timeOrigin,
+    created_perf_ms: roundTraceNumber(currentTrace.createdPerfMs),
+    created_epoch_ms: currentTrace.createdEpochMs,
+    user_agent: navigator.userAgent,
+    location: window.location.href,
+    events: currentTrace.events.slice(-32),
+  };
+}
+
+function traceWebSocketUrl(baseUrl) {
+  if (!currentTrace) return baseUrl;
+  try {
+    const url = new URL(baseUrl, window.location.href);
+    url.searchParams.set("trace_id", currentTrace.traceId);
+    return url.toString();
+  } catch {
+    const separator = baseUrl.includes("?") ? "&" : "?";
+    return `${baseUrl}${separator}trace_id=${encodeURIComponent(currentTrace.traceId)}`;
+  }
+}
+
+function markClientTrace(name, fields = {}, options = {}) {
+  if (!currentTrace) return null;
+  const event = {
+    name,
+    seq: ++currentTrace.seq,
+    trace_id: currentTrace.traceId,
+    client_perf_ms: roundTraceNumber(performance.now()),
+    client_epoch_ms: Date.now(),
+    ...fields,
+  };
+  currentTrace.events.push(event);
+  if (currentTrace.events.length > 64) currentTrace.events.shift();
+  console.debug("realtime_trace", event);
+  recordTraceTopologyEvent(event);
+  if (options.send !== false) sendClientTrace(event);
+  return event;
+}
+
+function sendClientTrace(event) {
+  if (!traceInitSent || !currentTrace || !ws || ws.readyState !== WebSocket.OPEN) {
+    return;
+  }
+  try {
+    ws.send(pack({
+      type: "event",
+      kind: "client_trace",
+      trace_id: currentTrace.traceId,
+      payload: event,
+    }));
+  } catch (error) {
+    console.debug("realtime_trace send failed", error);
+  }
+}
+
+function roundTraceNumber(value) {
+  return Math.round(Number(value || 0) * 1000) / 1000;
+}
+
+function recordTraceTopologyEvent(event, receivedPerfMs = performance.now()) {
+  if (!traceTopology || !event) return;
+  traceTopology.addEvent(event.trace ? event.trace : event, receivedPerfMs);
+  renderTraceTopology();
+}
+
+function resetTraceTopology(traceId = "") {
+  traceTopology?.reset(traceId);
+  renderTraceTopology();
+}
+
+function renderTraceTopology() {
+  if (traceRenderFrame) return;
+  traceRenderFrame = requestAnimationFrame(() => {
+    traceRenderFrame = 0;
+    renderTraceTopologyNow();
+  });
+}
+
+function renderTraceTopologyNow() {
+  if (!traceTopology) return;
+  const summary = traceTopology.summary();
+  updateTraceSummary(summary);
+  if (activeWorkspaceView !== "trace") return;
+  renderTraceSvg(summary);
+  renderTraceEventList(summary.recentEvents);
+}
+
+function updateTraceSummary(summary) {
+  $("traceIdText").textContent = shortTraceId(summary.traceId);
+  $("traceEventCountText").textContent = String(summary.eventCount);
+  const chunk = summary.latestChunk;
+  $("traceChunkText").textContent = chunk ? `#${chunk.chunkIndex}` : "-";
+  $("traceChunkTotalText").textContent = chunk ? formatTraceDuration(chunk.chunkTotalMs) : "-";
+  $("traceSchedulerText").textContent = chunk ? formatTraceDuration(chunk.schedulerForwardMs) : "-";
+  $("traceVaeEncodeText").textContent = chunk ? formatTraceDuration(chunk.vaeEncodeMs) : "-";
+  $("traceDenoiseText").textContent = chunk ? formatTraceDuration(chunk.denoiseMs) : "-";
+  const vaeDecodeMs = chunk
+    ? sumTraceNumbers(chunk.vaeDecodeMs, chunk.postDecodeMs)
+    : null;
+  $("traceVaeDecodeText").textContent = formatTraceDuration(vaeDecodeMs);
+  $("traceAsyncEstimateText").textContent = formatAsyncEstimate(summary.asyncEstimate);
+}
+
+function renderTraceSvg(summary) {
+  const container = $("traceTopology");
+  const nodes = summary.nodes || [];
+  if (!nodes.length || summary.eventCount === 0) {
+    container.innerHTML = `<svg viewBox="0 0 1180 240" role="img" aria-label="Trace topology"><text class="trace-empty" x="36" y="122">Trace events will appear after Generate starts.</text></svg>`;
+    return;
+  }
+
+  const width = 1180;
+  const height = 240;
+  const marginX = 28;
+  const nodeW = nodes.length > 8 ? 112 : 124;
+  const nodeH = 74;
+  const gap = (width - marginX * 2 - nodeW * nodes.length) / Math.max(1, nodes.length - 1);
+  const nodeY = 72;
+  const positions = new Map();
+  nodes.forEach((node, index) => {
+    positions.set(node.id, {
+      x: marginX + index * (nodeW + gap),
+      y: nodeY,
+    });
+  });
+
+  const edges = (summary.edges || []).map((edge) => {
+    const from = positions.get(edge.from);
+    const to = positions.get(edge.to);
+    if (!from || !to) return "";
+    const x1 = from.x + nodeW;
+    const x2 = to.x;
+    const y = nodeY + nodeH / 2;
+    return `
+      <line class="trace-edge-line" x1="${x1}" y1="${y}" x2="${x2 - 8}" y2="${y}" />
+      <text class="trace-edge-label" x="${(x1 + x2) / 2}" y="${y - 10}" text-anchor="middle">${escapeHtml(edge.label || "-")}</text>
+    `;
+  }).join("");
+
+  const nodeMarkup = nodes.map((node) => {
+    const pos = positions.get(node.id);
+    return `
+      <g class="trace-node ${node.status === "active" ? "is-active" : ""}" transform="translate(${pos.x} ${pos.y})">
+        <rect width="${nodeW}" height="${nodeH}" rx="8"></rect>
+        <text class="trace-node-title" x="12" y="24">${escapeHtml(node.title)}</text>
+        <text class="trace-node-subtitle" x="12" y="43">${escapeHtml(node.subtitle || "")}</text>
+        <text class="trace-node-metric" x="12" y="62">${escapeHtml(node.metric || "-")}</text>
+      </g>
+    `;
+  }).join("");
+
+  container.innerHTML = `
+    <svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Realtime trace topology">
+      <defs>
+        <marker id="traceArrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="#8c9288"></path>
+        </marker>
+      </defs>
+      ${edges}
+      ${nodeMarkup}
+    </svg>
+  `;
+}
+
+function renderTraceEventList(events) {
+  const list = $("traceEventList");
+  list.replaceChildren();
+  for (const event of [...events].reverse()) {
+    const item = document.createElement("div");
+    item.className = "trace-event-item";
+    const name = document.createElement("b");
+    name.textContent = event.event || "-";
+    const time = document.createElement("span");
+    time.textContent = traceEventTimeLabel(event);
+    const details = document.createElement("code");
+    details.textContent = traceEventDetails(event);
+    item.append(name, time, details);
+    list.appendChild(item);
+  }
+}
+
+function traceEventTimeLabel(event) {
+  if (Number.isFinite(Number(event.server_elapsed_ms))) {
+    return `server +${formatTraceDuration(event.server_elapsed_ms)}`;
+  }
+  if (Number.isFinite(Number(event.client_perf_ms)) && currentTrace) {
+    return `client +${formatTraceDuration(Number(event.client_perf_ms) - currentTrace.createdPerfMs)}`;
+  }
+  return "-";
+}
+
+function traceEventDetails(event) {
+  const parts = [];
+  if (event.chunk_index !== null && event.chunk_index !== undefined) parts.push(`chunk=${event.chunk_index}`);
+  if (event.event_id !== null && event.event_id !== undefined) parts.push(`event=${event.event_id}`);
+  if (Number.isFinite(Number(event.duration_ms))) parts.push(`duration=${formatTraceDuration(event.duration_ms)}`);
+  if (Number.isFinite(Number(event.cuda_ms))) parts.push(`cuda=${formatTraceDuration(event.cuda_ms)}`);
+  if (Number.isFinite(Number(event.chunk_total_ms))) parts.push(`chunk_total=${formatTraceDuration(event.chunk_total_ms)}`);
+  if (Number.isFinite(Number(event.display_lag_ms))) parts.push(`display_lag=${formatTraceDuration(event.display_lag_ms)}`);
+  if (event.content_type) parts.push(shortPayloadMode(event.content_type));
+  return parts.join(" · ") || "-";
+}
+
+function formatAsyncEstimate(estimate) {
+  if (!estimate) return "-";
+  return `${formatTraceDuration(estimate.savedMs)} saved · ${estimate.speedup.toFixed(2)}x`;
+}
+
+function sumTraceNumbers(...values) {
+  let total = 0;
+  let seen = false;
+  for (const value of values) {
+    if (!Number.isFinite(Number(value))) continue;
+    total += Number(value);
+    seen = true;
+  }
+  return seen ? total : null;
+}
+
+function shortTraceId(traceId) {
+  const value = String(traceId || "");
+  if (!value) return "-";
+  if (value.length <= 12) return value;
+  return `${value.slice(0, 8)}...${value.slice(-4)}`;
+}
+
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;");
+}
+
+function setWorkspaceView(view) {
+  activeWorkspaceView = view === "trace" ? "trace" : "preview";
+  document.querySelectorAll("[data-workspace-view]").forEach((button) => {
+    const active = button.dataset.workspaceView === activeWorkspaceView;
+    button.classList.toggle("is-active", active);
+    button.setAttribute("aria-selected", active ? "true" : "false");
+  });
+  document.querySelectorAll(".workspace-pane").forEach((pane) => {
+    const active = pane.id === `${activeWorkspaceView}Pane`;
+    pane.classList.toggle("is-active", active);
+    pane.hidden = !active;
+  });
+  if (activeWorkspaceView === "trace") renderTraceTopologyNow();
+}
+
+function updateControlDebugText() {
+  const activeActions = controlStateController
+    ? Array.from(controlStateController.activeActions).sort().join("+")
+    : "";
+  const activeText = activeActions || "idle";
+  const sentText = lastSentEventId ? `sent #${lastSentEventId}` : "sent -";
+  const sampledText = lastSampledEventId ? `sampled #${lastSampledEventId}` : "sampled -";
+  $("actionStateText").textContent = `${activeText} · ${sentText} · ${sampledText}`;
 }
 
 function drawIdle() {
@@ -298,12 +607,18 @@ function resetStreamStats() {
   lastDecodeDropCount = 0;
   encodedDecodeErrors = 0;
   renderedPreviewFrames = 0;
+  lastSentEventId = 0;
+  lastSampledEventId = 0;
+  traceInitSent = false;
+  renderedTraceChunks = new Set();
+  resetTraceTopology("");
   controlStateController?.reset({ sendRelease: false });
   resetDecoderState();
   updateStats();
   $("renderFps").textContent = "0";
   $("latencyText").textContent = "-";
   $("stageLatencyText").textContent = "-";
+  $("actionStateText").textContent = "-";
   $("decodeText").textContent = "-";
   $("displayLagText").textContent = "-";
   $("serverSendText").textContent = "-";
@@ -362,6 +677,8 @@ async function decodeFrameBatch(header, data) {
     return items.map((item) => ({
       ...item,
       receivedAt: header.__received_at,
+      eventId: header.event_id,
+      traceId: header.trace_id,
       decodedAt,
       decodeMs: lastDecodeMs,
     }));
@@ -375,6 +692,8 @@ async function decodeFrameBatch(header, data) {
     return items.map((item) => ({
       ...item,
       receivedAt: header.__received_at,
+      eventId: header.event_id,
+      traceId: header.trace_id,
       decodedAt,
       decodeMs: lastDecodeMs,
     }));
@@ -398,6 +717,8 @@ async function decodeFrameBatch(header, data) {
               : new ImageData(new Uint8ClampedArray(frame), message.width, message.height),
             chunk: message.chunk,
             receivedAt: header.__received_at,
+            eventId: header.event_id,
+            traceId: header.trace_id,
             decodedAt,
             decodeMs: lastDecodeMs,
           })));
@@ -422,6 +743,8 @@ async function decodeFrameBatch(header, data) {
       return items.map((item) => ({
         ...item,
         receivedAt: header.__received_at,
+        eventId: header.event_id,
+        traceId: header.trace_id,
         decodedAt,
         decodeMs: lastDecodeMs,
       }));
@@ -1253,7 +1576,7 @@ function drawFrame(image, { close = true, markRendered = true } = {}) {
     canvas.height = sourceHeight;
   }
   ctx.imageSmoothingEnabled = true;
-  ctx.imageSmoothingQuality = "high";
+  ctx.imageSmoothingQuality = "medium";
   ctx.drawImage(drawSource, 0, 0, sourceWidth, sourceHeight);
   if (markRendered) renderedPreviewFrames += 1;
   setPreviewState("live");
@@ -1261,6 +1584,8 @@ function drawFrame(image, { close = true, markRendered = true } = {}) {
 }
 
 function renderLoop(now) {
+  renderLoopSamples.push(now);
+  renderLoopSamples = renderLoopSamples.filter((t) => now - t < 1000);
   const decision = playbackController.render(now, {
     hasPendingInput: hasPendingPlaybackInput(),
   });
@@ -1274,19 +1599,62 @@ function renderLoop(now) {
     $("renderFps").textContent = renderedFps;
     $("chunkText").textContent = `chunk ${item.chunk}`;
     lastDisplayLagMs = now - (item.receivedAt || now);
+    if (!renderedTraceChunks.has(item.chunk)) {
+      renderedTraceChunks.add(item.chunk);
+      const playback = playbackController.snapshot();
+      markClientTrace("client.chunk_first_rendered", {
+        chunk_index: Number(item.chunk || 0),
+        event_id: Number(item.eventId || 0),
+        display_lag_ms: roundTraceNumber(lastDisplayLagMs),
+        decode_ms: roundTraceNumber(item.decodeMs || lastDecodeMs),
+        queue_frames: playback.queueFrames,
+        buffer_ms: roundTraceNumber(playback.bufferMs),
+      });
+    }
     $("decodeText").textContent = `${Math.round(item.decodeMs || lastDecodeMs)} ms`;
     $("displayLagText").textContent = `${(lastDisplayLagMs / 1000).toFixed(1)} s`;
     updateStats();
   } else if (decision.action === "hold") {
     updateStats();
   }
-  requestAnimationFrame(renderLoop);
+  scheduleRenderLoop();
+}
+
+function scheduleRenderLoop() {
+  const timerFps = Math.min(
+    MAX_RENDER_TIMER_FPS,
+    Math.max(MIN_RENDER_TIMER_FPS, previewPlaybackTargetFps() * 2),
+  );
+  window.setTimeout(() => renderLoop(performance.now()), 1000 / timerFps);
 }
 
 async function readFirstFrame() {
   const file = $("firstFrame").files[0];
   if (file) return new Uint8Array(await file.arrayBuffer());
-  return selectedReferenceBytes || selectedReferenceUrl || undefined;
+  if (selectedReferenceBytes) return selectedReferenceBytes;
+  if (selectedReferenceUrl) {
+    selectedReferenceBytes = await fetchReferenceBytes(selectedReferenceUrl);
+    return selectedReferenceBytes;
+  }
+  return undefined;
+}
+
+async function fetchReferenceBytes(url) {
+  try {
+    const response = await fetch(url, { cache: "force-cache", mode: "cors" });
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    if (!bytes.byteLength) {
+      throw new Error("empty image");
+    }
+    return bytes;
+  } catch (error) {
+    throw new Error(
+      `reference image fetch failed: ${error.message || String(error)}`
+    );
+  }
 }
 
 function drawReferencePreviewFromImageSource(src, label) {
@@ -1360,7 +1728,7 @@ function abortCurrentSession(reason = "session closed by client", {
   setStatus(expectedClose ? "Closing" : "Aborting");
   if (!renderedPreviewFrames) setPreviewState("idle");
   addHistory(reason);
-  socket.close(expectedClose ? 1000 : 1011, reason.slice(0, 120));
+  socket.close(expectedClose ? 1000 : CLIENT_ERROR_CLOSE_CODE, reason.slice(0, 120));
   return socket;
 }
 
@@ -1399,6 +1767,12 @@ async function connect() {
       await waitForSocketClose(oldSocket);
     }
     resetStreamStats();
+    currentTrace = createClientTrace();
+    resetTraceTopology(currentTrace.traceId);
+    markClientTrace("client.generate_clicked", {
+      fps: Number($("fps").value || DEFAULT_TARGET_FPS),
+      transport: $("transportFormat").value || "delta",
+    }, { send: false });
     const epoch = ++streamEpoch;
     if (!$("firstFrame").files[0] && !selectedReferenceBytes && !selectedReferenceUrl) {
       await setPresetReference(presets[0]);
@@ -1416,6 +1790,8 @@ async function connect() {
     const superResolutionParams = readSuperResolutionParams();
     const init = compact({
       type: "init",
+      trace_id: currentTrace.traceId,
+      client_trace: currentTracePayload(),
       model: $("model").value,
       prompt: $("prompt").value,
       size: $("size").value,
@@ -1435,7 +1811,10 @@ async function connect() {
     document.activeElement?.blur?.();
     canvas.tabIndex = 0;
     canvas.focus();
-    const socket = new WebSocket($("serverUrl").value);
+    const socket = new WebSocket(traceWebSocketUrl($("serverUrl").value));
+    markClientTrace("client.ws_constructed", {
+      ws_buffered_amount: socket.bufferedAmount,
+    }, { send: false });
     ws = socket;
     socket.binaryType = "arraybuffer";
     socketHadError = false;
@@ -1443,7 +1822,16 @@ async function connect() {
     socketServerError = "";
     socket.onopen = () => {
       if (epoch !== streamEpoch) return;
+      markClientTrace("client.ws_open", {
+        ws_buffered_amount: socket.bufferedAmount,
+      }, { send: false });
+      const initSentEvent = markClientTrace("client.init_sent", {}, { send: false });
+      init.client_trace = currentTracePayload();
+      const initPayload = pack(init);
+      if (initSentEvent) initSentEvent.payload_bytes = initPayload.byteLength;
+      init.client_trace = currentTracePayload();
       socket.send(pack(init));
+      traceInitSent = true;
       setStatus("Starting", "live");
       addHistory(
         `session started with ${selectedReferenceLabel || "uploaded reference"}`
@@ -1451,6 +1839,11 @@ async function connect() {
     };
     socket.onclose = (event) => {
       if (epoch !== streamEpoch) return;
+      markClientTrace("client.ws_closed", {
+        code: event.code,
+        reason: event.reason || "",
+      }, { send: false });
+      traceInitSent = false;
       if (ws === socket) ws = null;
       $("connectBtn").disabled = false;
       if (clearQueueOnClose) {
@@ -1476,6 +1869,7 @@ async function connect() {
     };
     socket.onerror = () => {
       if (epoch !== streamEpoch) return;
+      markClientTrace("client.ws_error", {}, { send: false });
       if (!socketCloseExpected) {
         socketHadError = true;
         $("connectBtn").disabled = false;
@@ -1509,21 +1903,50 @@ function handleReceiveError(error, epoch) {
 
 function receive(data, epoch) {
   if (!pendingHeader) {
+    const receivedAt = performance.now();
     const message = unpack(new Uint8Array(data));
-    message.__received_at = performance.now();
+    message.__received_at = receivedAt;
     if (message.type === "error") {
+      markClientTrace("client.server_error_received", {
+        payload_bytes: data.byteLength || data.size || 0,
+      });
       socketServerError = message.content || "unknown";
       setStatus(socketServerError, "error");
       addHistory(`server error: ${socketServerError}`);
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        socketCloseExpected = true;
+        ws.close(1000, socketServerError.slice(0, 120));
+      }
+      $("connectBtn").disabled = false;
+      if (!renderedPreviewFrames) setPreviewState("idle");
       return;
     }
     if (message.type === "chunk_stats") {
+      markClientTrace("client.chunk_stats_received", {
+        chunk_index: Number(message.chunk_index || 0),
+        event_id: Number(message.event_id || 0),
+        num_frames: Number(message.num_frames || 0),
+        content_type: message.content_type || "",
+        payload_bytes: data.byteLength || data.size || 0,
+      });
+      recordTraceTopologyEvent({ event: "server.chunk_complete", ...message }, receivedAt);
       updateServerChunkStats(message);
+      return;
+    }
+    if (message.type === "trace_event") {
+      recordTraceTopologyEvent(message.trace || message, receivedAt);
       return;
     }
     if (message.type === "frame_batch") {
       const payload = message.payload;
       delete message.payload;
+      markClientTrace("client.frame_batch_received", {
+        chunk_index: Number(message.chunk_index || 0),
+        event_id: Number(message.event_id || 0),
+        content_type: message.content_type || "",
+        num_frames: Number(message.num_frames || 0),
+        payload_bytes: payload?.byteLength || payload?.length || 0,
+      });
       enqueueDecodeBatch(message, payload, epoch);
       if (!renderedPreviewFrames) setStatus("Receiving", "live");
       return;
@@ -1534,6 +1957,14 @@ function receive(data, epoch) {
   }
   const header = pendingHeader;
   pendingHeader = null;
+  header.__received_at = performance.now();
+  markClientTrace("client.frame_batch_received", {
+    chunk_index: Number(header.chunk_index || 0),
+    event_id: Number(header.event_id || 0),
+    content_type: header.content_type || "",
+    num_frames: Number(header.num_frames || 0),
+    payload_bytes: data.byteLength || data.size || 0,
+  });
   enqueueDecodeBatch(header, data, epoch);
 }
 
@@ -1549,6 +1980,14 @@ async function decodeAndEnqueueFrameBatch(header, data, epoch) {
     handleEncodedPreviewDecodeError(error, header, data, payloadBytes);
     return;
   }
+  markClientTrace("client.decode_batch_done", {
+    chunk_index: Number(header.chunk_index || 0),
+    event_id: Number(header.event_id || 0),
+    content_type: header.content_type || "",
+    num_frames: decodedFrames.length,
+    payload_bytes: payloadBytes,
+    decode_ms: roundTraceNumber(lastDecodeMs),
+  });
   if (epoch !== streamEpoch) {
     for (const item of decodedFrames) item.image?.close?.();
     return;
@@ -1582,6 +2021,8 @@ function updateServerChunkStats(stats) {
   const targetFps = previewPlaybackTargetFps();
   const theoreticalFps = chunkTotal > 0 ? numFrames / chunkTotal : 0;
   const playback = playbackController.observeServerStats(stats, performance.now());
+  lastSampledEventId = Number(stats.event_id || 0);
+  updateControlDebugText();
   const realtimeRatio = targetFps > 0 ? theoreticalFps / targetFps : 0;
   const isWarmupChunk =
     chunkIndex === 0 && theoreticalFps > 0 && theoreticalFps < targetFps * 0.8;
@@ -1604,7 +2045,24 @@ function sendEvent(kind, payload, historyText = null) {
     return null;
   }
   const eventId = nextEventId++;
-  ws.send(pack({ type: "event", kind, payload, event_id: eventId }));
+  const clientSentPerfMs = performance.now();
+  const clientSentEpochMs = Date.now();
+  ws.send(pack({
+    type: "event",
+    kind,
+    payload,
+    event_id: eventId,
+    trace_id: currentTrace?.traceId,
+    client_sent_perf_ms: roundTraceNumber(clientSentPerfMs),
+    client_sent_epoch_ms: clientSentEpochMs,
+  }));
+  markClientTrace("client.event_sent", {
+    kind,
+    event_id: eventId,
+    ws_buffered_amount: ws.bufferedAmount,
+  });
+  lastSentEventId = eventId;
+  updateControlDebugText();
   if (kind === "camera_actions" || kind === "prompt") {
     playbackController.noteInputEvent(eventId, performance.now(), {
       cutoverMode: cameraActionHasActiveMotion(payload) || kind === "prompt" ? "motion" : "settle",
@@ -1696,6 +2154,24 @@ function modelsUrlFromServerUrl(serverUrl) {
   return url.toString();
 }
 
+function realtimeServerUrlFromLocation() {
+  if (!window.location.host) return "";
+  if (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1") {
+    return "";
+  }
+  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+  return `${protocol}//${window.location.host}/v1/realtime_video/generate`;
+}
+
+function applyDefaultServerUrl() {
+  const current = $("serverUrl").value.trim();
+  const locationServerUrl = realtimeServerUrlFromLocation();
+  if (!locationServerUrl) return;
+  if (current.includes("127.0.0.1") || current.includes("localhost")) {
+    $("serverUrl").value = locationServerUrl;
+  }
+}
+
 function firstServedModelInfo(payload) {
   if (Array.isArray(payload?.data) && payload.data.length > 0) return payload.data[0];
   if (payload && typeof payload === "object") return payload;
@@ -1768,12 +2244,15 @@ function readPreviewTransportParams() {
   if (!outputFormat) return {};
   const params = {
     realtime_output_format: outputFormat,
-    realtime_output_pacing: true,
+    realtime_output_pacing: false,
   };
   if (outputFormat === "webp" || outputFormat === "jpeg") {
     params.output_compression = outputQuality;
+    const baseSize = parseSizeValue($("size").value);
+    if (baseSize?.width && baseSize.width > DEFAULT_PREVIEW_MAX_WIDTH) {
+      params.realtime_preview_max_width = DEFAULT_PREVIEW_MAX_WIDTH;
+    }
     if ($("superResolution").checked && $("frameInterpolation").checked) {
-      const baseSize = parseSizeValue($("size").value);
       if (baseSize?.width) params.realtime_preview_max_width = baseSize.width;
     }
   }
@@ -1912,6 +2391,7 @@ async function applyQueryParams() {
   const params = new URLSearchParams(window.location.search);
   const server = params.get("server");
   if (server) $("serverUrl").value = server;
+  else applyDefaultServerUrl();
   const model = params.get("model");
   if (model) $("model").value = model;
   $("transportFormat").value = params.get("transport") || DEFAULT_PREVIEW_OUTPUT_FORMAT;
@@ -1990,6 +2470,13 @@ function pack(value) {
 function unpack(buf) {
   let i = 0;
   const text = new TextDecoder();
+  const readU32 = () => (
+    (buf[i++] * 16777216) + (buf[i++] << 16) + (buf[i++] << 8) + buf[i++]
+  );
+  const readI32 = () => {
+    const value = readU32();
+    return value > 0x7fffffff ? value - 0x100000000 : value;
+  };
   const read = () => {
     const b = buf[i++];
     if (b <= 0x7f) return b;
@@ -2000,7 +2487,12 @@ function unpack(buf) {
     if (b === 0xc2 || b === 0xc3) return b === 0xc3;
     if (b === 0xcc) return buf[i++];
     if (b === 0xcd) return (buf[i++] << 8) | buf[i++];
-    if (b === 0xce) return (buf[i++] * 16777216) + (buf[i++] << 16) + (buf[i++] << 8) + buf[i++];
+    if (b === 0xce) return readU32();
+    if (b === 0xcf) {
+      const hi = readU32();
+      const lo = readU32();
+      return hi * 4294967296 + lo;
+    }
     if (b === 0xca) {
       const value = new DataView(buf.buffer, buf.byteOffset + i, 4).getFloat32(0);
       i += 4;
@@ -2014,15 +2506,17 @@ function unpack(buf) {
     if (b === 0xc4) return readBin(buf[i++]);
     if (b === 0xc5) return readBin((buf[i++] << 8) | buf[i++]);
     if (b === 0xc6) {
-      return readBin(
-        (buf[i++] * 16777216) + (buf[i++] << 16) + (buf[i++] << 8) + buf[i++],
-      );
+      return readBin(readU32());
+    }
+    if (b === 0xd2) return readI32();
+    if (b === 0xd3) {
+      const hi = readI32();
+      const lo = readU32();
+      return hi * 4294967296 + lo;
     }
     if (b === 0xdc) return Array.from({ length: (buf[i++] << 8) | buf[i++] }, read);
     if (b === 0xdd) {
-      return Array.from({
-        length: (buf[i++] * 16777216) + (buf[i++] << 16) + (buf[i++] << 8) + buf[i++],
-      }, read);
+      return Array.from({ length: readU32() }, read);
     }
     if (b === 0xd9) return readStr(buf[i++]);
     if (b === 0xda) return readStr((buf[i++] << 8) | buf[i++]);
@@ -2052,7 +2546,8 @@ applyQueryParams()
     applyPresetForModel: !query.model && !query.preset,
   }))
   .catch(showError);
-requestAnimationFrame(renderLoop);
+scheduleRenderLoop();
+renderTraceTopology();
 updateRecordButton();
 $("connectBtn").onclick = connect;
 $("stopBtn").onclick = () => closeSession();
@@ -2076,8 +2571,12 @@ $("frameInterpolation").addEventListener("change", () => {
 });
 $("superResolution").addEventListener("change", tunePreviewQualityForPostprocess);
 $("previewScale").addEventListener("input", () => setPreviewScale($("previewScale").value));
+canvas.addEventListener("pointerdown", () => canvas.focus({ preventScroll: true }));
 $("serverUrl").addEventListener("change", () => {
   queryServerModelInfo({ applyPresetForModel: true }).catch(showError);
+});
+document.querySelectorAll("[data-workspace-view]").forEach((button) => {
+  button.addEventListener("click", () => setWorkspaceView(button.dataset.workspaceView));
 });
 document.querySelectorAll("button").forEach((btn) => {
   btn.addEventListener("pointerdown", () => btn.classList.add("is-pressed"));
@@ -2200,6 +2699,7 @@ class ControlStateController {
     CONTROL_ACTION_META_KEYS.forEach((action) => {
       setControlButtonActive(action, this.activeActions.has(action));
     });
+    updateControlDebugText();
   }
 
   sameActions(left, right) {
@@ -2215,6 +2715,7 @@ class ControlStateController {
 
 const CONTROL_ACTION_META_KEYS = Object.keys(CONTROL_ACTION_META);
 controlStateController = new ControlStateController();
+updateControlDebugText();
 
 document.addEventListener("keydown", (event) => {
   if (isTypingTarget(event.target)) return;
@@ -2241,4 +2742,33 @@ document.addEventListener("visibilitychange", () => {
   if (document.hidden) {
     controlStateController.releaseAll();
   }
+});
+
+window.__sglangRealtimeDebug = () => ({
+  activeActions: controlStateController
+    ? Array.from(controlStateController.activeActions).sort()
+    : [],
+  bytes,
+  decodeInProgress,
+  decodeQueueLength: decodeQueue.length,
+  droppedDecodeFrames,
+  frames,
+  lastDecodeMs,
+  lastDisplayLagMs,
+  lastSampledEventId,
+  lastSentEventId,
+  pendingDecodeBatches,
+  pendingHeader: Boolean(pendingHeader),
+  playback: playbackController.snapshot(),
+  renderedFps: fpsSamples.length,
+  renderedPreviewFrames,
+  renderLoopFps: renderLoopSamples.length,
+  socketBufferedAmount: ws ? ws.bufferedAmount : 0,
+  socketCloseExpected,
+  socketHadError,
+  socketReadyState: ws ? ws.readyState : null,
+  socketServerError,
+  status: $("statusText").textContent,
+  streamEpoch,
+  visibilityState: document.visibilityState,
 });

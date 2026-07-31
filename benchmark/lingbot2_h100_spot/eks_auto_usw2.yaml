@@ -1,0 +1,65 @@
+apiVersion: eks.amazonaws.com/v1
+kind: NodeClass
+metadata:
+  name: codex-lingbot2-h100-perf-auto
+  labels:
+    seedleap.ai/owner: chenshengdong
+    seedleap.ai/task: lingbot2-h100-perf
+spec:
+  ephemeralStorage:
+    iops: 3000
+    size: 400Gi
+    throughput: 125
+  networkPolicy: DefaultAllow
+  networkPolicyEventLogs: Disabled
+  role: AmazonEKSAutoNodeRole
+  securityGroupSelectorTerms:
+    - id: sg-01dc86c32f0be6c0c
+  snatPolicy: Random
+  subnetSelectorTerms:
+    - id: subnet-0b6a784859ea30d13
+    - id: subnet-02296f99e90de96b2
+---
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: codex-lingbot2-h100-perf
+  labels:
+    seedleap.ai/owner: chenshengdong
+    seedleap.ai/task: lingbot2-h100-perf
+spec:
+  disruption:
+    budgets:
+      - nodes: "0"
+        reasons: [Empty, Underutilized]
+    consolidateAfter: 10m
+    consolidationPolicy: WhenEmpty
+  limits:
+    cpu: "192"
+    nvidia.com/gpu: "8"
+  template:
+    metadata:
+      labels:
+        seedleap.ai/capacity-pool: codex-lingbot2-h100-perf
+        seedleap.ai/owner: chenshengdong
+        seedleap.ai/task: lingbot2-h100-perf
+    spec:
+      expireAfter: 8h
+      nodeClassRef:
+        group: eks.amazonaws.com
+        kind: NodeClass
+        name: codex-lingbot2-h100-perf-auto
+      requirements:
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: [on-demand]
+        - key: node.kubernetes.io/instance-type
+          operator: In
+          values: [p5.48xlarge]
+        - key: topology.kubernetes.io/zone
+          operator: In
+          values: [us-west-2b]
+        - key: kubernetes.io/arch
+          operator: In
+          values: [amd64]
+      terminationGracePeriod: 5m

@@ -1,0 +1,21 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ReadInputFrames",
+      "Effect": "Allow",
+      "Action": ["s3:GetObject"],
+      "Resource": [
+        "arn:aws:s3:::REPLACE_WITH_INPUT_BUCKET/REPLACE_WITH_INPUT_PREFIX/*"
+      ]
+    },
+    {
+      "Sid": "ReadWriteGeneratedVideos",
+      "Effect": "Allow",
+      "Action": ["s3:GetObject", "s3:PutObject"],
+      "Resource": [
+        "arn:aws:s3:::REPLACE_WITH_OUTPUT_BUCKET/REPLACE_WITH_OUTPUT_PREFIX/*"
+      ]
+    }
+  ]
+}

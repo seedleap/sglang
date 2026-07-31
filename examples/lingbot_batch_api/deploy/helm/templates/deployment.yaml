@@ -1,0 +1,145 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ .Release.Name }}
+    spec:
+      serviceAccountName: {{ .Values.serviceAccount.name }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      nodeSelector:
+{{ toYaml .Values.nodeSelector | indent 8 }}
+      tolerations:
+{{ toYaml .Values.tolerations | indent 8 }}
+      containers:
+        - name: sglang
+          image: "{{ .Values.sglangImage.repository }}:{{ .Values.sglangImage.tag }}"
+          imagePullPolicy: {{ .Values.sglangImage.pullPolicy }}
+          command: ["/bin/bash", "-lc"]
+          args:
+            - |
+              set -euo pipefail
+              python3 -m pip install --no-cache-dir --no-deps \
+                "taehv @ git+https://github.com/madebyollin/taehv.git@{{ .Values.taehv.revision }}" \
+                --root-user-action=ignore
+              mkdir -p "$(dirname "{{ .Values.taehv.checkpointPath }}")"
+              python3 - <<'TAEHV_PY'
+              import hashlib
+              import urllib.request
+              from pathlib import Path
+
+              url = "https://raw.githubusercontent.com/madebyollin/taehv/{{ .Values.taehv.revision }}/taew2_1.pth"
+              target = Path("{{ .Values.taehv.checkpointPath }}")
+              urllib.request.urlretrieve(url, target)
+              digest = hashlib.sha256(target.read_bytes()).hexdigest()
+              expected = "{{ .Values.taehv.checkpointSha256 }}"
+              if digest != expected:
+                  raise SystemExit(f"TAEHV checkpoint sha256 mismatch: {digest}")
+              TAEHV_PY
+              python3 - <<'TAEHV_IMPORT_PY'
+              from taehv import StreamingTAEHV, TAEHV
+              print("TAEHV runtime ready")
+              TAEHV_IMPORT_PY
+              exec sglang serve \
+                --model-path {{ .Values.model.id | quote }} \
+                --revision {{ .Values.model.revision | quote }} \
+                --pipeline-class-name LingBotWorldCausalDMDPipeline \
+                --num-gpus 2 \
+                --performance-mode speed \
+                --tp-size 1 \
+                --sp-degree 2 \
+                --ulysses-degree 2 \
+                --dit-cpu-offload false \
+                --text-encoder-cpu-offload false \
+                --vae-config.use-parallel-decode true \
+                --vae-config.parallel-decode-mode spatial \
+                --vae-config.taehv-checkpoint-path {{ .Values.taehv.checkpointPath | quote }} \
+                --enable-torch-compile false \
+                --attention-backend-config {{ .Values.attentionBackendConfig | quote }} \
+                --host 0.0.0.0 \
+                --port 30000
+          env:
+            - name: HF_HOME
+              value: {{ .Values.fsx.mountPath }}/hf-lb2
+            - name: SGLANG_LINGBOT_LAZY_VAE_ENCODE_BLACK_FRAMES
+              value: "60"
+            - name: SGLANG_LINGBOT_ENABLE_INTERACTIVE_KV_WINDOW
+              value: "true"
+            - name: SGLANG_DIFFUSION_CACHE_ROOT
+              value: /server-cache
+            - name: TAEHV_CHECKPOINT_PATH
+              value: {{ .Values.taehv.checkpointPath | quote }}
+          ports:
+            - name: sglang
+              containerPort: 30000
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: sglang
+            periodSeconds: 5
+            failureThreshold: 120
+          resources:
+{{ toYaml .Values.resources.sglang | indent 12 }}
+          volumeMounts:
+            - name: fsx
+              mountPath: {{ .Values.fsx.mountPath }}
+            - name: shm
+              mountPath: /dev/shm
+            - name: server-cache
+              mountPath: /server-cache
+        - name: api
+          image: "{{ .Values.apiImage.repository }}:{{ .Values.apiImage.tag }}"
+          imagePullPolicy: {{ .Values.apiImage.pullPolicy }}
+          env:
+            - name: API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.api.existingSecret }}
+                  key: {{ .Values.api.secretKey }}
+            - name: OUTPUT_BUCKET
+              value: {{ .Values.api.outputBucket | quote }}
+            - name: OUTPUT_PREFIX
+              value: {{ .Values.api.outputPrefix | quote }}
+            - name: RETRY_AFTER_SECONDS
+              value: {{ .Values.api.retryAfterSeconds | quote }}
+            - name: SGLANG_WS_URL
+              value: ws://127.0.0.1:30000/v1/realtime_video/generate
+          ports:
+            - name: api
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: api
+            periodSeconds: 1
+            failureThreshold: 1
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: api
+            periodSeconds: 10
+          resources:
+{{ toYaml .Values.resources.api | indent 12 }}
+      volumes:
+        - name: fsx
+          persistentVolumeClaim:
+            claimName: {{ .Values.fsx.existingClaim }}
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 128Gi
+        - name: server-cache
+          emptyDir:
+            sizeLimit: 20Gi

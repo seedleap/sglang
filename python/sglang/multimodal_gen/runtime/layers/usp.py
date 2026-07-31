@@ -8,6 +8,7 @@ import torch.distributed as dist
 import torch.distributed._functional_collectives as ft_c
 from torch.distributed.tensor.experimental._attention import _cp_options
 
+from sglang.multimodal_gen import envs
 from sglang.multimodal_gen.runtime.distributed.parallel_state import (
     get_sp_group,
     get_ulysses_parallel_rank,
@@ -23,6 +24,48 @@ if TYPE_CHECKING:
     )
 
 logger = logging.getLogger(__name__)
+
+_BENCHMARK_BYPASS_USP_A2A = envs.SGLANG_DIFFUSION_BENCHMARK_BYPASS_USP_A2A
+if _BENCHMARK_BYPASS_USP_A2A:
+    logger.warning(
+        "BENCHMARK ONLY: bypassing Ulysses all-to-all communication; "
+        "outputs are not semantically valid"
+    )
+
+
+def _benchmark_reshape_input_without_a2a(
+    x: torch.Tensor, world_size: int, head_dim: int
+) -> torch.Tensor:
+    """Keep Ulysses input shape/FLOPs while idealizing communication to zero.
+
+    This is intentionally not a correctness path. It reinterprets local data
+    into the post-all-to-all shape so downstream attention executes the same
+    tensor dimensions without any collective or layout-copy cost.
+    """
+    if head_dim == 1:
+        b, h_global, s_local, d = x.shape
+        return x.contiguous().reshape(
+            b, h_global // world_size, s_local * world_size, d
+        )
+    b, s_local, h_global, d = x.shape
+    return x.contiguous().reshape(
+        b, s_local * world_size, h_global // world_size, d
+    )
+
+
+def _benchmark_reshape_output_without_a2a(
+    x: torch.Tensor, world_size: int, head_dim: int
+) -> torch.Tensor:
+    """Inverse shape-only companion to the benchmark input bypass."""
+    if head_dim == 1:
+        b, h_local, s_global, d = x.shape
+        return x.contiguous().reshape(
+            b, h_local * world_size, s_global // world_size, d
+        )
+    b, s_global, h_local, d = x.shape
+    return x.contiguous().reshape(
+        b, s_global // world_size, h_local * world_size, d
+    )
 
 
 def _maybe_wait(tensor: torch.Tensor) -> torch.Tensor:
@@ -106,6 +149,9 @@ def _usp_input_all_to_all(x: torch.Tensor, head_dim: int = 1) -> torch.Tensor:
     ), f"h_global ({h_global}) must be divisible by world_size ({world_size})"
 
     h_local, s_global = h_global // world_size, s_local * world_size
+
+    if _BENCHMARK_BYPASS_USP_A2A:
+        return _benchmark_reshape_input_without_a2a(x, world_size, head_dim)
 
     x = x.permute(permute_order).contiguous()
     x = _usp_all_to_all_single(x)
@@ -239,6 +285,9 @@ def _usp_output_all_to_all(x: torch.Tensor, head_dim: int = 1) -> torch.Tensor:
     ), f"s_global ({s_global}) must be divisible by world_size ({world_size})"
 
     s_local, h_global = s_global // world_size, h_local * world_size
+
+    if _BENCHMARK_BYPASS_USP_A2A:
+        return _benchmark_reshape_output_without_a2a(x, world_size, head_dim)
 
     x = x.permute(permute_order).contiguous()
     x = _usp_all_to_all_single(x)

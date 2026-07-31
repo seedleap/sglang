@@ -46,6 +46,7 @@ class RealtimeFrameBatchHeader(TypedDict, total=False):
     raw_size: int
     encoding: str
     delta_reference: str
+    trace_id: str
     payload_lengths: list[int]
     event_id: int
     frame_batch_index: int
@@ -124,13 +125,15 @@ def _frame_shape_from_metadata(
 
 
 RAW_RGB_FRAMES_PER_WS_MESSAGE = 16
-ENCODED_PREVIEW_FRAMES_PER_WS_MESSAGE = 6
+ENCODED_PREVIEW_FRAMES_PER_WS_MESSAGE = 3
 FRAME_BATCH_PACK_OFFLOAD_BYTES = 64 * 1024
 WEBP_DEFAULT_QUALITY = 90
 JPEG_DEFAULT_QUALITY = 95
 JPEG_SUBSAMPLING = 0
 RAW_LOSSLESS_OUTPUT_FORMAT = "raw"
 ENCODED_PREVIEW_FORMATS = {"webp", "jpeg"}
+DEFAULT_REALTIME_OUTPUT_FORMAT = "webp"
+DEFAULT_REALTIME_PREVIEW_MAX_WIDTH = 480
 
 
 @dataclass(frozen=True)
@@ -138,6 +141,22 @@ class _TransportPayload:
     content_type: str
     payload: bytes
     metadata: dict[str, int | str | bool | list[int]]
+
+
+def normalize_realtime_output_format(output_format: str | None) -> str:
+    if output_format is None or output_format == "":
+        return DEFAULT_REALTIME_OUTPUT_FORMAT
+    return output_format
+
+
+def normalize_realtime_preview_max_width(
+    *,
+    output_format: str | None,
+    preview_max_width: int | None,
+) -> int | None:
+    if output_format in ENCODED_PREVIEW_FORMATS and preview_max_width is None:
+        return DEFAULT_REALTIME_PREVIEW_MAX_WIDTH
+    return preview_max_width
 
 
 def _split_frame_batch(
@@ -342,32 +361,6 @@ def _is_encoded_preview_transport(
     )
 
 
-async def _build_encoded_preview_payloads(
-    split_batches: list[list[bytes]],
-    *,
-    content_type: str,
-    metadata: dict[str, int | str],
-    output_format: str,
-    transport_quality: int | None,
-    preview_max_width: int | None,
-    event_id: int | None,
-) -> list[_TransportPayload]:
-    return list(
-        await asyncio.gather(
-            *(
-                _build_encoded_preview_payload(
-                    transport_frames,
-                    metadata=metadata,
-                    output_format=output_format,
-                    transport_quality=transport_quality,
-                    preview_max_width=preview_max_width,
-                )
-                for transport_frames in split_batches
-            )
-        )
-    )
-
-
 async def _build_encoded_preview_payload(
     transport_frames: list[bytes],
     *,
@@ -463,8 +456,13 @@ class RawRGBRealtimeOutputAdapter:
             if content_type == RAW_RGB_CONTENT_TYPE
             else {}
         )
-        output_format = getattr(batch, "realtime_output_format", None)
-        preview_max_width = getattr(batch, "realtime_preview_max_width", None)
+        output_format = normalize_realtime_output_format(
+            getattr(batch, "realtime_output_format", None)
+        )
+        preview_max_width = normalize_realtime_preview_max_width(
+            output_format=output_format,
+            preview_max_width=getattr(batch, "realtime_preview_max_width", None),
+        )
         stats = await self._send_frame_batches(
             ws,
             result.raw_frame_batches,
@@ -472,6 +470,8 @@ class RawRGBRealtimeOutputAdapter:
             chunk_index_start=batch.block_idx,
             request_id=batch.request_id,
             event_id=getattr(batch, "realtime_event_id", None),
+            trace_id=getattr(batch, "realtime_trace_id", None)
+            or getattr(session, "trace_id", None),
             frame_metadata=frame_metadata,
             output_format=output_format,
             transport_quality=getattr(batch, "output_compression", None),
@@ -489,6 +489,7 @@ class RawRGBRealtimeOutputAdapter:
         chunk_index_start: int,
         request_id: str,
         event_id: int | None = None,
+        trace_id: str | None = None,
         frame_metadata: dict[str, int | str] | None = None,
         output_format: str | None = None,
         transport_quality: int | None = None,
@@ -511,27 +512,21 @@ class RawRGBRealtimeOutputAdapter:
                 )
             )
             num_frame_batches = len(split_batches)
-            encoded_preview_payloads: list[_TransportPayload] | None = None
-            if _is_encoded_preview_transport(
-                content_type=content_type,
-                output_format=output_format,
-            ):
-                timer = RealtimeStageTimer()
-                encoded_preview_payloads = await _build_encoded_preview_payloads(
-                    split_batches,
-                    content_type=content_type,
-                    metadata=metadata,
-                    output_format=output_format,
-                    transport_quality=transport_quality,
-                    preview_max_width=preview_max_width,
-                    event_id=event_id,
-                )
-                stats["raw_payload_build_ms"] += timer.mark_ms()
             for frame_batch_index, transport_frames in enumerate(split_batches):
                 timer = RealtimeStageTimer()
                 transport_metadata = metadata
-                if encoded_preview_payloads is not None:
-                    transport_payload = encoded_preview_payloads[frame_batch_index]
+                if _is_encoded_preview_transport(
+                    content_type=content_type,
+                    output_format=output_format,
+                ):
+                    transport_payload = await _build_encoded_preview_payload(
+                        transport_frames,
+                        metadata=metadata,
+                        output_format=output_format,
+                        transport_quality=transport_quality,
+                        preview_max_width=preview_max_width,
+                    )
+                    stats["raw_payload_build_ms"] += timer.mark_ms()
                 else:
                     if _should_build_payload_off_loop(
                         content_type=content_type,
@@ -571,6 +566,8 @@ class RawRGBRealtimeOutputAdapter:
                 }
                 if event_id is not None:
                     header["event_id"] = event_id
+                if trace_id:
+                    header["trace_id"] = trace_id
                 header.update(transport_metadata)
                 header.update(transport_payload.metadata)
 

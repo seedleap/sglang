@@ -180,10 +180,11 @@ def build_raw_rgb_frame_batches(
 
     total_ms = (time.monotonic() - start) * 1000.0
     logger.info(
-        "realtime raw RGB frame batch timing: request_id=%s "
+        "realtime raw RGB frame batch timing: trace_id=%s request_id=%s "
         "chunk_idx=%s sample_to_frames=%.2fms frames_to_bytes=%.2fms "
         "total=%.2fms batches=%d frames=%d frame_shape=%s "
         "raw_bytes=%d content_type=%s",
+        getattr(req, "realtime_trace_id", None),
         req.request_id,
         req.block_idx,
         sample_to_frames_ms,

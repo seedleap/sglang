@@ -92,6 +92,25 @@ OFFLOAD_DISABLE_RECOMMENDATION_ORDER = (
 )
 
 
+def _realtime_session_cache_capacity() -> int:
+    """Read the per-worker realtime-session cache capacity defensively."""
+    raw = os.environ.get("SGLANG_REALTIME_MAX_SESSIONS", "1")
+    try:
+        capacity = int(raw)
+    except ValueError:
+        logger.warning(
+            "Invalid SGLANG_REALTIME_MAX_SESSIONS=%r; using the default of 1", raw
+        )
+        return 1
+    if capacity < 1:
+        logger.warning(
+            "SGLANG_REALTIME_MAX_SESSIONS=%s must be positive; using the default of 1",
+            capacity,
+        )
+        return 1
+    return capacity
+
+
 @dataclass
 class _ExpandedOutputParts:
     tensor_outputs: list[torch.Tensor] = field(default_factory=list)
@@ -131,7 +150,12 @@ class GPUWorker(GPUWorkerPostTrainingMixin):
 
         self.cfg_group = get_cfg_group()
         self.cfg_cpu_group = self.cfg_group.cpu_group
-        self._realtime_sessions = RealtimeSessionCache(max_sessions=1)
+        self._realtime_sessions = RealtimeSessionCache(
+            max_sessions=_realtime_session_cache_capacity()
+        )
+        logger.info(
+            "Realtime session cache capacity: %s", self._realtime_sessions.max_sessions
+        )
         self.memory_occupation: MemoryOccupationController | None = None
 
     def release_realtime_session(self, session_id: str) -> OutputBatch:

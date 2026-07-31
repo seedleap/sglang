@@ -1,0 +1,26 @@
+FROM lmsysorg/sglang:dev@sha256:8f78575e03ab59a39191a4a6f718bbbe1726fa940f72a86a187a3f1628ada9a7
+
+ARG CODE_SHA=644634498dfb0cdf59f3db023a908b8610f1bf26
+ARG TAEHV_REVISION=093b918971d59001a0bad6dfd6e0409b5e1752cf
+ARG TAEHV_CHECKPOINT_SHA256=d26151e76cdc2c9424bef988de874b33d9a53f30ef3060cd556c429c469c797e
+COPY . /workspace/sglang
+WORKDIR /workspace/sglang
+
+RUN test "$(cat .source_sha)" = "${CODE_SHA}" \
+    && python3 -m pip install -e "python[diffusion]" --root-user-action=ignore \
+    && python3 -m pip install \
+        --force-reinstall \
+        --no-deps \
+        --index-url https://flashinfer.ai/whl/cu130 \
+        'flashinfer-jit-cache==0.6.12+cu130' \
+    && python3 -m pip install --no-cache-dir --no-deps \
+        "taehv @ git+https://github.com/madebyollin/taehv.git@${TAEHV_REVISION}" \
+        --root-user-action=ignore \
+    && mkdir -p /opt/taehv \
+    && curl --fail --location --retry 3 \
+        "https://raw.githubusercontent.com/madebyollin/taehv/${TAEHV_REVISION}/taew2_1.pth" \
+        --output /opt/taehv/taew2_1.pth \
+    && echo "${TAEHV_CHECKPOINT_SHA256}  /opt/taehv/taew2_1.pth" | sha256sum -c - \
+    && python3 -c "from taehv import StreamingTAEHV, TAEHV; print('TAEHV runtime ready')"
+
+LABEL org.opencontainers.image.revision="${CODE_SHA}"

@@ -36,6 +36,10 @@ from sglang.multimodal_gen.runtime.pipelines_core.stages.validators import (
 from sglang.multimodal_gen.runtime.platforms import current_platform
 from sglang.multimodal_gen.runtime.server_args import ServerArgs
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
+from sglang.multimodal_gen.runtime.utils.realtime_trace import (
+    realtime_trace_span,
+    tensor_trace_metadata,
+)
 
 logger = init_logger(__name__)
 
@@ -361,10 +365,11 @@ class LingBotWorldCausalDMDDenoisingStage(CausalDMDDenoisingStage):
             else int(sample_frames) * int(self.num_token_per_frame)
         )
         logger.info(
-            "LingBot interactive KV window: session_id=%s request_id=%s "
+            "LingBot interactive KV window: trace_id=%s session_id=%s request_id=%s "
             "chunk_idx=%s mode=%s window_frames=%s sample_frames=%s "
             "cache_frames=%s sink_frames=%s current_frames=%s sample_tokens=%s "
             "cache_tokens=%s still_chunks=%s",
+            getattr(batch, "realtime_trace_id", None),
             getattr(batch, "realtime_session_id", None),
             getattr(batch, "request_id", None),
             getattr(batch, "block_idx", None),
@@ -441,16 +446,39 @@ class LingBotWorldCausalDMDDenoisingStage(CausalDMDDenoisingStage):
             batch,
             server_args,
         )
+        active_sample_tokens = getattr(batch, "realtime_causal_kv_sample_tokens", None)
         try:
-            return super()._denoise_realtime_causal_chunk(
+            with realtime_trace_span(
+                logger,
                 batch,
-                server_args,
-                ctx=ctx,
-                cache_ctx=cache_ctx,
-                chunk_latents=chunk_latents,
-                prepare_model_input=prepare_model_input,
-                prepare_context_input=prepare_context_input,
-            )
+                "server.model_denoise_complete",
+                component="dit_denoiser",
+                input_tensor=chunk_latents,
+                chunk_index=getattr(batch, "block_idx", None),
+                first_chunk=getattr(batch, "block_idx", 0) == 0,
+                num_steps=len(ctx.timesteps),
+                current_start_frame=cache_ctx.current_start_frame,
+                current_start_tokens=cache_ctx.current_start_frame
+                * self.num_token_per_frame,
+                kv_sample_tokens=active_sample_tokens,
+                condition_kinds=sorted(batch.condition_inputs)
+                if batch.condition_inputs
+                else [],
+                target_dtype=str(ctx.target_dtype),
+            ) as trace_span:
+                denoised = super()._denoise_realtime_causal_chunk(
+                    batch,
+                    server_args,
+                    ctx=ctx,
+                    cache_ctx=cache_ctx,
+                    chunk_latents=chunk_latents,
+                    prepare_model_input=prepare_model_input,
+                    prepare_context_input=prepare_context_input,
+                )
+                trace_span.add_fields(
+                    **tensor_trace_metadata(denoised, prefix="output")
+                )
+                return denoised
         finally:
             batch.realtime_causal_kv_sample_tokens = previous_sample_tokens
 
@@ -540,30 +568,45 @@ class LingBotWorldCausalDMDDenoisingStage(CausalDMDDenoisingStage):
             device=context_input.device,
             dtype=torch.long,
         )
-        with (
-            torch.autocast(
-                device_type=current_platform.device_type,
-                dtype=target_dtype,
-                enabled=autocast_enabled,
-            ),
-            set_forward_context(
-                current_timestep=-1,
-                attn_metadata=attn_metadata,
-                forward_batch=batch,
-            ),
-        ):
-            self.transformer(
-                context_input.to(target_dtype),
-                prompt_embeds,
-                timestep,
-                kv_cache=kv_cache,
-                crossattn_cache=crossattn_cache,
-                current_start=current_start_tokens,
-                start_frame=start_frame,
-                skip_final_projection=True,
-                **image_kwargs,
-                **pos_cond_kwargs,
-            )
+        with realtime_trace_span(
+            logger,
+            batch,
+            "server.model_context_cache_update_complete",
+            component="dit_context_cache_update",
+            input_tensor=context_input,
+            chunk_index=getattr(batch, "block_idx", None),
+            first_chunk=getattr(batch, "block_idx", 0) == 0,
+            current_start_tokens=current_start_tokens,
+            start_frame=start_frame,
+            target_dtype=str(target_dtype),
+        ) as trace_span:
+            with (
+                torch.autocast(
+                    device_type=current_platform.device_type,
+                    dtype=target_dtype,
+                    enabled=autocast_enabled,
+                ),
+                set_forward_context(
+                    current_timestep=-1,
+                    attn_metadata=attn_metadata,
+                    forward_batch=batch,
+                ),
+            ):
+                context_output = self.transformer(
+                    context_input.to(target_dtype),
+                    prompt_embeds,
+                    timestep,
+                    kv_cache=kv_cache,
+                    crossattn_cache=crossattn_cache,
+                    current_start=current_start_tokens,
+                    start_frame=start_frame,
+                    skip_final_projection=True,
+                    **image_kwargs,
+                    **pos_cond_kwargs,
+                )
+                trace_span.add_fields(
+                    **tensor_trace_metadata(context_output, prefix="output")
+                )
 
     @staticmethod
     def _select_i2v_condition_chunk(

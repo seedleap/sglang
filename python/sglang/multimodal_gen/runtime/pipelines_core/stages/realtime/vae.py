@@ -19,7 +19,15 @@ from sglang.multimodal_gen.runtime.realtime.session import (
     BaseRealtimeState,
 )
 from sglang.multimodal_gen.runtime.server_args import ServerArgs
+from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
+from sglang.multimodal_gen.runtime.utils.realtime_trace import (
+    log_realtime_trace_for_batch,
+    realtime_trace_span,
+    tensor_trace_metadata,
+)
 from sglang.multimodal_gen.utils import PRECISION_TO_TYPE
+
+logger = init_logger(__name__)
 
 
 class RealtimeVAEState(BaseRealtimeState):
@@ -36,12 +44,16 @@ class RealtimeVAEDecodeState(BaseRealtimeState):
     def __init__(self):
         super().__init__()
         self.reset_causal_decode_state = None
+        self.taehv_streaming_decoder = None
+        self.taehv_output_queue: list[torch.Tensor] = []
 
     def dispose(self):
         reset_causal_decode_state = self.reset_causal_decode_state
         self.reset_causal_decode_state = None
         if callable(reset_causal_decode_state):
             reset_causal_decode_state()
+        self.taehv_streaming_decoder = None
+        self.taehv_output_queue.clear()
 
 
 class RealtimeImageVAEEncodingStage(ImageVAEEncodingStage):
@@ -59,11 +71,29 @@ class RealtimeImageVAEEncodingStage(ImageVAEEncodingStage):
                 state.image_latent = None
             elif state.image_latent is not None:
                 batch.image_latent = state.image_latent
+                log_realtime_trace_for_batch(
+                    logger,
+                    batch,
+                    "server.vae_encode_cache_hit",
+                    component="vae_encoder",
+                    chunk_index=batch.block_idx,
+                    first_chunk=False,
+                    **tensor_trace_metadata(batch.image_latent, prefix="image_latent"),
+                )
                 return batch
 
         if batch.condition_image is None:
             if state is not None and state.image_latent is not None:
                 batch.image_latent = state.image_latent
+                log_realtime_trace_for_batch(
+                    logger,
+                    batch,
+                    "server.vae_encode_cache_hit",
+                    component="vae_encoder",
+                    chunk_index=batch.block_idx,
+                    first_chunk=batch.block_idx == 0,
+                    **tensor_trace_metadata(batch.image_latent, prefix="image_latent"),
+                )
             return batch
 
         batch = super().forward(batch, server_args)
@@ -75,6 +105,13 @@ class RealtimeImageVAEEncodingStage(ImageVAEEncodingStage):
 
 class CausalVaeDecodingStage(DecodingStage):
     """Decode realtime chunks with a persistent causal VAE cache when available."""
+
+    @staticmethod
+    def _taehv_checkpoint_path(server_args: ServerArgs) -> str | None:
+        value = getattr(
+            server_args.pipeline_config.vae_config, "taehv_checkpoint_path", None
+        )
+        return value.strip() if isinstance(value, str) and value.strip() else None
 
     @staticmethod
     def _supports_wan_decoder_cache(vae) -> bool:
@@ -169,6 +206,101 @@ class CausalVaeDecodingStage(DecodingStage):
 
         return (image / 2 + 0.5).clamp(0, 1)
 
+    def _get_or_create_taehv_streaming_decoder(
+        self,
+        decode_state: RealtimeVAEDecodeState,
+        server_args: ServerArgs,
+    ):
+        if decode_state.taehv_streaming_decoder is not None:
+            return decode_state.taehv_streaming_decoder
+
+        if not hasattr(self, "_taehv_model"):
+            checkpoint_path = self._taehv_checkpoint_path(server_args)
+            if checkpoint_path is None:
+                raise RuntimeError(
+                    "TAEHV realtime decode requires "
+                    "--vae-config.taehv-checkpoint-path"
+                )
+
+            try:
+                from taehv import TAEHV
+            except ImportError as exc:
+                raise RuntimeError(
+                    "TAEHV realtime decode requires the `taehv` package. "
+                    "Install it and set --vae-config.taehv-checkpoint-path "
+                    "to a TAEHV checkpoint."
+                ) from exc
+
+            vae_dtype = PRECISION_TO_TYPE[server_args.pipeline_config.vae_precision]
+            self._taehv_model = TAEHV(checkpoint_path=checkpoint_path).to(
+                get_local_torch_device(), vae_dtype
+            )
+            self._taehv_model.eval()
+
+        try:
+            from taehv import StreamingTAEHV
+        except ImportError as exc:
+            raise RuntimeError(
+                "TAEHV realtime decode requires the `taehv` package. "
+                "Install it and set --vae-config.taehv-checkpoint-path "
+                "to a TAEHV checkpoint."
+            ) from exc
+
+        decoder = StreamingTAEHV(self._taehv_model)
+        decode_state.taehv_streaming_decoder = decoder
+        return decoder
+
+    @torch.no_grad()
+    def decode_taehv_streaming(
+        self,
+        latents: torch.Tensor,
+        server_args: ServerArgs,
+        decode_state: RealtimeVAEDecodeState,
+        *,
+        first_chunk: bool,
+    ) -> torch.Tensor:
+        decoder = self._get_or_create_taehv_streaming_decoder(decode_state, server_args)
+        vae_dtype = PRECISION_TO_TYPE[server_args.pipeline_config.vae_precision]
+        latents = latents.to(get_local_torch_device(), dtype=vae_dtype)
+
+        # SGLang/Wan uses NCTHW. TAEHV uses NTCHW and consumes model latents
+        # directly, without the full-VAE scale/shift path.
+        latents_ntchw = latents.permute(0, 2, 1, 3, 4).contiguous()
+        target_frames = max(
+            1,
+            latents_ntchw.shape[1] * int(decoder.taehv.t_upscale)
+            - (int(decoder.taehv.frames_to_trim) if first_chunk else 0),
+        )
+
+        if first_chunk:
+            decoder.reset()
+            decode_state.taehv_output_queue.clear()
+
+        produced: list[torch.Tensor] = []
+        for latent_t in latents_ntchw.split(1, dim=1):
+            frame = decoder.decode(latent_t)
+            if frame is not None:
+                produced.append(frame)
+            while True:
+                frame = decoder.decode()
+                if frame is None:
+                    break
+                produced.append(frame)
+
+        decode_state.taehv_output_queue.extend(produced)
+        if not decode_state.taehv_output_queue:
+            raise RuntimeError("TAEHV produced no frames for realtime chunk")
+
+        all_frames = torch.cat(decode_state.taehv_output_queue, dim=1)
+        take = min(target_frames, all_frames.shape[1])
+        if take == 0:
+            raise RuntimeError("TAEHV produced no frames for realtime chunk")
+
+        frames_ntchw = all_frames[:, :take].contiguous()
+        remaining = all_frames[:, take:].contiguous()
+        decode_state.taehv_output_queue = [remaining] if remaining.shape[1] > 0 else []
+        return frames_ntchw.permute(0, 2, 1, 3, 4).contiguous()
+
     @torch.no_grad()
     def forward(
         self,
@@ -178,7 +310,16 @@ class CausalVaeDecodingStage(DecodingStage):
         if batch.session is None:
             return super().forward(batch, server_args)
 
-        self.load_model()
+        with realtime_trace_span(
+            logger,
+            batch,
+            "server.vae_decoder_load_complete",
+            component="vae_decoder_load",
+            measure_cuda=False,
+            chunk_index=batch.block_idx,
+            first_chunk=batch.block_idx == 0,
+        ):
+            self.load_model()
 
         reset_causal_state = self._get_causal_decode_reset_fn()
         decode_state = batch.session.get_or_create_state(RealtimeVAEDecodeState)
@@ -186,12 +327,63 @@ class CausalVaeDecodingStage(DecodingStage):
         if batch.block_idx == 0 and callable(reset_causal_state):
             reset_causal_state()
 
-        frames = self.decode_causal(
-            batch.latents,
-            server_args,
-            first_chunk=batch.block_idx == 0,
+        taehv_checkpoint_path = self._taehv_checkpoint_path(server_args)
+        decoder_backend = (
+            "taehv_streaming" if taehv_checkpoint_path is not None else "causal_vae"
         )
-        frames = server_args.pipeline_config.post_decoding(frames, server_args)
+        vae_dtype = PRECISION_TO_TYPE[server_args.pipeline_config.vae_precision]
+        with realtime_trace_span(
+            logger,
+            batch,
+            "server.vae_decode_complete",
+            component="vae_decoder",
+            input_tensor=batch.latents,
+            chunk_index=batch.block_idx,
+            first_chunk=batch.block_idx == 0,
+            decoder_backend=decoder_backend,
+            vae_precision=str(vae_dtype),
+            vae_tiling=bool(server_args.pipeline_config.vae_tiling),
+            use_parallel_decode=bool(
+                getattr(server_args.pipeline_config.vae_config, "use_parallel_decode", False)
+            ),
+            parallel_decode_mode=getattr(
+                server_args.pipeline_config.vae_config, "parallel_decode_mode", None
+            ),
+        ) as trace_span:
+            if taehv_checkpoint_path is not None:
+                frames = self.decode_taehv_streaming(
+                    batch.latents,
+                    server_args,
+                    decode_state,
+                    first_chunk=batch.block_idx == 0,
+                )
+                trace_span.add_fields(
+                    taehv_queue_tensors=len(decode_state.taehv_output_queue),
+                    taehv_queue_frames=sum(
+                        int(item.shape[1])
+                        for item in decode_state.taehv_output_queue
+                        if hasattr(item, "shape") and len(item.shape) > 1
+                    ),
+                )
+            else:
+                frames = self.decode_causal(
+                    batch.latents,
+                    server_args,
+                    first_chunk=batch.block_idx == 0,
+                )
+            trace_span.add_fields(**tensor_trace_metadata(frames, prefix="output"))
+
+        with realtime_trace_span(
+            logger,
+            batch,
+            "server.post_decode_complete",
+            component="post_decode",
+            input_tensor=frames,
+            chunk_index=batch.block_idx,
+            first_chunk=batch.block_idx == 0,
+        ) as trace_span:
+            frames = server_args.pipeline_config.post_decoding(frames, server_args)
+            trace_span.add_fields(**tensor_trace_metadata(frames, prefix="output"))
 
         return OutputBatch(
             output=frames,

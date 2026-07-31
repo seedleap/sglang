@@ -1,0 +1,44 @@
+# syntax=docker/dockerfile:1.7
+# Build from the repository root so the runner and the matching SGLang source
+# are baked into one immutable production image.
+ARG BASE_IMAGE=lmsysorg/sglang:dev@sha256:8f78575e03ab59a39191a4a6f718bbbe1726fa940f72a86a187a3f1628ada9a7
+FROM ${BASE_IMAGE}
+
+ARG SOURCE_REVISION=unknown
+ARG TAEHV_REVISION=093b918971d59001a0bad6dfd6e0409b5e1752cf
+ARG TAEHV_CHECKPOINT_SHA256=d26151e76cdc2c9424bef988de874b33d9a53f30ef3060cd556c429c469c797e
+
+USER root
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates ffmpeg curl \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /opt/sglang
+COPY . /opt/sglang
+
+# Keep the runtime dependency graph identical to the existing Job bootstrap,
+# but pay this cost at image build time instead of while eight GPUs are leased.
+RUN python3 -m pip install --no-cache-dir -e "python[diffusion]" --root-user-action=ignore \
+    && python3 -m pip install --no-cache-dir --force-reinstall --no-deps \
+        --index-url https://flashinfer.ai/whl/cu130 \
+        'flashinfer-jit-cache==0.6.12+cu130' \
+    && python3 -m pip install --no-cache-dir \
+        'taehv @ git+https://github.com/madebyollin/taehv.git@093b918971d59001a0bad6dfd6e0409b5e1752cf' \
+        --root-user-action=ignore \
+    && mkdir -p /opt/taehv \
+    && curl --fail --location --retry 3 \
+        "https://raw.githubusercontent.com/madebyollin/taehv/${TAEHV_REVISION}/taew2_1.pth" \
+        --output /opt/taehv/taew2_1.pth \
+    && echo "${TAEHV_CHECKPOINT_SHA256}  /opt/taehv/taew2_1.pth" | sha256sum -c - \
+    && python3 -m pip install --no-cache-dir boto3 --root-user-action=ignore \
+    && mkdir -p /opt/bench \
+    && cp -a benchmark/lingbot2_offline_batch/. /opt/bench/
+
+ENV SGLANG_VIDEO_BATCH_RUN_SCRIPT=/opt/bench/run_capacity_smoke_720p.sh \
+    PYTHONUNBUFFERED=1
+
+LABEL org.opencontainers.image.source="https://github.com/lkejun237-ops/sglang" \
+      org.opencontainers.image.revision="${SOURCE_REVISION}" \
+      org.opencontainers.image.description="Immutable LingBot offline SGLang video runner"
+
+CMD ["python3", "/opt/bench/run_t2i_video_batch.py"]
