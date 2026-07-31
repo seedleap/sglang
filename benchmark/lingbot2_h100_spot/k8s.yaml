@@ -307,7 +307,7 @@ spec:
         instrumentation.opentelemetry.io/inject-nodejs: "false"
         instrumentation.opentelemetry.io/inject-python: "false"
         seedleap.ai/code-git-branch: codex/lingbot-action-override
-        seedleap.ai/code-git-ref: 644634498dfb0cdf59f3db023a908b8610f1bf26
+        seedleap.ai/code-git-ref: 369bd9d8d03932af3fd5a1e680eb436536e60cb3
         seedleap.ai/code-git-repo: lkejun237-ops/sglang
         seedleap.ai/attention-backend-config: lingbot_causal_fa_num_splits=2
         seedleap.ai/model-revision: 59cccf49f2d2dd27418ae7a04b82b10868d455c2
@@ -419,7 +419,7 @@ spec:
               exit "${status}"
           env:
             - name: CODE_GIT_REF
-              value: 644634498dfb0cdf59f3db023a908b8610f1bf26
+              value: 369bd9d8d03932af3fd5a1e680eb436536e60cb3
             - name: CODE_GIT_BRANCH
               value: codex/lingbot-action-override
             - name: CODE_GIT_REPO
