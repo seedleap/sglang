@@ -1758,7 +1758,7 @@ function buildReplayHtml(artifact) {
     .replay-video { display: block; width: 100%; max-height: 72vh; border: 0; border-radius: 0; background: #11140f; }
     .replay-cursor { position: absolute; inset: 0 auto 0 0; width: 2px; transform: translateX(var(--replay-cursor-x, -200%)); background: rgba(142, 207, 157, 0.86); box-shadow: 0 0 0 1px rgba(17, 20, 15, 0.62); pointer-events: none; opacity: 0; }
     .replay-video-shell.is-inspecting .replay-cursor { opacity: 1; }
-    .replay-inspector { position: absolute; left: 14px; top: 14px; z-index: 4; width: min(430px, calc(100% - 28px)); max-height: calc(100% - 28px); overflow: auto; border: 1px solid rgba(232, 234, 223, 0.34); border-radius: 8px; background: rgba(251, 250, 245, 0.95); color: #171a16; box-shadow: 0 18px 50px rgba(17, 20, 15, 0.34); pointer-events: none; }
+    .replay-inspector { position: fixed; left: 0; top: 0; z-index: 40; width: min(430px, calc(100vw - 28px)); max-height: min(520px, calc(100vh - 28px)); overflow: auto; border: 1px solid rgba(232, 234, 223, 0.34); border-radius: 8px; background: rgba(251, 250, 245, 0.95); color: #171a16; box-shadow: 0 18px 50px rgba(17, 20, 15, 0.34); pointer-events: none; transform: translate(14px, 14px); }
     .replay-inspector[hidden] { display: none; }
     .replay-inspector-header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding: 10px 12px 8px; border-bottom: 1px solid #cbd2c4; }
     .replay-inspector-header b { font-size: 13px; }
@@ -1915,6 +1915,7 @@ ${replayControls}
         k: "↓ Pitch -",
         l: "→ Yaw +",
       };
+      const REPLAY_INSPECTOR_OFFSET_PX = 16;
 
       function applyReplayEvent(active, event) {
         if (!event || typeof event.kind !== "string") return active;
@@ -2060,6 +2061,29 @@ ${replayControls}
         });
       }
 
+      function positionReplayInspector(event) {
+        if (!inspector || !event) return;
+        inspector.hidden = false;
+        const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 0;
+        const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
+        const rect = inspector.getBoundingClientRect();
+        const width = rect.width || Math.min(430, Math.max(240, viewportWidth - REPLAY_INSPECTOR_OFFSET_PX * 2));
+        const height = rect.height || Math.min(520, Math.max(160, viewportHeight - REPLAY_INSPECTOR_OFFSET_PX * 2));
+        let left = event.clientX + REPLAY_INSPECTOR_OFFSET_PX;
+        let top = event.clientY + REPLAY_INSPECTOR_OFFSET_PX;
+        if (left + width > viewportWidth - REPLAY_INSPECTOR_OFFSET_PX) {
+          left = event.clientX - width - REPLAY_INSPECTOR_OFFSET_PX;
+        }
+        if (top + height > viewportHeight - REPLAY_INSPECTOR_OFFSET_PX) {
+          top = event.clientY - height - REPLAY_INSPECTOR_OFFSET_PX;
+        }
+        const maxLeft = Math.max(REPLAY_INSPECTOR_OFFSET_PX, viewportWidth - width - REPLAY_INSPECTOR_OFFSET_PX);
+        const maxTop = Math.max(REPLAY_INSPECTOR_OFFSET_PX, viewportHeight - height - REPLAY_INSPECTOR_OFFSET_PX);
+        left = Math.min(maxLeft, Math.max(REPLAY_INSPECTOR_OFFSET_PX, left));
+        top = Math.min(maxTop, Math.max(REPLAY_INSPECTOR_OFFSET_PX, top));
+        inspector.style.transform = "translate(" + Math.round(left) + "px, " + Math.round(top) + "px)";
+      }
+
       function inspectReplayAt(clientMs) {
         if (!inspector) return;
         const userActions = userActionsAt(clientMs);
@@ -2107,7 +2131,10 @@ ${replayControls}
       ["loadedmetadata", "timeupdate", "seeked", "play", "pause"].forEach((eventName) => {
         video.addEventListener(eventName, syncReplayControls);
       });
-      video.addEventListener("mousemove", (event) => inspectReplayAt(replayClientMsFromPointer(event)));
+      video.addEventListener("mousemove", (event) => {
+        positionReplayInspector(event);
+        inspectReplayAt(replayClientMsFromPointer(event));
+      });
       video.addEventListener("mouseleave", () => {
         if (inspector) inspector.hidden = true;
         videoShell?.classList.remove("is-inspecting");

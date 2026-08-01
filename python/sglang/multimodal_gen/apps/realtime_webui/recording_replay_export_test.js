@@ -51,6 +51,21 @@ assert.match(
 );
 assert.match(
   replayHtmlBuilder,
+  /\.replay-inspector\s*\{\s*position:\s*fixed;/,
+  "replay inspector should float near the cursor instead of being pinned over the video stage",
+);
+assert.match(
+  replayHtmlBuilder,
+  /function positionReplayInspector\(event\)/,
+  "replay inspector should be positioned from the pointer coordinates",
+);
+assert.match(
+  replayHtmlBuilder,
+  /positionReplayInspector\(event\);\s*inspectReplayAt\(replayClientMsFromPointer\(event\)\)/,
+  "replay inspector should move before refreshing hover context on mouse move",
+);
+assert.match(
+  replayHtmlBuilder,
   /function replayClientMsFromPointer/,
   "replay index should map pointer position over the video to recording time",
 );
