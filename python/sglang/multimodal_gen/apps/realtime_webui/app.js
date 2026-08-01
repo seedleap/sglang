@@ -98,6 +98,19 @@ const CONTROL_ACTION_META = {
   k: { label: "Pitch -", type: "rotation", axis: "-pitch", amount: "4deg/frame" },
   l: { label: "Yaw +", type: "rotation", axis: "+yaw", amount: "6deg/frame" },
 };
+const RECORDING_STAGE_WIDTH = 1600;
+const RECORDING_STAGE_TOPBAR_HEIGHT = 54;
+const RECORDING_STAGE_PREVIEW_HEIGHT = 586;
+const RECORDING_STAGE_CONTROLS_HEIGHT = 144;
+const RECORDING_STAGE_TIMELINE_HEIGHT = 48;
+const RECORDING_STAGE_TELEMETRY_HEIGHT = 96;
+const RECORDING_STAGE_HEIGHT =
+  RECORDING_STAGE_TOPBAR_HEIGHT +
+  RECORDING_STAGE_PREVIEW_HEIGHT +
+  RECORDING_STAGE_CONTROLS_HEIGHT +
+  RECORDING_STAGE_TIMELINE_HEIGHT +
+  RECORDING_STAGE_TELEMETRY_HEIGHT;
+const RECORDING_STAGE_PADDING = 18;
 
 function applyRuntimeUiConfig() {
   $("fps").value = String(DEFAULT_TARGET_FPS);
@@ -1014,6 +1027,9 @@ function startRecording() {
     started_client_ms: artifactClientMs(recordingArtifact),
     mode: recordingMode,
     mime_type: recordingMimeType,
+    capture_scope: "stage",
+    capture_width: RECORDING_STAGE_WIDTH,
+    capture_height: RECORDING_STAGE_HEIGHT,
     target_fps: recordingFps,
   };
   if (recordingMode === "mediarecorder-webm") startWebmRecording();
@@ -1079,7 +1095,7 @@ async function buildMp4RecordingBlob() {
 }
 
 function startWebmRecording() {
-  drawViewportToRecordingCanvas();
+  drawRecordingStageFrame(canvas);
   recordingMediaChunks = [];
   recordingCaptureStream = recordingCanvas.captureStream(recordingFps);
   recordingMediaRecorder = new MediaRecorder(
@@ -1147,7 +1163,7 @@ function recordDecodedFrameBatch(decodedFrames) {
 function recordDecodedFrame(image) {
   if (!recordingActive || recordingSaving) return;
   if (recordingMode === "mediarecorder-webm") {
-    drawRecordingCanvasFrame(image);
+    drawRecordingStageFrame(image);
     recordingFrameIndex += 1;
     recordingMediaRecorder?.requestData?.();
     return;
@@ -1179,63 +1195,355 @@ function recordDecodedFrame(image) {
     });
 }
 
-function drawViewportToRecordingCanvas() {
-  const sourceWidth = canvas.width || 1280;
-  const sourceHeight = canvas.height || 720;
-  if (recordingCanvas.width !== sourceWidth || recordingCanvas.height !== sourceHeight) {
-    recordingCanvas.width = sourceWidth;
-    recordingCanvas.height = sourceHeight;
-  }
-  recordingCtx.imageSmoothingEnabled = true;
-  recordingCtx.imageSmoothingQuality = "medium";
-  recordingCtx.drawImage(canvas, 0, 0, sourceWidth, sourceHeight);
-  drawRecordingInputOverlay(sourceWidth, sourceHeight);
-}
-
-function drawRecordingCanvasFrame(image) {
-  const sourceWidth = image.width;
-  const sourceHeight = image.height;
-  if (recordingCanvas.width !== sourceWidth || recordingCanvas.height !== sourceHeight) {
-    recordingCanvas.width = sourceWidth;
-    recordingCanvas.height = sourceHeight;
-  }
-  if (image instanceof ImageData) {
-    recordingCtx.putImageData(image, 0, 0);
-  } else {
-    recordingCtx.imageSmoothingEnabled = true;
-    recordingCtx.imageSmoothingQuality = "medium";
-    recordingCtx.drawImage(image, 0, 0, sourceWidth, sourceHeight);
-  }
-  drawRecordingInputOverlay(sourceWidth, sourceHeight);
-}
-
 function createRecordingFrame(image, timestamp, duration) {
-  drawRecordingCanvasFrame(image);
+  drawRecordingStageFrame(image);
   return new VideoFrame(recordingCanvas, { timestamp, duration });
 }
 
-function drawRecordingInputOverlay(width, height) {
-  if (!controlStateController?.activeActions?.size) return;
-  const actions = Array.from(controlStateController.activeActions)
-    .sort()
-    .map((action) => action.toUpperCase())
-    .join(" + ");
+function drawRecordingStageFrame(image) {
+  ensureRecordingStageCanvas();
+  const source = recordingDrawableSource(image || canvas);
+  const sourceWidth = source.width || canvas.width || 1280;
+  const sourceHeight = source.height || canvas.height || 720;
   recordingCtx.save();
-  const fontSize = Math.max(14, Math.round(width * 0.022));
-  recordingCtx.font = `600 ${fontSize}px ui-sans-serif, system-ui, sans-serif`;
-  const text = `Input ${actions}`;
-  const metrics = recordingCtx.measureText(text);
-  const paddingX = Math.round(fontSize * 0.7);
-  const paddingY = Math.round(fontSize * 0.45);
-  const boxWidth = Math.ceil(metrics.width + paddingX * 2);
-  const boxHeight = Math.ceil(fontSize + paddingY * 2);
-  const x = Math.round(width * 0.03);
-  const y = height - boxHeight - Math.round(height * 0.04);
-  recordingCtx.fillStyle = "rgba(17, 20, 15, 0.72)";
-  recordingCtx.fillRect(x, y, boxWidth, boxHeight);
-  recordingCtx.fillStyle = "#fffdf7";
-  recordingCtx.fillText(text, x + paddingX, y + paddingY + fontSize * 0.78);
+  recordingCtx.imageSmoothingEnabled = true;
+  recordingCtx.imageSmoothingQuality = "medium";
+  recordingCtx.fillStyle = "#11140f";
+  recordingCtx.fillRect(0, 0, RECORDING_STAGE_WIDTH, RECORDING_STAGE_HEIGHT);
+  drawRecordingTopbar();
+  drawRecordingPreview(source, sourceWidth, sourceHeight);
+  drawRecordingControls();
+  drawRecordingTimeline();
+  drawRecordingTelemetry();
   recordingCtx.restore();
+}
+
+function ensureRecordingStageCanvas() {
+  if (
+    recordingCanvas.width !== RECORDING_STAGE_WIDTH ||
+    recordingCanvas.height !== RECORDING_STAGE_HEIGHT
+  ) {
+    recordingCanvas.width = RECORDING_STAGE_WIDTH;
+    recordingCanvas.height = RECORDING_STAGE_HEIGHT;
+  }
+}
+
+function recordingDrawableSource(image) {
+  if (image instanceof ImageData) {
+    if (scratchCanvas.width !== image.width || scratchCanvas.height !== image.height) {
+      scratchCanvas.width = image.width;
+      scratchCanvas.height = image.height;
+    }
+    scratchCtx.putImageData(image, 0, 0);
+    return scratchCanvas;
+  }
+  return image || canvas;
+}
+
+function drawRecordingTopbar() {
+  const y = 0;
+  fillRecordingRect(0, y, RECORDING_STAGE_WIDTH, RECORDING_STAGE_TOPBAR_HEIGHT, "#10140f");
+  recordingCtx.fillStyle = "rgba(232, 234, 223, 0.12)";
+  recordingCtx.fillRect(0, RECORDING_STAGE_TOPBAR_HEIGHT - 1, RECORDING_STAGE_WIDTH, 1);
+
+  let x = RECORDING_STAGE_PADDING;
+  const dotKind = $("statusDot")?.classList.contains("live")
+    ? "live"
+    : $("statusDot")?.classList.contains("error") ? "error" : "";
+  recordingCtx.beginPath();
+  recordingCtx.arc(x + 6, y + RECORDING_STAGE_TOPBAR_HEIGHT / 2, 5, 0, Math.PI * 2);
+  recordingCtx.fillStyle = dotKind === "live" ? "#8ecf9d" : dotKind === "error" ? "#b9543c" : "#687164";
+  recordingCtx.fill();
+  x += 24;
+  drawRecordingLabel(recordingElementText("statusText", "Idle"), x, y + 33, {
+    color: "#e8eadf",
+    font: "18px ui-sans-serif, system-ui, sans-serif",
+    maxWidth: 120,
+  });
+  x += 126;
+  drawRecordingLabel(recordingElementText("chunkText", "chunk -"), x, y + 33, {
+    color: "#e8eadf",
+    font: "15px ui-sans-serif, system-ui, sans-serif",
+    maxWidth: 96,
+  });
+  x += 118;
+  drawRecordingPill(x, y + 11, 126, 32, {
+    label: recordingActive ? "Stop" : "Record",
+    detail: recordingElementText("recordDuration", "00:00"),
+    active: recordingActive,
+  });
+  x += 146;
+  drawRecordingPill(x, y + 11, 86, 32, {
+    label: recordingElementText("recordFolderLabel", "Folder"),
+    active: $("recordFolderBtn")?.classList.contains("is-selected"),
+  });
+
+  let right = RECORDING_STAGE_WIDTH - RECORDING_STAGE_PADDING;
+  right = drawRecordingTopbarStatRight(`buffer ${recordingElementText("stageLatencyText", "-")}`, right, y);
+  right = drawRecordingTopbarStatRight(`action ${recordingElementText("actionStateText", "-")}`, right, y);
+  right = drawRecordingTopbarStatRight(`source ${recordingElementText("theoreticalFpsText", "-")}`, right, y);
+  right = drawRecordingTopbarStatRight(`render ${recordingElementText("renderFps", "0")} fps`, right, y);
+  right = drawRecordingTopbarStatRight(`output ${recordingElementText("outputSizeText", "-")}`, right, y);
+  drawRecordingTopbarStatRight(
+    `Preview ${recordingElementText("previewScaleText", "100%")}`,
+    right,
+    y,
+  );
+}
+
+function drawRecordingTopbarStatRight(text, right, y) {
+  recordingCtx.font = "600 15px ui-sans-serif, system-ui, sans-serif";
+  const width = Math.min(recordingCtx.measureText(text).width, 250);
+  drawRecordingLabel(text, right - width, y + 33, {
+    color: "#fffdf7",
+    font: "600 15px ui-sans-serif, system-ui, sans-serif",
+    maxWidth: width,
+  });
+  return right - width - 24;
+}
+
+function drawRecordingPreview(source, sourceWidth, sourceHeight) {
+  const y = RECORDING_STAGE_TOPBAR_HEIGHT;
+  fillRecordingRect(0, y, RECORDING_STAGE_WIDTH, RECORDING_STAGE_PREVIEW_HEIGHT, "#11140f");
+  const previewRect = {
+    x: 118,
+    y,
+    width: RECORDING_STAGE_WIDTH - 236,
+    height: RECORDING_STAGE_PREVIEW_HEIGHT,
+  };
+  const scale = Math.min(
+    previewRect.width / Math.max(1, sourceWidth),
+    previewRect.height / Math.max(1, sourceHeight),
+  );
+  const drawWidth = Math.round(sourceWidth * scale);
+  const drawHeight = Math.round(sourceHeight * scale);
+  const drawX = Math.round(previewRect.x + (previewRect.width - drawWidth) / 2);
+  const drawY = Math.round(previewRect.y + (previewRect.height - drawHeight) / 2);
+  fillRecordingRect(previewRect.x, previewRect.y, previewRect.width, previewRect.height, "#151912");
+  recordingCtx.drawImage(source, drawX, drawY, drawWidth, drawHeight);
+}
+
+function drawRecordingControls() {
+  const y = RECORDING_STAGE_TOPBAR_HEIGHT + RECORDING_STAGE_PREVIEW_HEIGHT;
+  fillRecordingRect(0, y, RECORDING_STAGE_WIDTH, RECORDING_STAGE_CONTROLS_HEIGHT, "#151912");
+  recordingCtx.fillStyle = "rgba(232, 234, 223, 0.12)";
+  recordingCtx.fillRect(0, y, RECORDING_STAGE_WIDTH, 1);
+  const gap = 38;
+  const clusterWidth = (RECORDING_STAGE_WIDTH - RECORDING_STAGE_PADDING * 2 - gap) / 2;
+  drawRecordingControlCluster("MOVE", RECORDING_STAGE_PADDING, y + 24, clusterWidth, [
+    [null, "w", null],
+    ["a", "s", "d"],
+  ]);
+  drawRecordingControlCluster(
+    "LOOK",
+    RECORDING_STAGE_PADDING + clusterWidth + gap,
+    y + 24,
+    clusterWidth,
+    [
+      [null, "i", null],
+      ["j", "k", "l"],
+    ],
+  );
+}
+
+function drawRecordingControlCluster(title, x, y, width, rows) {
+  drawRecordingLabel(title, x, y + 61, {
+    color: "rgba(232, 234, 223, 0.62)",
+    font: "15px ui-sans-serif, system-ui, sans-serif",
+    maxWidth: 66,
+  });
+  const padX = x + 72;
+  const cellGap = 8;
+  const buttonWidth = (width - 72 - cellGap * 2) / 3;
+  const buttonHeight = 44;
+  rows.forEach((row, rowIndex) => {
+    row.forEach((action, columnIndex) => {
+      if (!action) return;
+      drawRecordingControlButton(
+        action,
+        padX + columnIndex * (buttonWidth + cellGap),
+        y + rowIndex * (buttonHeight + cellGap),
+        buttonWidth,
+        buttonHeight,
+      );
+    });
+  });
+}
+
+function drawRecordingControlButton(action, x, y, width, height) {
+  const active = controlStateController?.activeActions?.has(action);
+  const radius = 5;
+  fillRecordingRoundedRect(x, y, width, height, radius, active ? "#8c9288" : "#eef1ec");
+  strokeRecordingRoundedRect(
+    x,
+    y,
+    width,
+    height,
+    radius,
+    active ? "#aeb4aa" : "rgba(232, 234, 223, 0.18)",
+  );
+  const meta = CONTROL_ACTION_META[action] || {};
+  drawRecordingLabel(meta.label || action.toUpperCase(), x + width / 2, y + 28, {
+    align: "center",
+    color: active ? "#fffdf7" : "#11140f",
+    font: "16px ui-sans-serif, system-ui, sans-serif",
+    maxWidth: width - 34,
+  });
+  const keyLabel = action === "i" ? "↑" : action === "j" ? "←" : action === "k" ? "↓" : action === "l" ? "→" : action.toUpperCase();
+  drawRecordingLabel(keyLabel, x + width - 16, y + 16, {
+    align: "right",
+    color: active ? "rgba(255, 253, 247, 0.78)" : "#687164",
+    font: "700 13px ui-sans-serif, system-ui, sans-serif",
+    maxWidth: 28,
+  });
+}
+
+function drawRecordingTimeline() {
+  const y = RECORDING_STAGE_TOPBAR_HEIGHT +
+    RECORDING_STAGE_PREVIEW_HEIGHT +
+    RECORDING_STAGE_CONTROLS_HEIGHT;
+  fillRecordingRect(0, y, RECORDING_STAGE_WIDTH, RECORDING_STAGE_TIMELINE_HEIGHT, "#11140f");
+  recordingCtx.fillStyle = "rgba(232, 234, 223, 0.12)";
+  recordingCtx.fillRect(0, y, RECORDING_STAGE_WIDTH, 1);
+  const text = [
+    recordingElementText("queueText", "queue 0"),
+    recordingElementText("frameText", "frames 0"),
+    recordingElementText("byteText", "0 MB"),
+  ].join("   ");
+  drawRecordingLabel(text, RECORDING_STAGE_WIDTH - RECORDING_STAGE_PADDING, y + 31, {
+    align: "right",
+    color: "#e8eadf",
+    font: "16px ui-sans-serif, system-ui, sans-serif",
+    maxWidth: RECORDING_STAGE_WIDTH - RECORDING_STAGE_PADDING * 2,
+  });
+}
+
+function drawRecordingTelemetry() {
+  const y = RECORDING_STAGE_TOPBAR_HEIGHT +
+    RECORDING_STAGE_PREVIEW_HEIGHT +
+    RECORDING_STAGE_CONTROLS_HEIGHT +
+    RECORDING_STAGE_TIMELINE_HEIGHT;
+  fillRecordingRect(0, y, RECORDING_STAGE_WIDTH, RECORDING_STAGE_TELEMETRY_HEIGHT, "#11140f");
+  const rows = [
+    [
+      ["Payload", recordingElementText("payloadMode", selectedTransportLabel())],
+      ["Server send", recordingElementText("serverSendText", "-")],
+      ["Chunk bytes", recordingElementText("chunkPayloadText", "-")],
+    ],
+    [
+      ["Chunk wait", recordingElementText("latencyText", "-")],
+      ["Decode", recordingElementText("decodeText", "-")],
+      ["Display lag", recordingElementText("displayLagText", "-")],
+    ],
+  ];
+  const cellWidth = RECORDING_STAGE_WIDTH / 3;
+  const cellHeight = RECORDING_STAGE_TELEMETRY_HEIGHT / 2;
+  rows.forEach((row, rowIndex) => {
+    row.forEach(([label, value], columnIndex) => {
+      const x = columnIndex * cellWidth;
+      const cellY = y + rowIndex * cellHeight;
+      recordingCtx.fillStyle = "rgba(232, 234, 223, 0.1)";
+      recordingCtx.fillRect(x, cellY, cellWidth, 1);
+      if (columnIndex > 0) recordingCtx.fillRect(x, cellY, 1, cellHeight);
+      drawRecordingLabel(label, x + 18, cellY + 30, {
+        color: "rgba(232, 234, 223, 0.62)",
+        font: "15px ui-sans-serif, system-ui, sans-serif",
+        maxWidth: cellWidth * 0.45,
+      });
+      drawRecordingLabel(value, x + cellWidth - 18, cellY + 30, {
+        align: "right",
+        color: "#fffdf7",
+        font: "700 16px ui-sans-serif, system-ui, sans-serif",
+        maxWidth: cellWidth * 0.5,
+      });
+    });
+  });
+}
+
+function drawRecordingPill(x, y, width, height, { label, detail = "", active = false }) {
+  fillRecordingRoundedRect(
+    x,
+    y,
+    width,
+    height,
+    6,
+    active ? "#b9543c" : "rgba(238, 241, 236, 0.08)",
+  );
+  strokeRecordingRoundedRect(x, y, width, height, 6, "rgba(232, 234, 223, 0.24)");
+  drawRecordingLabel(label, x + 14, y + 21, {
+    color: "#e8eadf",
+    font: "14px ui-sans-serif, system-ui, sans-serif",
+    maxWidth: width - (detail ? 62 : 28),
+  });
+  if (detail) {
+    drawRecordingLabel(detail, x + width - 12, y + 21, {
+      align: "right",
+      color: "rgba(232, 234, 223, 0.78)",
+      font: "14px ui-sans-serif, system-ui, sans-serif",
+      maxWidth: 48,
+    });
+  }
+}
+
+function recordingElementText(id, fallback = "-") {
+  const value = $(id)?.textContent;
+  return value && String(value).trim() ? String(value).trim() : fallback;
+}
+
+function drawRecordingLabel(text, x, y, {
+  color = "#fffdf7",
+  font = "14px ui-sans-serif, system-ui, sans-serif",
+  align = "left",
+  maxWidth = undefined,
+} = {}) {
+  recordingCtx.save();
+  recordingCtx.fillStyle = color;
+  recordingCtx.font = font;
+  recordingCtx.textAlign = align;
+  recordingCtx.textBaseline = "alphabetic";
+  if (maxWidth === undefined) {
+    recordingCtx.fillText(String(text), x, y);
+  } else {
+    recordingCtx.fillText(String(text), x, y, maxWidth);
+  }
+  recordingCtx.restore();
+}
+
+function fillRecordingRect(x, y, width, height, fillStyle) {
+  recordingCtx.fillStyle = fillStyle;
+  recordingCtx.fillRect(x, y, width, height);
+}
+
+function fillRecordingRoundedRect(x, y, width, height, radius, fillStyle) {
+  recordingCtx.beginPath();
+  recordingRoundedRectPath(x, y, width, height, radius);
+  recordingCtx.fillStyle = fillStyle;
+  recordingCtx.fill();
+}
+
+function strokeRecordingRoundedRect(x, y, width, height, radius, strokeStyle) {
+  recordingCtx.beginPath();
+  recordingRoundedRectPath(x, y, width, height, radius);
+  recordingCtx.strokeStyle = strokeStyle;
+  recordingCtx.lineWidth = 1;
+  recordingCtx.stroke();
+}
+
+function recordingRoundedRectPath(x, y, width, height, radius) {
+  const r = Math.min(radius, width / 2, height / 2);
+  if (recordingCtx.roundRect) {
+    recordingCtx.roundRect(x, y, width, height, r);
+    return;
+  }
+  recordingCtx.moveTo(x + r, y);
+  recordingCtx.lineTo(x + width - r, y);
+  recordingCtx.quadraticCurveTo(x + width, y, x + width, y + r);
+  recordingCtx.lineTo(x + width, y + height - r);
+  recordingCtx.quadraticCurveTo(x + width, y + height, x + width - r, y + height);
+  recordingCtx.lineTo(x + r, y + height);
+  recordingCtx.quadraticCurveTo(x, y + height, x, y + height - r);
+  recordingCtx.lineTo(x, y + r);
+  recordingCtx.quadraticCurveTo(x, y, x + r, y);
 }
 
 async function ensureRecordingEncoder(width, height) {
@@ -1400,6 +1708,31 @@ function buildReplayHtml(artifact) {
   const referenceBlock = referenceImage?.data_url
     ? `<img class="reference" src="${escapeHtmlAttribute(referenceImage.data_url)}" alt="reference image" />`
     : `<div class="reference empty">${escapeHtmlText(referenceImage ? referenceImage.label || "reference image" : "T2V session: no reference image")}</div>`;
+  const replayControls = `
+          <div class="replay-stage-controls" aria-label="Camera controls">
+            <div class="replay-control-cluster">
+              <span class="replay-control-title">Move</span>
+              <div class="replay-camera-pad">
+                <span></span>
+                <button data-replay-action="w" data-key="W" type="button">Forward</button>
+                <span></span>
+                <button data-replay-action="a" data-key="A" type="button">Left</button>
+                <button data-replay-action="s" data-key="S" type="button">Back</button>
+                <button data-replay-action="d" data-key="D" type="button">Right</button>
+              </div>
+            </div>
+            <div class="replay-control-cluster">
+              <span class="replay-control-title">Look</span>
+              <div class="replay-camera-pad">
+                <span></span>
+                <button data-replay-action="i" data-key="&uarr;" type="button">Pitch +</button>
+                <span></span>
+                <button data-replay-action="j" data-key="&larr;" type="button">Yaw -</button>
+                <button data-replay-action="k" data-key="&darr;" type="button">Pitch -</button>
+                <button data-replay-action="l" data-key="&rarr;" type="button">Yaw +</button>
+              </div>
+            </div>
+          </div>`;
   const artifactJson = JSON.stringify(artifact)
     .replace(/</g, "\\u003c")
     .replace(/\u2028/g, "\\u2028")
@@ -1412,11 +1745,29 @@ function buildReplayHtml(artifact) {
   <title>SGLang realtime replay ${escapeHtmlText(artifact.trace_id || "")}</title>
   <style>
     body { margin: 0; background: #eef1ec; color: #171a16; font: 14px/1.45 ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
-    main { width: min(1180px, calc(100vw - 32px)); margin: 24px auto 56px; }
+    main { width: min(1480px, calc(100vw - 32px)); margin: 24px auto 56px; }
     h1 { margin: 0 0 6px; font-size: 24px; }
     .meta, .grid, .events, .prompt-list { margin-top: 16px; }
     .grid { display: grid; grid-template-columns: minmax(0, 2fr) minmax(260px, 1fr); gap: 16px; align-items: start; }
+    .replay-stage { overflow: hidden; border: 1px solid #11140f; border-radius: 8px; background: #11140f; box-shadow: 0 18px 60px rgba(23, 26, 22, 0.12); }
+    .replay-topbar, .replay-timeline { display: flex; align-items: center; gap: 10px; min-width: 0; height: 44px; padding: 0 14px; color: #e8eadf; background: rgba(17, 20, 15, 0.9); font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+    .replay-topbar-spacer { flex: 1; }
+    .replay-dot { width: 8px; height: 8px; border-radius: 50%; background: #8ecf9d; box-shadow: 0 0 0 4px rgba(142, 207, 157, 0.14); }
+    .replay-pill { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px; border: 1px solid rgba(232, 234, 223, 0.22); border-radius: 6px; background: rgba(238, 241, 236, 0.08); color: #e8eadf; }
+    .replay-video-shell { display: grid; place-items: center; min-height: 320px; background: #11140f; }
+    .replay-video { display: block; width: 100%; max-height: 72vh; border: 0; border-radius: 0; background: #11140f; }
+    .replay-stage-controls { display: grid; grid-template-columns: repeat(2, minmax(180px, 1fr)); gap: 12px; padding: 12px 14px 13px; border-top: 1px solid rgba(232, 234, 223, 0.12); background: #151912; }
+    .replay-control-cluster { display: grid; grid-template-columns: 46px 1fr; gap: 10px; align-items: center; }
+    .replay-control-title { color: rgba(232, 234, 223, 0.62); font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; }
+    .replay-camera-pad { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+    .replay-camera-pad span { min-height: 36px; }
+    .replay-camera-pad button { position: relative; min-height: 36px; border: 1px solid rgba(232, 234, 223, 0.18); border-radius: 5px; background: #eef1ec; color: #11140f; font: inherit; font-size: 12px; }
+    .replay-camera-pad button::after { content: attr(data-key); position: absolute; right: 7px; top: 5px; color: #687164; font-size: 10px; font-weight: 650; }
+    .replay-camera-pad button.is-active { border-color: #aeb4aa; background: #8c9288; color: #fffdf7; box-shadow: inset 0 0 0 1px rgba(255, 253, 247, 0.22), 0 0 0 3px rgba(238, 241, 236, 0.2); }
+    .replay-camera-pad button.is-active::after { color: rgba(255, 253, 247, 0.78); }
+    .replay-timeline { justify-content: flex-end; border-top: 1px solid rgba(232, 234, 223, 0.12); }
     video, .reference { width: 100%; border: 1px solid #cbd2c4; border-radius: 8px; background: #11140f; }
+    .replay-stage video { border: 0; border-radius: 0; }
     .reference.empty { min-height: 160px; display: grid; place-items: center; border: 1px dashed #cbd2c4; border-radius: 8px; color: #687164; }
     pre, code { white-space: pre-wrap; word-break: break-word; }
     pre { margin: 8px 0 0; padding: 12px; background: #fbfaf5; border: 1px solid #cbd2c4; border-radius: 8px; }
@@ -1426,7 +1777,7 @@ function buildReplayHtml(artifact) {
     .cards { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin-top: 12px; }
     .card { padding: 10px; border: 1px solid #cbd2c4; border-radius: 8px; background: #fbfaf5; }
     .card b { display: block; font-size: 16px; }
-    @media (max-width: 860px) { .grid, .cards { grid-template-columns: 1fr; } }
+    @media (max-width: 860px) { .grid, .cards, .replay-stage-controls { grid-template-columns: 1fr; } }
   </style>
 </head>
 <body>
@@ -1441,7 +1792,25 @@ function buildReplayHtml(artifact) {
     </div>
     <section class="grid">
       <div>
-        <video controls preload="metadata" src="${escapeHtmlAttribute(recording.video_url || recording.video_file || "")}"></video>
+        <section class="replay-stage" aria-label="Recorded realtime stage">
+          <div class="replay-topbar">
+            <span class="replay-dot" aria-hidden="true"></span>
+            <span>Replay</span>
+            <span>frames ${escapeHtmlText(recording.frames ?? "-")}</span>
+            <span class="replay-pill">Record ${escapeHtmlText(recording.fps ?? request.fps ?? "-")} fps</span>
+            <span class="replay-topbar-spacer"></span>
+            <span>mode ${escapeHtmlText(request.generation_mode || "-")}</span>
+            <span>scope ${escapeHtmlText(recording.capture_scope || "viewport")}</span>
+          </div>
+          <div class="replay-video-shell">
+            <video id="replayVideo" class="replay-video" controls preload="metadata" src="${escapeHtmlAttribute(recording.video_url || recording.video_file || "")}"></video>
+          </div>
+${replayControls}
+          <div class="replay-timeline">
+            <span id="replayActiveText">input idle</span>
+            <span>${escapeHtmlText(recording.video_file || "-")}</span>
+          </div>
+        </section>
         <h2>Prompt History</h2>
         <ol class="prompt-list">${promptRows}</ol>
       </div>
@@ -1461,6 +1830,59 @@ function buildReplayHtml(artifact) {
     </section>
   </main>
   <script id="recording-artifact" type="application/json">${artifactJson}</script>
+  <script>
+    (() => {
+      const artifactNode = document.getElementById("recording-artifact");
+      const video = document.getElementById("replayVideo");
+      const activeText = document.getElementById("replayActiveText");
+      const buttons = Array.from(document.querySelectorAll("[data-replay-action]"));
+      if (!artifactNode || !video || !buttons.length) return;
+      const artifact = JSON.parse(artifactNode.textContent || "{}");
+      const events = Array.isArray(artifact.events)
+        ? artifact.events.slice().sort((left, right) => Number(left.client_ms || 0) - Number(right.client_ms || 0))
+        : [];
+      const recordingStartMs = Number(artifact.recording && artifact.recording.started_client_ms) || 0;
+
+      function applyReplayEvent(active, event) {
+        if (!event || typeof event.kind !== "string") return active;
+        if (event.kind === "camera_actions_sent" && Array.isArray(event.active_actions)) {
+          return new Set(event.active_actions.map(String));
+        }
+        const action = typeof event.action === "string" ? event.action : "";
+        if (!action) return active;
+        if (event.kind === "key_down" || event.kind === "control_button_down") active.add(action);
+        if (event.kind === "key_up" || event.kind === "control_button_up") active.delete(action);
+        return active;
+      }
+
+      function replayActionsAt(clientMs) {
+        let active = new Set();
+        for (const event of events) {
+          if (Number(event.client_ms || 0) > clientMs) break;
+          active = applyReplayEvent(active, event);
+        }
+        return active;
+      }
+
+      function syncReplayControls() {
+        const clientMs = recordingStartMs + video.currentTime * 1000;
+        const active = replayActionsAt(clientMs);
+        buttons.forEach((button) => {
+          button.classList.toggle("is-active", active.has(button.dataset.replayAction));
+        });
+        if (activeText) {
+          const labels = Array.from(active).sort().map((action) => action.toUpperCase());
+          activeText.textContent = labels.length ? "input " + labels.join(" + ") : "input idle";
+        }
+        if (!video.paused && !video.ended) requestAnimationFrame(syncReplayControls);
+      }
+
+      ["loadedmetadata", "timeupdate", "seeked", "play", "pause"].forEach((eventName) => {
+        video.addEventListener(eventName, syncReplayControls);
+      });
+      syncReplayControls();
+    })();
+  </script>
 </body>
 </html>`;
 }

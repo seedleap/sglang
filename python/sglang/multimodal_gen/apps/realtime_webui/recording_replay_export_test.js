@@ -1,0 +1,48 @@
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
+
+const appJs = fs.readFileSync(path.join(__dirname, "app.js"), "utf8");
+
+const replayHtmlBuilder = appJs.slice(
+  appJs.indexOf("function buildReplayHtml"),
+  appJs.indexOf("function formatReplayMs"),
+);
+
+assert.match(
+  appJs,
+  /function drawRecordingStageFrame\(/,
+  "recording should compose the full stage instead of capturing only the viewport canvas",
+);
+assert.match(
+  appJs,
+  /capture_scope:\s*"stage"/,
+  "recording metadata should describe that the stage was captured",
+);
+assert.match(
+  replayHtmlBuilder,
+  /class="replay-stage"/,
+  "exported replay index should render a stage-style video area",
+);
+assert.match(
+  replayHtmlBuilder,
+  /data-replay-action="w"/,
+  "replay index should include visible movement controls",
+);
+assert.match(
+  replayHtmlBuilder,
+  /data-replay-action="l"/,
+  "replay index should include visible look controls",
+);
+assert.match(
+  replayHtmlBuilder,
+  /function syncReplayControls/,
+  "replay index should update button highlights as the video plays",
+);
+assert.match(
+  replayHtmlBuilder,
+  /camera_actions_sent/,
+  "replay index should use camera action events to reconstruct active input state",
+);
+
+console.log("recording replay export ok");
