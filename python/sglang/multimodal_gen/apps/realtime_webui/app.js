@@ -6,6 +6,9 @@ const WEBP_FRAME_CONTENT_TYPE = "image/webp";
 const JPEG_FRAME_CONTENT_TYPE = "image/jpeg";
 const DECODER_WORKER_URL = "./decoder_worker.js?v=rgb-worker-v10";
 const UI_CONFIG = Object.freeze(globalThis.SGLANG_REALTIME_UI_CONFIG || {});
+const SESSION_ARTIFACT_SCHEMA_VERSION = 1;
+const SESSION_ARTIFACT_EVENT_LIMIT = 20000;
+const MAX_EMBEDDED_REFERENCE_IMAGE_BYTES = 2 * 1024 * 1024;
 
 function configuredNumber(name, fallback) {
   const value = Number(UI_CONFIG[name]);
@@ -15,6 +18,8 @@ function configuredNumber(name, fallback) {
 function configuredGenerationModes() {
   const requestedModes = Array.isArray(UI_CONFIG.generationModes)
     ? UI_CONFIG.generationModes
+    : UI_CONFIG.generationMode || UI_CONFIG.defaultGenerationMode
+    ? ["i2v", UI_CONFIG.generationMode || UI_CONFIG.defaultGenerationMode]
     : ["i2v"];
   const modes = requestedModes
     .map((mode) => String(mode).toLowerCase())
@@ -39,10 +44,13 @@ const DEFAULT_UPSCALING_MODEL =
   "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesr-general-x4v3.pth";
 const DEFAULT_PREVIEW_SCALE = 100;
 const ENABLED_GENERATION_MODES = configuredGenerationModes();
+const CONFIGURED_DEFAULT_GENERATION_MODE = String(
+  UI_CONFIG.defaultGenerationMode || UI_CONFIG.generationMode || "",
+).toLowerCase();
 const DEFAULT_GENERATION_MODE = ENABLED_GENERATION_MODES.includes(
-  String(UI_CONFIG.defaultGenerationMode || "").toLowerCase(),
+  CONFIGURED_DEFAULT_GENERATION_MODE,
 )
-  ? String(UI_CONFIG.defaultGenerationMode).toLowerCase()
+  ? CONFIGURED_DEFAULT_GENERATION_MODE
   : ENABLED_GENERATION_MODES[0];
 const T2V_FRAME_STEP = Math.max(
   1,
@@ -372,6 +380,16 @@ let recordingFps = DEFAULT_TARGET_FPS;
 let recordingTimer = 0;
 let recordingSaving = false;
 let recordingEncodeChain = Promise.resolve();
+let recordingMode = "";
+let recordingMediaRecorder = null;
+let recordingMediaChunks = [];
+let recordingCaptureStream = null;
+let recordingMimeType = "video/mp4";
+let recordingDirectoryHandle = null;
+let recordingBaseFileName = "";
+let currentSessionArtifact = null;
+let recordingArtifact = null;
+let renderedTraceChunks = new Set();
 const decodeRequests = new Map();
 let controlStateController = null;
 let lastSentEventId = 0;
@@ -465,6 +483,7 @@ function resetStreamStats() {
   renderedPreviewFrames = 0;
   lastSentEventId = 0;
   lastSampledEventId = 0;
+  renderedTraceChunks = new Set();
   controlStateController?.reset({ sendRelease: false });
   resetDecoderState();
   updateStats();
@@ -679,9 +698,9 @@ function closeFrames(items) {
   for (const item of items || []) item.image?.close?.();
 }
 
-function recordingFileName() {
+function recordingFileName(extension = "mp4") {
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-  return `sglang-realtime-${stamp}.mp4`;
+  return `sglang-realtime-${stamp}.${extension}`;
 }
 
 function updateRecordButton() {
@@ -704,11 +723,273 @@ function formatRecordingDuration(elapsedMs) {
   return `${String(minutes).padStart(2, "0")}:${String(rest).padStart(2, "0")}`;
 }
 
+function selectRecordingMode() {
+  if (window.VideoEncoder && window.VideoFrame) return "webcodecs-mp4";
+  if (window.MediaRecorder && recordingCanvas.captureStream && supportedWebmMimeType()) {
+    return "mediarecorder-webm";
+  }
+  return "";
+}
+
+function supportedWebmMimeType() {
+  if (!window.MediaRecorder) return "";
+  const candidates = [
+    "video/webm;codecs=vp9",
+    "video/webm;codecs=vp8",
+    "video/webm",
+  ];
+  return candidates.find((mimeType) => (
+    typeof MediaRecorder.isTypeSupported !== "function" ||
+    MediaRecorder.isTypeSupported(mimeType)
+  )) || "";
+}
+
+function updateRecordFolderButton() {
+  const button = $("recordFolderBtn");
+  if (!button) return;
+  const supported = typeof window.showDirectoryPicker === "function";
+  button.disabled = recordingSaving || !supported;
+  button.classList.toggle("is-selected", Boolean(recordingDirectoryHandle));
+  $("recordFolderLabel").textContent = recordingDirectoryHandle ? "Set" : "Folder";
+  button.title = supported
+    ? recordingDirectoryHandle
+      ? "Recording artifacts will be saved to the selected folder"
+      : "Choose a folder for MP4, JSON, and HTML recording artifacts"
+    : "Folder save is unavailable in this browser; artifacts will download";
+}
+
+async function chooseRecordingDirectory() {
+  if (typeof window.showDirectoryPicker !== "function") {
+    addHistory("record folder unavailable · using downloads");
+    updateRecordFolderButton();
+    return;
+  }
+  try {
+    recordingDirectoryHandle = await window.showDirectoryPicker({ mode: "readwrite" });
+    addHistory("record folder selected");
+  } catch (error) {
+    if (error?.name !== "AbortError") {
+      addHistory(error.message || "record folder selection failed");
+    }
+  } finally {
+    updateRecordFolderButton();
+  }
+}
+
+function recordingAssetBaseUrl() {
+  return String(UI_CONFIG.recordingAssetBaseUrl || "").trim().replace(/\/+$/, "");
+}
+
+function recordingAssetUrl(fileName) {
+  const baseUrl = recordingAssetBaseUrl();
+  return baseUrl ? `${baseUrl}/${encodeURIComponent(fileName)}` : fileName;
+}
+
+function generateTraceId() {
+  if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
+  return `trace-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function artifactClientMs(artifact = currentSessionArtifact) {
+  if (!artifact?.client_started_at_ms) return 0;
+  return Math.round(performance.now() - artifact.client_started_at_ms);
+}
+
+function currentRequestSnapshot() {
+  const generationMode = selectedGenerationMode();
+  return compact({
+    type: "init_snapshot",
+    generation_mode: generationMode,
+    model: $("model").value,
+    prompt: $("prompt").value,
+    size: $("size").value,
+    fps: Number($("fps").value || DEFAULT_TARGET_FPS),
+    num_frames: generationMode === "t2v" ? readT2VNumFrames() : Number($("numFrames").value),
+    seed: Number($("seed").value),
+    num_inference_steps: Number($("steps").value),
+    guidance_scale: Number($("guidance").value),
+    realtime_causal_sink_size: readOptionalInteger("sinkSize"),
+    realtime_causal_kv_cache_num_frames: readOptionalInteger("windowFrames"),
+    max_chunks: generationMode === "t2v" || $("continuous").checked ? undefined : 1,
+    ...readPreviewTransportParams(),
+    ...readFrameInterpolationParams(),
+    ...readSuperResolutionParams(),
+  });
+}
+
+function createSessionArtifact(init = currentRequestSnapshot(), referenceImage = null) {
+  const now = new Date();
+  const artifact = {
+    schema_version: SESSION_ARTIFACT_SCHEMA_VERSION,
+    trace_id: generateTraceId(),
+    created_at: now.toISOString(),
+    page_url: window.location.href,
+    user_agent: navigator.userAgent,
+    client_started_at_ms: performance.now(),
+    server_url: $("serverUrl").value,
+    request: {},
+    prompt_history: [],
+    events: [],
+    chunks: [],
+    first_rendered_chunks: [],
+    recording: null,
+  };
+  updateSessionArtifactRequest(artifact, init, referenceImage);
+  recordPromptHistory(init.prompt, "init", null, artifact);
+  return artifact;
+}
+
+function updateSessionArtifactRequest(artifact, init, referenceImage = null) {
+  artifact.server_url = $("serverUrl").value;
+  artifact.request = {
+    ...stripBinaryFields(init),
+    reference_image: referenceImage,
+  };
+  artifact.reference_image = referenceImage || null;
+  artifact.generation_mode = init.generation_mode || artifact.request.generation_mode || null;
+  artifact.model = init.model || artifact.model || "";
+}
+
+function beginSessionArtifact(init, referenceImage = null) {
+  const artifact = recordingActive && recordingArtifact
+    ? recordingArtifact
+    : createSessionArtifact(init, referenceImage);
+  updateSessionArtifactRequest(artifact, init, referenceImage);
+  currentSessionArtifact = artifact;
+  if (recordingActive) recordingArtifact = artifact;
+  recordPromptHistory(init.prompt, "init", null, artifact);
+  recordTrajectoryEvent("session_init", {
+    generation_mode: init.generation_mode,
+    has_reference_image: Boolean(referenceImage),
+    num_frames: init.num_frames,
+    max_chunks: init.max_chunks ?? null,
+  });
+  return artifact;
+}
+
+function ensureSessionArtifact() {
+  if (!currentSessionArtifact) {
+    currentSessionArtifact = createSessionArtifact(currentRequestSnapshot(), null);
+  }
+  return currentSessionArtifact;
+}
+
+function recordTrajectoryEvent(kind, details = {}) {
+  if (!currentSessionArtifact && !recordingActive) return null;
+  const artifact = ensureSessionArtifact();
+  const event = {
+    kind,
+    client_ms: artifactClientMs(artifact),
+    ...jsonSafe(details),
+  };
+  artifact.events.push(event);
+  if (artifact.events.length > SESSION_ARTIFACT_EVENT_LIMIT) {
+    artifact.events.splice(0, artifact.events.length - SESSION_ARTIFACT_EVENT_LIMIT);
+  }
+  return event;
+}
+
+function recordPromptHistory(prompt, kind = "prompt_update", eventId = null, artifact = null) {
+  const target = artifact || currentSessionArtifact;
+  if (!target || typeof prompt !== "string") return;
+  const lastPrompt = target.prompt_history[target.prompt_history.length - 1];
+  if (lastPrompt && lastPrompt.prompt === prompt && lastPrompt.kind === kind) return;
+  target.prompt_history.push(compact({
+    kind,
+    event_id: eventId,
+    client_ms: artifactClientMs(target),
+    prompt,
+  }));
+}
+
+async function createReferenceImageMeta(firstFrame) {
+  if (!firstFrame) return null;
+  const file = $("firstFrame").files[0];
+  const mime = file?.type || selectedPreset?.mime || mimeFromReferenceUrl(selectedReferenceUrl);
+  const bytes = firstFrame.byteLength || firstFrame.length || 0;
+  const meta = {
+    source: file ? "upload" : selectedReferenceUrl ? "preset_url" : "bytes",
+    label: file?.name || selectedReferenceLabel || selectedPreset?.name || "",
+    url: selectedReferenceUrl || undefined,
+    mime,
+    bytes,
+    first_frame_sha256: await sha256Bytes(firstFrame),
+  };
+  if (bytes > 0 && bytes <= MAX_EMBEDDED_REFERENCE_IMAGE_BYTES) {
+    meta.data_url = await bytesToDataUrl(firstFrame, mime);
+  }
+  return compact(meta);
+}
+
+function mimeFromReferenceUrl(url) {
+  const path = String(url || "").split("?")[0].toLowerCase();
+  if (path.endsWith(".png")) return "image/png";
+  if (path.endsWith(".webp")) return "image/webp";
+  return "image/jpeg";
+}
+
+async function sha256Bytes(bytes) {
+  if (!bytes || !globalThis.crypto?.subtle) return null;
+  const buffer = bytes instanceof Uint8Array
+    ? bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)
+    : bytes;
+  const digest = await globalThis.crypto.subtle.digest("SHA-256", buffer);
+  return Array.from(new Uint8Array(digest))
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+function bytesToDataUrl(bytes, mime = "application/octet-stream") {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.onerror = () => reject(reader.error || new Error("reference image encode failed"));
+    reader.readAsDataURL(new Blob([bytes], { type: mime }));
+  });
+}
+
+function stripBinaryFields(value) {
+  const safe = jsonSafe(value);
+  if (value?.first_frame instanceof Uint8Array) {
+    safe.first_frame = {
+      byte_length: value.first_frame.byteLength,
+      note: "binary bytes summarized; see request.reference_image",
+    };
+  }
+  return safe;
+}
+
+function jsonSafe(value, depth = 0) {
+  if (depth > 8) return "[MaxDepth]";
+  if (value == null || typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+    return value;
+  }
+  if (value instanceof Uint8Array) {
+    return { binary_type: "Uint8Array", byte_length: value.byteLength };
+  }
+  if (value instanceof ArrayBuffer) {
+    return { binary_type: "ArrayBuffer", byte_length: value.byteLength };
+  }
+  if (value instanceof Blob) {
+    return { binary_type: "Blob", byte_length: value.size, type: value.type };
+  }
+  if (Array.isArray(value)) return value.map((item) => jsonSafe(item, depth + 1));
+  if (typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value)
+        .filter(([, item]) => typeof item !== "function" && item !== undefined)
+        .map(([key, item]) => [key, jsonSafe(item, depth + 1)]),
+    );
+  }
+  return String(value);
+}
+
 function startRecording() {
   if (recordingActive || recordingSaving) return;
-  if (!window.VideoEncoder || !window.VideoFrame) {
-    setStatus("MP4 unsupported", "error");
-    addHistory("MP4 recording requires WebCodecs H.264 support");
+  recordingMode = selectRecordingMode();
+  if (!recordingMode) {
+    setStatus("Recording unsupported", "error");
+    addHistory("recording requires WebCodecs MP4 or MediaRecorder WebM support");
     return;
   }
   recordingActive = true;
@@ -716,11 +997,30 @@ function startRecording() {
   recordingEncoder = null;
   recordingEncoderReady = null;
   recordingEncoderConfig = null;
+  recordingMediaRecorder = null;
+  recordingMediaChunks = [];
+  recordingCaptureStream = null;
+  recordingMimeType = recordingMode === "mediarecorder-webm"
+    ? supportedWebmMimeType()
+    : "video/mp4";
   recordingFrameIndex = 0;
   recordingFps = Math.max(1, previewPlaybackTargetFps());
   recordingEncodeChain = Promise.resolve();
+  recordingBaseFileName = recordingFileName().replace(/\.[^.]*$/, "");
+  recordingArtifact = ensureSessionArtifact();
+  recordingArtifact.recording = {
+    base_file_name: recordingBaseFileName,
+    started_at: new Date().toISOString(),
+    started_client_ms: artifactClientMs(recordingArtifact),
+    mode: recordingMode,
+    mime_type: recordingMimeType,
+    target_fps: recordingFps,
+  };
+  if (recordingMode === "mediarecorder-webm") startWebmRecording();
+  recordTrajectoryEvent("record_start", { target_fps: recordingFps });
   recordingTimer = window.setInterval(updateRecordButton, 250);
   updateRecordButton();
+  updateRecordFolderButton();
   addHistory("recording started");
 }
 
@@ -733,31 +1033,21 @@ async function stopRecording() {
   }
   recordingSaving = true;
   updateRecordButton();
+  updateRecordFolderButton();
 
-  let fileHandle = null;
-  const fileName = recordingFileName();
+  const extension = recordingMode === "mediarecorder-webm" ? "webm" : "mp4";
+  const fileName = `${recordingBaseFileName || recordingFileName(extension).replace(/\.[^.]*$/, "")}.${extension}`;
   try {
-    if (window.showSaveFilePicker) {
-      fileHandle = await window.showSaveFilePicker({
-        suggestedName: fileName,
-        types: [{
-          description: "MP4 video",
-          accept: { "video/mp4": [".mp4"] },
-        }],
-      });
-    }
-    await recordingEncodeChain;
-    if (!recordingEncoder || !recordingSamples.length) throw new Error("No frames were recorded");
-    await recordingEncoder.flush();
-    const mp4Blob = buildRecordingMp4();
-    if (fileHandle) {
-      const writable = await fileHandle.createWritable();
-      await writable.write(mp4Blob);
-      await writable.close();
-    } else {
-      downloadBlob(mp4Blob, fileName);
-    }
-    addHistory(`saved ${recordingSamples.length} frames as mp4`);
+    recordTrajectoryEvent("record_stop", {
+      encoded_frames: recordingSamples.length,
+      captured_frames: recordingFrameIndex,
+      mode: recordingMode,
+    });
+    const videoBlob = recordingMode === "mediarecorder-webm"
+      ? await stopWebmRecording()
+      : await buildMp4RecordingBlob();
+    await saveRecordingArtifactFiles(videoBlob, fileName);
+    addHistory(`saved ${recordingFrameIndex} frames · ${extension}/json/html`);
   } catch (error) {
     if (error?.name === "AbortError") {
       addHistory("recording save canceled");
@@ -769,10 +1059,80 @@ async function stopRecording() {
     recordingEncoder?.close?.();
     recordingEncoder = null;
     recordingEncoderReady = null;
+    stopRecordingCaptureStream();
+    recordingMediaRecorder = null;
+    recordingMediaChunks = [];
+    recordingCaptureStream = null;
+    recordingMode = "";
     recordingSaving = false;
     recordingSamples = [];
     updateRecordButton();
+    updateRecordFolderButton();
   }
+}
+
+async function buildMp4RecordingBlob() {
+  await recordingEncodeChain;
+  if (!recordingEncoder || !recordingSamples.length) throw new Error("No frames were recorded");
+  await recordingEncoder.flush();
+  return buildRecordingMp4();
+}
+
+function startWebmRecording() {
+  drawViewportToRecordingCanvas();
+  recordingMediaChunks = [];
+  recordingCaptureStream = recordingCanvas.captureStream(recordingFps);
+  recordingMediaRecorder = new MediaRecorder(
+    recordingCaptureStream,
+    recordingMimeType ? { mimeType: recordingMimeType } : undefined,
+  );
+  recordingMimeType = recordingMediaRecorder.mimeType || recordingMimeType || "video/webm";
+  recordingMediaRecorder.ondataavailable = (event) => {
+    if (event.data?.size) recordingMediaChunks.push(event.data);
+  };
+  recordingMediaRecorder.onerror = (event) => {
+    recordingActive = false;
+    addHistory(event.error?.message || "recording media recorder failed");
+    updateRecordButton();
+  };
+  recordingMediaRecorder.start(250);
+}
+
+function stopWebmRecording() {
+  return new Promise((resolve, reject) => {
+    const recorder = recordingMediaRecorder;
+    if (!recorder) {
+      reject(new Error("No WebM recorder was started"));
+      return;
+    }
+    recorder.onstop = () => {
+      stopRecordingCaptureStream();
+      if (!recordingMediaChunks.length) {
+        reject(new Error("No frames were recorded"));
+        return;
+      }
+      resolve(new Blob(recordingMediaChunks, { type: recordingMimeType || "video/webm" }));
+    };
+    recorder.onerror = (event) => {
+      stopRecordingCaptureStream();
+      reject(event.error || new Error("recording media recorder failed"));
+    };
+    if (recorder.state === "inactive") {
+      recorder.onstop();
+      return;
+    }
+    try {
+      recorder.requestData?.();
+      recorder.stop();
+    } catch (error) {
+      reject(error);
+    }
+  });
+}
+
+function stopRecordingCaptureStream() {
+  for (const track of recordingCaptureStream?.getTracks?.() || []) track.stop();
+  recordingCaptureStream = null;
 }
 
 function recordDecodedFrameBatch(decodedFrames) {
@@ -786,6 +1146,12 @@ function recordDecodedFrameBatch(decodedFrames) {
 
 function recordDecodedFrame(image) {
   if (!recordingActive || recordingSaving) return;
+  if (recordingMode === "mediarecorder-webm") {
+    drawRecordingCanvasFrame(image);
+    recordingFrameIndex += 1;
+    recordingMediaRecorder?.requestData?.();
+    return;
+  }
   const frameIndex = recordingFrameIndex;
   const duration = Math.round(1_000_000 / Math.max(1, recordingFps));
   const timestamp = frameIndex * duration;
@@ -813,16 +1179,63 @@ function recordDecodedFrame(image) {
     });
 }
 
-function createRecordingFrame(image, timestamp, duration) {
-  if (image instanceof ImageData) {
-    if (recordingCanvas.width !== image.width || recordingCanvas.height !== image.height) {
-      recordingCanvas.width = image.width;
-      recordingCanvas.height = image.height;
-    }
-    recordingCtx.putImageData(image, 0, 0);
-    return new VideoFrame(recordingCanvas, { timestamp, duration });
+function drawViewportToRecordingCanvas() {
+  const sourceWidth = canvas.width || 1280;
+  const sourceHeight = canvas.height || 720;
+  if (recordingCanvas.width !== sourceWidth || recordingCanvas.height !== sourceHeight) {
+    recordingCanvas.width = sourceWidth;
+    recordingCanvas.height = sourceHeight;
   }
-  return new VideoFrame(image, { timestamp, duration });
+  recordingCtx.imageSmoothingEnabled = true;
+  recordingCtx.imageSmoothingQuality = "medium";
+  recordingCtx.drawImage(canvas, 0, 0, sourceWidth, sourceHeight);
+  drawRecordingInputOverlay(sourceWidth, sourceHeight);
+}
+
+function drawRecordingCanvasFrame(image) {
+  const sourceWidth = image.width;
+  const sourceHeight = image.height;
+  if (recordingCanvas.width !== sourceWidth || recordingCanvas.height !== sourceHeight) {
+    recordingCanvas.width = sourceWidth;
+    recordingCanvas.height = sourceHeight;
+  }
+  if (image instanceof ImageData) {
+    recordingCtx.putImageData(image, 0, 0);
+  } else {
+    recordingCtx.imageSmoothingEnabled = true;
+    recordingCtx.imageSmoothingQuality = "medium";
+    recordingCtx.drawImage(image, 0, 0, sourceWidth, sourceHeight);
+  }
+  drawRecordingInputOverlay(sourceWidth, sourceHeight);
+}
+
+function createRecordingFrame(image, timestamp, duration) {
+  drawRecordingCanvasFrame(image);
+  return new VideoFrame(recordingCanvas, { timestamp, duration });
+}
+
+function drawRecordingInputOverlay(width, height) {
+  if (!controlStateController?.activeActions?.size) return;
+  const actions = Array.from(controlStateController.activeActions)
+    .sort()
+    .map((action) => action.toUpperCase())
+    .join(" + ");
+  recordingCtx.save();
+  const fontSize = Math.max(14, Math.round(width * 0.022));
+  recordingCtx.font = `600 ${fontSize}px ui-sans-serif, system-ui, sans-serif`;
+  const text = `Input ${actions}`;
+  const metrics = recordingCtx.measureText(text);
+  const paddingX = Math.round(fontSize * 0.7);
+  const paddingY = Math.round(fontSize * 0.45);
+  const boxWidth = Math.ceil(metrics.width + paddingX * 2);
+  const boxHeight = Math.ceil(fontSize + paddingY * 2);
+  const x = Math.round(width * 0.03);
+  const y = height - boxHeight - Math.round(height * 0.04);
+  recordingCtx.fillStyle = "rgba(17, 20, 15, 0.72)";
+  recordingCtx.fillRect(x, y, boxWidth, boxHeight);
+  recordingCtx.fillStyle = "#fffdf7";
+  recordingCtx.fillText(text, x + paddingX, y + paddingY + fontSize * 0.78);
+  recordingCtx.restore();
 }
 
 async function ensureRecordingEncoder(width, height) {
@@ -893,6 +1306,182 @@ function downloadBlob(blob, fileName) {
   link.click();
   link.remove();
   window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function sidecarFileName(fileName, extension) {
+  return `${String(fileName).replace(/\.[^.]*$/, "")}.${extension}`;
+}
+
+async function saveRecordingArtifactFiles(videoBlob, fileName) {
+  const artifact = finalizeRecordingArtifact(videoBlob, fileName);
+  const jsonFileName = artifact.recording.json_file;
+  const htmlFileName = artifact.recording.html_file;
+  const jsonBlob = new Blob(
+    [JSON.stringify(artifact, null, 2)],
+    { type: "application/json" },
+  );
+  const htmlBlob = new Blob(
+    [buildReplayHtml(artifact)],
+    { type: "text/html" },
+  );
+  await saveRecordingFiles([
+    { name: fileName, blob: videoBlob },
+    { name: jsonFileName, blob: jsonBlob },
+    { name: htmlFileName, blob: htmlBlob },
+  ]);
+}
+
+function finalizeRecordingArtifact(videoBlob, fileName) {
+  const artifact = recordingArtifact || ensureSessionArtifact();
+  const jsonFileName = sidecarFileName(fileName, "json");
+  const htmlFileName = sidecarFileName(fileName, "html");
+  artifact.recording = {
+    ...(artifact.recording || {}),
+    stopped_at: new Date().toISOString(),
+    stopped_client_ms: artifactClientMs(artifact),
+    mode: recordingMode,
+    mime_type: videoBlob.type || recordingMimeType,
+    fps: recordingFps,
+    frames: recordingFrameIndex,
+    encoded_chunks: recordingMode === "mediarecorder-webm"
+      ? recordingMediaChunks.length
+      : recordingSamples.length,
+    video_file: fileName,
+    video_url: recordingAssetUrl(fileName),
+    video_bytes: videoBlob.size,
+    json_file: jsonFileName,
+    json_url: recordingAssetUrl(jsonFileName),
+    html_file: htmlFileName,
+    html_url: recordingAssetUrl(htmlFileName),
+    asset_base_url: recordingAssetBaseUrl() || null,
+  };
+  return artifact;
+}
+
+async function saveRecordingFiles(files) {
+  if (recordingDirectoryHandle) {
+    await ensureRecordingDirectoryWritable(recordingDirectoryHandle);
+    for (const file of files) {
+      const handle = await recordingDirectoryHandle.getFileHandle(file.name, { create: true });
+      const writable = await handle.createWritable();
+      await writable.write(file.blob);
+      await writable.close();
+    }
+    return;
+  }
+  for (const file of files) downloadBlob(file.blob, file.name);
+}
+
+async function ensureRecordingDirectoryWritable(directoryHandle) {
+  const options = { mode: "readwrite" };
+  if (directoryHandle.queryPermission) {
+    const existing = await directoryHandle.queryPermission(options);
+    if (existing === "granted") return;
+  }
+  if (directoryHandle.requestPermission) {
+    const requested = await directoryHandle.requestPermission(options);
+    if (requested === "granted") return;
+  }
+  throw new Error("recording folder permission denied");
+}
+
+function buildReplayHtml(artifact) {
+  const recording = artifact.recording || {};
+  const request = artifact.request || {};
+  const referenceImage = request.reference_image || null;
+  const prompts = artifact.prompt_history || [];
+  const events = artifact.events || [];
+  const eventRows = events.slice(-600).map((event) => (
+    `<tr><td>${escapeHtmlText(event.kind)}</td><td>${formatReplayMs(event.client_ms)}</td><td><code>${escapeHtmlText(JSON.stringify(event))}</code></td></tr>`
+  )).join("");
+  const promptRows = prompts.map((item) => (
+    `<li><b>${escapeHtmlText(item.kind)}</b> ${formatReplayMs(item.client_ms)}<pre>${escapeHtmlText(item.prompt || "")}</pre></li>`
+  )).join("");
+  const referenceBlock = referenceImage?.data_url
+    ? `<img class="reference" src="${escapeHtmlAttribute(referenceImage.data_url)}" alt="reference image" />`
+    : `<div class="reference empty">${escapeHtmlText(referenceImage ? referenceImage.label || "reference image" : "T2V session: no reference image")}</div>`;
+  const artifactJson = JSON.stringify(artifact)
+    .replace(/</g, "\\u003c")
+    .replace(/\u2028/g, "\\u2028")
+    .replace(/\u2029/g, "\\u2029");
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>SGLang realtime replay ${escapeHtmlText(artifact.trace_id || "")}</title>
+  <style>
+    body { margin: 0; background: #eef1ec; color: #171a16; font: 14px/1.45 ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    main { width: min(1180px, calc(100vw - 32px)); margin: 24px auto 56px; }
+    h1 { margin: 0 0 6px; font-size: 24px; }
+    .meta, .grid, .events, .prompt-list { margin-top: 16px; }
+    .grid { display: grid; grid-template-columns: minmax(0, 2fr) minmax(260px, 1fr); gap: 16px; align-items: start; }
+    video, .reference { width: 100%; border: 1px solid #cbd2c4; border-radius: 8px; background: #11140f; }
+    .reference.empty { min-height: 160px; display: grid; place-items: center; border: 1px dashed #cbd2c4; border-radius: 8px; color: #687164; }
+    pre, code { white-space: pre-wrap; word-break: break-word; }
+    pre { margin: 8px 0 0; padding: 12px; background: #fbfaf5; border: 1px solid #cbd2c4; border-radius: 8px; }
+    table { width: 100%; border-collapse: collapse; background: #fbfaf5; border: 1px solid #cbd2c4; }
+    th, td { padding: 8px 10px; border-bottom: 1px solid #d8ddd2; vertical-align: top; text-align: left; }
+    th { color: #687164; font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; }
+    .cards { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin-top: 12px; }
+    .card { padding: 10px; border: 1px solid #cbd2c4; border-radius: 8px; background: #fbfaf5; }
+    .card b { display: block; font-size: 16px; }
+    @media (max-width: 860px) { .grid, .cards { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>SGLang realtime replay</h1>
+    <div class="meta">Trace ${escapeHtmlText(artifact.trace_id || "-")} · ${escapeHtmlText(request.generation_mode || "-")} · ${escapeHtmlText(recording.video_file || "-")}</div>
+    <div class="cards">
+      <div class="card"><span>Frames</span><b>${escapeHtmlText(recording.frames ?? "-")}</b></div>
+      <div class="card"><span>FPS</span><b>${escapeHtmlText(recording.fps ?? request.fps ?? "-")}</b></div>
+      <div class="card"><span>Events</span><b>${escapeHtmlText(events.length)}</b></div>
+      <div class="card"><span>Mode</span><b>${escapeHtmlText(request.generation_mode || "-")}</b></div>
+    </div>
+    <section class="grid">
+      <div>
+        <video controls preload="metadata" src="${escapeHtmlAttribute(recording.video_url || recording.video_file || "")}"></video>
+        <h2>Prompt History</h2>
+        <ol class="prompt-list">${promptRows}</ol>
+      </div>
+      <aside>
+        <h2>Reference</h2>
+        ${referenceBlock}
+        <h2>Request</h2>
+        <pre>${escapeHtmlText(JSON.stringify(request, null, 2))}</pre>
+      </aside>
+    </section>
+    <section class="events">
+      <h2>Recent Events</h2>
+      <table>
+        <thead><tr><th>Kind</th><th>Time</th><th>Payload</th></tr></thead>
+        <tbody>${eventRows}</tbody>
+      </table>
+    </section>
+  </main>
+  <script id="recording-artifact" type="application/json">${artifactJson}</script>
+</body>
+</html>`;
+}
+
+function formatReplayMs(value) {
+  const ms = Number(value || 0);
+  if (ms >= 1000) return `${(ms / 1000).toFixed(2)}s`;
+  return `${Math.round(ms)}ms`;
+}
+
+function escapeHtmlText(value) {
+  return String(value)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
+}
+
+function escapeHtmlAttribute(value) {
+  return escapeHtmlText(value)
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
 }
 
 function buildRecordingMp4() {
@@ -1470,6 +2059,11 @@ function renderLoop(now) {
     lastDisplayLagMs = now - (item.receivedAt || now);
     $("decodeText").textContent = `${Math.round(item.decodeMs || lastDecodeMs)} ms`;
     $("displayLagText").textContent = `${(lastDisplayLagMs / 1000).toFixed(1)} s`;
+    recordChunkFirstRendered(item.chunk, {
+      render_loop: true,
+      display_lag_ms: lastDisplayLagMs,
+      decode_ms: item.decodeMs || lastDecodeMs,
+    });
     updateStats();
   } else if (decision.action === "hold") {
     updateStats();
@@ -1561,6 +2155,10 @@ function abortCurrentSession(reason = "session closed by client", {
   expectedClose = true,
   keepConnectDisabled = false,
 } = {}) {
+  recordTrajectoryEvent(expectedClose ? "session_close_requested" : "session_abort_requested", {
+    reason,
+    clear_frames: clearFrames,
+  });
   const socket = ws;
   ws = null;
   streamEpoch++;
@@ -1667,6 +2265,8 @@ async function connect() {
       ...frameInterpolationParams,
       ...superResolutionParams,
     });
+    const referenceImage = await createReferenceImageMeta(firstFrame);
+    beginSessionArtifact(init, referenceImage);
     document.activeElement?.blur?.();
     canvas.tabIndex = 0;
     canvas.focus();
@@ -1678,7 +2278,13 @@ async function connect() {
     socketServerError = "";
     socket.onopen = () => {
       if (epoch !== streamEpoch) return;
+      recordTrajectoryEvent("socket_open", { url: $("serverUrl").value });
       socket.send(pack(init));
+      recordTrajectoryEvent("init_sent", {
+        generation_mode: generationMode,
+        num_frames: init.num_frames,
+        has_reference_image: Boolean(referenceImage),
+      });
       setStatus("Starting", "live");
       const source = generationMode === "t2v"
         ? `${numFrames} frames from text`
@@ -1707,11 +2313,18 @@ async function connect() {
         setStatus("Closed");
         addHistory(closeText);
       }
+      recordTrajectoryEvent("socket_close", {
+        code: event.code,
+        reason: event.reason || "",
+        normal_close: normalClose,
+        expected_close: socketCloseExpected,
+      });
       if (!renderedPreviewFrames) setPreviewState("idle");
       socketCloseExpected = false;
     };
     socket.onerror = () => {
       if (epoch !== streamEpoch) return;
+      recordTrajectoryEvent("socket_error", { ready_state: socket.readyState });
       if (!socketCloseExpected) {
         socketHadError = true;
         $("connectBtn").disabled = false;
@@ -1751,6 +2364,7 @@ function receive(data, epoch) {
       socketServerError = message.content || "unknown";
       setStatus(socketServerError, "error");
       addHistory(`server error: ${socketServerError}`);
+      recordTrajectoryEvent("server_error", { content: socketServerError });
       if (ws && ws.readyState === WebSocket.OPEN) {
         socketCloseExpected = true;
         ws.close(1000, socketServerError.slice(0, 120));
@@ -1760,12 +2374,14 @@ function receive(data, epoch) {
       return;
     }
     if (message.type === "chunk_stats") {
+      recordServerChunkStats(message);
       updateServerChunkStats(message);
       return;
     }
     if (message.type === "frame_batch") {
       const payload = message.payload;
       delete message.payload;
+      recordFrameBatchReceived(message, payload?.byteLength || payload?.size || payload?.length || 0);
       enqueueDecodeBatch(message, payload, epoch);
       if (!renderedPreviewFrames) setStatus("Receiving", "live");
       return;
@@ -1777,6 +2393,7 @@ function receive(data, epoch) {
   const header = pendingHeader;
   pendingHeader = null;
   header.__received_at = performance.now();
+  recordFrameBatchReceived(header, data?.byteLength || data?.size || data?.length || 0);
   enqueueDecodeBatch(header, data, epoch);
 }
 
@@ -1799,6 +2416,11 @@ async function decodeAndEnqueueFrameBatch(header, data, epoch) {
   const now = performance.now();
   if (!renderedPreviewFrames && decodedFrames.length) {
     drawFrame(decodedFrames[0].image, { close: false, markRendered: false });
+    recordChunkFirstRendered(decodedFrames[0].chunk, {
+      initial_preview: true,
+      display_lag_ms: now - (decodedFrames[0].receivedAt || now),
+      decode_ms: decodedFrames[0].decodeMs || lastDecodeMs,
+    });
   }
   // record source frames before preview playback can hold or drop for latency
   recordDecodedFrameBatch(decodedFrames);
@@ -1814,6 +2436,66 @@ async function decodeAndEnqueueFrameBatch(header, data, epoch) {
   updateOutputSizeFromHeader(header);
   setStatus("Live", "live");
   updateStats();
+}
+
+function recordServerChunkStats(stats) {
+  if (!currentSessionArtifact) return;
+  const chunk = jsonSafe({
+    chunk_index: stats.chunk_index,
+    event_id: stats.event_id,
+    num_frames: stats.num_frames,
+    content_type: stats.content_type,
+    ws_payload_bytes: stats.ws_payload_bytes,
+    raw_write_ms: stats.raw_write_ms,
+    ws_write_ms: stats.ws_write_ms,
+    chunk_total_ms: stats.chunk_total_ms,
+    received_client_ms: artifactClientMs(),
+  });
+  currentSessionArtifact.chunks.push(chunk);
+  if (currentSessionArtifact.chunks.length > SESSION_ARTIFACT_EVENT_LIMIT) {
+    currentSessionArtifact.chunks.splice(
+      0,
+      currentSessionArtifact.chunks.length - SESSION_ARTIFACT_EVENT_LIMIT,
+    );
+  }
+  recordTrajectoryEvent("server_chunk_stats", chunk);
+}
+
+function recordFrameBatchReceived(header, payloadBytes) {
+  recordTrajectoryEvent("frame_batch_received", {
+    chunk_index: header.chunk_index,
+    event_id: header.event_id,
+    content_type: header.content_type,
+    encoding: header.encoding,
+    num_frames: header.num_frames,
+    width: header.width,
+    height: header.height,
+    source_width: header.source_width,
+    source_height: header.source_height,
+    preview_width: header.preview_width,
+    preview_height: header.preview_height,
+    payload_bytes: payloadBytes,
+  });
+}
+
+function recordChunkFirstRendered(chunkIndex, details = {}) {
+  if (chunkIndex === undefined || chunkIndex === null) return;
+  const key = String(chunkIndex);
+  if (renderedTraceChunks.has(key)) return;
+  renderedTraceChunks.add(key);
+  const event = recordTrajectoryEvent("client.chunk_first_rendered", {
+    chunk_index: chunkIndex,
+    ...details,
+  });
+  if (event && currentSessionArtifact) {
+    currentSessionArtifact.first_rendered_chunks.push(event);
+    if (currentSessionArtifact.first_rendered_chunks.length > SESSION_ARTIFACT_EVENT_LIMIT) {
+      currentSessionArtifact.first_rendered_chunks.splice(
+        0,
+        currentSessionArtifact.first_rendered_chunks.length - SESSION_ARTIFACT_EVENT_LIMIT,
+      );
+    }
+  }
 }
 
 function updateServerChunkStats(stats) {
@@ -1846,12 +2528,30 @@ function updateServerChunkStats(stats) {
 function sendEvent(kind, payload, historyText = null) {
   if (!ws || ws.readyState !== WebSocket.OPEN) {
     addHistory(`${historyText || `${kind} event`} · socket not open`);
+    recordTrajectoryEvent(`${kind}_event_dropped`, {
+      reason: "socket not open",
+      payload,
+    });
     return null;
   }
   const eventId = nextEventId++;
   ws.send(pack({ type: "event", kind, payload, event_id: eventId }));
   lastSentEventId = eventId;
   updateControlDebugText();
+  if (kind === "prompt") {
+    recordPromptHistory(payload, "prompt_update", eventId);
+    recordTrajectoryEvent("prompt_update", { event_id: eventId, prompt: payload });
+  } else if (kind === "camera_actions") {
+    recordTrajectoryEvent("camera_actions_sent", {
+      event_id: eventId,
+      payload,
+      active_actions: controlStateController
+        ? Array.from(controlStateController.activeActions).sort()
+        : [],
+    });
+  } else {
+    recordTrajectoryEvent(`${kind}_event_sent`, { event_id: eventId, payload });
+  }
   if (kind === "camera_actions" || kind === "prompt") {
     playbackController.noteInputEvent(eventId, performance.now(), {
       cutoverMode: cameraActionHasActiveMotion(payload) || kind === "prompt" ? "motion" : "settle",
@@ -2334,6 +3034,7 @@ applyQueryParams()
   .catch(showError);
 scheduleRenderLoop();
 updateRecordButton();
+updateRecordFolderButton();
 $("connectBtn").onclick = connect;
 $("stopBtn").onclick = () => closeSession();
 $("sendPromptBtn").onclick = () => sendEvent("prompt", $("prompt").value);
@@ -2344,6 +3045,11 @@ $("recordBtn").onclick = () => {
   } else {
     startRecording();
   }
+};
+$("recordFolderBtn").onclick = () => {
+  chooseRecordingDirectory().catch((error) => {
+    addHistory(error.message || "record folder selection failed");
+  });
 };
 $("firstFrame").onchange = () => drawReferencePreview($("firstFrame").files[0]);
 $("generationMode").addEventListener("change", updateGenerationModeUi);
@@ -2376,12 +3082,16 @@ document.querySelectorAll("[data-action]").forEach((btn) => {
   const action = btn.dataset.action;
   btn.addEventListener("pointerdown", (event) => {
     event.preventDefault();
-    controlStateController.setAction(action, true);
+    if (controlStateController.setAction(action, true)) {
+      recordTrajectoryEvent("control_button_down", { action });
+    }
   });
   ["pointerup", "pointercancel", "pointerleave", "blur"].forEach((eventName) => {
     btn.addEventListener(eventName, (event) => {
       event.preventDefault();
-      controlStateController.setAction(action, false);
+      if (controlStateController.setAction(action, false)) {
+        recordTrajectoryEvent("control_button_up", { action, event: eventName });
+      }
     });
   });
 });
@@ -2421,7 +3131,7 @@ class ControlStateController {
 
   setAction(action, active) {
     const hadAction = this.activeActions.has(action);
-    if (active === hadAction) return;
+    if (active === hadAction) return false;
     if (active) {
       this.activeActions.add(action);
     } else {
@@ -2429,6 +3139,7 @@ class ControlStateController {
     }
     this.updateButtons();
     this.enqueueTransition();
+    return true;
   }
 
   releaseAll() {
@@ -2510,8 +3221,21 @@ document.addEventListener("keydown", (event) => {
   const action = keyboardAction(event);
   if (!action) return;
   event.preventDefault();
-  if (event.repeat) return;
-  controlStateController.setAction(action, true);
+  if (event.repeat) {
+    recordTrajectoryEvent("key_repeat_ignored", {
+      key: event.key,
+      code: event.code,
+      action,
+    });
+    return;
+  }
+  if (controlStateController.setAction(action, true)) {
+    recordTrajectoryEvent("key_down", {
+      key: event.key,
+      code: event.code,
+      action,
+    });
+  }
 });
 
 document.addEventListener("keyup", (event) => {
@@ -2519,7 +3243,13 @@ document.addEventListener("keyup", (event) => {
   const action = keyboardAction(event);
   if (!action) return;
   event.preventDefault();
-  controlStateController.setAction(action, false);
+  if (controlStateController.setAction(action, false)) {
+    recordTrajectoryEvent("key_up", {
+      key: event.key,
+      code: event.code,
+      action,
+    });
+  }
 });
 
 window.addEventListener("blur", () => {
@@ -2551,6 +3281,18 @@ window.__sglangRealtimeDebug = () => ({
   renderedFps: fpsSamples.length,
   renderedPreviewFrames,
   renderLoopFps: renderLoopSamples.length,
+  recordingArtifact: recordingArtifact ? {
+    events: recordingArtifact.events.length,
+    firstRenderedChunks: recordingArtifact.first_rendered_chunks.length,
+    promptHistory: recordingArtifact.prompt_history.length,
+    traceId: recordingArtifact.trace_id,
+  } : null,
+  currentSessionArtifact: currentSessionArtifact ? {
+    events: currentSessionArtifact.events.length,
+    firstRenderedChunks: currentSessionArtifact.first_rendered_chunks.length,
+    promptHistory: currentSessionArtifact.prompt_history.length,
+    traceId: currentSessionArtifact.trace_id,
+  } : null,
   socketBufferedAmount: ws ? ws.bufferedAmount : 0,
   socketCloseExpected,
   socketHadError,
