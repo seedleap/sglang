@@ -1708,31 +1708,6 @@ function buildReplayHtml(artifact) {
   const referenceBlock = referenceImage?.data_url
     ? `<img class="reference" src="${escapeHtmlAttribute(referenceImage.data_url)}" alt="reference image" />`
     : `<div class="reference empty">${escapeHtmlText(referenceImage ? referenceImage.label || "reference image" : "T2V session: no reference image")}</div>`;
-  const replayControls = `
-          <div class="replay-stage-controls" aria-label="Camera controls">
-            <div class="replay-control-cluster">
-              <span class="replay-control-title">Move</span>
-              <div class="replay-camera-pad">
-                <span></span>
-                <button data-replay-action="w" data-key="W" type="button">Forward</button>
-                <span></span>
-                <button data-replay-action="a" data-key="A" type="button">Left</button>
-                <button data-replay-action="s" data-key="S" type="button">Back</button>
-                <button data-replay-action="d" data-key="D" type="button">Right</button>
-              </div>
-            </div>
-            <div class="replay-control-cluster">
-              <span class="replay-control-title">Look</span>
-              <div class="replay-camera-pad">
-                <span></span>
-                <button data-replay-action="i" data-key="&uarr;" type="button">Pitch +</button>
-                <span></span>
-                <button data-replay-action="j" data-key="&larr;" type="button">Yaw -</button>
-                <button data-replay-action="k" data-key="&darr;" type="button">Pitch -</button>
-                <button data-replay-action="l" data-key="&rarr;" type="button">Yaw +</button>
-              </div>
-            </div>
-          </div>`;
   const artifactJson = JSON.stringify(artifact)
     .replace(/</g, "\\u003c")
     .replace(/\u2028/g, "\\u2028")
@@ -1771,15 +1746,6 @@ function buildReplayHtml(artifact) {
     .replay-inspector-block pre { max-height: 110px; margin: 0; padding: 8px; border-radius: 6px; font-size: 11px; }
     .replay-inspector-image { display: none; width: 86px; height: 48px; object-fit: cover; margin: 0 0 8px; border: 1px solid #cbd2c4; border-radius: 5px; }
     .replay-inspector-image.has-image { display: block; }
-    .replay-stage-controls { display: grid; grid-template-columns: repeat(2, minmax(180px, 1fr)); gap: 12px; padding: 12px 14px 13px; border-top: 1px solid rgba(232, 234, 223, 0.12); background: #151912; }
-    .replay-control-cluster { display: grid; grid-template-columns: 46px 1fr; gap: 10px; align-items: center; }
-    .replay-control-title { color: rgba(232, 234, 223, 0.62); font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; }
-    .replay-camera-pad { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
-    .replay-camera-pad span { min-height: 36px; }
-    .replay-camera-pad button { position: relative; min-height: 36px; border: 1px solid rgba(232, 234, 223, 0.18); border-radius: 5px; background: #eef1ec; color: #11140f; font: inherit; font-size: 12px; }
-    .replay-camera-pad button::after { content: attr(data-key); position: absolute; right: 7px; top: 5px; color: #687164; font-size: 10px; font-weight: 650; }
-    .replay-camera-pad button.is-active { border-color: #aeb4aa; background: #8c9288; color: #fffdf7; box-shadow: inset 0 0 0 1px rgba(255, 253, 247, 0.22), 0 0 0 3px rgba(238, 241, 236, 0.2); }
-    .replay-camera-pad button.is-active::after { color: rgba(255, 253, 247, 0.78); }
     .replay-timeline { justify-content: flex-end; border-top: 1px solid rgba(232, 234, 223, 0.12); }
     video, .reference { width: 100%; border: 1px solid #cbd2c4; border-radius: 8px; background: #11140f; }
     .replay-stage video { border: 0; border-radius: 0; }
@@ -1792,7 +1758,7 @@ function buildReplayHtml(artifact) {
     .cards { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin-top: 12px; }
     .card { padding: 10px; border: 1px solid #cbd2c4; border-radius: 8px; background: #fbfaf5; }
     .card b { display: block; font-size: 16px; }
-    @media (max-width: 860px) { .grid, .cards, .replay-stage-controls { grid-template-columns: 1fr; } }
+    @media (max-width: 860px) { .grid, .cards { grid-template-columns: 1fr; } }
   </style>
 </head>
 <body>
@@ -1842,7 +1808,6 @@ function buildReplayHtml(artifact) {
               </div>
             </aside>
           </div>
-${replayControls}
           <div class="replay-timeline">
             <span id="replayActiveText">input idle</span>
             <span>${escapeHtmlText(recording.video_file || "-")}</span>
@@ -1872,7 +1837,6 @@ ${replayControls}
       const artifactNode = document.getElementById("recording-artifact");
       const video = document.getElementById("replayVideo");
       const activeText = document.getElementById("replayActiveText");
-      const buttons = Array.from(document.querySelectorAll("[data-replay-action]"));
       const videoShell = video && video.closest(".replay-video-shell");
       const inspector = document.getElementById("replayInspector");
       const inspectorTime = document.getElementById("replayInspectorTime");
@@ -1883,7 +1847,7 @@ ${replayControls}
       const inspectorEvents = document.getElementById("replayInspectorEvents");
       const inspectorImage = document.getElementById("replayInspectorImage");
       const inspectorImageMeta = document.getElementById("replayInspectorImageMeta");
-      if (!artifactNode || !video || !buttons.length) return;
+      if (!artifactNode || !video) return;
       const artifact = JSON.parse(artifactNode.textContent || "{}");
       const events = Array.isArray(artifact.events)
         ? artifact.events.slice().sort((left, right) => Number(left.client_ms || 0) - Number(right.client_ms || 0))
@@ -2055,32 +2019,11 @@ ${replayControls}
         return (relative / 1000).toFixed(2) + "s";
       }
 
-      function setReplayButtons(active) {
-        buttons.forEach((button) => {
-          button.classList.toggle("is-active", active.has(button.dataset.replayAction));
-        });
-      }
-
       function positionReplayInspector(event) {
         if (!inspector || !event) return;
         inspector.hidden = false;
-        const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 0;
-        const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
-        const rect = inspector.getBoundingClientRect();
-        const width = rect.width || Math.min(430, Math.max(240, viewportWidth - REPLAY_INSPECTOR_OFFSET_PX * 2));
-        const height = rect.height || Math.min(520, Math.max(160, viewportHeight - REPLAY_INSPECTOR_OFFSET_PX * 2));
-        let left = event.clientX + REPLAY_INSPECTOR_OFFSET_PX;
-        let top = event.clientY + REPLAY_INSPECTOR_OFFSET_PX;
-        if (left + width > viewportWidth - REPLAY_INSPECTOR_OFFSET_PX) {
-          left = event.clientX - width - REPLAY_INSPECTOR_OFFSET_PX;
-        }
-        if (top + height > viewportHeight - REPLAY_INSPECTOR_OFFSET_PX) {
-          top = event.clientY - height - REPLAY_INSPECTOR_OFFSET_PX;
-        }
-        const maxLeft = Math.max(REPLAY_INSPECTOR_OFFSET_PX, viewportWidth - width - REPLAY_INSPECTOR_OFFSET_PX);
-        const maxTop = Math.max(REPLAY_INSPECTOR_OFFSET_PX, viewportHeight - height - REPLAY_INSPECTOR_OFFSET_PX);
-        left = Math.min(maxLeft, Math.max(REPLAY_INSPECTOR_OFFSET_PX, left));
-        top = Math.min(maxTop, Math.max(REPLAY_INSPECTOR_OFFSET_PX, top));
+        const left = event.clientX + REPLAY_INSPECTOR_OFFSET_PX;
+        const top = event.clientY + REPLAY_INSPECTOR_OFFSET_PX;
         inspector.style.transform = "translate(" + Math.round(left) + "px, " + Math.round(top) + "px)";
       }
 
@@ -2114,13 +2057,11 @@ ${replayControls}
             inspectorImage.classList.remove("has-image");
           }
         }
-        setReplayButtons(userActions);
       }
 
       function syncReplayControls() {
         const clientMs = recordingStartMs + video.currentTime * 1000;
         const active = replayActionsAt(clientMs);
-        setReplayButtons(active);
         if (activeText) {
           const labels = Array.from(active).sort().map((action) => action.toUpperCase());
           activeText.textContent = labels.length ? "input " + labels.join(" + ") : "input idle";

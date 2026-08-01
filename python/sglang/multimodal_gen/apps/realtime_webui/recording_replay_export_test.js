@@ -24,15 +24,15 @@ assert.match(
   /class="replay-stage"/,
   "exported replay index should render a stage-style video area",
 );
-assert.match(
+assert.doesNotMatch(
   replayHtmlBuilder,
-  /data-replay-action="w"/,
-  "replay index should include visible movement controls",
+  /data-replay-action=/,
+  "exported replay should not render a second row of camera controls below the recorded stage",
 );
-assert.match(
+assert.doesNotMatch(
   replayHtmlBuilder,
-  /data-replay-action="l"/,
-  "replay index should include visible look controls",
+  /replay-stage-controls/,
+  "exported replay should rely on the recorded stage controls instead of duplicating them",
 );
 assert.match(
   replayHtmlBuilder,
@@ -58,6 +58,26 @@ assert.match(
   replayHtmlBuilder,
   /function positionReplayInspector\(event\)/,
   "replay inspector should be positioned from the pointer coordinates",
+);
+assert.match(
+  replayHtmlBuilder,
+  /event\.clientX\s*\+\s*REPLAY_INSPECTOR_OFFSET_PX/,
+  "replay inspector should stay to the lower-right of the cursor",
+);
+assert.match(
+  replayHtmlBuilder,
+  /event\.clientY\s*\+\s*REPLAY_INSPECTOR_OFFSET_PX/,
+  "replay inspector should stay below the cursor",
+);
+assert.doesNotMatch(
+  replayHtmlBuilder,
+  /event\.clientX\s*-\s*width/,
+  "replay inspector should not flip to the left side of the cursor",
+);
+assert.doesNotMatch(
+  replayHtmlBuilder,
+  /event\.clientY\s*-\s*height/,
+  "replay inspector should not flip above the cursor",
 );
 assert.match(
   replayHtmlBuilder,
