@@ -44,5 +44,35 @@ assert.match(
   /camera_actions_sent/,
   "replay index should use camera action events to reconstruct active input state",
 );
+assert.match(
+  replayHtmlBuilder,
+  /id="replayInspector"/,
+  "replay index should expose a hover inspector near the recorded video",
+);
+assert.match(
+  replayHtmlBuilder,
+  /function replayClientMsFromPointer/,
+  "replay index should map pointer position over the video to recording time",
+);
+assert.match(
+  replayHtmlBuilder,
+  /function inspectReplayAt/,
+  "replay index should show prompt, image, and event context for the hovered time",
+);
+assert.match(
+  replayHtmlBuilder,
+  /function sglangActionsForEventId/,
+  "replay index should derive the SGLang-sampled actions from server chunk event ids",
+);
+assert.match(
+  replayHtmlBuilder,
+  /Prompt at cursor/,
+  "replay inspector should include the prompt active at the hovered point",
+);
+assert.match(
+  replayHtmlBuilder,
+  /Reference image/,
+  "replay inspector should include reference image metadata",
+);
 
 console.log("recording replay export ok");

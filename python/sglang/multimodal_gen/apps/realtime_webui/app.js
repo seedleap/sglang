@@ -1754,8 +1754,23 @@ function buildReplayHtml(artifact) {
     .replay-topbar-spacer { flex: 1; }
     .replay-dot { width: 8px; height: 8px; border-radius: 50%; background: #8ecf9d; box-shadow: 0 0 0 4px rgba(142, 207, 157, 0.14); }
     .replay-pill { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px; border: 1px solid rgba(232, 234, 223, 0.22); border-radius: 6px; background: rgba(238, 241, 236, 0.08); color: #e8eadf; }
-    .replay-video-shell { display: grid; place-items: center; min-height: 320px; background: #11140f; }
+    .replay-video-shell { position: relative; display: grid; place-items: center; min-height: 320px; background: #11140f; }
     .replay-video { display: block; width: 100%; max-height: 72vh; border: 0; border-radius: 0; background: #11140f; }
+    .replay-cursor { position: absolute; inset: 0 auto 0 0; width: 2px; transform: translateX(var(--replay-cursor-x, -200%)); background: rgba(142, 207, 157, 0.86); box-shadow: 0 0 0 1px rgba(17, 20, 15, 0.62); pointer-events: none; opacity: 0; }
+    .replay-video-shell.is-inspecting .replay-cursor { opacity: 1; }
+    .replay-inspector { position: absolute; left: 14px; top: 14px; z-index: 4; width: min(430px, calc(100% - 28px)); max-height: calc(100% - 28px); overflow: auto; border: 1px solid rgba(232, 234, 223, 0.34); border-radius: 8px; background: rgba(251, 250, 245, 0.95); color: #171a16; box-shadow: 0 18px 50px rgba(17, 20, 15, 0.34); pointer-events: none; }
+    .replay-inspector[hidden] { display: none; }
+    .replay-inspector-header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding: 10px 12px 8px; border-bottom: 1px solid #cbd2c4; }
+    .replay-inspector-header b { font-size: 13px; }
+    .replay-inspector-header span { color: #687164; font-size: 12px; font-variant-numeric: tabular-nums; }
+    .replay-inspector-grid { display: grid; grid-template-columns: 120px minmax(0, 1fr); gap: 6px 10px; padding: 10px 12px; }
+    .replay-inspector-grid span { color: #687164; font-size: 12px; }
+    .replay-inspector-grid b { min-width: 0; font-size: 12px; word-break: break-word; }
+    .replay-inspector-block { padding: 0 12px 10px; }
+    .replay-inspector-block span { display: block; margin-bottom: 4px; color: #687164; font-size: 12px; }
+    .replay-inspector-block pre { max-height: 110px; margin: 0; padding: 8px; border-radius: 6px; font-size: 11px; }
+    .replay-inspector-image { display: none; width: 86px; height: 48px; object-fit: cover; margin: 0 0 8px; border: 1px solid #cbd2c4; border-radius: 5px; }
+    .replay-inspector-image.has-image { display: block; }
     .replay-stage-controls { display: grid; grid-template-columns: repeat(2, minmax(180px, 1fr)); gap: 12px; padding: 12px 14px 13px; border-top: 1px solid rgba(232, 234, 223, 0.12); background: #151912; }
     .replay-control-cluster { display: grid; grid-template-columns: 46px 1fr; gap: 10px; align-items: center; }
     .replay-control-title { color: rgba(232, 234, 223, 0.62); font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; }
@@ -1804,6 +1819,28 @@ function buildReplayHtml(artifact) {
           </div>
           <div class="replay-video-shell">
             <video id="replayVideo" class="replay-video" controls preload="metadata" src="${escapeHtmlAttribute(recording.video_url || recording.video_file || "")}"></video>
+            <div id="replayCursor" class="replay-cursor" aria-hidden="true"></div>
+            <aside id="replayInspector" class="replay-inspector" hidden aria-live="polite">
+              <div class="replay-inspector-header">
+                <b>Cursor trace</b>
+                <span id="replayInspectorTime">-</span>
+              </div>
+              <div class="replay-inspector-grid">
+                <span>User keys</span><b id="replayInspectorUserKeys">-</b>
+                <span>SGLang keys</span><b id="replayInspectorSglangKeys">-</b>
+                <span>Chunk / event</span><b id="replayInspectorChunk">-</b>
+                <span>Reference image</span><b id="replayInspectorImageMeta">-</b>
+              </div>
+              <div class="replay-inspector-block">
+                <img id="replayInspectorImage" class="replay-inspector-image" alt="reference image at cursor" />
+                <span>Prompt at cursor</span>
+                <pre id="replayInspectorPrompt">-</pre>
+              </div>
+              <div class="replay-inspector-block">
+                <span>Nearby events</span>
+                <pre id="replayInspectorEvents">-</pre>
+              </div>
+            </aside>
           </div>
 ${replayControls}
           <div class="replay-timeline">
@@ -1836,12 +1873,48 @@ ${replayControls}
       const video = document.getElementById("replayVideo");
       const activeText = document.getElementById("replayActiveText");
       const buttons = Array.from(document.querySelectorAll("[data-replay-action]"));
+      const videoShell = video && video.closest(".replay-video-shell");
+      const inspector = document.getElementById("replayInspector");
+      const inspectorTime = document.getElementById("replayInspectorTime");
+      const inspectorUserKeys = document.getElementById("replayInspectorUserKeys");
+      const inspectorSglangKeys = document.getElementById("replayInspectorSglangKeys");
+      const inspectorChunk = document.getElementById("replayInspectorChunk");
+      const inspectorPrompt = document.getElementById("replayInspectorPrompt");
+      const inspectorEvents = document.getElementById("replayInspectorEvents");
+      const inspectorImage = document.getElementById("replayInspectorImage");
+      const inspectorImageMeta = document.getElementById("replayInspectorImageMeta");
       if (!artifactNode || !video || !buttons.length) return;
       const artifact = JSON.parse(artifactNode.textContent || "{}");
       const events = Array.isArray(artifact.events)
         ? artifact.events.slice().sort((left, right) => Number(left.client_ms || 0) - Number(right.client_ms || 0))
         : [];
       const recordingStartMs = Number(artifact.recording && artifact.recording.started_client_ms) || 0;
+      const recording = artifact.recording || {};
+      const request = artifact.request || {};
+      const prompts = Array.isArray(artifact.prompt_history)
+        ? artifact.prompt_history.slice().sort((left, right) => Number(left.client_ms || 0) - Number(right.client_ms || 0))
+        : [];
+      const chunks = Array.isArray(artifact.chunks) && artifact.chunks.length
+        ? artifact.chunks.slice().sort((left, right) => replayEventTime(left) - replayEventTime(right))
+        : events.filter((event) => event.kind === "server_chunk_stats")
+          .sort((left, right) => replayEventTime(left) - replayEventTime(right));
+      const referenceImage = request.reference_image || artifact.reference_image || null;
+      const cameraEventsById = new Map();
+      events.forEach((event) => {
+        if (event.kind === "camera_actions_sent" && event.event_id !== undefined && event.event_id !== null) {
+          cameraEventsById.set(Number(event.event_id), event);
+        }
+      });
+      const replayActionLabels = {
+        w: "W Forward",
+        a: "A Left",
+        s: "S Back",
+        d: "D Right",
+        i: "↑ Pitch +",
+        j: "← Yaw -",
+        k: "↓ Pitch -",
+        l: "→ Yaw +",
+      };
 
       function applyReplayEvent(active, event) {
         if (!event || typeof event.kind !== "string") return active;
@@ -1864,12 +1937,166 @@ ${replayControls}
         return active;
       }
 
-      function syncReplayControls() {
-        const clientMs = recordingStartMs + video.currentTime * 1000;
-        const active = replayActionsAt(clientMs);
+      function userActionsAt(clientMs) {
+        const active = new Set();
+        for (const event of events) {
+          if (Number(event.client_ms || 0) > clientMs) break;
+          const action = typeof event.action === "string" ? event.action : "";
+          if (!action) continue;
+          if (event.kind === "key_down" || event.kind === "control_button_down") active.add(action);
+          if (event.kind === "key_up" || event.kind === "control_button_up") active.delete(action);
+        }
+        return active;
+      }
+
+      function replayEventTime(event) {
+        return Number(event.received_client_ms ?? event.client_ms ?? 0);
+      }
+
+      function promptAt(clientMs) {
+        let prompt = { prompt: request.prompt || "-", kind: "request", client_ms: 0 };
+        for (const item of prompts) {
+          if (Number(item.client_ms || 0) > clientMs) break;
+          prompt = item;
+        }
+        return prompt;
+      }
+
+      function chunkAt(clientMs) {
+        let selected = null;
+        for (const chunk of chunks) {
+          if (replayEventTime(chunk) > clientMs) break;
+          selected = chunk;
+        }
+        return selected || chunks[0] || null;
+      }
+
+      function sglangActionsForEventId(eventId) {
+        if (eventId === undefined || eventId === null || eventId === "") return new Set();
+        const event = cameraEventsById.get(Number(eventId));
+        return new Set(Array.isArray(event?.active_actions) ? event.active_actions.map(String) : []);
+      }
+
+      function actionText(actions) {
+        const labels = Array.from(actions)
+          .sort()
+          .map((action) => replayActionLabels[action] || action.toUpperCase());
+        return labels.length ? labels.join(" + ") : "idle";
+      }
+
+      function eventSummaryAt(clientMs) {
+        const interesting = events.filter((event) => (
+          [
+            "key_down",
+            "key_up",
+            "control_button_down",
+            "control_button_up",
+            "camera_actions_sent",
+            "prompt_update",
+            "server_chunk_stats",
+          ].includes(event.kind)
+        ));
+        let nearby = interesting.filter((event) => Math.abs(Number(event.client_ms || 0) - clientMs) <= 750);
+        if (!nearby.length) {
+          nearby = interesting.filter((event) => Number(event.client_ms || 0) <= clientMs).slice(-6);
+        } else {
+          nearby = nearby.slice(-8);
+        }
+        return nearby.map(formatReplayEventSummary).join("\\n") || "-";
+      }
+
+      function formatReplayEventSummary(event) {
+        const parts = [
+          formatReplayClientMs(Number(event.client_ms || 0)),
+          event.kind,
+        ];
+        if (event.action) parts.push("action=" + event.action.toUpperCase());
+        if (event.event_id !== undefined) parts.push("event#" + event.event_id);
+        if (event.chunk_index !== undefined) parts.push("chunk#" + event.chunk_index);
+        if (Array.isArray(event.active_actions)) {
+          parts.push("active=" + actionText(new Set(event.active_actions.map(String))));
+        }
+        return parts.join(" · ");
+      }
+
+      function referenceImageText() {
+        if (!referenceImage) return "T2V / no reference image";
+        const parts = [
+          referenceImage.label || "reference image",
+          referenceImage.source || "",
+          referenceImage.mime || "",
+          referenceImage.bytes ? String(referenceImage.bytes) + " bytes" : "",
+        ].filter(Boolean);
+        return parts.join(" · ");
+      }
+
+      function replayDurationSeconds() {
+        if (Number.isFinite(video.duration) && video.duration > 0) return video.duration;
+        const frames = Number(recording.frames || 0);
+        const fps = Number(recording.fps || request.fps || 0);
+        return frames > 0 && fps > 0 ? frames / fps : 0;
+      }
+
+      function clampReplayRatio(value) {
+        return Math.min(1, Math.max(0, value));
+      }
+
+      function replayClientMsFromPointer(event) {
+        const rect = video.getBoundingClientRect();
+        const ratio = clampReplayRatio((event.clientX - rect.left) / Math.max(1, rect.width));
+        const durationSeconds = replayDurationSeconds();
+        if (videoShell) videoShell.style.setProperty("--replay-cursor-x", (ratio * 100).toFixed(2) + "%");
+        return recordingStartMs + durationSeconds * ratio * 1000;
+      }
+
+      function formatReplayClientMs(ms) {
+        const relative = Math.max(0, ms - recordingStartMs);
+        return (relative / 1000).toFixed(2) + "s";
+      }
+
+      function setReplayButtons(active) {
         buttons.forEach((button) => {
           button.classList.toggle("is-active", active.has(button.dataset.replayAction));
         });
+      }
+
+      function inspectReplayAt(clientMs) {
+        if (!inspector) return;
+        const userActions = userActionsAt(clientMs);
+        const chunk = chunkAt(clientMs);
+        const sglangActions = sglangActionsForEventId(chunk?.event_id);
+        const prompt = promptAt(clientMs);
+        inspector.hidden = false;
+        videoShell?.classList.add("is-inspecting");
+        if (inspectorTime) inspectorTime.textContent = formatReplayClientMs(clientMs);
+        if (inspectorUserKeys) inspectorUserKeys.textContent = actionText(userActions);
+        if (inspectorSglangKeys) inspectorSglangKeys.textContent = actionText(sglangActions);
+        if (inspectorChunk) {
+          inspectorChunk.textContent = chunk
+            ? "chunk #" + (chunk.chunk_index ?? "-") + " · event #" + (chunk.event_id ?? "-")
+            : "-";
+        }
+        if (inspectorPrompt) {
+          inspectorPrompt.textContent = (prompt.kind || "prompt") + " " + formatReplayClientMs(Number(prompt.client_ms || 0)) + "\\n" + (prompt.prompt || "-");
+        }
+        if (inspectorEvents) inspectorEvents.textContent = eventSummaryAt(clientMs);
+        if (inspectorImageMeta) inspectorImageMeta.textContent = referenceImageText();
+        if (inspectorImage) {
+          if (referenceImage?.data_url) {
+            inspectorImage.src = referenceImage.data_url;
+            inspectorImage.classList.add("has-image");
+          } else {
+            inspectorImage.removeAttribute("src");
+            inspectorImage.classList.remove("has-image");
+          }
+        }
+        setReplayButtons(userActions);
+      }
+
+      function syncReplayControls() {
+        const clientMs = recordingStartMs + video.currentTime * 1000;
+        const active = replayActionsAt(clientMs);
+        setReplayButtons(active);
         if (activeText) {
           const labels = Array.from(active).sort().map((action) => action.toUpperCase());
           activeText.textContent = labels.length ? "input " + labels.join(" + ") : "input idle";
@@ -1879,6 +2106,12 @@ ${replayControls}
 
       ["loadedmetadata", "timeupdate", "seeked", "play", "pause"].forEach((eventName) => {
         video.addEventListener(eventName, syncReplayControls);
+      });
+      video.addEventListener("mousemove", (event) => inspectReplayAt(replayClientMsFromPointer(event)));
+      video.addEventListener("mouseleave", () => {
+        if (inspector) inspector.hidden = true;
+        videoShell?.classList.remove("is-inspecting");
+        syncReplayControls();
       });
       syncReplayControls();
     })();
