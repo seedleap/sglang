@@ -109,5 +109,20 @@ assert.match(
   /Reference image/,
   "replay inspector should include reference image metadata",
 );
+assert.match(
+  replayHtmlBuilder,
+  /function replayReferenceImageSrc/,
+  "replay index should resolve reference images from either embedded data or URLs",
+);
+assert.match(
+  replayHtmlBuilder,
+  /referenceImage\?\.data_url\s*\|\|\s*referenceImage\?\.url/,
+  "preset reference URLs should render instead of a black placeholder when data_url is omitted",
+);
+assert.match(
+  replayHtmlBuilder,
+  /inspectorImage\.src = referenceSrc/,
+  "replay inspector should use the same resolved reference image source as the sidebar",
+);
 
 console.log("recording replay export ok");

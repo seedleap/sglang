@@ -402,11 +402,20 @@ let recordingDirectoryHandle = null;
 let recordingBaseFileName = "";
 let currentSessionArtifact = null;
 let recordingArtifact = null;
+let currentTrace = null;
+let traceInitSent = false;
 let renderedTraceChunks = new Set();
 const decodeRequests = new Map();
 let controlStateController = null;
 let lastSentEventId = 0;
 let lastSampledEventId = 0;
+const traceTopologyApi = window.SGLangRealtimeTraceTopology || {};
+const traceTopology = traceTopologyApi.createRealtimeTraceTopology
+  ? traceTopologyApi.createRealtimeTraceTopology({ maxEvents: 220 })
+  : null;
+const formatTraceDuration = traceTopologyApi.formatTraceDuration || formatMs;
+let activeWorkspaceView = "preview";
+let traceRenderFrame = 0;
 
 const stage = document.querySelector(".stage");
 const previewFrame = document.querySelector(".preview-frame");
@@ -450,6 +459,280 @@ function addHistory(text) {
   item.textContent = `${now.toLocaleTimeString("zh-CN", { hour12: false })}.${ms} ${text}`;
   $("historyList").prepend(item);
   while ($("historyList").children.length > 8) $("historyList").lastChild.remove();
+}
+
+function createClientTrace() {
+  return {
+    traceId: createTraceId(),
+    seq: 0,
+    createdPerfMs: performance.now(),
+    createdEpochMs: Date.now(),
+    events: [],
+  };
+}
+
+function createTraceId() {
+  if (crypto.randomUUID) return crypto.randomUUID().replaceAll("-", "");
+  const random = crypto.getRandomValues(new Uint32Array(4));
+  return Array.from(random, (part) => part.toString(16).padStart(8, "0")).join("");
+}
+
+function currentTracePayload() {
+  if (!currentTrace) return undefined;
+  return {
+    trace_id: currentTrace.traceId,
+    time_origin_ms: performance.timeOrigin,
+    created_perf_ms: roundTraceNumber(currentTrace.createdPerfMs),
+    created_epoch_ms: currentTrace.createdEpochMs,
+    user_agent: navigator.userAgent,
+    location: window.location.href,
+    events: currentTrace.events.slice(-32),
+  };
+}
+
+function traceWebSocketUrl(baseUrl) {
+  if (!currentTrace) return baseUrl;
+  try {
+    const url = new URL(baseUrl, window.location.href);
+    url.searchParams.set("trace_id", currentTrace.traceId);
+    return url.toString();
+  } catch {
+    const separator = baseUrl.includes("?") ? "&" : "?";
+    return `${baseUrl}${separator}trace_id=${encodeURIComponent(currentTrace.traceId)}`;
+  }
+}
+
+function markClientTrace(name, fields = {}, options = {}) {
+  if (!currentTrace) return null;
+  const event = {
+    name,
+    seq: ++currentTrace.seq,
+    trace_id: currentTrace.traceId,
+    client_perf_ms: roundTraceNumber(performance.now()),
+    client_epoch_ms: Date.now(),
+    ...fields,
+  };
+  currentTrace.events.push(event);
+  if (currentTrace.events.length > 64) currentTrace.events.shift();
+  recordTraceTopologyEvent(event);
+  if (options.send !== false) sendClientTrace(event);
+  return event;
+}
+
+function sendClientTrace(event) {
+  if (!traceInitSent || !currentTrace || !ws || ws.readyState !== WebSocket.OPEN) {
+    return;
+  }
+  try {
+    ws.send(pack({
+      type: "event",
+      kind: "client_trace",
+      trace_id: currentTrace.traceId,
+      payload: event,
+    }));
+  } catch (error) {
+    console.debug("realtime_trace send failed", error);
+  }
+}
+
+function roundTraceNumber(value) {
+  return Math.round(Number(value || 0) * 1000) / 1000;
+}
+
+function recordTraceTopologyEvent(event, receivedPerfMs = performance.now()) {
+  if (!traceTopology || !event) return;
+  const traceEvent = event.trace ? event.trace : event;
+  traceTopology.addEvent(traceEvent, receivedPerfMs);
+  recordTrajectoryEvent("trace_event", { trace: traceEvent });
+  renderTraceTopology();
+}
+
+function resetTraceTopology(traceId = "") {
+  traceTopology?.reset(traceId);
+  renderTraceTopology();
+}
+
+function renderTraceTopology() {
+  if (traceRenderFrame) return;
+  traceRenderFrame = requestAnimationFrame(() => {
+    traceRenderFrame = 0;
+    renderTraceTopologyNow();
+  });
+}
+
+function renderTraceTopologyNow() {
+  if (!traceTopology) return;
+  const summary = traceTopology.summary();
+  updateTraceSummary(summary);
+  if (activeWorkspaceView !== "trace") return;
+  renderTraceSvg(summary);
+  renderTraceEventList(summary.recentEvents);
+}
+
+function updateTraceSummary(summary) {
+  $("traceIdText").textContent = shortTraceId(summary.traceId);
+  $("traceEventCountText").textContent = String(summary.eventCount);
+  const chunk = summary.latestChunk;
+  $("traceChunkText").textContent = chunk ? `#${chunk.chunkIndex}` : "-";
+  $("traceChunkTotalText").textContent = chunk ? formatTraceDuration(chunk.chunkTotalMs) : "-";
+  $("traceSchedulerText").textContent = chunk ? formatTraceDuration(chunk.schedulerForwardMs) : "-";
+  $("traceVaeEncodeText").textContent = chunk ? formatTraceDuration(chunk.vaeEncodeMs) : "-";
+  $("traceDenoiseText").textContent = chunk ? formatTraceDuration(chunk.denoiseMs) : "-";
+  const vaeDecodeMs = chunk
+    ? sumTraceNumbers(chunk.vaeDecodeMs, chunk.postDecodeMs)
+    : null;
+  $("traceVaeDecodeText").textContent = formatTraceDuration(vaeDecodeMs);
+  $("traceAsyncEstimateText").textContent = formatAsyncEstimate(summary.asyncEstimate);
+}
+
+function renderTraceSvg(summary) {
+  const container = $("traceTopology");
+  const nodes = summary.nodes || [];
+  if (!nodes.length || summary.eventCount === 0) {
+    container.innerHTML = `<svg viewBox="0 0 1180 240" role="img" aria-label="Trace topology"><text class="trace-empty" x="36" y="122">Trace events will appear after Generate starts.</text></svg>`;
+    return;
+  }
+
+  const width = 1180;
+  const height = 240;
+  const marginX = 28;
+  const nodeW = nodes.length > 8 ? 112 : 124;
+  const nodeH = 74;
+  const gap = (width - marginX * 2 - nodeW * nodes.length) / Math.max(1, nodes.length - 1);
+  const nodeY = 72;
+  const positions = new Map();
+  nodes.forEach((node, index) => {
+    positions.set(node.id, {
+      x: marginX + index * (nodeW + gap),
+      y: nodeY,
+    });
+  });
+
+  const edges = (summary.edges || []).map((edge) => {
+    const from = positions.get(edge.from);
+    const to = positions.get(edge.to);
+    if (!from || !to) return "";
+    const x1 = from.x + nodeW;
+    const x2 = to.x;
+    const y = nodeY + nodeH / 2;
+    return `
+      <line class="trace-edge-line" x1="${x1}" y1="${y}" x2="${x2 - 8}" y2="${y}" />
+      <text class="trace-edge-label" x="${(x1 + x2) / 2}" y="${y - 10}" text-anchor="middle">${escapeHtml(nodeLabel(edge.label || "-"))}</text>
+    `;
+  }).join("");
+
+  const nodeMarkup = nodes.map((node) => {
+    const pos = positions.get(node.id);
+    return `
+      <g class="trace-node ${node.status === "active" ? "is-active" : ""}" transform="translate(${pos.x} ${pos.y})">
+        <rect width="${nodeW}" height="${nodeH}" rx="8"></rect>
+        <text class="trace-node-title" x="12" y="24">${escapeHtml(node.title)}</text>
+        <text class="trace-node-subtitle" x="12" y="43">${escapeHtml(node.subtitle || "")}</text>
+        <text class="trace-node-metric" x="12" y="62">${escapeHtml(node.metric || "-")}</text>
+      </g>
+    `;
+  }).join("");
+
+  container.innerHTML = `
+    <svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Realtime trace topology">
+      <defs>
+        <marker id="traceArrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="#8c9288"></path>
+        </marker>
+      </defs>
+      ${edges}
+      ${nodeMarkup}
+    </svg>
+  `;
+}
+
+function renderTraceEventList(events) {
+  const list = $("traceEventList");
+  list.replaceChildren();
+  for (const event of [...events].reverse()) {
+    const item = document.createElement("div");
+    item.className = "trace-event-item";
+    const name = document.createElement("b");
+    name.textContent = event.event || event.name || "-";
+    const time = document.createElement("span");
+    time.textContent = traceEventTimeLabel(event);
+    const details = document.createElement("code");
+    details.textContent = traceEventDetails(event);
+    item.append(name, time, details);
+    list.appendChild(item);
+  }
+}
+
+function traceEventTimeLabel(event) {
+  if (Number.isFinite(Number(event.server_elapsed_ms))) {
+    return `server +${formatTraceDuration(event.server_elapsed_ms)}`;
+  }
+  if (Number.isFinite(Number(event.client_perf_ms)) && currentTrace) {
+    return `client +${formatTraceDuration(Number(event.client_perf_ms) - currentTrace.createdPerfMs)}`;
+  }
+  return "-";
+}
+
+function traceEventDetails(event) {
+  const parts = [];
+  if (event.chunk_index !== null && event.chunk_index !== undefined) parts.push(`chunk=${event.chunk_index}`);
+  if (event.event_id !== null && event.event_id !== undefined) parts.push(`event=${event.event_id}`);
+  if (Number.isFinite(Number(event.duration_ms))) parts.push(`duration=${formatTraceDuration(event.duration_ms)}`);
+  if (Number.isFinite(Number(event.cuda_ms))) parts.push(`cuda=${formatTraceDuration(event.cuda_ms)}`);
+  if (Number.isFinite(Number(event.chunk_total_ms))) parts.push(`chunk_total=${formatTraceDuration(event.chunk_total_ms)}`);
+  if (Number.isFinite(Number(event.display_lag_ms))) parts.push(`display_lag=${formatTraceDuration(event.display_lag_ms)}`);
+  if (event.content_type) parts.push(shortPayloadMode(event.content_type));
+  return parts.join(" · ") || "-";
+}
+
+function formatAsyncEstimate(estimate) {
+  if (!estimate) return "-";
+  return `${formatTraceDuration(estimate.savedMs)} saved · ${estimate.speedup.toFixed(2)}x`;
+}
+
+function sumTraceNumbers(...values) {
+  let total = 0;
+  let seen = false;
+  for (const value of values) {
+    if (!Number.isFinite(Number(value))) continue;
+    total += Number(value);
+    seen = true;
+  }
+  return seen ? total : null;
+}
+
+function shortTraceId(traceId) {
+  const value = String(traceId || "");
+  if (!value) return "-";
+  if (value.length <= 12) return value;
+  return `${value.slice(0, 8)}...${value.slice(-4)}`;
+}
+
+function nodeLabel(value) {
+  return value;
+}
+
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;");
+}
+
+function setWorkspaceView(view) {
+  activeWorkspaceView = view === "trace" ? "trace" : "preview";
+  document.querySelectorAll("[data-workspace-view]").forEach((button) => {
+    const active = button.dataset.workspaceView === activeWorkspaceView;
+    button.classList.toggle("is-active", active);
+    button.setAttribute("aria-selected", active ? "true" : "false");
+  });
+  document.querySelectorAll(".workspace-pane").forEach((pane) => {
+    const active = pane.id === `${activeWorkspaceView}Pane`;
+    pane.classList.toggle("is-active", active);
+    pane.hidden = !active;
+  });
+  if (activeWorkspaceView === "trace") renderTraceTopologyNow();
 }
 
 function updateControlDebugText() {
@@ -1705,8 +1988,12 @@ function buildReplayHtml(artifact) {
   const promptRows = prompts.map((item) => (
     `<li><b>${escapeHtmlText(item.kind)}</b> ${formatReplayMs(item.client_ms)}<pre>${escapeHtmlText(item.prompt || "")}</pre></li>`
   )).join("");
-  const referenceBlock = referenceImage?.data_url
-    ? `<img class="reference" src="${escapeHtmlAttribute(referenceImage.data_url)}" alt="reference image" />`
+  function replayReferenceImageSrc(referenceImage) {
+    return referenceImage?.data_url || referenceImage?.url || referenceImage?.source_url || referenceImage?.preset_url || "";
+  }
+  const referenceSrc = replayReferenceImageSrc(referenceImage);
+  const referenceBlock = referenceSrc
+    ? `<img class="reference" src="${escapeHtmlAttribute(referenceSrc)}" alt="reference image" />`
     : `<div class="reference empty">${escapeHtmlText(referenceImage ? referenceImage.label || "reference image" : "T2V session: no reference image")}</div>`;
   const artifactJson = JSON.stringify(artifact)
     .replace(/</g, "\\u003c")
@@ -1863,6 +2150,7 @@ function buildReplayHtml(artifact) {
         : events.filter((event) => event.kind === "server_chunk_stats")
           .sort((left, right) => replayEventTime(left) - replayEventTime(right));
       const referenceImage = request.reference_image || artifact.reference_image || null;
+      const referenceSrc = replayReferenceImageSrc(referenceImage);
       const cameraEventsById = new Map();
       events.forEach((event) => {
         if (event.kind === "camera_actions_sent" && event.event_id !== undefined && event.event_id !== null) {
@@ -1995,6 +2283,10 @@ function buildReplayHtml(artifact) {
         return parts.join(" · ");
       }
 
+      function replayReferenceImageSrc(referenceImage) {
+        return referenceImage?.data_url || referenceImage?.url || referenceImage?.source_url || referenceImage?.preset_url || "";
+      }
+
       function replayDurationSeconds() {
         if (Number.isFinite(video.duration) && video.duration > 0) return video.duration;
         const frames = Number(recording.frames || 0);
@@ -2049,8 +2341,8 @@ function buildReplayHtml(artifact) {
         if (inspectorEvents) inspectorEvents.textContent = eventSummaryAt(clientMs);
         if (inspectorImageMeta) inspectorImageMeta.textContent = referenceImageText();
         if (inspectorImage) {
-          if (referenceImage?.data_url) {
-            inspectorImage.src = referenceImage.data_url;
+          if (referenceSrc) {
+            inspectorImage.src = referenceSrc;
             inspectorImage.classList.add("has-image");
           } else {
             inspectorImage.removeAttribute("src");
@@ -2806,7 +3098,7 @@ function abortCurrentSession(reason = "session closed by client", {
   setStatus(expectedClose ? "Closing" : "Aborting");
   if (!renderedPreviewFrames) setPreviewState("idle");
   addHistory(reason);
-  socket.close(expectedClose ? 1000 : 1011, reason.slice(0, 120));
+  socket.close(expectedClose ? 1000 : 1008, reason.slice(0, 120));
   return socket;
 }
 
@@ -2846,6 +3138,14 @@ async function connect() {
     }
     resetStreamStats();
     const epoch = ++streamEpoch;
+    currentTrace = createClientTrace();
+    traceInitSent = false;
+    resetTraceTopology(currentTrace.traceId);
+    markClientTrace("client.generate_clicked", {
+      generation_mode: selectedGenerationMode(),
+      transport: $("transportFormat").value || "raw",
+      fps: Number($("fps").value || DEFAULT_TARGET_FPS),
+    }, { send: false });
     const generationMode = selectedGenerationMode();
     let firstFrame;
     let numFrames = Number($("numFrames").value);
@@ -2883,6 +3183,8 @@ async function connect() {
       max_chunks: generationMode === "t2v" || $("continuous").checked
         ? undefined
         : 1,
+      trace_id: currentTrace.traceId,
+      client_trace: currentTracePayload(),
       first_frame: firstFrame,
       ...previewTransportParams,
       ...frameInterpolationParams,
@@ -2890,10 +3192,13 @@ async function connect() {
     });
     const referenceImage = await createReferenceImageMeta(firstFrame);
     beginSessionArtifact(init, referenceImage);
+    if (currentSessionArtifact && currentTrace) {
+      currentSessionArtifact.trace_id = currentTrace.traceId;
+    }
     document.activeElement?.blur?.();
     canvas.tabIndex = 0;
     canvas.focus();
-    const socket = new WebSocket($("serverUrl").value);
+    const socket = new WebSocket(traceWebSocketUrl($("serverUrl").value));
     ws = socket;
     socket.binaryType = "arraybuffer";
     socketHadError = false;
@@ -2901,8 +3206,19 @@ async function connect() {
     socketServerError = "";
     socket.onopen = () => {
       if (epoch !== streamEpoch) return;
-      recordTrajectoryEvent("socket_open", { url: $("serverUrl").value });
-      socket.send(pack(init));
+      markClientTrace("client.ws_open", {
+        url: traceWebSocketUrl($("serverUrl").value),
+      }, { send: false });
+      recordTrajectoryEvent("socket_open", { url: traceWebSocketUrl($("serverUrl").value) });
+      const initPayload = pack(init);
+      socket.send(initPayload);
+      traceInitSent = true;
+      markClientTrace("client.init_sent", {
+        generation_mode: generationMode,
+        num_frames: init.num_frames,
+        has_reference_image: Boolean(referenceImage),
+        payload_bytes: initPayload.byteLength,
+      });
       recordTrajectoryEvent("init_sent", {
         generation_mode: generationMode,
         num_frames: init.num_frames,
@@ -2917,6 +3233,10 @@ async function connect() {
     socket.onclose = (event) => {
       if (epoch !== streamEpoch) return;
       if (ws === socket) ws = null;
+      markClientTrace("client.ws_close", {
+        code: event.code,
+        reason: event.reason || "",
+      }, { send: false });
       $("connectBtn").disabled = false;
       if (clearQueueOnClose) {
         clearFrameQueue();
@@ -2947,6 +3267,7 @@ async function connect() {
     };
     socket.onerror = () => {
       if (epoch !== streamEpoch) return;
+      markClientTrace("client.ws_error", {}, { send: false });
       recordTrajectoryEvent("socket_error", { ready_state: socket.readyState });
       if (!socketCloseExpected) {
         socketHadError = true;
@@ -2981,9 +3302,13 @@ function handleReceiveError(error, epoch) {
 
 function receive(data, epoch) {
   if (!pendingHeader) {
+    const receivedAt = performance.now();
     const message = unpack(new Uint8Array(data));
-    message.__received_at = performance.now();
+    message.__received_at = receivedAt;
     if (message.type === "error") {
+      markClientTrace("client.server_error_received", {
+        payload_bytes: data.byteLength || data.size || 0,
+      });
       socketServerError = message.content || "unknown";
       setStatus(socketServerError, "error");
       addHistory(`server error: ${socketServerError}`);
@@ -2997,13 +3322,33 @@ function receive(data, epoch) {
       return;
     }
     if (message.type === "chunk_stats") {
-      recordServerChunkStats(message);
-      updateServerChunkStats(message);
+      const stats = message;
+      markClientTrace("client.chunk_stats_received", {
+        chunk_index: Number(stats.chunk_index || 0),
+        event_id: Number(stats.event_id || 0),
+        num_frames: Number(stats.num_frames || 0),
+        content_type: stats.content_type || "",
+        payload_bytes: data.byteLength || data.size || 0,
+      });
+      recordTraceTopologyEvent({ event: "server.chunk_complete", ...stats }, receivedAt);
+      recordServerChunkStats(stats);
+      updateServerChunkStats(stats);
+      return;
+    }
+    if (message.type === "trace_event") {
+      recordTraceTopologyEvent(message.trace || message, receivedAt);
       return;
     }
     if (message.type === "frame_batch") {
       const payload = message.payload;
       delete message.payload;
+      markClientTrace("client.frame_batch_received", {
+        chunk_index: Number(message.chunk_index || 0),
+        event_id: Number(message.event_id || 0),
+        content_type: message.content_type || "",
+        num_frames: Number(message.num_frames || 0),
+        payload_bytes: payload?.byteLength || payload?.size || payload?.length || 0,
+      });
       recordFrameBatchReceived(message, payload?.byteLength || payload?.size || payload?.length || 0);
       enqueueDecodeBatch(message, payload, epoch);
       if (!renderedPreviewFrames) setStatus("Receiving", "live");
@@ -3016,6 +3361,13 @@ function receive(data, epoch) {
   const header = pendingHeader;
   pendingHeader = null;
   header.__received_at = performance.now();
+  markClientTrace("client.frame_batch_received", {
+    chunk_index: Number(header.chunk_index || 0),
+    event_id: Number(header.event_id || 0),
+    content_type: header.content_type || "",
+    num_frames: Number(header.num_frames || 0),
+    payload_bytes: data.byteLength || data.size || data.length || 0,
+  });
   recordFrameBatchReceived(header, data?.byteLength || data?.size || data?.length || 0);
   enqueueDecodeBatch(header, data, epoch);
 }
@@ -3036,6 +3388,14 @@ async function decodeAndEnqueueFrameBatch(header, data, epoch) {
     for (const item of decodedFrames) item.image?.close?.();
     return;
   }
+  markClientTrace("client.decode_batch_done", {
+    chunk_index: Number(header.chunk_index || 0),
+    event_id: Number(header.event_id || 0),
+    content_type: header.content_type || "",
+    num_frames: decodedFrames.length,
+    payload_bytes: payloadBytes,
+    decode_ms: roundTraceNumber(lastDecodeMs),
+  });
   const now = performance.now();
   if (!renderedPreviewFrames && decodedFrames.length) {
     drawFrame(decodedFrames[0].image, { close: false, markRendered: false });
@@ -3110,6 +3470,11 @@ function recordChunkFirstRendered(chunkIndex, details = {}) {
     chunk_index: chunkIndex,
     ...details,
   });
+  markClientTrace("client.chunk_first_rendered", {
+    chunk_index: Number(chunkIndex || 0),
+    display_lag_ms: roundTraceNumber(details.display_lag_ms),
+    decode_ms: roundTraceNumber(details.decode_ms),
+  });
   if (event && currentSessionArtifact) {
     currentSessionArtifact.first_rendered_chunks.push(event);
     if (currentSessionArtifact.first_rendered_chunks.length > SESSION_ARTIFACT_EVENT_LIMIT) {
@@ -3158,7 +3523,22 @@ function sendEvent(kind, payload, historyText = null) {
     return null;
   }
   const eventId = nextEventId++;
-  ws.send(pack({ type: "event", kind, payload, event_id: eventId }));
+  const clientSentPerfMs = performance.now();
+  const clientSentEpochMs = Date.now();
+  ws.send(pack({
+    type: "event",
+    kind,
+    payload,
+    event_id: eventId,
+    trace_id: currentTrace?.traceId,
+    client_sent_perf_ms: roundTraceNumber(clientSentPerfMs),
+    client_sent_epoch_ms: clientSentEpochMs,
+  }));
+  markClientTrace("client.event_sent", {
+    kind,
+    event_id: eventId,
+    ws_buffered_amount: ws.bufferedAmount,
+  });
   lastSentEventId = eventId;
   updateControlDebugText();
   if (kind === "prompt") {
@@ -3592,6 +3972,19 @@ function pack(value) {
 function unpack(buf) {
   let i = 0;
   const text = new TextDecoder();
+  const readU32 = () => (
+    (buf[i++] * 16777216) + (buf[i++] << 16) + (buf[i++] << 8) + buf[i++]
+  );
+  const readI32 = () => {
+    const value = readU32();
+    return value > 0x7fffffff ? value - 0x100000000 : value;
+  };
+  const readU64 = () => {
+    const hi = readU32();
+    const lo = readU32();
+    const value = BigInt(hi) * 4294967296n + BigInt(lo);
+    return value <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(value) : value.toString();
+  };
   const read = () => {
     const b = buf[i++];
     if (b <= 0x7f) return b;
@@ -3602,7 +3995,8 @@ function unpack(buf) {
     if (b === 0xc2 || b === 0xc3) return b === 0xc3;
     if (b === 0xcc) return buf[i++];
     if (b === 0xcd) return (buf[i++] << 8) | buf[i++];
-    if (b === 0xce) return (buf[i++] * 16777216) + (buf[i++] << 16) + (buf[i++] << 8) + buf[i++];
+    if (b === 0xce) return readU32();
+    if (b === 0xcf) return readU64();
     if (b === 0xca) {
       const value = new DataView(buf.buffer, buf.byteOffset + i, 4).getFloat32(0);
       i += 4;
@@ -3615,17 +4009,15 @@ function unpack(buf) {
     }
     if (b === 0xc4) return readBin(buf[i++]);
     if (b === 0xc5) return readBin((buf[i++] << 8) | buf[i++]);
-    if (b === 0xc6) {
-      return readBin(
-        (buf[i++] * 16777216) + (buf[i++] << 16) + (buf[i++] << 8) + buf[i++],
-      );
+    if (b === 0xc6) return readBin(readU32());
+    if (b === 0xd2) return readI32();
+    if (b === 0xd3) {
+      const hi = readI32();
+      const lo = readU32();
+      return hi * 4294967296 + lo;
     }
     if (b === 0xdc) return Array.from({ length: (buf[i++] << 8) | buf[i++] }, read);
-    if (b === 0xdd) {
-      return Array.from({
-        length: (buf[i++] * 16777216) + (buf[i++] << 16) + (buf[i++] << 8) + buf[i++],
-      }, read);
-    }
+    if (b === 0xdd) return Array.from({ length: readU32() }, read);
     if (b === 0xd9) return readStr(buf[i++]);
     if (b === 0xda) return readStr((buf[i++] << 8) | buf[i++]);
     if (b === 0xde) return readMap((buf[i++] << 8) | buf[i++]);
@@ -3656,6 +4048,7 @@ applyQueryParams()
   }))
   .catch(showError);
 scheduleRenderLoop();
+renderTraceTopology();
 updateRecordButton();
 updateRecordFolderButton();
 $("connectBtn").onclick = connect;
@@ -3694,6 +4087,9 @@ $("previewScale").addEventListener("input", () => setPreviewScale($("previewScal
 canvas.addEventListener("pointerdown", () => canvas.focus({ preventScroll: true }));
 $("serverUrl").addEventListener("change", () => {
   queryServerModelInfo({ applyPresetForModel: true }).catch(showError);
+});
+document.querySelectorAll("[data-workspace-view]").forEach((button) => {
+  button.addEventListener("click", () => setWorkspaceView(button.dataset.workspaceView));
 });
 document.querySelectorAll("button").forEach((btn) => {
   btn.addEventListener("pointerdown", () => btn.classList.add("is-pressed"));
