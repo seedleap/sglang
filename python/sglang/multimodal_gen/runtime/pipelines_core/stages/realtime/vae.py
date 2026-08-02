@@ -237,6 +237,7 @@ class CausalVaeDecodingStage(DecodingStage):
         if batch.block_idx == 0 and callable(reset_causal_state):
             reset_causal_state()
 
+        vae_config = getattr(server_args.pipeline_config, "vae_config", None)
         with realtime_trace_span(
             logger,
             batch,
@@ -248,8 +249,10 @@ class CausalVaeDecodingStage(DecodingStage):
             decoder_backend="causal_vae",
             vae_precision=server_args.pipeline_config.vae_precision,
             vae_tiling=server_args.pipeline_config.vae_tiling,
-            use_parallel_decode=server_args.pipeline_config.use_parallel_decode,
-            parallel_decode_mode=server_args.pipeline_config.parallel_decode_mode,
+            use_parallel_decode=bool(
+                getattr(vae_config, "use_parallel_decode", False)
+            ),
+            parallel_decode_mode=getattr(vae_config, "parallel_decode_mode", None),
         ) as trace_span:
             frames = self.decode_causal(
                 batch.latents,
