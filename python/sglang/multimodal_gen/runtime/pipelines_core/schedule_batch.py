@@ -421,6 +421,8 @@ class OutputBatch:
     remote_vae_request: dict[str, Any] | None = None
     realtime_output_chunk_index_start: int | None = None
     realtime_output_event_id: int | None = None
+    realtime_latents: torch.Tensor | None = None
+    realtime_handoff: dict[str, Any] | None = None
     audio: torch.Tensor | None = None
     audio_sample_rate: int | None = None
     trajectory_timesteps: torch.Tensor | None = None
@@ -448,4 +450,6 @@ class OutputBatch:
         self.output_file_paths = None
         self.raw_frame_batches = None
         self.remote_vae_request = None
+        self.realtime_latents = None
+        self.realtime_handoff = None
         self.noise_pred = None
