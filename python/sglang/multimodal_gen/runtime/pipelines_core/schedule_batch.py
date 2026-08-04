@@ -423,6 +423,7 @@ class OutputBatch:
     realtime_output_event_id: int | None = None
     realtime_latents: torch.Tensor | None = None
     realtime_handoff: dict[str, Any] | None = None
+    realtime_request_metadata: dict[str, Any] | None = None
     audio: torch.Tensor | None = None
     audio_sample_rate: int | None = None
     trajectory_timesteps: torch.Tensor | None = None
@@ -452,4 +453,5 @@ class OutputBatch:
         self.remote_vae_request = None
         self.realtime_latents = None
         self.realtime_handoff = None
+        self.realtime_request_metadata = None
         self.noise_pred = None
