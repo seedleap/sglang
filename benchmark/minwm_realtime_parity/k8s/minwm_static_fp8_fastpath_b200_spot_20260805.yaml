@@ -1,13 +1,13 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: minwm-static-fp8-fastpath-b200-20260805-04
+  name: minwm-static-fp8-fastpath-b200-20260805-05
   namespace: ray
   labels:
-    app.kubernetes.io/name: minwm-static-fp8-fastpath-b200-20260805-04
+    app.kubernetes.io/name: minwm-static-fp8-fastpath-b200-20260805-05
     seedleap.ai/owner: chenshengdong
     seedleap.ai/task: minwm-static-fp8-2x
-    seedleap.ai/run-id: minwm-static-fp8-fastpath-b200-20260805-04
+    seedleap.ai/run-id: minwm-static-fp8-fastpath-b200-20260805-05
   annotations:
     seedleap.ai/capacity-type: spot
     seedleap.ai/repo: seedleap/sglang
@@ -19,10 +19,10 @@ spec:
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: minwm-static-fp8-fastpath-b200-20260805-04
+        app.kubernetes.io/name: minwm-static-fp8-fastpath-b200-20260805-05
         seedleap.ai/owner: chenshengdong
         seedleap.ai/task: minwm-static-fp8-2x
-        seedleap.ai/run-id: minwm-static-fp8-fastpath-b200-20260805-04
+        seedleap.ai/run-id: minwm-static-fp8-fastpath-b200-20260805-05
       annotations:
         seedleap.ai/repo: seedleap/sglang
         seedleap.ai/branch: codex/minwm-realtime-api
@@ -54,7 +54,7 @@ spec:
             - name: SGLANG_GIT_REF
               value: "761b76f5206c4d8f384e5a6ddf6728a1eede0776"
             - name: RUN_ID
-              value: minwm-static-fp8-fastpath-b200-20260805-04
+              value: minwm-static-fp8-fastpath-b200-20260805-05
             - name: NODE_NAME
               valueFrom:
                 fieldRef:
@@ -121,6 +121,7 @@ spec:
                 'websockets==17.0.1' \
                 'zstandard==0.25.0' \
                 --root-user-action=ignore
+              python3 -m pip uninstall -y peft
               python3 -m pip install --force-reinstall --no-deps \
                 --index-url https://flashinfer.ai/whl/cu130 \
                 'flashinfer-jit-cache==0.6.12+cu130'

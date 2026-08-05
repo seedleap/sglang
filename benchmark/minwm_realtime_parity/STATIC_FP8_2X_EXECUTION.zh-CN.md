@@ -108,9 +108,10 @@ VAE/调度，则继续做不降低画质的流水化或阶段并行，并分别�
 
 ### 2026-08-05：B200 Spot 微基准 `-03`
 
-- 结果：Karpenter 先后尝试多个 NodeClaim，最终在 east2b 创建 B200 Spot；Pod 拉取镜像并启动后，
-  节点再次被回收，事件为 `TaintManagerEviction`。Pod 随节点消失，未产生有效测试结果。
-- 偏离预期：完整 diffusion extra 安装扩大了“拿到 Spot 到开始测试”的脆弱窗口，且结果目录建在安装后，
-  因此这次没有持久化安装日志。
-- 决策：`-04` 把 S3 provenance/job log 前置，并改为已在 RTX preflight 使用过的最小 runtime
-  依赖集合；不重新解析完整 diffusion extra，不构建 kernel，目标是把 B200 上的准备时间压到数分钟。
+- 结果：Karpenter 先后尝试多个 NodeClaim，最终在 east2b 创建 B200 Spot；完整依赖安装完成，
+  但 pytest collection 因残留 `peft==0.17.0` 导入已从 `transformers==5.12.1` 移除的
+  `HybridCache` 而失败。CUDA test 与 microbenchmark 未执行。
+- 证据纠偏：Pod 消失后只看 Kubernetes 事件，曾把 `TaintManagerEviction` 误判为运行主因；S3 中实际
+  留有 provenance 和 `pytest.log`，证明主因是 PEFT/Transformers API 不兼容。最终判断以 S3 日志为准。
+- 决策：暂停尚未拿到节点的 `-04`，避免它用同样环境失败；`-05` 沿用短安装路径并显式
+  `pip uninstall -y peft`。保留 suspended `-04`，不删除旧 Job。
