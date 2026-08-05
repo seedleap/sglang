@@ -546,6 +546,8 @@ PY
 fi
 
 if [[ "${MINWM_BENCHMARK_MODE}" == "calibratedfp8" ]]; then
+  python3 -m pytest -q \
+    /workspace/sglang/python/sglang/multimodal_gen/test/unit/test_minwm_static_fp8_transformer.py
   CALIBRATION_CASES="${MINWM_CASES_PATH:-${SCRIPT_DIR}/cases_720p_compile_smoke.json}"
   CALIBRATION_RESULTS="${LOCAL_RESULTS}/static-fp8-calibration"
   CALIBRATION_PATH="${CALIBRATION_RESULTS}/static-fp8-calibration.json"
@@ -574,6 +576,8 @@ if [[ "${MINWM_BENCHMARK_MODE}" == "calibratedfp8" ]]; then
 fi
 
 if [[ "${MINWM_BENCHMARK_MODE}" == "nvfp4" ]]; then
+  python3 -m pytest -q \
+    /workspace/sglang/python/sglang/multimodal_gen/test/unit/test_minwm_nvfp4_transformer.py
   NVFP4_CASES="${MINWM_CASES_PATH:-${SCRIPT_DIR}/cases_720p_compile_smoke.json}"
   NVFP4_RESULTS="${LOCAL_RESULTS}/nvfp4-calibration"
   NVFP4_DUMP_DIR="${NVFP4_RESULTS}/parity-dumps"
