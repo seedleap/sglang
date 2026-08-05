@@ -331,6 +331,8 @@ def main() -> None:
                 "cross_seq_lens",
                 "attention_tag",
             ):
+                if name not in forward_kwargs:
+                    continue
                 value = forward_kwargs.get(name)
                 record[name] = (
                     value.detach().cpu() if isinstance(value, torch.Tensor) else value
