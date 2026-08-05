@@ -271,19 +271,25 @@ else
 fi
 if [[ -n "${MINWM_SAGE_ATTENTION_BACKENDS:-}" \
   && "${MINWM_SKIP_INSTALL:-0}" != "1" ]]; then
+  python3 -m pip install --force-reinstall --no-deps \
+    'nvidia-cuda-cccl==13.0.85' \
+    'nvidia-cuda-crt==13.0.88' \
+    'nvidia-cuda-nvcc==13.0.88' \
+    'nvidia-nvvm==13.0.88' \
+    --root-user-action=ignore
   sage_cuda_home="${MINWM_SAGE_CUDA_HOME:-/opt/minwm/venv/lib/python3.12/site-packages/nvidia/cu13}"
-  if [[ -x "${sage_cuda_home}/bin/nvcc" ]]; then
-    export CUDA_HOME="${sage_cuda_home}"
-    export CUDACXX="${CUDA_HOME}/bin/nvcc"
-    export PATH="${CUDA_HOME}/bin:${PATH}"
-    if [[ ! -e "${CUDA_HOME}/lib64" ]]; then
-      ln -s lib "${CUDA_HOME}/lib64"
-    fi
-    if [[ ! -e "${CUDA_HOME}/lib/libcudart.so" ]]; then
-      ln -s libcudart.so.13 "${CUDA_HOME}/lib/libcudart.so"
-    fi
+  [[ -x "${sage_cuda_home}/bin/nvcc" ]]
+  export CUDA_HOME="${sage_cuda_home}"
+  export CUDACXX="${CUDA_HOME}/bin/nvcc"
+  export PATH="${CUDA_HOME}/bin:${PATH}"
+  if [[ ! -e "${CUDA_HOME}/lib64" ]]; then
+    ln -s lib "${CUDA_HOME}/lib64"
   fi
-  nvcc --version
+  if [[ ! -e "${CUDA_HOME}/lib/libcudart.so" ]]; then
+    ln -s libcudart.so.13 "${CUDA_HOME}/lib/libcudart.so"
+  fi
+  nvcc --version | tee "${RESULTS}/sage-attention-nvcc.txt"
+  grep -q 'release 13\.0' "${RESULTS}/sage-attention-nvcc.txt"
   sage_attention_ref="${MINWM_SAGE_ATTENTION_REF:-d1a57a546c3d395b1ffcbeecc66d81db76f3b4b5}"
   sage_attention_source="$(mktemp -d)/SageAttention"
   git clone --filter=blob:none --no-checkout \
@@ -1378,6 +1384,8 @@ run_throughput_profile() {
 profiles=(
   "exact-packed-det-kv128 packed fa true text_encoder,vae false 128"
   "exact-packed-det-kv45 packed fa true text_encoder,vae false 45"
+  "packed-optimized-components-kv128 packed fa false '' false 128"
+  "packed-optimized-components-kv45 packed fa false '' false 45"
   "packed-nondeterministic-kv128 packed fa false text_encoder,vae false 128"
   "packed-nondeterministic-kv45 packed fa false text_encoder,vae false 45"
   "lingbot-style-dense-native-kv45 dense fa false text_encoder,vae false 45"
@@ -1501,6 +1509,14 @@ isolated_pairs = {
         "exact-packed-det-kv128",
         "exact-packed-det-kv45",
     ),
+    "packed_vs_dense_fa_kv45": (
+        "dense-optimized-components-kv45",
+        "packed-optimized-components-kv45",
+    ),
+    "packed_vs_dense_fa_kv128": (
+        "dense-optimized-components-kv128",
+        "packed-optimized-components-kv128",
+    ),
     "sage_attn_vs_dense_fa_kv45": (
         "dense-optimized-components-kv45",
         "dense-sage-attn-kv45",
@@ -1556,6 +1572,143 @@ print(json.dumps({
     for name, value in profiles.items()
 }, indent=2, sort_keys=True))
 PY
+
+run_attention_quality_profile() {
+  local profile="$1" attention_impl="$2" attention_backend="$3"
+  local packed_deterministic="$4" kv_frames="$5"
+  local profile_dir="${LOCAL_RESULTS}/attention-quality/${profile}"
+  local profile_results="${RESULTS}/attention-quality/${profile}"
+  mkdir -p "${profile_dir}" "${profile_results}"
+  MINWM_ATTENTION_IMPL="${attention_impl}" \
+  MINWM_PACKED_ATTENTION_DETERMINISTIC="${packed_deterministic}" \
+  MINWM_NATIVE_COMPONENTS="" \
+  sglang serve \
+    --model-path "${MODEL_DIR}" \
+    --pipeline-class-name MinWMCausalDMDPipeline \
+    --attention-backend "${attention_backend}" \
+    --performance-mode speed \
+    --enable-torch-compile false \
+    --warmup-mode off \
+    --port 30000 \
+    > "${profile_results}/server.log" 2>&1 &
+  local profile_server_pid=$!
+  if ! wait_for_server "${profile_server_pid}" "${profile_results}/server.log"; then
+    kill "${profile_server_pid}" 2>/dev/null || true
+    wait "${profile_server_pid}" 2>/dev/null || true
+    return 1
+  fi
+  set +e
+  python3 "${SCRIPT_DIR}/run_sglang_api.py" \
+    --cases "${MINWM_ATTENTION_QUALITY_CASES_PATH}" \
+    --results "${profile_dir}" \
+    --ws-url ws://127.0.0.1:30000/v1/realtime_video/generate \
+    --case "${MINWM_ATTENTION_QUALITY_CASE}" \
+    --kv-cache-num-frames "${kv_frames}" \
+    --output-prefix output \
+    --engine-name "minwm-${profile}" \
+    > >(tee "${profile_results}/client.log") 2>&1
+  local profile_status=$?
+  set -e
+  kill "${profile_server_pid}" 2>/dev/null || true
+  wait "${profile_server_pid}" 2>/dev/null || true
+  if (( profile_status == 0 )); then
+    cp -r "${profile_dir}/." "${profile_results}/"
+  fi
+  return "${profile_status}"
+}
+
+if [[ "${MINWM_RUN_ATTENTION_QUALITY:-0}" == "1" ]]; then
+  : "${MINWM_ATTENTION_QUALITY_CASES_PATH:=${MINWM_THROUGHPUT_CASES_PATH:-${SCRIPT_DIR}/cases_720p_compile_smoke.json}}"
+  : "${MINWM_ATTENTION_QUALITY_CASE:=${MINWM_THROUGHPUT_CASE:-00_forward_080_pottery_720p}}"
+  quality_kv_frames="${MINWM_ATTENTION_QUALITY_KV_FRAMES:-128}"
+  quality_specs=(
+    "packed-fa packed fa true"
+    "dense-fa dense fa false"
+  )
+  if [[ ",${MINWM_SAGE_ATTENTION_BACKENDS:-}," == *",sage_attn,"* ]]; then
+    quality_specs+=("dense-sage-attn dense sage_attn false")
+  fi
+  if [[ ",${MINWM_SAGE_ATTENTION_BACKENDS:-}," == *",sage_attn_3,"* ]]; then
+    quality_specs+=("dense-sage-attn-3 dense sage_attn_3 false")
+  fi
+  quality_failures=()
+  for spec in "${quality_specs[@]}"; do
+    read -r profile attention_impl attention_backend packed_deterministic <<< "${spec}"
+    if ! run_attention_quality_profile \
+      "${profile}" "${attention_impl}" "${attention_backend}" \
+      "${packed_deterministic}" "${quality_kv_frames}"; then
+      quality_failures+=("${profile}")
+    fi
+  done
+  python3 - \
+    "${LOCAL_RESULTS}/attention-quality" \
+    "${RESULTS}/attention-quality-summary.json" \
+    "${MINWM_ATTENTION_QUALITY_CASE}" \
+    "${quality_failures[*]}" <<'PY'
+import concurrent.futures
+import json
+import math
+import sys
+from pathlib import Path
+
+import numpy as np
+from skimage.metrics import structural_similarity
+
+root = Path(sys.argv[1])
+output = Path(sys.argv[2])
+case = sys.argv[3]
+failures = sys.argv[4].split() if sys.argv[4] else []
+reference_path = root / "dense-fa" / "cases" / case / "output.npy"
+reference = np.load(reference_path, mmap_mode="r", allow_pickle=False)
+
+
+def frame_ssim(pair):
+    reference_frame, candidate_frame = pair
+    return structural_similarity(
+        reference_frame,
+        candidate_frame,
+        channel_axis=-1,
+        data_range=255,
+    )
+
+
+comparisons = {}
+for path in sorted(root.glob(f"*/cases/{case}/output.npy")):
+    profile = path.parents[2].name
+    candidate = np.load(path, mmap_mode="r", allow_pickle=False)
+    if candidate.shape != reference.shape:
+        raise ValueError(
+            f"{profile} shape {candidate.shape} != dense-fa shape {reference.shape}"
+        )
+    difference = candidate.astype(np.float32) - reference.astype(np.float32)
+    mse = float(np.mean(np.square(difference), dtype=np.float64))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+        ssim_values = list(executor.map(frame_ssim, zip(reference, candidate)))
+    comparisons[profile] = {
+        "reference_profile": "dense-fa",
+        "shape": list(candidate.shape),
+        "bitwise_equal": bool(np.array_equal(reference, candidate)),
+        "max_abs": float(np.max(np.abs(difference), initial=0)),
+        "mae": float(np.mean(np.abs(difference), dtype=np.float64)),
+        "rmse": math.sqrt(mse),
+        "psnr_db": None if mse == 0 else 20 * math.log10(255 / math.sqrt(mse)),
+        "mean_frame_ssim": float(np.mean(ssim_values)),
+        "min_frame_ssim": float(np.min(ssim_values)),
+        "changed_value_fraction": float(np.count_nonzero(difference) / difference.size),
+    }
+summary = {
+    "case": case,
+    "reference_profile": "dense-fa",
+    "failed_profiles": failures,
+    "comparisons": comparisons,
+}
+output.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
+print(json.dumps(summary, indent=2, sort_keys=True))
+PY
+  if (( ${#quality_failures[@]} != 0 )); then
+    profile_failures+=("attention-quality:${quality_failures[*]}")
+  fi
+fi
 
 echo "MINWM_B200_FULL_COMPLETE results=${RESULTS} bitwise_status=${bitwise_status} numeric_status=${numeric_status} profile_failures=${profile_failures[*]}"
 if (( bitwise_status != 0 && numeric_status != 0 )); then
