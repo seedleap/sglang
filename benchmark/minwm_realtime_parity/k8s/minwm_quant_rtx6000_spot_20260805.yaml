@@ -101,18 +101,18 @@ spec:
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: minwm-quant-fp8-rtx6000-20260805-03
+  name: minwm-quant-fp8-rtx6000-20260805-04
   namespace: ray
   labels:
-    app.kubernetes.io/name: minwm-quant-fp8-rtx6000-20260805-03
+    app.kubernetes.io/name: minwm-quant-fp8-rtx6000-20260805-04
     seedleap.ai/owner: chenshengdong
     seedleap.ai/task: minwm-realtime-quantization
-    seedleap.ai/run-id: minwm-quant-fp8-rtx6000-20260805-03
+    seedleap.ai/run-id: minwm-quant-fp8-rtx6000-20260805-04
   annotations:
     seedleap.ai/capacity-type: spot
     seedleap.ai/repo: seedleap/sglang
     seedleap.ai/branch: codex/minwm-realtime-api
-    seedleap.ai/sglang-git-ref: "17924c42d21be2c62d4d503757dfa9c567760cb1"
+    seedleap.ai/sglang-git-ref: "b2c8b41b4edabf000ca786c50b0447b570ab0fc3"
     seedleap.ai/minwm-git-ref: "2efc6485f65e8fcab506665efde79bc41406385e"
     seedleap.ai/checkpoint-version-id: "wduScksw2f3yPErnG9lBioOuE2AToyAP"
 spec:
@@ -121,14 +121,14 @@ spec:
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: minwm-quant-fp8-rtx6000-20260805-03
+        app.kubernetes.io/name: minwm-quant-fp8-rtx6000-20260805-04
         seedleap.ai/owner: chenshengdong
         seedleap.ai/task: minwm-realtime-quantization
-        seedleap.ai/run-id: minwm-quant-fp8-rtx6000-20260805-03
+        seedleap.ai/run-id: minwm-quant-fp8-rtx6000-20260805-04
       annotations:
         seedleap.ai/repo: seedleap/sglang
         seedleap.ai/branch: codex/minwm-realtime-api
-        seedleap.ai/sglang-git-ref: "17924c42d21be2c62d4d503757dfa9c567760cb1"
+        seedleap.ai/sglang-git-ref: "b2c8b41b4edabf000ca786c50b0447b570ab0fc3"
     spec:
       restartPolicy: Never
       terminationGracePeriodSeconds: 60
@@ -156,7 +156,7 @@ spec:
                   name: github-token
                   key: token
             - name: SGLANG_GIT_REF
-              value: "17924c42d21be2c62d4d503757dfa9c567760cb1"
+              value: "b2c8b41b4edabf000ca786c50b0447b570ab0fc3"
             - name: MINWM_GIT_REF
               value: "2efc6485f65e8fcab506665efde79bc41406385e"
             - name: MINWM_BENCHMARK_MODE
@@ -169,6 +169,8 @@ spec:
               value: "1"
             - name: MINWM_BUILD_SGLANG_KERNEL_FROM_SOURCE
               value: "1"
+            - name: MINWM_SGLANG_KERNEL_WHEEL_PATH
+              value: /s3/world-model/evals/minwm/quantization/20260805/artifacts/sglang_kernel-0.4.4-torch2.12.1-cu130-sm120.whl
             - name: MINWM_STAGE_FROM_MOUNT
               value: "1"
             - name: MINWM_CHECKPOINT_MOUNT_PATH
@@ -210,7 +212,7 @@ spec:
               clone_at sglang /workspace/sglang "${SGLANG_GIT_REF}"
               git -C /workspace/sglang rev-parse HEAD
 
-              export MINWM_RUN_ID=minwm-quant-fp8-rtx6000-20260805-03
+              export MINWM_RUN_ID=minwm-quant-fp8-rtx6000-20260805-04
               export MINWM_PROFILE_QUANTIZATION=fp8
               bash /workspace/sglang/benchmark/minwm_realtime_parity/aws_b200_entrypoint.sh
           resources:
