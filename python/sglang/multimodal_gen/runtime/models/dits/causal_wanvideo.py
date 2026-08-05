@@ -113,6 +113,8 @@ class CausalWanSelfAttention(nn.Module):
                 AttentionBackendEnum.FA,
                 AttentionBackendEnum.AITER,
                 AttentionBackendEnum.TORCH_SDPA,
+                AttentionBackendEnum.SAGE_ATTN,
+                AttentionBackendEnum.SAGE_ATTN_3,
             ),
         )
 

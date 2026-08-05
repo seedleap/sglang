@@ -82,6 +82,29 @@ _MINWM_CACHE_ROTATED_K = _env_flag("MINWM_CACHE_ROTATED_K", True)
 _MINWM_PRECOMPUTE_CACHE_ROPE = _env_flag("MINWM_PRECOMPUTE_CACHE_ROPE", True)
 _MINWM_CACHE_PACKED_METADATA = _env_flag("MINWM_CACHE_PACKED_METADATA", True)
 _MINWM_ANNOUNCED_ATTENTION_BACKENDS: set[tuple[str, str]] = set()
+_MINWM_SAGE_ATTENTION_BACKENDS = {
+    AttentionBackendEnum.SAGE_ATTN,
+    AttentionBackendEnum.SAGE_ATTN_3,
+}
+
+
+def _minwm_validate_attention_impl(
+    attention_impl: str,
+    selected_backends: set[AttentionBackendEnum],
+) -> None:
+    if attention_impl not in {"packed", "dense"}:
+        raise ValueError(
+            f"MINWM_ATTENTION_IMPL must be 'packed' or 'dense', got {attention_impl!r}"
+        )
+    selected_sage_backends = selected_backends & _MINWM_SAGE_ATTENTION_BACKENDS
+    if attention_impl == "packed" and selected_sage_backends:
+        names = ", ".join(
+            sorted(backend.name.lower() for backend in selected_sage_backends)
+        )
+        raise ValueError(
+            f"MinWM {names} requires MINWM_ATTENTION_IMPL=dense; the packed "
+            "path is a dedicated FlashAttention varlen implementation."
+        )
 
 
 class _MinWMUlyssesWorkspace:
@@ -549,6 +572,8 @@ class MinWMCausalSelfAttention(CausalWanSelfAttention):
                     AttentionBackendEnum.FA,
                     AttentionBackendEnum.AITER,
                     AttentionBackendEnum.TORCH_SDPA,
+                    AttentionBackendEnum.SAGE_ATTN,
+                    AttentionBackendEnum.SAGE_ATTN_3,
                 ),
             )
         )
@@ -941,11 +966,7 @@ class MinWMCausalTransformer3DModel(CausalWanTransformer3DModel):
     lora_param_names_mapping = MinWMVideoConfig().lora_param_names_mapping
 
     def __init__(self, config, hf_config, quant_config=None) -> None:
-        if _MINWM_ATTENTION_IMPL not in {"packed", "dense"}:
-            raise ValueError(
-                "MINWM_ATTENTION_IMPL must be 'packed' or 'dense', got "
-                f"{_MINWM_ATTENTION_IMPL!r}"
-            )
+        _minwm_validate_attention_impl(_MINWM_ATTENTION_IMPL, set())
         logger.info(
             "MinWM execution profile: attention_impl=%s "
             "packed_deterministic=%s segment_compile=%s cache_rotated_k=%s "
@@ -961,6 +982,20 @@ class MinWMCausalTransformer3DModel(CausalWanTransformer3DModel):
         if deterministic.strip().lower() not in {"", "0", "false", "no", "off"}:
             torch.use_deterministic_algorithms(True)
         super().__init__(config, hf_config, quant_config)
+        selected_backends = {
+            attention.backend
+            for block in self.blocks
+            for attention in (
+                block.attn1.attn,
+                block.attn1.ulysses_attn,
+                block.attn2.attn,
+            )
+        }
+        _minwm_validate_attention_impl(_MINWM_ATTENTION_IMPL, selected_backends)
+        logger.info(
+            "MinWM resolved dense attention backends=%s",
+            ",".join(sorted(backend.name.lower() for backend in selected_backends)),
+        )
         self.sp_size = get_sp_world_size()
         ulysses_workspace = _MinWMUlyssesWorkspace() if self.sp_size > 1 else None
         d = self.hidden_size // self.num_attention_heads

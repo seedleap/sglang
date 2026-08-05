@@ -269,6 +269,25 @@ PY
 else
   echo "Skipped dependency installation for reused in-Pod benchmark environment"
 fi
+if [[ -n "${MINWM_SAGE_ATTENTION_BACKENDS:-}" \
+  && "${MINWM_SKIP_INSTALL:-0}" != "1" ]]; then
+  sage_attention_ref="${MINWM_SAGE_ATTENTION_REF:-d1a57a546c3d395b1ffcbeecc66d81db76f3b4b5}"
+  sage_attention_source="$(mktemp -d)/SageAttention"
+  git clone --filter=blob:none --no-checkout \
+    https://github.com/thu-ml/SageAttention.git "${sage_attention_source}"
+  git -C "${sage_attention_source}" checkout --detach "${sage_attention_ref}"
+  [[ "$(git -C "${sage_attention_source}" rev-parse HEAD)" == "${sage_attention_ref}" ]]
+  printf '%s\n' "${sage_attention_ref}" \
+    > "${RESULTS}/sage-attention-source-ref.txt"
+  if [[ ",${MINWM_SAGE_ATTENTION_BACKENDS}," == *",sage_attn,"* ]]; then
+    python3 -m pip install "${sage_attention_source}" \
+      --no-build-isolation --root-user-action=ignore
+  fi
+  if [[ ",${MINWM_SAGE_ATTENTION_BACKENDS}," == *",sage_attn_3,"* ]]; then
+    python3 -m pip install "${sage_attention_source}/sageattention3_blackwell" \
+      --no-build-isolation --root-user-action=ignore
+  fi
+fi
 python3 - <<'PY' | tee "${RESULTS}/runtime.json"
 import importlib.util, json
 import diffusers, torch, transformers
@@ -277,10 +296,20 @@ print(json.dumps({
     "cuda": torch.version.cuda,
     "diffusers": diffusers.__version__,
     "peft_installed": importlib.util.find_spec("peft") is not None,
+    "sageattention_installed": importlib.util.find_spec("sageattention") is not None,
+    "sageattn3_installed": importlib.util.find_spec("sageattn3") is not None,
     "transformers": transformers.__version__,
     "gpu": torch.cuda.get_device_name(0),
 }, sort_keys=True))
 PY
+
+if [[ "${MINWM_RUN_SAGE_TESTS:-0}" == "1" ]]; then
+  python3 -m pytest -q \
+    /workspace/sglang/python/sglang/multimodal_gen/test/unit/test_sage_attention3_backend.py \
+    /workspace/sglang/python/sglang/multimodal_gen/test/unit/test_cuda_attention_backend.py \
+    /workspace/sglang/python/sglang/multimodal_gen/test/unit/realtime/test_minwm_realtime.py \
+    -k 'sage'
+fi
 
 if [[ -n "${MINWM_REUSE_MODEL_RUN_ID:-}" ]]; then
   [[ -f "${MODEL_DIR}/transformer/diffusion_pytorch_model.safetensors.index.json" ]]
@@ -1254,8 +1283,9 @@ else
 fi
 
 run_throughput_profile() {
-  local profile="$1" attention_impl="$2" packed_deterministic="$3"
-  local native_components="$4" torch_compile="$5" kv_frames="$6"
+  local profile="$1" attention_impl="$2" attention_backend="$3"
+  local packed_deterministic="$4" native_components="$5"
+  local torch_compile="$6" kv_frames="$7"
   local profile_dir="${LOCAL_RESULTS}/throughput/${profile}"
   local profile_results="${RESULTS}/throughput/${profile}"
   local quantization_args=()
@@ -1291,7 +1321,7 @@ run_throughput_profile() {
   sglang serve \
     --model-path "${MODEL_DIR}" \
     --pipeline-class-name MinWMCausalDMDPipeline \
-    --attention-backend fa \
+    --attention-backend "${attention_backend}" \
     --performance-mode speed \
     "${quantization_args[@]}" \
     "${transformer_args[@]}" \
@@ -1333,14 +1363,29 @@ run_throughput_profile() {
 }
 
 profiles=(
-  "exact-packed-det-kv128 packed true text_encoder,vae false 128"
-  "exact-packed-det-kv45 packed true text_encoder,vae false 45"
-  "packed-nondeterministic-kv45 packed false text_encoder,vae false 45"
-  "lingbot-style-dense-native-kv45 dense false text_encoder,vae false 45"
-  "dense-optimized-components-kv45 dense false '' false 45"
+  "exact-packed-det-kv128 packed fa true text_encoder,vae false 128"
+  "exact-packed-det-kv45 packed fa true text_encoder,vae false 45"
+  "packed-nondeterministic-kv45 packed fa false text_encoder,vae false 45"
+  "lingbot-style-dense-native-kv45 dense fa false text_encoder,vae false 45"
+  "dense-optimized-components-kv45 dense fa false '' false 45"
 )
 if [[ "${MINWM_INCLUDE_COMPILE_PROFILE:-true}" == "true" ]]; then
-  profiles+=("dense-optimized-compile-kv45 dense false '' true 45")
+  profiles+=("dense-optimized-compile-kv45 dense fa false '' true 45")
+fi
+if [[ -n "${MINWM_SAGE_ATTENTION_BACKENDS:-}" ]]; then
+  profiles+=("dense-optimized-components-kv128 dense fa false '' false 128")
+fi
+if [[ ",${MINWM_SAGE_ATTENTION_BACKENDS:-}," == *",sage_attn,"* ]]; then
+  profiles+=(
+    "dense-sage-attn-kv45 dense sage_attn false '' false 45"
+    "dense-sage-attn-kv128 dense sage_attn false '' false 128"
+  )
+fi
+if [[ ",${MINWM_SAGE_ATTENTION_BACKENDS:-}," == *",sage_attn_3,"* ]]; then
+  profiles+=(
+    "dense-sage-attn-3-kv45 dense sage_attn_3 false '' false 45"
+    "dense-sage-attn-3-kv128 dense sage_attn_3 false '' false 128"
+  )
 fi
 if [[ -n "${MINWM_THROUGHPUT_PROFILES:-}" ]]; then
   selected_profiles=()
@@ -1358,12 +1403,13 @@ if [[ -n "${MINWM_THROUGHPUT_PROFILES:-}" ]]; then
 fi
 profile_failures=()
 for spec in "${profiles[@]}"; do
-  read -r profile attention_impl packed_deterministic native_components torch_compile kv_frames <<< "${spec}"
+  read -r profile attention_impl attention_backend packed_deterministic native_components torch_compile kv_frames <<< "${spec}"
   if [[ "${native_components}" == "''" ]]; then
     native_components=""
   fi
   if ! run_throughput_profile \
-    "${profile}" "${attention_impl}" "${packed_deterministic}" \
+    "${profile}" "${attention_impl}" "${attention_backend}" \
+    "${packed_deterministic}" \
     "${native_components}" "${torch_compile}" "${kv_frames}"; then
     profile_failures+=("${profile}")
   fi
@@ -1436,6 +1482,22 @@ isolated_pairs = {
     "kv128_vs_kv45_effect": (
         "exact-packed-det-kv128",
         "exact-packed-det-kv45",
+    ),
+    "sage_attn_vs_dense_fa_kv45": (
+        "dense-optimized-components-kv45",
+        "dense-sage-attn-kv45",
+    ),
+    "sage_attn_3_vs_dense_fa_kv45": (
+        "dense-optimized-components-kv45",
+        "dense-sage-attn-3-kv45",
+    ),
+    "sage_attn_vs_dense_fa_kv128": (
+        "dense-optimized-components-kv128",
+        "dense-sage-attn-kv128",
+    ),
+    "sage_attn_3_vs_dense_fa_kv128": (
+        "dense-optimized-components-kv128",
+        "dense-sage-attn-3-kv128",
     ),
 }
 isolated = {}
