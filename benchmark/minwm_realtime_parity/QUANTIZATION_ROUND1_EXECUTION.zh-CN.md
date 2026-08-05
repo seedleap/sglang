@@ -74,11 +74,11 @@
 
 运行前待填写：
 
-- SGLang immutable SHA：待首次提交后填写
-- Job / Pod / Node：待提交
+- SGLang immutable SHA：`ca2509f03432d07f183f8f1816c1ae1f218ec6a0`
+- Job：`minwm-quant-r1-b200-20260805-01`；Pod / Node 待调度后填写
 - image digest：`sha256:bedc07ea3ba55059a8c1c569c3b177c4d00d41f37d4fa9105375531534ef5f2a`
 - GPU request：1 x B200
-- 结果 PVC：待 dry-run 后填写
+- 结果 PVC：`minwm-quant-r1-results-20260805`
 
 ## 结果结论
 
