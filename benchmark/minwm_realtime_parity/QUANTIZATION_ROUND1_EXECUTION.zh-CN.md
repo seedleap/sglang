@@ -92,6 +92,7 @@
 2. 因此旧数据只能形成先验：online FP8 约比 BF16 快 `15.0%`，static FP8 约快 `7.2%`，该次 NVFP4 反而慢约 `13.0%`；不能把它当作本轮 720p 结论。
 3. 旧 BF16 / online FP8 compile lane 均失败。日志显示 whole-DiT 在 KV 长度增长阶段反复产生冷编译：BF16 后段单 chunk 曾达到 `337–391 s`，online FP8 首 chunk 约 `150 s`；client 最终收到 WebSocket `1012 service restart`。这更像“长冷编译暴露在 Spot / Job 生命周期内”而不是稳态 FPS 失败。
 4. 决策：本轮仍保留 20 个 warmup chunk，让 KV45 前的形状编译不进入 measured 200 chunks；east2 Job deadline 从 4 小时延长到 7 小时。各 lane 结果直接写独立 S3 目录，即使 Spot 中断也保留已完成证据，后续只补缺失 lane。
+5. 决策：将运行顺序从“每种量化 eager+compile 连跑”改为“先完成 6 个 eager，再运行 6 个 compile”，且 compile 阶段按旧先验把 online FP8 放在最前。这样长冷编译或 Spot 中断不会阻止其余量化方法先拿到 eager 上限。
 
 ## 作业证据
 

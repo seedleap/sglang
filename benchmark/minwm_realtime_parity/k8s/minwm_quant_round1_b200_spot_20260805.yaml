@@ -145,8 +145,9 @@ spec:
 
               matrix_id="${MATRIX_ID}"
               matrix_results_root="${MINWM_RESULTS_ROOT%/}"
-              base_run="${matrix_id}-bf16"
-              nvfp4_run="${matrix_id}-nvfp4-trtllm"
+              base_run="${matrix_id}-bf16-eager"
+              static_fp8_run="${matrix_id}-static-fp8-eager"
+              nvfp4_run="${matrix_id}-nvfp4-trtllm-eager"
               entrypoint=/workspace/sglang/benchmark/minwm_realtime_parity/aws_b200_entrypoint.sh
               failures=()
               mkdir -p "${matrix_results_root}"
@@ -184,41 +185,96 @@ spec:
                   "$@"
               }
 
-              run_lane bf16 \
+              eager_profile=dense-optimized-components-kv45
+              compile_profile=dense-optimized-compile-kv45
+
+              run_lane bf16-eager \
                 MINWM_RUN_ID="${base_run}" \
                 MINWM_BENCHMARK_MODE=profiles \
-                MINWM_PROFILE_QUANTIZATION_LABEL=bf16
+                MINWM_PROFILE_QUANTIZATION_LABEL=bf16 \
+                MINWM_THROUGHPUT_PROFILES="${eager_profile}"
 
               [[ -f "/work/minwm-realtime/${base_run}/checkpoint/model.pt" ]]
               [[ -f "/work/minwm-realtime/${base_run}/sglang-model/minwm_conversion_manifest.json" ]]
 
-              run_reused_lane online-fp8 \
+              run_reused_lane online-fp8-eager \
                 MINWM_BENCHMARK_MODE=profiles \
                 MINWM_PROFILE_QUANTIZATION=fp8 \
-                MINWM_PROFILE_QUANTIZATION_LABEL=online_fp8_dynamic
+                MINWM_PROFILE_QUANTIZATION_LABEL=online_fp8_dynamic \
+                MINWM_THROUGHPUT_PROFILES="${eager_profile}"
 
-              run_reused_lane static-fp8 \
+              run_reused_lane static-fp8-eager \
                 MINWM_BENCHMARK_MODE=calibratedfp8 \
-                MINWM_PROFILE_QUANTIZATION_LABEL=static_fp8_calibrated
+                MINWM_PROFILE_QUANTIZATION_LABEL=static_fp8_calibrated \
+                MINWM_THROUGHPUT_PROFILES="${eager_profile}"
 
-              run_reused_lane nvfp4-trtllm \
+              run_reused_lane nvfp4-trtllm-eager \
                 MINWM_BENCHMARK_MODE=nvfp4 \
                 MINWM_PROFILE_QUANTIZATION_LABEL=nvfp4_flashinfer_trtllm \
-                SGLANG_DIFFUSION_FLASHINFER_FP4_GEMM_BACKEND=flashinfer_trtllm
+                SGLANG_DIFFUSION_FLASHINFER_FP4_GEMM_BACKEND=flashinfer_trtllm \
+                MINWM_THROUGHPUT_PROFILES="${eager_profile}"
 
-              [[ -f "/work/minwm-realtime/${nvfp4_run}/nvfp4-transformer/minwm_nvfp4_manifest.json" ]]
+              if [[ -f "/work/minwm-realtime/${nvfp4_run}/nvfp4-transformer/minwm_nvfp4_manifest.json" ]]; then
+                run_reused_lane nvfp4-cutlass-eager \
+                  MINWM_BENCHMARK_MODE=profiles \
+                  MINWM_PROFILE_TRANSFORMER_PATH="/work/minwm-realtime/${nvfp4_run}/nvfp4-transformer" \
+                  MINWM_PROFILE_QUANTIZATION_LABEL=nvfp4_flashinfer_cutlass \
+                  SGLANG_DIFFUSION_FLASHINFER_FP4_GEMM_BACKEND=flashinfer_cutlass \
+                  MINWM_THROUGHPUT_PROFILES="${eager_profile}"
 
-              run_reused_lane nvfp4-cutlass \
+                run_reused_lane nvfp4-cudnn-eager \
+                  MINWM_BENCHMARK_MODE=profiles \
+                  MINWM_PROFILE_TRANSFORMER_PATH="/work/minwm-realtime/${nvfp4_run}/nvfp4-transformer" \
+                  MINWM_PROFILE_QUANTIZATION_LABEL=nvfp4_flashinfer_cudnn \
+                  SGLANG_DIFFUSION_FLASHINFER_FP4_GEMM_BACKEND=flashinfer_cudnn \
+                  MINWM_THROUGHPUT_PROFILES="${eager_profile}"
+              else
+                failures+=("nvfp4-transformer-missing:1")
+              fi
+
+              run_reused_lane online-fp8-compile \
                 MINWM_BENCHMARK_MODE=profiles \
-                MINWM_PROFILE_TRANSFORMER_PATH="/work/minwm-realtime/${nvfp4_run}/nvfp4-transformer" \
-                MINWM_PROFILE_QUANTIZATION_LABEL=nvfp4_flashinfer_cutlass \
-                SGLANG_DIFFUSION_FLASHINFER_FP4_GEMM_BACKEND=flashinfer_cutlass
+                MINWM_PROFILE_QUANTIZATION=fp8 \
+                MINWM_PROFILE_QUANTIZATION_LABEL=online_fp8_dynamic \
+                MINWM_THROUGHPUT_PROFILES="${compile_profile}"
 
-              run_reused_lane nvfp4-cudnn \
+              run_reused_lane bf16-compile \
                 MINWM_BENCHMARK_MODE=profiles \
-                MINWM_PROFILE_TRANSFORMER_PATH="/work/minwm-realtime/${nvfp4_run}/nvfp4-transformer" \
-                MINWM_PROFILE_QUANTIZATION_LABEL=nvfp4_flashinfer_cudnn \
-                SGLANG_DIFFUSION_FLASHINFER_FP4_GEMM_BACKEND=flashinfer_cudnn
+                MINWM_PROFILE_QUANTIZATION_LABEL=bf16 \
+                MINWM_THROUGHPUT_PROFILES="${compile_profile}"
+
+              if [[ -f "/work/minwm-realtime/${static_fp8_run}/static-fp8-transformer/minwm_static_fp8_manifest.json" ]]; then
+                run_reused_lane static-fp8-compile \
+                  MINWM_BENCHMARK_MODE=profiles \
+                  MINWM_PROFILE_TRANSFORMER_PATH="/work/minwm-realtime/${static_fp8_run}/static-fp8-transformer" \
+                  MINWM_PROFILE_QUANTIZATION_LABEL=static_fp8_calibrated \
+                  MINWM_THROUGHPUT_PROFILES="${compile_profile}"
+              else
+                failures+=("static-fp8-transformer-missing:1")
+              fi
+
+              if [[ -f "/work/minwm-realtime/${nvfp4_run}/nvfp4-transformer/minwm_nvfp4_manifest.json" ]]; then
+                run_reused_lane nvfp4-trtllm-compile \
+                  MINWM_BENCHMARK_MODE=profiles \
+                  MINWM_PROFILE_TRANSFORMER_PATH="/work/minwm-realtime/${nvfp4_run}/nvfp4-transformer" \
+                  MINWM_PROFILE_QUANTIZATION_LABEL=nvfp4_flashinfer_trtllm \
+                  SGLANG_DIFFUSION_FLASHINFER_FP4_GEMM_BACKEND=flashinfer_trtllm \
+                  MINWM_THROUGHPUT_PROFILES="${compile_profile}"
+
+                run_reused_lane nvfp4-cutlass-compile \
+                  MINWM_BENCHMARK_MODE=profiles \
+                  MINWM_PROFILE_TRANSFORMER_PATH="/work/minwm-realtime/${nvfp4_run}/nvfp4-transformer" \
+                  MINWM_PROFILE_QUANTIZATION_LABEL=nvfp4_flashinfer_cutlass \
+                  SGLANG_DIFFUSION_FLASHINFER_FP4_GEMM_BACKEND=flashinfer_cutlass \
+                  MINWM_THROUGHPUT_PROFILES="${compile_profile}"
+
+                run_reused_lane nvfp4-cudnn-compile \
+                  MINWM_BENCHMARK_MODE=profiles \
+                  MINWM_PROFILE_TRANSFORMER_PATH="/work/minwm-realtime/${nvfp4_run}/nvfp4-transformer" \
+                  MINWM_PROFILE_QUANTIZATION_LABEL=nvfp4_flashinfer_cudnn \
+                  SGLANG_DIFFUSION_FLASHINFER_FP4_GEMM_BACKEND=flashinfer_cudnn \
+                  MINWM_THROUGHPUT_PROFILES="${compile_profile}"
+              fi
 
               python3 - "${matrix_results_root}" "${matrix_id}" <<'PY'
               import csv
@@ -229,12 +285,18 @@ spec:
               root = Path(sys.argv[1])
               matrix_id = sys.argv[2]
               lanes = [
-                  "bf16",
-                  "online-fp8",
-                  "static-fp8",
-                  "nvfp4-trtllm",
-                  "nvfp4-cutlass",
-                  "nvfp4-cudnn",
+                  "bf16-eager",
+                  "online-fp8-eager",
+                  "static-fp8-eager",
+                  "nvfp4-trtllm-eager",
+                  "nvfp4-cutlass-eager",
+                  "nvfp4-cudnn-eager",
+                  "online-fp8-compile",
+                  "bf16-compile",
+                  "static-fp8-compile",
+                  "nvfp4-trtllm-compile",
+                  "nvfp4-cutlass-compile",
+                  "nvfp4-cudnn-compile",
               ]
               matrix = {"matrix_id": matrix_id, "lanes": {}}
               for lane in lanes:

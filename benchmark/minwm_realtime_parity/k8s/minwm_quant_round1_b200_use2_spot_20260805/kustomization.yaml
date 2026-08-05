@@ -3,7 +3,7 @@ kind: Kustomization
 resources:
   - ../minwm_quant_round1_b200_spot_20260805.yaml
 namespace: ray
-nameSuffix: -use2
+nameSuffix: -use2-v2
 patches:
   - path: delete_pvc.yaml
   - path: job_patch.yaml
