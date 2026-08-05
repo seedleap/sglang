@@ -21,6 +21,7 @@ set -euo pipefail
   || "${MINWM_BENCHMARK_MODE}" == "triptych720p" \
   || "${MINWM_BENCHMARK_MODE}" == "spmatrix720p" \
   || "${MINWM_BENCHMARK_MODE}" == "bounded5s" \
+  || "${MINWM_BENCHMARK_MODE}" == "calibratedfp8" \
   || "${MINWM_BENCHMARK_MODE}" == "dragon60s" ]] || {
   echo "unsupported MINWM_BENCHMARK_MODE=${MINWM_BENCHMARK_MODE}" >&2
   exit 2
@@ -543,6 +544,34 @@ PY
   exit 0
 fi
 
+if [[ "${MINWM_BENCHMARK_MODE}" == "calibratedfp8" ]]; then
+  CALIBRATION_CASES="${MINWM_CASES_PATH:-${SCRIPT_DIR}/cases_720p_compile_smoke.json}"
+  CALIBRATION_RESULTS="${LOCAL_RESULTS}/static-fp8-calibration"
+  CALIBRATION_PATH="${CALIBRATION_RESULTS}/static-fp8-calibration.json"
+  STATIC_FP8_TRANSFORMER="${WORK_ROOT}/static-fp8-transformer"
+  mkdir -p "${CALIBRATION_RESULTS}"
+  python3 "${SCRIPT_DIR}/run_minwm_baseline.py" \
+    --cases "${CALIBRATION_CASES}" \
+    --minwm-root /workspace/minWM \
+    --checkpoint "${CHECKPOINT}" \
+    --pretrained-dir "${PRETRAINED}" \
+    --config "${MINWM_CONFIG}" \
+    --results "${CALIBRATION_RESULTS}" \
+    --fp8-calibration-output "${CALIBRATION_PATH}" \
+    | tee "${RESULTS}/static-fp8-calibration.log"
+  python3 -m sglang.multimodal_gen.tools.build_minwm_static_fp8_transformer \
+    --input-dir "${MODEL_DIR}/transformer" \
+    --calibration "${CALIBRATION_PATH}" \
+    --output-dir "${STATIC_FP8_TRANSFORMER}" \
+    --activation-margin "${MINWM_STATIC_FP8_MARGIN:-1.0}" \
+    | tee "${RESULTS}/static-fp8-conversion.log"
+  cp "${CALIBRATION_PATH}" "${RESULTS}/"
+  cp "${CALIBRATION_RESULTS}/baseline_run.json" "${RESULTS}/static-fp8-calibration-baseline.json"
+  cp "${STATIC_FP8_TRANSFORMER}/minwm_static_fp8_manifest.json" "${RESULTS}/"
+  export MINWM_PROFILE_TRANSFORMER_PATH="${STATIC_FP8_TRANSFORMER}"
+  export MINWM_PROFILE_QUANTIZATION_LABEL=static_fp8
+fi
+
 if [[ "${MINWM_BENCHMARK_MODE}" == "spmatrix720p" ]]; then
   SP_CASES="${MINWM_CASES_PATH:-${SCRIPT_DIR}/cases_720p_compile_smoke.json}"
   # Keep completed lanes directly on the mounted result store. Spot retries can
@@ -993,7 +1022,8 @@ PY
   exit 0
 fi
 
-if [[ "${MINWM_BENCHMARK_MODE}" != "profiles" ]]; then
+if [[ "${MINWM_BENCHMARK_MODE}" != "profiles" \
+  && "${MINWM_BENCHMARK_MODE}" != "calibratedfp8" ]]; then
 SMOKE_RESULTS="${LOCAL_RESULTS}/smoke"
 mkdir -p "${SMOKE_RESULTS}"
 python3 "${SCRIPT_DIR}/run_minwm_baseline.py" \
@@ -1100,8 +1130,12 @@ run_throughput_profile() {
   local profile_dir="${LOCAL_RESULTS}/throughput/${profile}"
   local profile_results="${RESULTS}/throughput/${profile}"
   local quantization_args=()
+  local transformer_args=()
   if [[ -n "${MINWM_PROFILE_QUANTIZATION:-}" ]]; then
     quantization_args=(--quantization "${MINWM_PROFILE_QUANTIZATION}")
+  fi
+  if [[ -n "${MINWM_PROFILE_TRANSFORMER_PATH:-}" ]]; then
+    transformer_args=(--transformer-path "${MINWM_PROFILE_TRANSFORMER_PATH}")
   fi
   mkdir -p "${profile_dir}" "${profile_results}"
   MINWM_ATTENTION_IMPL="${attention_impl}" \
@@ -1113,6 +1147,7 @@ run_throughput_profile() {
     --attention-backend fa \
     --performance-mode speed \
     "${quantization_args[@]}" \
+    "${transformer_args[@]}" \
     --enable-torch-compile "${torch_compile}" \
     --warmup-mode off \
     --port 30000 \
@@ -1161,7 +1196,8 @@ for spec in "${profiles[@]}"; do
 done
 
 python3 - "${RESULTS}/throughput" "${RESULTS}/throughput-summary.json" \
-  "${profile_failures[*]}" "${MINWM_PROFILE_QUANTIZATION:-}" <<'PY'
+  "${profile_failures[*]}" \
+  "${MINWM_PROFILE_QUANTIZATION_LABEL:-${MINWM_PROFILE_QUANTIZATION:-}}" <<'PY'
 import json, sys
 from pathlib import Path
 
