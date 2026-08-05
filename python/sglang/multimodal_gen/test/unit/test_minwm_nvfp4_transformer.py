@@ -8,6 +8,7 @@ from sglang.multimodal_gen.tools.build_minwm_nvfp4_transformer import (
     INDEX_FILENAME,
     materialize_minwm_nvfp4_transformer,
     minwm_block_linear_names,
+    prepare_calibration_kwargs,
 )
 
 
@@ -64,3 +65,25 @@ def test_materialize_minwm_nvfp4_transformer(tmp_path: Path):
     output_config = json.loads((output / "config.json").read_text(encoding="utf-8"))
     assert output_config["quantization_config"]["quant_algo"] == "NVFP4"
     assert output_config["quantization_config"]["group_size"] == 16
+
+
+def test_prepare_calibration_kwargs_rebuilds_cold_inference_cache():
+    cache = object()
+
+    class Generator:
+        def make_kv_cache(self):
+            return cache
+
+    record = {
+        "x": torch.ones(1),
+        "t": torch.zeros(1),
+        "context": torch.ones(1),
+        "context_lens": torch.ones(1, dtype=torch.int32),
+        "output": torch.zeros(1),
+    }
+
+    kwargs = prepare_calibration_kwargs(Generator(), record, device="cpu")
+
+    assert kwargs["cache"] is cache
+    assert kwargs["self_cache_update"] is None
+    assert "output" not in kwargs

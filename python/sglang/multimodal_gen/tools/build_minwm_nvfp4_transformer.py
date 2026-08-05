@@ -194,6 +194,26 @@ def _load_minwm_pipeline(
     )
 
 
+def prepare_calibration_kwargs(
+    generator, record: dict, *, device: str = "cuda"
+) -> dict:
+    kwargs = {
+        name: value.to(device) if isinstance(value, torch.Tensor) else value
+        for name, value in record.items()
+        if name != "output"
+    }
+    packed_metadata = ("seq_lens", "block_idx", "position_ids")
+    if not all(kwargs.get(name) is not None for name in packed_metadata):
+        if not hasattr(generator, "make_kv_cache"):
+            raise ValueError(
+                "calibration record has no packed metadata and the generator "
+                "cannot create an inference KV cache"
+            )
+        kwargs["cache"] = generator.make_kv_cache()
+        kwargs.setdefault("self_cache_update", None)
+    return kwargs
+
+
 def build_calibrated_minwm_nvfp4_transformer(
     *,
     input_dir: str,
@@ -223,11 +243,7 @@ def build_calibrated_minwm_nvfp4_transformer(
     def calibrate(_blocks) -> None:
         if hasattr(generator, "clear_cache"):
             generator.clear_cache()
-        kwargs = {
-            name: value.to("cuda") if isinstance(value, torch.Tensor) else value
-            for name, value in record.items()
-            if name != "output"
-        }
+        kwargs = prepare_calibration_kwargs(generator, record)
         with torch.inference_mode():
             generator(**kwargs)
 
