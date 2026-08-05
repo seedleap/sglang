@@ -120,6 +120,7 @@
 5. H200 新节点注册初期，EBS provisioner 曾报告缺少 topology key，S3 CSI 也曾短暂未注册。节点标签与 CSI DaemonSet 就绪后 PVC 自动 Bound、Pod 自动启动；没有通过重建资源掩盖这个时序问题。
 6. B200 eager client FPS 依次为 BF16 `14.079`、online FP8 `14.122`、static FP8 `14.158`、NVFP4 TRT-LLM `13.706`、NVFP4 Cutlass `13.269`、NVFP4 cuDNN `12.202`。static FP8 暂居第一但只比 BF16 快 `0.56%`；NVFP4 三个 backend 都是负收益。
 7. 旧 480p online FP8 的约 `+15%` 没有迁移到本轮 720p B200（仅 `+0.30%`）。这是本轮最重要的预期偏离，说明分辨率、VAE/传输占比或非 GEMM 部分足以吞掉量化 kernel 收益；后续不能用旧 480p 数据外推 720p。
+8. 成本约束补充：后续只使用 `spot` profile 对应的 `minwm-spot` 路径，不再使用 `aws03` profile；前者有优惠、更便宜。AWS03 路径本轮只做过供给探测，B200/B300 都始终为 0 实例，现已保持 Job suspended、ASG desired=0，不计入结果。
 
 ## 作业证据
 
