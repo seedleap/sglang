@@ -36,6 +36,7 @@ spec:
           values:
             - us-east-2a
             - us-east-2b
+            - us-east-2c
         - key: node.kubernetes.io/instance-type
           operator: In
           values:

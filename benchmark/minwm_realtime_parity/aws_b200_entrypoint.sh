@@ -232,8 +232,7 @@ PY
         CMAKE_BUILD_PARALLEL_LEVEL=8 \
         MAX_JOBS=8 \
         python3 -m pip wheel /workspace/sglang/sgl-kernel \
-          --no-build-isolation --no-deps --wheel-dir "${kernel_wheel_dir}" \
-          --root-user-action=ignore
+          --no-build-isolation --no-deps --wheel-dir "${kernel_wheel_dir}"
       kernel_wheel_path="$(find "${kernel_wheel_dir}" -maxdepth 1 -type f -name '*.whl' -print -quit)"
       [[ -n "${kernel_wheel_path}" ]]
       python3 -m pip install --no-deps \

@@ -1,10 +1,10 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: minwm-quant-fp8-rtx6000-wheel-20260805-12
+  name: minwm-quant-fp8-rtx6000-wheel-20260805-13
   namespace: ray
   labels:
-    app.kubernetes.io/name: minwm-quant-fp8-rtx6000-wheel-20260805-12
+    app.kubernetes.io/name: minwm-quant-fp8-rtx6000-wheel-20260805-13
     seedleap.ai/owner: chenshengdong
     seedleap.ai/task: minwm-realtime-quantization
   annotations:
@@ -17,7 +17,7 @@ spec:
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: minwm-quant-fp8-rtx6000-wheel-20260805-12
+        app.kubernetes.io/name: minwm-quant-fp8-rtx6000-wheel-20260805-13
         seedleap.ai/owner: chenshengdong
         seedleap.ai/task: minwm-realtime-quantization
     spec:
@@ -125,8 +125,7 @@ spec:
                 CMAKE_BUILD_PARALLEL_LEVEL=8 \
                 MAX_JOBS=8 \
                 python3 -m pip wheel /workspace/sglang/sgl-kernel \
-                  --no-build-isolation --no-deps --wheel-dir "${wheel_dir}" \
-                  --root-user-action=ignore
+                  --no-build-isolation --no-deps --wheel-dir "${wheel_dir}"
               wheel_path="$(find "${wheel_dir}" -maxdepth 1 -type f -name '*.whl' -print -quit)"
               [[ -n "${wheel_path}" ]]
               python3 -m pip install "${wheel_path}" \
