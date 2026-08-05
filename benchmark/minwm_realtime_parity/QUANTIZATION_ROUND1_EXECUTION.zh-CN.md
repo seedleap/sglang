@@ -86,6 +86,13 @@
 3. east2 的 B200 Spot NodePool 跨常规三 AZ，且当天已有 static-FP8 与 NVFP4 Job 成功完成，说明它比 ATL2 单可用区池更符合本轮运行预期。
 4. 决策：暂停 use1 的 B200 / B300 Pending Job，保留 Job、PVC 和事件用于审计；没有创建 GPU、没有结果数据被中止。第一轮转到 east2 的 B200 Spot 池，结果写到独立 S3 前缀。
 
+### 2026-08-05：读取旧量化结果与 compile 失败证据
+
+1. 旧结果合同明确是 `832x480 / 00_forward_pottery`，不是本轮固定的 `1248x704`。eager client FPS 分别为 BF16 `23.183`、online FP8 `26.653`、static FP8 `24.859`、NVFP4 `20.173`。
+2. 因此旧数据只能形成先验：online FP8 约比 BF16 快 `15.0%`，static FP8 约快 `7.2%`，该次 NVFP4 反而慢约 `13.0%`；不能把它当作本轮 720p 结论。
+3. 旧 BF16 / online FP8 compile lane 均失败。日志显示 whole-DiT 在 KV 长度增长阶段反复产生冷编译：BF16 后段单 chunk 曾达到 `337–391 s`，online FP8 首 chunk 约 `150 s`；client 最终收到 WebSocket `1012 service restart`。这更像“长冷编译暴露在 Spot / Job 生命周期内”而不是稳态 FPS 失败。
+4. 决策：本轮仍保留 20 个 warmup chunk，让 KV45 前的形状编译不进入 measured 200 chunks；east2 Job deadline 从 4 小时延长到 7 小时。各 lane 结果直接写独立 S3 目录，即使 Spot 中断也保留已完成证据，后续只补缺失 lane。
+
 ## 作业证据
 
 运行前待填写：

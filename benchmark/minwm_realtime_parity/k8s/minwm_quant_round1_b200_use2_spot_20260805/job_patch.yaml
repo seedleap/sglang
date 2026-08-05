@@ -9,6 +9,7 @@ metadata:
     seedleap.ai/cluster: leap-world-use2
     seedleap.ai/instance-type: p6-b200.48xlarge
 spec:
+  activeDeadlineSeconds: 25200
   template:
     metadata:
       labels:
