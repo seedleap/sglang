@@ -59,6 +59,8 @@ spec:
               value: "2efc6485f65e8fcab506665efde79bc41406385e"
             - name: MINWM_BENCHMARK_MODE
               value: nvfp4
+            - name: MINWM_INCLUDE_COMPILE_PROFILE
+              value: "false"
             - name: MINWM_RUN_ID
               value: minwm-quant-nvfp4-b200-20260805-01
             - name: MINWM_STAGE_FROM_MOUNT

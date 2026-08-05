@@ -1216,8 +1216,10 @@ profiles=(
   "packed-nondeterministic-kv45 packed false text_encoder,vae false 45"
   "lingbot-style-dense-native-kv45 dense false text_encoder,vae false 45"
   "dense-optimized-components-kv45 dense false '' false 45"
-  "dense-optimized-compile-kv45 dense false '' true 45"
 )
+if [[ "${MINWM_INCLUDE_COMPILE_PROFILE:-true}" == "true" ]]; then
+  profiles+=("dense-optimized-compile-kv45 dense false '' true 45")
+fi
 profile_failures=()
 for spec in "${profiles[@]}"; do
   read -r profile attention_impl packed_deterministic native_components torch_compile kv_frames <<< "${spec}"
