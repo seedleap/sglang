@@ -200,8 +200,11 @@ PY
       --root-user-action=ignore
     if [[ -n "${MINWM_SGLANG_KERNEL_WHEEL_PATH:-}" ]]; then
       [[ -f "${MINWM_SGLANG_KERNEL_WHEEL_PATH}" ]]
+      kernel_wheel_install_dir="$(mktemp -d)"
+      kernel_wheel_install_path="${kernel_wheel_install_dir}/sglang_kernel-0.4.4-cp310-abi3-linux_x86_64.whl"
+      cp "${MINWM_SGLANG_KERNEL_WHEEL_PATH}" "${kernel_wheel_install_path}"
       python3 -m pip install --no-deps \
-        "${MINWM_SGLANG_KERNEL_WHEEL_PATH}" \
+        "${kernel_wheel_install_path}" \
         --root-user-action=ignore
     elif [[ "${MINWM_BUILD_SGLANG_KERNEL_FROM_SOURCE:-1}" == "1" ]]; then
       # The SM120 image carries a newer Torch ABI than the released
