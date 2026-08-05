@@ -22,6 +22,7 @@ set -euo pipefail
   || "${MINWM_BENCHMARK_MODE}" == "spmatrix720p" \
   || "${MINWM_BENCHMARK_MODE}" == "bounded5s" \
   || "${MINWM_BENCHMARK_MODE}" == "calibratedfp8" \
+  || "${MINWM_BENCHMARK_MODE}" == "nvfp4" \
   || "${MINWM_BENCHMARK_MODE}" == "dragon60s" ]] || {
   echo "unsupported MINWM_BENCHMARK_MODE=${MINWM_BENCHMARK_MODE}" >&2
   exit 2
@@ -572,6 +573,36 @@ if [[ "${MINWM_BENCHMARK_MODE}" == "calibratedfp8" ]]; then
   export MINWM_PROFILE_QUANTIZATION_LABEL=static_fp8
 fi
 
+if [[ "${MINWM_BENCHMARK_MODE}" == "nvfp4" ]]; then
+  NVFP4_CASES="${MINWM_CASES_PATH:-${SCRIPT_DIR}/cases_720p_compile_smoke.json}"
+  NVFP4_RESULTS="${LOCAL_RESULTS}/nvfp4-calibration"
+  NVFP4_DUMP_DIR="${NVFP4_RESULTS}/parity-dumps"
+  NVFP4_TRANSFORMER="${WORK_ROOT}/nvfp4-transformer"
+  mkdir -p "${NVFP4_RESULTS}"
+  MINWM_PARITY_DUMP_DIR="${NVFP4_DUMP_DIR}" \
+    python3 "${SCRIPT_DIR}/run_minwm_baseline.py" \
+      --cases "${NVFP4_CASES}" \
+      --minwm-root /workspace/minWM \
+      --checkpoint "${CHECKPOINT}" \
+      --pretrained-dir "${PRETRAINED}" \
+      --config "${MINWM_CONFIG}" \
+      --results "${NVFP4_RESULTS}" \
+      | tee "${RESULTS}/nvfp4-calibration.log"
+  python3 -m sglang.multimodal_gen.tools.build_minwm_nvfp4_transformer \
+    --input-dir "${MODEL_DIR}/transformer" \
+    --output-dir "${NVFP4_TRANSFORMER}" \
+    --minwm-root /workspace/minWM \
+    --checkpoint "${CHECKPOINT}" \
+    --pretrained-dir "${PRETRAINED}" \
+    --config "${MINWM_CONFIG}" \
+    --calibration-forward "${NVFP4_DUMP_DIR}/baseline/forward_000.pt" \
+    | tee "${RESULTS}/nvfp4-conversion.log"
+  cp "${NVFP4_RESULTS}/baseline_run.json" "${RESULTS}/nvfp4-calibration-baseline.json"
+  cp "${NVFP4_TRANSFORMER}/minwm_nvfp4_manifest.json" "${RESULTS}/"
+  export MINWM_PROFILE_TRANSFORMER_PATH="${NVFP4_TRANSFORMER}"
+  export MINWM_PROFILE_QUANTIZATION_LABEL=nvfp4
+fi
+
 if [[ "${MINWM_BENCHMARK_MODE}" == "spmatrix720p" ]]; then
   SP_CASES="${MINWM_CASES_PATH:-${SCRIPT_DIR}/cases_720p_compile_smoke.json}"
   # Keep completed lanes directly on the mounted result store. Spot retries can
@@ -1023,7 +1054,8 @@ PY
 fi
 
 if [[ "${MINWM_BENCHMARK_MODE}" != "profiles" \
-  && "${MINWM_BENCHMARK_MODE}" != "calibratedfp8" ]]; then
+  && "${MINWM_BENCHMARK_MODE}" != "calibratedfp8" \
+  && "${MINWM_BENCHMARK_MODE}" != "nvfp4" ]]; then
 SMOKE_RESULTS="${LOCAL_RESULTS}/smoke"
 mkdir -p "${SMOKE_RESULTS}"
 python3 "${SCRIPT_DIR}/run_minwm_baseline.py" \
