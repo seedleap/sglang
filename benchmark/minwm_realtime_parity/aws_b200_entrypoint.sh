@@ -271,6 +271,19 @@ else
 fi
 if [[ -n "${MINWM_SAGE_ATTENTION_BACKENDS:-}" \
   && "${MINWM_SKIP_INSTALL:-0}" != "1" ]]; then
+  sage_cuda_home="${MINWM_SAGE_CUDA_HOME:-/opt/minwm/venv/lib/python3.12/site-packages/nvidia/cu13}"
+  if [[ -x "${sage_cuda_home}/bin/nvcc" ]]; then
+    export CUDA_HOME="${sage_cuda_home}"
+    export CUDACXX="${CUDA_HOME}/bin/nvcc"
+    export PATH="${CUDA_HOME}/bin:${PATH}"
+    if [[ ! -e "${CUDA_HOME}/lib64" ]]; then
+      ln -s lib "${CUDA_HOME}/lib64"
+    fi
+    if [[ ! -e "${CUDA_HOME}/lib/libcudart.so" ]]; then
+      ln -s libcudart.so.13 "${CUDA_HOME}/lib/libcudart.so"
+    fi
+  fi
+  nvcc --version
   sage_attention_ref="${MINWM_SAGE_ATTENTION_REF:-d1a57a546c3d395b1ffcbeecc66d81db76f3b4b5}"
   sage_attention_source="$(mktemp -d)/SageAttention"
   git clone --filter=blob:none --no-checkout \
