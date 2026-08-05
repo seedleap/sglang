@@ -1099,6 +1099,10 @@ run_throughput_profile() {
   local native_components="$4" torch_compile="$5" kv_frames="$6"
   local profile_dir="${LOCAL_RESULTS}/throughput/${profile}"
   local profile_results="${RESULTS}/throughput/${profile}"
+  local quantization_args=()
+  if [[ -n "${MINWM_PROFILE_QUANTIZATION:-}" ]]; then
+    quantization_args=(--quantization "${MINWM_PROFILE_QUANTIZATION}")
+  fi
   mkdir -p "${profile_dir}" "${profile_results}"
   MINWM_ATTENTION_IMPL="${attention_impl}" \
   MINWM_PACKED_ATTENTION_DETERMINISTIC="${packed_deterministic}" \
@@ -1108,6 +1112,7 @@ run_throughput_profile() {
     --pipeline-class-name MinWMCausalDMDPipeline \
     --attention-backend fa \
     --performance-mode speed \
+    "${quantization_args[@]}" \
     --enable-torch-compile "${torch_compile}" \
     --warmup-mode off \
     --port 30000 \
@@ -1156,7 +1161,7 @@ for spec in "${profiles[@]}"; do
 done
 
 python3 - "${RESULTS}/throughput" "${RESULTS}/throughput-summary.json" \
-  "${profile_failures[*]}" <<'PY'
+  "${profile_failures[*]}" "${MINWM_PROFILE_QUANTIZATION:-}" <<'PY'
 import json, sys
 from pathlib import Path
 
@@ -1168,6 +1173,7 @@ for path in sorted(root.glob("*/throughput.json")):
 summary = {
     "profiles": profiles,
     "failed_profiles": sys.argv[3].split() if sys.argv[3] else [],
+    "quantization": sys.argv[4] or None,
 }
 exact_name = "exact-packed-det-kv45"
 comparisons = {}
