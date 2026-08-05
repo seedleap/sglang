@@ -1211,9 +1211,20 @@ run_throughput_profile() {
     --port 30000 \
     > "${profile_results}/server.log" 2>&1 &
   local profile_server_pid=$!
+  (
+    while kill -0 "${profile_server_pid}" 2>/dev/null; do
+      nvidia-smi \
+        --query-gpu=timestamp,index,memory.used,utilization.gpu,power.draw \
+        --format=csv,noheader,nounits || true
+      sleep 1
+    done
+  ) > "${profile_results}/gpu-memory.csv" &
+  local profile_gpu_monitor_pid=$!
   if ! wait_for_server "${profile_server_pid}" "${profile_results}/server.log"; then
     kill "${profile_server_pid}" 2>/dev/null || true
     wait "${profile_server_pid}" 2>/dev/null || true
+    kill "${profile_gpu_monitor_pid}" 2>/dev/null || true
+    wait "${profile_gpu_monitor_pid}" 2>/dev/null || true
     return 1
   fi
   set +e
@@ -1224,6 +1235,8 @@ run_throughput_profile() {
   set -e
   kill "${profile_server_pid}" 2>/dev/null || true
   wait "${profile_server_pid}" 2>/dev/null || true
+  kill "${profile_gpu_monitor_pid}" 2>/dev/null || true
+  wait "${profile_gpu_monitor_pid}" 2>/dev/null || true
   if [[ -f "${profile_dir}/throughput.json" ]]; then
     cp "${profile_dir}/throughput.json" "${profile_results}/"
   fi
