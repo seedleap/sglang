@@ -82,6 +82,8 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
+            - name: MATRIX_ID
+              value: minwm-quant-r1-b200-20260805-01
             - name: SGLANG_GIT_REF
               value: "ca2509f03432d07f183f8f1816c1ae1f218ec6a0"
             - name: MINWM_GIT_REF
@@ -141,7 +143,7 @@ spec:
               clone_at sglang /workspace/sglang "${SGLANG_GIT_REF}"
               [[ "$(git -C /workspace/sglang rev-parse HEAD)" == "${SGLANG_GIT_REF}" ]]
 
-              matrix_id=minwm-quant-r1-b200-20260805-01
+              matrix_id="${MATRIX_ID}"
               base_run="${matrix_id}-bf16"
               nvfp4_run="${matrix_id}-nvfp4-trtllm"
               entrypoint=/workspace/sglang/benchmark/minwm_realtime_parity/aws_b200_entrypoint.sh

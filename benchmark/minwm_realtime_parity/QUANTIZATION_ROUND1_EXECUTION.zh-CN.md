@@ -70,6 +70,15 @@
 6. 决策：入口新增显式 throughput cases/case/warmup/measured 参数。本轮校准和测速统一为同一个 1248x704 case。
 7. 决策：所有 lane 放在同一 Pod 串行运行，请求 1 张 GPU。BF16 首次完成 staging、依赖安装和模型转换；后续 lane 复用 Pod 内输入与 BF16 模型，避免重复 S3 staging。NVFP4 只导出一次，三个 backend 复用同一份量化权重。
 
+### 2026-08-05：首次提交与 Spot 调度
+
+1. `kubectl apply --dry-run=client`、`kubectl apply --dry-run=server` 和清单内嵌脚本的 `bash -n` 均通过后，创建专用 PVC 与 Job。
+2. Karpenter 正确为 Pod 提名 `minwm-test-atl2-p6-spot` NodeClaim，证明 namespace、selector、toleration 和资源请求已经进入预期调度路径。
+3. AWS Fleet 随后连续返回 `UnfulfillableCapacity` / `InsufficientCapacityError`，失败发生在创建 `p6-b200.48xlarge` Spot 实例阶段。PVC 的 `WaitForFirstConsumer` 是该 Pending 状态的结果，不是独立存储故障。
+4. 决策：先保留 Pending Job 让 Karpenter 自动重试，不改成 B300 或 On-Demand。否则硬件变化会使本轮与既定 B200 合同不可比。若最终决定切硬件，必须新建单独矩阵并明确标注，不能覆盖本轮身份。
+5. B200 在容量失败缓存窗口后仍无可行 offering。为了让第一轮量化方法探索继续推进，决策新增独立的 `p6-b300.48xlarge` Spot fallback Job/PVC；它保持相同 12-lane 请求合同，但使用独立 matrix id，数据不得标为 B200。
+6. B200 Job 先保留 Pending 继续争取容量；如果 B300 已 Running，则暂停 B200 Job，避免同一第一轮在容量恢复后意外双跑。暂停是可恢复状态，不删除已有 Job/PVC 或诊断事件。
+
 ## 作业证据
 
 运行前待填写：
