@@ -54,7 +54,7 @@ spec:
                   name: github-token
                   key: token
             - name: SGLANG_GIT_REF
-              value: "afbee9c2db3f1c4bc72f5155dec0474a140eaa56"
+              value: "4a66501de5e4c085afd8068c50a08801e32d18b0"
             - name: MINWM_GIT_REF
               value: "2efc6485f65e8fcab506665efde79bc41406385e"
             - name: MINWM_BENCHMARK_MODE
