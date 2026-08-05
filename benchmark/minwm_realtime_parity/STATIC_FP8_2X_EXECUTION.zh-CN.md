@@ -96,3 +96,12 @@ VAE/调度，则继续做不降低画质的流水化或阶段并行，并分别�
   均未开始，不能用于判断修复有效性。
 - 决策：保留 `-01` Job 和 S3 日志；新建 `-02`，复用首轮正式入口的 SGLang diffusion extra 与
   FlashInfer JIT cache 安装方式，不覆盖旧 run id。
+
+### 2026-08-05：B200 Spot 微基准 `-02`
+
+- 结果：原有 B200 Spot 节点在提交窗口内被回收；Pod 未进入 Running，等待 30 分钟后触发
+  `DeadlineExceeded`。因此依赖安装、CUDA test 和 microbenchmark 都未执行。
+- 证据：NodePool `minwm-test-b200-spot` 仍 Ready，但节点数已变为 0；Job event 是
+  `FailedScheduling`，不是容器错误。
+- 决策：保留 `-02`，以 `-03` 重提并把 deadline 扩为 60 分钟，给 Spot 补充容量更充分的时间；
+  仍不切到 `aws03` 或 on-demand。
