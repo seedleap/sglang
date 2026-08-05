@@ -144,19 +144,20 @@ spec:
               [[ "$(git -C /workspace/sglang rev-parse HEAD)" == "${SGLANG_GIT_REF}" ]]
 
               matrix_id="${MATRIX_ID}"
+              matrix_results_root="${MINWM_RESULTS_ROOT%/}"
               base_run="${matrix_id}-bf16"
               nvfp4_run="${matrix_id}-nvfp4-trtllm"
               entrypoint=/workspace/sglang/benchmark/minwm_realtime_parity/aws_b200_entrypoint.sh
               failures=()
-              mkdir -p /results
+              mkdir -p "${matrix_results_root}"
               {
                 echo "pod=${POD_NAME}"
                 echo "node=${NODE_NAME}"
                 echo "image=829115578968.dkr.ecr.us-east-2.amazonaws.com/leap-world/minwm-training@sha256:bedc07ea3ba55059a8c1c569c3b177c4d00d41f37d4fa9105375531534ef5f2a"
                 echo "sglang=${SGLANG_GIT_REF}"
                 echo "minwm=${MINWM_GIT_REF}"
-              } > "/results/${matrix_id}-provenance.txt"
-              nvidia-smi -q > "/results/${matrix_id}-nvidia-smi.txt"
+              } > "${matrix_results_root}/${matrix_id}-provenance.txt"
+              nvidia-smi -q > "${matrix_results_root}/${matrix_id}-nvidia-smi.txt"
 
               run_lane() {
                 local lane="$1"
@@ -219,7 +220,7 @@ spec:
                 MINWM_PROFILE_QUANTIZATION_LABEL=nvfp4_flashinfer_cudnn \
                 SGLANG_DIFFUSION_FLASHINFER_FP4_GEMM_BACKEND=flashinfer_cudnn
 
-              python3 - "/results" "${matrix_id}" <<'PY'
+              python3 - "${matrix_results_root}" "${matrix_id}" <<'PY'
               import csv
               import json
               import sys
@@ -260,12 +261,12 @@ spec:
               print(json.dumps(matrix, indent=2, sort_keys=True))
               PY
 
-              printf '%s\n' "${failures[@]:-}" > "/results/${matrix_id}-failures.txt"
+              printf '%s\n' "${failures[@]:-}" > "${matrix_results_root}/${matrix_id}-failures.txt"
               if (( ${#failures[@]} != 0 )); then
                 echo "MINWM_QUANT_R1_FAILED failures=${failures[*]}" >&2
                 exit 1
               fi
-              echo "MINWM_QUANT_R1_COMPLETE summary=/results/${matrix_id}-matrix-summary.json"
+              echo "MINWM_QUANT_R1_COMPLETE summary=${matrix_results_root}/${matrix_id}-matrix-summary.json"
           resources:
             requests:
               cpu: "32"

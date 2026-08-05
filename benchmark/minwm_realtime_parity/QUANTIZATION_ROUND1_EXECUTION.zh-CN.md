@@ -79,6 +79,13 @@
 5. B200 在容量失败缓存窗口后仍无可行 offering。为了让第一轮量化方法探索继续推进，决策新增独立的 `p6-b300.48xlarge` Spot fallback Job/PVC；它保持相同 12-lane 请求合同，但使用独立 matrix id，数据不得标为 B200。
 6. B200 Job 先保留 Pending 继续争取容量；如果 B300 已 Running，则暂停 B200 Job，避免同一第一轮在容量恢复后意外双跑。暂停是可恢复状态，不删除已有 Job/PVC 或诊断事件。
 
+### 2026-08-05：识别到正确的 east2 Spot 控制面
+
+1. use1 的 B300 fallback 也连续收到 `UnfulfillableCapacity`，说明 ATL2 单可用区 P6 池当时同时缺 B200 与 B300。
+2. 进一步检查本机 kubeconfig 后发现 `minwm-spot` context 指向 us-east-2 的 `leap-world` 集群。这里正好存在旧量化清单引用的 `ray` namespace、`minwm-test-b200-spot`、`s3-claim` 和 `github-token`。
+3. east2 的 B200 Spot NodePool 跨常规三 AZ，且当天已有 static-FP8 与 NVFP4 Job 成功完成，说明它比 ATL2 单可用区池更符合本轮运行预期。
+4. 决策：暂停 use1 的 B200 / B300 Pending Job，保留 Job、PVC 和事件用于审计；没有创建 GPU、没有结果数据被中止。第一轮转到 east2 的 B200 Spot 池，结果写到独立 S3 前缀。
+
 ## 作业证据
 
 运行前待填写：
