@@ -1,13 +1,13 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: minwm-static-fp8-fastpath-b200-20260805-03
+  name: minwm-static-fp8-fastpath-b200-20260805-04
   namespace: ray
   labels:
-    app.kubernetes.io/name: minwm-static-fp8-fastpath-b200-20260805-03
+    app.kubernetes.io/name: minwm-static-fp8-fastpath-b200-20260805-04
     seedleap.ai/owner: chenshengdong
     seedleap.ai/task: minwm-static-fp8-2x
-    seedleap.ai/run-id: minwm-static-fp8-fastpath-b200-20260805-03
+    seedleap.ai/run-id: minwm-static-fp8-fastpath-b200-20260805-04
   annotations:
     seedleap.ai/capacity-type: spot
     seedleap.ai/repo: seedleap/sglang
@@ -19,10 +19,10 @@ spec:
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: minwm-static-fp8-fastpath-b200-20260805-03
+        app.kubernetes.io/name: minwm-static-fp8-fastpath-b200-20260805-04
         seedleap.ai/owner: chenshengdong
         seedleap.ai/task: minwm-static-fp8-2x
-        seedleap.ai/run-id: minwm-static-fp8-fastpath-b200-20260805-03
+        seedleap.ai/run-id: minwm-static-fp8-fastpath-b200-20260805-04
       annotations:
         seedleap.ai/repo: seedleap/sglang
         seedleap.ai/branch: codex/minwm-realtime-api
@@ -54,7 +54,7 @@ spec:
             - name: SGLANG_GIT_REF
               value: "761b76f5206c4d8f384e5a6ddf6728a1eede0776"
             - name: RUN_ID
-              value: minwm-static-fp8-fastpath-b200-20260805-03
+              value: minwm-static-fp8-fastpath-b200-20260805-04
             - name: NODE_NAME
               valueFrom:
                 fieldRef:
@@ -69,6 +69,18 @@ spec:
                 /workspace/sglang
               git -C /workspace/sglang checkout --detach "${SGLANG_GIT_REF}"
               [[ "$(git -C /workspace/sglang rev-parse HEAD)" == "${SGLANG_GIT_REF}" ]]
+
+              result_dir="/s3/world-model/evals/minwm/quantization/20260805/static-fp8-2x/${RUN_ID}"
+              mkdir -p "${result_dir}"
+              exec > >(tee -a "${result_dir}/job.log") 2>&1
+              {
+                echo "run_id=${RUN_ID}"
+                echo "image=829115578968.dkr.ecr.us-east-2.amazonaws.com/leap-world/minwm-training@sha256:bedc07ea3ba55059a8c1c569c3b177c4d00d41f37d4fa9105375531534ef5f2a"
+                echo "sglang=${SGLANG_GIT_REF}"
+                echo "node=${NODE_NAME:-unknown}"
+                date --iso-8601=seconds
+              } > "${result_dir}/provenance.txt"
+              nvidia-smi -q > "${result_dir}/nvidia-smi.txt"
 
               python3 - /workspace/sglang/python/pyproject.toml <<'PY'
               from pathlib import Path
@@ -85,22 +97,33 @@ spec:
                   raise RuntimeError("expected exactly one SGLang gRPC Rust extension block")
               path.write_text(text.replace(block, ""))
               PY
-              python3 -m pip install -e "/workspace/sglang/python[diffusion]" \
+              python3 -m pip install -e /workspace/sglang/python \
+                --no-deps --root-user-action=ignore
+              python3 -m pip install --no-deps \
+                'addict==2.4.0' \
+                'compressed-tensors' \
+                'diffusers==0.37.0' \
+                'fastapi==0.141.1' \
+                'gguf' \
+                'IPython==9.16.0' \
+                'msgspec==0.21.1' \
+                'orjson==3.11.9' \
+                'partial-json-parser' \
+                'prometheus-client==0.26.0' \
+                'pybase64==1.4.3' \
+                'python-multipart==0.0.32' \
+                'pyzmq==27.1.0' \
+                'setproctitle==1.3.7' \
+                'transformers==5.12.1' \
+                'uvicorn==0.52.0' \
+                'uvloop==0.22.1' \
+                'watchfiles==1.2.0' \
+                'websockets==17.0.1' \
+                'zstandard==0.25.0' \
                 --root-user-action=ignore
               python3 -m pip install --force-reinstall --no-deps \
                 --index-url https://flashinfer.ai/whl/cu130 \
                 'flashinfer-jit-cache==0.6.12+cu130'
-
-              result_dir="/s3/world-model/evals/minwm/quantization/20260805/static-fp8-2x/${RUN_ID}"
-              mkdir -p "${result_dir}"
-              {
-                echo "run_id=${RUN_ID}"
-                echo "image=829115578968.dkr.ecr.us-east-2.amazonaws.com/leap-world/minwm-training@sha256:bedc07ea3ba55059a8c1c569c3b177c4d00d41f37d4fa9105375531534ef5f2a"
-                echo "sglang=${SGLANG_GIT_REF}"
-                echo "node=${NODE_NAME:-unknown}"
-                date --iso-8601=seconds
-              } > "${result_dir}/provenance.txt"
-              nvidia-smi -q > "${result_dir}/nvidia-smi.txt"
 
               cd /workspace/sglang
               export PYTHONPATH=/workspace/sglang/python

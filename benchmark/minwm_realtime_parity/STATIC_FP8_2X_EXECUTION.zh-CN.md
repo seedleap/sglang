@@ -105,3 +105,12 @@ VAE/调度，则继续做不降低画质的流水化或阶段并行，并分别�
   `FailedScheduling`，不是容器错误。
 - 决策：保留 `-02`，以 `-03` 重提并把 deadline 扩为 60 分钟，给 Spot 补充容量更充分的时间；
   仍不切到 `aws03` 或 on-demand。
+
+### 2026-08-05：B200 Spot 微基准 `-03`
+
+- 结果：Karpenter 先后尝试多个 NodeClaim，最终在 east2b 创建 B200 Spot；Pod 拉取镜像并启动后，
+  节点再次被回收，事件为 `TaintManagerEviction`。Pod 随节点消失，未产生有效测试结果。
+- 偏离预期：完整 diffusion extra 安装扩大了“拿到 Spot 到开始测试”的脆弱窗口，且结果目录建在安装后，
+  因此这次没有持久化安装日志。
+- 决策：`-04` 把 S3 provenance/job log 前置，并改为已在 RTX preflight 使用过的最小 runtime
+  依赖集合；不重新解析完整 diffusion extra，不构建 kernel，目标是把 B200 上的准备时间压到数分钟。
