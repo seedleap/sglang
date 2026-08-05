@@ -87,3 +87,12 @@ VAE/调度，则继续做不降低画质的流水化或阶段并行，并分别�
 - 偏离预期：本机默认 Python 3.9 不满足仓库 3.10+ 类型语法；本机 Python 3.11 的 Torch/Triton
   组合又在 pytest collection 阶段发生模块/类型冲突。它们发生在目标测试执行前，因此不能作为测试通过证据；
   完整 correctness test 移到固定镜像的 B200 Spot 上执行。
+
+### 2026-08-05：B200 Spot 微基准 `-01`
+
+- profile/context：`spot` / `minwm-spot`；Pod 落到已有 `minwm-test-b200-spot` 的
+  `p6-b200.48xlarge`，没有落到 on-demand。
+- 结果：pytest collection 在导入 SGLang 时因镜像缺少 `orjson` 失败；CUDA test 与 microbenchmark
+  均未开始，不能用于判断修复有效性。
+- 决策：保留 `-01` Job 和 S3 日志；新建 `-02`，复用首轮正式入口的 SGLang diffusion extra 与
+  FlashInfer JIT cache 安装方式，不覆盖旧 run id。

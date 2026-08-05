@@ -1,13 +1,13 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: minwm-static-fp8-fastpath-b200-20260805-01
+  name: minwm-static-fp8-fastpath-b200-20260805-02
   namespace: ray
   labels:
-    app.kubernetes.io/name: minwm-static-fp8-fastpath-b200-20260805-01
+    app.kubernetes.io/name: minwm-static-fp8-fastpath-b200-20260805-02
     seedleap.ai/owner: chenshengdong
     seedleap.ai/task: minwm-static-fp8-2x
-    seedleap.ai/run-id: minwm-static-fp8-fastpath-b200-20260805-01
+    seedleap.ai/run-id: minwm-static-fp8-fastpath-b200-20260805-02
   annotations:
     seedleap.ai/capacity-type: spot
     seedleap.ai/repo: seedleap/sglang
@@ -19,10 +19,10 @@ spec:
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: minwm-static-fp8-fastpath-b200-20260805-01
+        app.kubernetes.io/name: minwm-static-fp8-fastpath-b200-20260805-02
         seedleap.ai/owner: chenshengdong
         seedleap.ai/task: minwm-static-fp8-2x
-        seedleap.ai/run-id: minwm-static-fp8-fastpath-b200-20260805-01
+        seedleap.ai/run-id: minwm-static-fp8-fastpath-b200-20260805-02
       annotations:
         seedleap.ai/repo: seedleap/sglang
         seedleap.ai/branch: codex/minwm-realtime-api
@@ -54,7 +54,7 @@ spec:
             - name: SGLANG_GIT_REF
               value: "761b76f5206c4d8f384e5a6ddf6728a1eede0776"
             - name: RUN_ID
-              value: minwm-static-fp8-fastpath-b200-20260805-01
+              value: minwm-static-fp8-fastpath-b200-20260805-02
             - name: NODE_NAME
               valueFrom:
                 fieldRef:
@@ -69,6 +69,27 @@ spec:
                 /workspace/sglang
               git -C /workspace/sglang checkout --detach "${SGLANG_GIT_REF}"
               [[ "$(git -C /workspace/sglang rev-parse HEAD)" == "${SGLANG_GIT_REF}" ]]
+
+              python3 - /workspace/sglang/python/pyproject.toml <<'PY'
+              from pathlib import Path
+              import sys
+
+              path = Path(sys.argv[1])
+              text = path.read_text()
+              block = '''[[tool.setuptools-rust.ext-modules]]
+              target = "sglang.srt.grpc._core"
+              path = "../rust/sglang-grpc/Cargo.toml"
+              binding = "PyO3"
+              '''
+              if text.count(block) != 1:
+                  raise RuntimeError("expected exactly one SGLang gRPC Rust extension block")
+              path.write_text(text.replace(block, ""))
+              PY
+              python3 -m pip install -e "/workspace/sglang/python[diffusion]" \
+                --root-user-action=ignore
+              python3 -m pip install --force-reinstall --no-deps \
+                --index-url https://flashinfer.ai/whl/cu130 \
+                'flashinfer-jit-cache==0.6.12+cu130'
 
               result_dir="/s3/world-model/evals/minwm/quantization/20260805/static-fp8-2x/${RUN_ID}"
               mkdir -p "${result_dir}"
