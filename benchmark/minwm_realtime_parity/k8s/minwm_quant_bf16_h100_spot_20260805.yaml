@@ -1,13 +1,13 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: minwm-quant-bf16-h100-20260805-02
+  name: minwm-quant-bf16-h100-20260805-03
   namespace: ray
   labels:
-    app.kubernetes.io/name: minwm-quant-bf16-h100-20260805-02
+    app.kubernetes.io/name: minwm-quant-bf16-h100-20260805-03
     seedleap.ai/owner: chenshengdong
     seedleap.ai/task: minwm-realtime-quantization
-    seedleap.ai/run-id: minwm-quant-bf16-h100-20260805-02
+    seedleap.ai/run-id: minwm-quant-bf16-h100-20260805-03
   annotations:
     seedleap.ai/capacity-type: spot
     seedleap.ai/repo: seedleap/sglang
@@ -17,14 +17,14 @@ metadata:
     seedleap.ai/checkpoint-version-id: "wduScksw2f3yPErnG9lBioOuE2AToyAP"
 spec:
   backoffLimit: 0
-  activeDeadlineSeconds: 7200
+  activeDeadlineSeconds: 10800
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: minwm-quant-bf16-h100-20260805-02
+        app.kubernetes.io/name: minwm-quant-bf16-h100-20260805-03
         seedleap.ai/owner: chenshengdong
         seedleap.ai/task: minwm-realtime-quantization
-        seedleap.ai/run-id: minwm-quant-bf16-h100-20260805-02
+        seedleap.ai/run-id: minwm-quant-bf16-h100-20260805-03
       annotations:
         seedleap.ai/repo: seedleap/sglang
         seedleap.ai/branch: codex/minwm-realtime-api
@@ -62,7 +62,7 @@ spec:
             - name: MINWM_THROUGHPUT_PROFILES
               value: dense-optimized-components-kv45
             - name: MINWM_RUN_ID
-              value: minwm-quant-bf16-h100-20260805-02
+              value: minwm-quant-bf16-h100-20260805-03
             - name: MINWM_STAGE_FROM_MOUNT
               value: "1"
             - name: MINWM_CHECKPOINT_MOUNT_PATH
