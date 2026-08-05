@@ -198,7 +198,12 @@ PY
       'websockets==17.0.1' \
       'zstandard==0.25.0' \
       --root-user-action=ignore
-    if [[ "${MINWM_BUILD_SGLANG_KERNEL_FROM_SOURCE:-1}" == "1" ]]; then
+    if [[ -n "${MINWM_SGLANG_KERNEL_WHEEL_PATH:-}" ]]; then
+      [[ -f "${MINWM_SGLANG_KERNEL_WHEEL_PATH}" ]]
+      python3 -m pip install --no-deps \
+        "${MINWM_SGLANG_KERNEL_WHEEL_PATH}" \
+        --root-user-action=ignore
+    elif [[ "${MINWM_BUILD_SGLANG_KERNEL_FROM_SOURCE:-1}" == "1" ]]; then
       # The SM120 image carries a newer Torch ABI than the released
       # sglang-kernel wheel. Build the exact checkout against the image's
       # Torch/CUDA stack so the FP8 ops are both SM120-capable and ABI-safe.
@@ -222,11 +227,22 @@ PY
         ln -s libcudart.so.13 "${CUDA_HOME}/lib/libcudart.so"
       fi
       nvcc --version
+      kernel_wheel_dir="$(mktemp -d)"
       CMAKE_ARGS="-DCMAKE_CUDA_COMPILER=${CUDACXX} -DCUDA_VERSION=13.0 -DCUDA_nvrtc_LIBRARY=${CUDA_HOME}/lib/libnvrtc.so.13 -DENABLE_BELOW_SM90=OFF -DSGL_KERNEL_ENABLE_FA3=OFF -DSGL_KERNEL_COMPILE_THREADS=2" \
         CMAKE_BUILD_PARALLEL_LEVEL=8 \
         MAX_JOBS=8 \
-        python3 -m pip install /workspace/sglang/sgl-kernel \
-          --no-build-isolation --no-deps --root-user-action=ignore
+        python3 -m pip wheel /workspace/sglang/sgl-kernel \
+          --no-build-isolation --no-deps --wheel-dir "${kernel_wheel_dir}" \
+          --root-user-action=ignore
+      kernel_wheel_path="$(find "${kernel_wheel_dir}" -maxdepth 1 -type f -name '*.whl' -print -quit)"
+      [[ -n "${kernel_wheel_path}" ]]
+      python3 -m pip install --no-deps \
+        "${kernel_wheel_path}" \
+        --root-user-action=ignore
+      if [[ -n "${MINWM_SGLANG_KERNEL_WHEEL_OUTPUT_PATH:-}" ]]; then
+        mkdir -p "${MINWM_SGLANG_KERNEL_WHEEL_OUTPUT_PATH%/*}"
+        cp "${kernel_wheel_path}" "${MINWM_SGLANG_KERNEL_WHEEL_OUTPUT_PATH}"
+      fi
     else
       python3 -m pip install --no-deps \
         'sglang-kernel==0.4.4' \
