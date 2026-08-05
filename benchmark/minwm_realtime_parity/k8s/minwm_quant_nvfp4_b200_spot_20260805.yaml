@@ -1,13 +1,13 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: minwm-quant-nvfp4-b200-20260805-02
+  name: minwm-quant-nvfp4-b200-20260805-03
   namespace: ray
   labels:
-    app.kubernetes.io/name: minwm-quant-nvfp4-b200-20260805-02
+    app.kubernetes.io/name: minwm-quant-nvfp4-b200-20260805-03
     seedleap.ai/owner: chenshengdong
     seedleap.ai/task: minwm-realtime-quantization
-    seedleap.ai/run-id: minwm-quant-nvfp4-b200-20260805-02
+    seedleap.ai/run-id: minwm-quant-nvfp4-b200-20260805-03
   annotations:
     seedleap.ai/capacity-type: spot
     seedleap.ai/repo: seedleap/sglang
@@ -21,10 +21,10 @@ spec:
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: minwm-quant-nvfp4-b200-20260805-02
+        app.kubernetes.io/name: minwm-quant-nvfp4-b200-20260805-03
         seedleap.ai/owner: chenshengdong
         seedleap.ai/task: minwm-realtime-quantization
-        seedleap.ai/run-id: minwm-quant-nvfp4-b200-20260805-02
+        seedleap.ai/run-id: minwm-quant-nvfp4-b200-20260805-03
       annotations:
         seedleap.ai/repo: seedleap/sglang
         seedleap.ai/branch: codex/minwm-realtime-api
@@ -54,7 +54,7 @@ spec:
                   name: github-token
                   key: token
             - name: SGLANG_GIT_REF
-              value: "ddbd6c81248c139bef25052babe62dfbfdeda1c8"
+              value: "c925800b27549251e38884d6a31e071fd72b3a19"
             - name: MINWM_GIT_REF
               value: "2efc6485f65e8fcab506665efde79bc41406385e"
             - name: MINWM_BENCHMARK_MODE
@@ -62,7 +62,7 @@ spec:
             - name: MINWM_INCLUDE_COMPILE_PROFILE
               value: "false"
             - name: MINWM_RUN_ID
-              value: minwm-quant-nvfp4-b200-20260805-02
+              value: minwm-quant-nvfp4-b200-20260805-03
             - name: MINWM_STAGE_FROM_MOUNT
               value: "1"
             - name: MINWM_CHECKPOINT_MOUNT_PATH
