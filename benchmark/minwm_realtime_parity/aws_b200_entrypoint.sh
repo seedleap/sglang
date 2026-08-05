@@ -165,8 +165,35 @@ path.write_text(text.replace(block, ""))
 print("Skipped unused sglang.srt.grpc Rust extension for diffusion-only benchmark")
 PY
   fi
-  python3 -m pip install -e "/workspace/sglang/python[diffusion]" \
-    --root-user-action=ignore
+  if [[ "${MINWM_PRESERVE_IMAGE_GPU_STACK:-0}" == "1" ]]; then
+    # SM120 images carry a matched Torch/FA4/CUTLASS stack. Resolving the full
+    # diffusion extra can downgrade that stack to packages without a usable
+    # varlen FA4 kernel, so install SGLang and only its Python runtime deps.
+    python3 -m pip install -e /workspace/sglang/python \
+      --no-deps --root-user-action=ignore
+    python3 -m pip install \
+      'fastapi==0.141.1' \
+      'IPython==9.16.0' \
+      'pyzmq==27.1.0' \
+      --root-user-action=ignore
+    python3 -m pip install --no-deps \
+      'addict==2.4.0' \
+      'msgspec==0.21.1' \
+      'orjson==3.11.9' \
+      'prometheus-client==0.26.0' \
+      'pybase64==1.4.3' \
+      'python-multipart==0.0.32' \
+      'setproctitle==1.3.7' \
+      'uvicorn==0.52.0' \
+      'uvloop==0.22.1' \
+      'watchfiles==1.2.0' \
+      'websockets==17.0.1' \
+      'zstandard==0.25.0' \
+      --root-user-action=ignore
+  else
+    python3 -m pip install -e "/workspace/sglang/python[diffusion]" \
+      --root-user-action=ignore
+  fi
   # The minWM training image pins peft==0.17.0, while this SGLang checkout pins
   # transformers==5.12.1.  Merely leaving the old PEFT package installed makes
   # diffusers detect and import it, which then fails on the removed HybridCache
@@ -174,9 +201,11 @@ PY
   # adapters, so remove that stale optional package instead of changing either
   # side's model/runtime dependency set.
   python3 -m pip uninstall -y peft
-  python3 -m pip install --force-reinstall --no-deps \
-    --index-url https://flashinfer.ai/whl/cu130 \
-    'flashinfer-jit-cache==0.6.12+cu130'
+  if [[ "${MINWM_PRESERVE_IMAGE_GPU_STACK:-0}" != "1" ]]; then
+    python3 -m pip install --force-reinstall --no-deps \
+      --index-url https://flashinfer.ai/whl/cu130 \
+      'flashinfer-jit-cache==0.6.12+cu130'
+  fi
 else
   echo "Skipped dependency installation for reused in-Pod benchmark environment"
 fi
