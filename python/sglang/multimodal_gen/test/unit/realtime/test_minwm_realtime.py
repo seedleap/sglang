@@ -44,6 +44,7 @@ from sglang.multimodal_gen.runtime.models.dits.minwm import (
     _minwm_should_restore_reference_output_projection,
     _minwm_uniform_cu_seqlens,
     _minwm_uniform_frame_indices,
+    _minwm_validate_attention_impl,
     apply_minwm_rotary_embedding,
 )
 from sglang.multimodal_gen.runtime.models.dits.minwm_action import (
@@ -71,6 +72,7 @@ from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.m
 from sglang.multimodal_gen.runtime.pipelines_core.stages.realtime.vae import (
     CausalVaeDecodingStage,
 )
+from sglang.multimodal_gen.runtime.platforms import AttentionBackendEnum
 from sglang.multimodal_gen.runtime.realtime.session import RealtimeSession
 from sglang.multimodal_gen.tools.convert_minwm_checkpoint import (
     DEFAULT_SOURCE_URI,
@@ -1895,6 +1897,19 @@ def test_minwm_attention_backend_matches_source_device_fallback(
         lambda name: object() if name in available else None,
     )
     assert _minwm_packed_attention_backend(torch.device("cuda")) == expected
+
+
+def test_minwm_rejects_sage_backend_on_packed_attention():
+    with pytest.raises(ValueError, match="requires MINWM_ATTENTION_IMPL=dense"):
+        _minwm_validate_attention_impl("packed", {AttentionBackendEnum.SAGE_ATTN_3})
+
+
+@pytest.mark.parametrize(
+    "backend",
+    [AttentionBackendEnum.SAGE_ATTN, AttentionBackendEnum.SAGE_ATTN_3],
+)
+def test_minwm_accepts_sage_backend_on_dense_attention(backend):
+    _minwm_validate_attention_impl("dense", {backend})
 
 
 def test_minwm_allows_benchmark_component_ablation(monkeypatch):
