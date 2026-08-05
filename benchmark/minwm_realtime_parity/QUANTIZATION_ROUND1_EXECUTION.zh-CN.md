@@ -102,6 +102,13 @@
 4. 同集群刚完成的 H200 BF16 / online FP8 作业使用旧 SHA `7cb482cc...`、832x480 默认 case 且仅含 eager，因此只作为供给与执行链路旁证：client FPS 分别为 `18.958` 和 `21.271`（FP8 `+12.2%`），不能并入固定 720p 正式矩阵。
 5. 决策：west2d Job 不锁死 B200 或 B300，让 Karpenter 在该 NodePool 的合法 P6 offering 中选择实际可获得的 Spot 型号；最终结果必须绑定实际 node / instance type / GPU 名称，不与 B200 基线混写。east2 B200 在 west2d Job 获得 GPU 后暂停，避免两个完整矩阵意外同时运行。
 
+### 2026-08-05：发现 AWS03 跨三 AZ 的托管 B200 Spot 节点组
+
+1. west2d Karpenter Job 首次请求也得到 `UnfulfillableCapacity`。继续检查 kubeconfig 中非 Karpenter 集群后，发现 AWS03 账户的 us-west-2 集群存在 `minwm-spot-p6-b200-0703` 托管节点组：`capacityType=SPOT`、B200、跨三个 subnet、`desired=0 / max=20`。
+2. 同集群现有 8 台 B300 节点属于 `wan22-cb-*` Capacity Block 节点组，不是 Spot。决策：不使用这些现成节点来替代 Spot，也不把 Capacity Block 数据混入本轮。
+3. AWS03 west 集群有 `github-token`，并将 east2 的 S3 bucket 以 RWX `s3-claim` 挂载；旧 MinWM west Spot 清单也验证过相同 nodeSelector、taint 和路径。它不需要专用 EBS PVC，可继续逐 lane 直写 S3。
+4. 集群没有 Cluster Autoscaler deployment。决策：先提交专用 Job，再将 `minwm-spot-p6-b200-0703` 的 desired size 从 0 临时调到 1；实验终止后恢复为 0。这个节点组本身明确是 Spot，且跨三个 AZ，比单 AZ Karpenter 路径更有机会拿到容量。
+
 ## 作业证据
 
 运行前待填写：
