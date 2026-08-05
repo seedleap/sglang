@@ -32,17 +32,17 @@
 | # | 权重 / 激活 | kernel backend | compile | 状态 | client FPS | scheduler FPS | 相对 BF16 同 compile |
 |---:|---|---|---|---|---:|---:|---:|
 | 1 | BF16 | BF16 GEMM | off | 完成 | 14.079 | 14.092 | 基线 |
-| 2 | BF16 | BF16 GEMM | on | 待运行 | - | - | 基线 |
+| 2 | BF16 | BF16 GEMM | on | `cold-compile-timeout` | - | - | 失败基线，不计 FPS |
 | 3 | online FP8 W8A8 dynamic | SGLang FP8 | off | 完成 | 14.122 | 14.135 | +0.30% |
-| 4 | online FP8 W8A8 dynamic | SGLang FP8 | on | 待运行 | - | - | - |
+| 4 | online FP8 W8A8 dynamic | SGLang FP8 | on | `cold-compile-timeout` | - | - | 失败项不计 FPS |
 | 5 | calibrated FP8 W8A8 static | ModelOpt static FP8 | off | 完成 | 14.158 | 14.171 | +0.56% |
-| 6 | calibrated FP8 W8A8 static | ModelOpt static FP8 | on | 待运行 | - | - | - |
+| 6 | calibrated FP8 W8A8 static | ModelOpt static FP8 | on | Triton/Inductor 编译失败 | - | - | 失败项不计 FPS |
 | 7 | ModelOpt NVFP4 W4A4 | `flashinfer_trtllm` | off | 完成 | 13.706 | 13.718 | -2.65% |
-| 8 | ModelOpt NVFP4 W4A4 | `flashinfer_trtllm` | on | 待运行 | - | - | - |
+| 8 | ModelOpt NVFP4 W4A4 | `flashinfer_trtllm` | on | `cold-compile-timeout` | - | - | 失败项不计 FPS |
 | 9 | ModelOpt NVFP4 W4A4 | `flashinfer_cutlass` | off | 完成 | 13.269 | 13.280 | -5.76% |
-| 10 | ModelOpt NVFP4 W4A4 | `flashinfer_cutlass` | on | 待运行 | - | - | - |
+| 10 | ModelOpt NVFP4 W4A4 | `flashinfer_cutlass` | on | `cold-compile-timeout` | - | - | 失败项不计 FPS |
 | 11 | ModelOpt NVFP4 W4A4 | `flashinfer_cudnn` | off | 完成 | 12.202 | 12.211 | -13.34% |
-| 12 | ModelOpt NVFP4 W4A4 | `flashinfer_cudnn` | on | 待运行 | - | - | - |
+| 12 | ModelOpt NVFP4 W4A4 | `flashinfer_cudnn` | on | FlashInfer / stream API 失败 | - | - | 失败项不计 FPS |
 
 ## 预期与判读
 
@@ -121,23 +121,56 @@
 6. B200 eager client FPS 依次为 BF16 `14.079`、online FP8 `14.122`、static FP8 `14.158`、NVFP4 TRT-LLM `13.706`、NVFP4 Cutlass `13.269`、NVFP4 cuDNN `12.202`。static FP8 暂居第一但只比 BF16 快 `0.56%`；NVFP4 三个 backend 都是负收益。
 7. 旧 480p online FP8 的约 `+15%` 没有迁移到本轮 720p B200（仅 `+0.30%`）。这是本轮最重要的预期偏离，说明分辨率、VAE/传输占比或非 GEMM 部分足以吞掉量化 kernel 收益；后续不能用旧 480p 数据外推 720p。
 8. 成本约束补充：后续只使用 `spot` profile 对应的 `minwm-spot` 路径，不再使用 `aws03` profile；前者有优惠、更便宜。AWS03 路径本轮只做过供给探测，B200/B300 都始终为 0 实例，现已保持 Job suspended、ASG desired=0，不计入结果。
+9. `online-fp8-compile` 于 `11:24:13Z` 启动后，30 分钟内仍无法完成 20 个 warmup chunk。运行中从 stdout 看不到 chunk 级进度，一度误判为“首 chunk 未返回”；lane 关闭后复核 S3 server trace，确认实际完成了 `chunk_index=0..4`，各 chunk 总耗时约 `234 / 177 / 278 / 399 / 528 s`。这说明问题不是单次首编译，而是 KV / shape 推进过程中反复发生长编译。期间 32 个 Inductor worker 持续换批、服务进程存活、显存约 `57.3 GiB`，GPU 大部分时间利用率为 0。为控制 Spot 成本并覆盖剩余方法，决策将各 compile lane 的完整 warmup 等待上限设为 30 分钟；该 lane 在 `11:56:58Z` 结束，记录为 `cold-compile-timeout`，不补零 FPS。服务进程收到 TERM 后 30 秒未退出，因此最终使用 KILL；client 如实留下 WebSocket `1012 service restart`，矩阵随后进入 `bf16-compile`。
+10. `bf16-compile` 也在 throughput client 运行 `1804 s` 后未完成 warmup、未产出 throughput 文件。事后 trace 同样只完成 `chunk_index=0..4`，耗时约 `185 / 166 / 271 / 390 / 518 s`；scheduler 进程约占用一个 CPU core，显存约 `62.0 GiB`，GPU 大部分时间为 0。它于 `12:29:59Z` 按同一规则结束并进入 `static-fp8-compile`。首次 watchdog 虽打印了 timeout marker，但因远端 awk 引号错误没有取到服务 PID；只读进程复核发现偏差后，改用精确进程匹配执行 TERM/KILL，并修正后续 watchdog。最终状态以 Pod 内进程、server trace 和 lane end marker 为准，不以 watchdog 自身的日志声明为准。
+11. `static-fp8-compile` 在首个请求约 28 秒后主动失败，并非超时。底层是名为 `_static_quant_fp8` 的 Inductor/Triton kernel 编译失败：TTIR 分析无法处理 `tt.elementwise_inline_asm`，随后 `RuntimeError: PassManager::run failed`。因此该 lane 标记为明确的 compiler incompatibility，不归因于 Spot，也不允许回退到 eager 后冒充 compile 结果。
+12. `nvfp4-trtllm-compile` 同样只完成 `chunk_index=0..4`（约 `192 / 171 / 274 / 400 / 529 s`），没有完成 warmup，也没有 throughput 结果；最终于 `13:10:17Z` 结束并标记 `cold-compile-timeout`。`nvfp4-cutlass-compile` 的 client 超过 30 分钟后，watchdog 曾瞬时查询不到服务 PID，却错误地把该 lane 加入“已处理”集合，导致它继续运行到 `14:05:10Z` 才由人工复核强制结束，实际 lane 时长约 55 分钟，并因此多完成到 `chunk_index=6`（后两 chunk 约 `687 / 719 s`），仍远未完成 20 个 warmup。这是成本控制偏离预期；最后一条 cuDNN lane 改用单 lane watchdog：每 30 秒确认 client 仍是 cuDNN，30 分钟后必须解析并验证服务 PID，只有 client 消失或进程确认结束才退出。
+13. `nvfp4-cudnn-compile` 在首请求约 29 秒后明确失败：FlashInfer cuDNN FP4 路径把 `torch.Stream` 当作带有 `cuda_stream` 属性的对象，触发 `AttributeError: 'torch.Stream' object has no attribute 'cuda_stream'`。同一 cuDNN backend 的 eager lane 能完整运行，因此这是 cuDNN FP4 与 torch.compile 组合的 API / graph integration 失败，不是 backend 在 B200 上完全不可用。矩阵最终因 6 条 compile lane 非零退出而以 `BackoffLimitExceeded` 标记 Job Failed；这是聚合脚本的预期失败语义，6 条 eager summary 和全部失败日志均已写入 S3。
 
 ## 作业证据
 
 - SGLang immutable SHA：`ca2509f03432d07f183f8f1816c1ae1f218ec6a0`
 - Job：`ray/minwm-quant-r1-b200-20260805-01-use2-v2`
+- Matrix ID：`minwm-quant-r1-b200-use2-20260805-02`
 - Pod：`minwm-quant-r1-b200-20260805-01-use2-v2-52vl7`
 - Node：`ip-172-31-108-150.us-east-2.compute.internal`；`p6-b200.48xlarge`；Spot；`us-east-2a`
 - image digest：`sha256:bedc07ea3ba55059a8c1c569c3b177c4d00d41f37d4fa9105375531534ef5f2a`
 - GPU request：1 x B200
 - 结果前缀：`/s3/world-model/evals/minwm/quantization/20260805/round1-fixed-720p`
+- 汇总文件：上述前缀下的 `minwm-quant-r1-b200-use2-20260805-02-matrix-summary.json`
+- 终态：`Failed / BackoffLimitExceeded`；原因是聚合脚本保留 6 条 compile lane 的非零状态，不是 Spot 中断。Pod 已结束，不再占用本轮 GPU request。
 
 ## 结果结论
 
-待第一轮完成后填写。结论必须区分：
+### 本轮可测上限
 
-1. 量化本身对 eager 的收益；
-2. compile 本身在各精度上的收益；
-3. 量化 + compile 的全局最优；
-4. scheduler FPS 与 client FPS 的差距，判断收益是否被 VAE / 传输吞掉；
-5. 失败 backend 与明确错误，不把失败项包装成“无收益”。
+在固定 B200 Spot、1248x704、KV45、4 steps、20+200 chunks 合同下，本轮拿到的最高有效 client FPS 是 calibrated static FP8 eager 的 `14.158`，相对 BF16 eager `14.079` 只提高 `0.56%`。online FP8 eager 为 `14.122`（`+0.30%`）。单次运行没有误差条，因此这两个提升都应视为“基本持平、static FP8 略占优”，而不是足以直接改生产默认值的显著收益。
+
+NVFP4 三个 backend 均完整跑通 eager，但性能全部下降：TRT-LLM `13.706`（`-2.65%`）、Cutlass `13.269`（`-5.76%`）、cuDNN `12.202`（`-13.34%`）。所以当前实现的 W4A4 带宽优势没有转化为 MinWM 720p realtime 的端到端吞吐优势；最好的 NVFP4 也落后 BF16。
+
+| eager lane | peak GPU memory MiB | 相对 BF16 峰值 |
+|---|---:|---:|
+| BF16 | 61,960 | 基线 |
+| online FP8 | 57,270 | -7.57% |
+| static FP8 | 57,618 | -7.01% |
+| NVFP4 TRT-LLM | 55,894 | -9.79% |
+| NVFP4 Cutlass | 55,894 | -9.79% |
+| NVFP4 cuDNN | 55,922 | -9.74% |
+
+量化确实降低峰值显存，但幅度远小于 transformer linear 权重位宽的缩减比例，因为 VAE、attention、KV/cache、激活和未量化模块仍占用显存。若目标是吞吐，NVFP4 当前不值得采用；若目标是显存容量，它约 10% 的端到端峰值节省可作为后续独立课题，不能与加速混为一谈。
+
+### compile 结论
+
+本轮 6 条 compile lane 没有任何一条完成 20+200 合同，因此没有合法的 BF16 compile 基线，也没有量化 + compile 的有效 FPS。不能拿某个 compile lane 的局部 chunk 时间与 eager BF16 比较，也不能把失败项写成 0 FPS。
+
+- online FP8、BF16、NVFP4 TRT-LLM、NVFP4 Cutlass：KV / shape 推进时反复触发分钟级编译，只完成 5–7 个 warmup chunk；单 chunk 最长达到约 `719 s`，在成本上限内无法进入 steady measured window。
+- static FP8：`_static_quant_fp8` Triton kernel 的 TTIR 分析无法处理 `tt.elementwise_inline_asm`，`PassManager::run failed`。
+- NVFP4 cuDNN：FlashInfer cuDNN 路径对 `torch.Stream.cuda_stream` 的假设与当前 PyTorch API 不兼容。
+
+因此，本轮全局“有效结果”最优仍是 static FP8 eager `14.158 FPS`；whole-DiT compile 的理论稳态上限没有测到。实际证据更接近“当前 compile 形状策略不可部署”，后续若继续，应先解决固定 KV shape 的预编译 / cache 复用与两个明确 compiler/API 兼容问题，再谈稳态收益。
+
+### 端到端归因与放行决策
+
+所有 eager lane 的 scheduler FPS 仅比 client FPS 高约 `0.08%–0.09%`，量化差异基本完整传导到客户端；WebSocket 写出不是吞掉 FP8 收益的主要环节。720p 下只有约 0.3%–0.6% 的 FP8 收益，更可能说明未量化路径和 kernel/runtime 开销主导了 Amdahl 上限，而不是网络层把一个很大的 DiT 加速吃掉。
+
+第一轮到此结束，不修改生产默认值。static FP8 若要继续，必须进入重复测量与多 case 质量轮；online FP8 可作为零离线校准成本的低风险候选，但当前性能收益接近噪声；NVFP4 加速方向暂不推进，除非后续 profile 证明可修复的特定 kernel 开销。

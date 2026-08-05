@@ -1,6 +1,6 @@
 # minWM SGLang 量化第一轮掌握度考察
 
-版本：第一轮执行配套卷，建议闭卷 60 分钟，总分 100 分。
+版本：第一轮完成版配套卷，建议闭卷 60 分钟，总分 100 分。
 
 ## 使用方式
 
@@ -27,15 +27,15 @@
 9. 旧 832x480 eager 结果为：BF16 `23.183`、online FP8 `26.653`、static FP8 `24.859`、NVFP4 `20.173` client FPS。分别计算三个量化方案相对 BF16 的百分比变化。（6 分）
 10. 上题数据为什么只能作为本轮先验，不能回答 1248x704 的最终收益上限？至少列出 3 条原因。（4 分）
 11. 对任意一条本轮 lane，同时拿到 client FPS 和 scheduler FPS 后，如何利用二者差距判断收益是否被 VAE、输出物化或 WebSocket 吞掉？（4 分）
-12. 从执行记录的最终表中指出：最佳 eager、最佳 compile、全局最佳，以及各自相对同 compile 状态 BF16 的收益。若某 lane 失败，必须写失败类型而不是补零。（6 分，待正式矩阵完成后作答）
+12. 从执行记录的最终表中指出：最佳 eager、最佳 compile、全局最佳，以及各自相对同 compile 状态 BF16 的收益。解释为什么本轮不能给出“量化 + compile 的 FPS 上限”，并按类别列出 6 条 compile 失败，不能补零。（6 分）
 
 ## D. Spot 运维与故障诊断（25 分）
 
 13. 解释 `WaitForFirstConsumer`、`FailedScheduling`、`Nominated`、`InsufficientCapacityError` 的因果顺序。为什么本轮最初的 PVC Pending 不是独立存储故障？（6 分）
 14. 最初 use1 清单与 east2 旧清单分别依赖哪些 namespace / NodePool / taint / 存储资源？如何用只读命令证明是“控制面不匹配”而不是代码错误？（6 分）
-15. 为什么在发现 ATL2 B200 和 B300 都无容量后，没有把 B300 结果伪装成 B200？为什么最终又转向 east2 B200 三 AZ pool？（4 分）
-16. 旧 compile 日志中出现单 chunk `150–391 s`，随后 WebSocket `1012 service restart`。给出一个证据驱动的诊断树，区分冷编译、稳态性能差、Spot 中断和应用异常。（5 分）
-17. 为什么正式矩阵改成“先 6 个 eager，再 6 个 compile”？Spot 中断后应怎样只补缺失 lane，避免覆盖已有 S3 证据？（4 分）
+15. 为什么在发现 ATL2 B200 和 B300 都无容量后，没有把 B300 结果伪装成 B200？为什么最终转向 east2 B200 三 AZ pool，并在得到正式容量后只保留 `spot` profile / `minwm-spot` 路径、不再使用 `aws03`？（4 分）
+16. 本轮 compile trace 显示前 5–7 个 warmup chunk 约耗时 `166–719 s`，随后部分 lane 出现 WebSocket `1012`。给出证据驱动的诊断树，区分“shape 推进时反复 cold compile”、稳态性能差、Spot 中断、编译器/API 不兼容和人为止损。（5 分）
+17. 为什么正式矩阵改成“先 6 个 eager，再 6 个 compile”？为什么 Job 最终是 `BackoffLimitExceeded / Failed`，6 条 eager 结果仍然有效？watchdog 曾在 PID 查询为空时错误地认为 Cutlass lane 已处理，这说明终态判断应以哪些证据为准？（4 分）
 
 ## E. 独立复现实操（10 分）
 
@@ -62,13 +62,17 @@
 - 旧 eager 结果约为 online FP8 `+15.0%`、static FP8 `+7.2%`、NVFP4 `-13.0%`。
 - 不可外推原因至少包括分辨率不一致、旧 compile 缺失/失败、单次运行无误差条、NVFP4 backend 未完整 sweep、旧代码 SHA 不同。
 - scheduler 与 client 接近表示模型关键路径基本传导到客户端；scheduler 明显更高则应检查 VAE、raw RGB 物化、D2H/序列化与网络写入。
+- 本轮最佳 eager 与全局最佳有效结果都是 static FP8 eager `14.158 FPS`，相对 BF16 eager `14.079 FPS` 为 `+0.56%`；online FP8 为 `+0.30%`。最佳 compile 不存在，因为没有任何 compile lane 完成 20+200 合同，也没有合法的 BF16 compile 基线。
+- 6 条 compile 应按证据分类：online FP8、BF16、NVFP4 TRT-LLM、NVFP4 Cutlass 为 warmup 内反复分钟级编译并超时；static FP8 为 `_static_quant_fp8` / `tt.elementwise_inline_asm` / `PassManager::run failed`；NVFP4 cuDNN 为 `torch.Stream.cuda_stream` API 不兼容。
 
 ### D 部分
 
 - 正确链路是 Pod 等待调度，Karpenter 提名 NodeClaim，AWS Fleet 创建实例失败；动态 PVC 因 Pod 未落区而继续 `WaitForFirstConsumer`。
 - use1 是 `default / minwm-test-atl2-p6-spot / minwm-test-atl2-karpenter / 专用 EBS PVC`；east2 是 `ray / minwm-test-b200-spot / wan22-ti2v / s3-claim`。
-- `1012` 只是连接终止表象；必须结合 compile chunk 时间、server shutdown、Pod/NodeClaim/Spot 事件和是否存在 steady measured chunks判断。
-- 先 eager 是故障域排序：短路径先覆盖方法空间，长冷编译后置；补跑使用新 run id，只读取旧证据，不覆盖旧目录。
+- B300 与 B200 是不同硬件合同，不能混写；正式结果绑定 east2 实际 B200 Spot 节点。成本约束要求后续只使用优惠的 `spot` profile / `minwm-spot`，AWS03 仅做过 0 实例供给探测且保持 suspended / desired=0，不进入结果。
+- `1012` 只是连接终止表象；本轮 server trace 证明多个 lane 已完成少量 warmup chunk，但 KV / shape 推进继续触发长编译。必须结合每个 `chunk_index` 的耗时、server shutdown 发起方、Pod/NodeClaim/Spot 事件、compiler stack 和是否存在 steady measured chunks判断。
+- 先 eager 是故障域排序：短路径先覆盖方法空间，长冷编译后置。聚合脚本因任一 lane 失败而整体非零，所以 Job Failed 不会抹去已落 S3、合同完整的 eager summary。
+- watchdog 的声明不是权威终态；至少交叉检查 Pod 内 server/client PID、lane end marker、S3 server trace / throughput summary 和 Kubernetes Job/Node 事件。补跑要用新 run id，只读取旧证据，不覆盖旧目录。
 
 ### E 部分
 
