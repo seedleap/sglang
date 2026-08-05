@@ -319,6 +319,22 @@ def main() -> None:
                 ),
                 "output": output.detach().cpu(),
             }
+            for name in (
+                "seq_lens",
+                "block_idx",
+                "position_ids",
+                "clean_x",
+                "aug_t",
+                "action_seq_lens",
+                "action_token_nums",
+                "action_mask",
+                "cross_seq_lens",
+                "attention_tag",
+            ):
+                value = forward_kwargs.get(name)
+                record[name] = (
+                    value.detach().cpu() if isinstance(value, torch.Tensor) else value
+                )
             torch.save(record, dump_dir / f"forward_{forward_index:03d}.pt")
             forward_index += 1
             return output
