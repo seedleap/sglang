@@ -208,28 +208,32 @@ spec:
                 MINWM_PROFILE_QUANTIZATION_LABEL=static_fp8_calibrated \
                 MINWM_THROUGHPUT_PROFILES="${eager_profile}"
 
-              run_reused_lane nvfp4-trtllm-eager \
-                MINWM_BENCHMARK_MODE=nvfp4 \
-                MINWM_PROFILE_QUANTIZATION_LABEL=nvfp4_flashinfer_trtllm \
-                SGLANG_DIFFUSION_FLASHINFER_FP4_GEMM_BACKEND=flashinfer_trtllm \
-                MINWM_THROUGHPUT_PROFILES="${eager_profile}"
-
-              if [[ -f "/work/minwm-realtime/${nvfp4_run}/nvfp4-transformer/minwm_nvfp4_manifest.json" ]]; then
-                run_reused_lane nvfp4-cutlass-eager \
-                  MINWM_BENCHMARK_MODE=profiles \
-                  MINWM_PROFILE_TRANSFORMER_PATH="/work/minwm-realtime/${nvfp4_run}/nvfp4-transformer" \
-                  MINWM_PROFILE_QUANTIZATION_LABEL=nvfp4_flashinfer_cutlass \
-                  SGLANG_DIFFUSION_FLASHINFER_FP4_GEMM_BACKEND=flashinfer_cutlass \
+              if [[ "${MINWM_QUANT_R1_SKIP_NVFP4:-0}" != "1" ]]; then
+                run_reused_lane nvfp4-trtllm-eager \
+                  MINWM_BENCHMARK_MODE=nvfp4 \
+                  MINWM_PROFILE_QUANTIZATION_LABEL=nvfp4_flashinfer_trtllm \
+                  SGLANG_DIFFUSION_FLASHINFER_FP4_GEMM_BACKEND=flashinfer_trtllm \
                   MINWM_THROUGHPUT_PROFILES="${eager_profile}"
 
-                run_reused_lane nvfp4-cudnn-eager \
-                  MINWM_BENCHMARK_MODE=profiles \
-                  MINWM_PROFILE_TRANSFORMER_PATH="/work/minwm-realtime/${nvfp4_run}/nvfp4-transformer" \
-                  MINWM_PROFILE_QUANTIZATION_LABEL=nvfp4_flashinfer_cudnn \
-                  SGLANG_DIFFUSION_FLASHINFER_FP4_GEMM_BACKEND=flashinfer_cudnn \
-                  MINWM_THROUGHPUT_PROFILES="${eager_profile}"
+                if [[ -f "/work/minwm-realtime/${nvfp4_run}/nvfp4-transformer/minwm_nvfp4_manifest.json" ]]; then
+                  run_reused_lane nvfp4-cutlass-eager \
+                    MINWM_BENCHMARK_MODE=profiles \
+                    MINWM_PROFILE_TRANSFORMER_PATH="/work/minwm-realtime/${nvfp4_run}/nvfp4-transformer" \
+                    MINWM_PROFILE_QUANTIZATION_LABEL=nvfp4_flashinfer_cutlass \
+                    SGLANG_DIFFUSION_FLASHINFER_FP4_GEMM_BACKEND=flashinfer_cutlass \
+                    MINWM_THROUGHPUT_PROFILES="${eager_profile}"
+
+                  run_reused_lane nvfp4-cudnn-eager \
+                    MINWM_BENCHMARK_MODE=profiles \
+                    MINWM_PROFILE_TRANSFORMER_PATH="/work/minwm-realtime/${nvfp4_run}/nvfp4-transformer" \
+                    MINWM_PROFILE_QUANTIZATION_LABEL=nvfp4_flashinfer_cudnn \
+                    SGLANG_DIFFUSION_FLASHINFER_FP4_GEMM_BACKEND=flashinfer_cudnn \
+                    MINWM_THROUGHPUT_PROFILES="${eager_profile}"
+                else
+                  failures+=("nvfp4-transformer-missing:1")
+                fi
               else
-                failures+=("nvfp4-transformer-missing:1")
+                echo "MINWM_QUANT_R1_SKIP lanes=nvfp4-* reason=hardware-not-supported"
               fi
 
               run_reused_lane online-fp8-compile \
@@ -253,7 +257,7 @@ spec:
                 failures+=("static-fp8-transformer-missing:1")
               fi
 
-              if [[ -f "/work/minwm-realtime/${nvfp4_run}/nvfp4-transformer/minwm_nvfp4_manifest.json" ]]; then
+              if [[ "${MINWM_QUANT_R1_SKIP_NVFP4:-0}" != "1" && -f "/work/minwm-realtime/${nvfp4_run}/nvfp4-transformer/minwm_nvfp4_manifest.json" ]]; then
                 run_reused_lane nvfp4-trtllm-compile \
                   MINWM_BENCHMARK_MODE=profiles \
                   MINWM_PROFILE_TRANSFORMER_PATH="/work/minwm-realtime/${nvfp4_run}/nvfp4-transformer" \
@@ -279,6 +283,7 @@ spec:
               python3 - "${matrix_results_root}" "${matrix_id}" <<'PY'
               import csv
               import json
+              import os
               import sys
               from pathlib import Path
 
@@ -303,6 +308,8 @@ spec:
                   run_root = root / f"{matrix_id}-{lane}"
                   summary_path = run_root / "throughput-summary.json"
                   item = {"result_root": str(run_root), "summary_exists": summary_path.is_file()}
+                  if os.environ.get("MINWM_QUANT_R1_SKIP_NVFP4") == "1" and lane.startswith("nvfp4-"):
+                      item["skipped"] = "hardware-not-supported"
                   if summary_path.is_file():
                       item.update(json.loads(summary_path.read_text()))
                   peak_memory = {}

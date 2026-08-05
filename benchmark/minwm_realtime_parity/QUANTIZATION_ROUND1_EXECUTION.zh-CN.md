@@ -109,6 +109,7 @@
 3. AWS03 west 集群有 `github-token`，并将 east2 的 S3 bucket 以 RWX `s3-claim` 挂载；旧 MinWM west Spot 清单也验证过相同 nodeSelector、taint 和路径。它不需要专用 EBS PVC，可继续逐 lane 直写 S3。
 4. 集群没有 Cluster Autoscaler deployment。决策：先提交专用 Job，再将 `minwm-spot-p6-b200-0703` 的 desired size 从 0 临时调到 1；实验终止后恢复为 0。这个节点组本身明确是 Spot，且跨三个 AZ，比单 AZ Karpenter 路径更有机会拿到容量。
 5. B200 ASG 的第一次实例启动仍返回 `UnfulfillableCapacity`。为避免上限探索只押一个 SKU，新增同集群 `minwm-spot-p6-b300-0703` 的独立固定 720p 矩阵，并将 desired size 临时调到 1。B300 是独立硬件结果；B200 / B300 谁先获得真机，就暂停另一个尚未获得 GPU 的完整矩阵并恢复其 desired size 为 0，避免并行消耗两台 P6。
+6. 多条 P6 路径均持续等待容量时，phx2 集群已有 H200 Spot 节点且存在空闲 GPU。决策：并行运行固定 720p 的 BF16、online FP8、static FP8 eager/compile 子矩阵，用它回答 FP8 路径与 compile 的趋势；Hopper 不具备本轮 NVFP4 硬件路径，因此 6 条 NVFP4 lane 显式标记 `hardware-not-supported`，不尝试后静默失败，也不把 H200 数据与 Blackwell 上限合并。
 
 ## 作业证据
 
