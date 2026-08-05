@@ -13,8 +13,8 @@
 | 项目 | 固定值 |
 |---|---|
 | 硬件 | AWS Spot `p6-b200.48xlarge`，单 Pod、单 GPU、所有 lane 串行 |
-| 集群 / 可用区 | `codex-seed-leap-use1` / `us-east-1-atl-2a` |
-| NodePool | `minwm-test-atl2-p6-spot` |
+| 集群 / 可用区 | `minwm-spot`（`leap-world` east2）/ 实际 `us-east-2a` |
+| NodePool | `minwm-test-b200-spot` |
 | 模型代码 | `seedleap/minWM@2efc6485f65e8fcab506665efde79bc41406385e` |
 | checkpoint | `global_step_003200/ema_student/model.pt`，S3 VersionId `wduScksw2f3yPErnG9lBioOuE2AToyAP` |
 | 请求 case | `cases_720p_compile_smoke.json` / `00_forward_080_pottery_720p` |
@@ -31,17 +31,17 @@
 
 | # | 权重 / 激活 | kernel backend | compile | 状态 | client FPS | scheduler FPS | 相对 BF16 同 compile |
 |---:|---|---|---|---|---:|---:|---:|
-| 1 | BF16 | BF16 GEMM | off | 待运行 | - | - | 基线 |
+| 1 | BF16 | BF16 GEMM | off | 完成 | 14.079 | 14.092 | 基线 |
 | 2 | BF16 | BF16 GEMM | on | 待运行 | - | - | 基线 |
-| 3 | online FP8 W8A8 dynamic | SGLang FP8 | off | 待运行 | - | - | - |
+| 3 | online FP8 W8A8 dynamic | SGLang FP8 | off | 完成 | 14.122 | 14.135 | +0.30% |
 | 4 | online FP8 W8A8 dynamic | SGLang FP8 | on | 待运行 | - | - | - |
-| 5 | calibrated FP8 W8A8 static | ModelOpt static FP8 | off | 待运行 | - | - | - |
+| 5 | calibrated FP8 W8A8 static | ModelOpt static FP8 | off | 完成 | 14.158 | 14.171 | +0.56% |
 | 6 | calibrated FP8 W8A8 static | ModelOpt static FP8 | on | 待运行 | - | - | - |
-| 7 | ModelOpt NVFP4 W4A4 | `flashinfer_trtllm` | off | 待运行 | - | - | - |
+| 7 | ModelOpt NVFP4 W4A4 | `flashinfer_trtllm` | off | 完成 | 13.706 | 13.718 | -2.65% |
 | 8 | ModelOpt NVFP4 W4A4 | `flashinfer_trtllm` | on | 待运行 | - | - | - |
-| 9 | ModelOpt NVFP4 W4A4 | `flashinfer_cutlass` | off | 待运行 | - | - | - |
+| 9 | ModelOpt NVFP4 W4A4 | `flashinfer_cutlass` | off | 完成 | 13.269 | 13.280 | -5.76% |
 | 10 | ModelOpt NVFP4 W4A4 | `flashinfer_cutlass` | on | 待运行 | - | - | - |
-| 11 | ModelOpt NVFP4 W4A4 | `flashinfer_cudnn` | off | 待运行 | - | - | - |
+| 11 | ModelOpt NVFP4 W4A4 | `flashinfer_cudnn` | off | 完成 | 12.202 | 12.211 | -13.34% |
 | 12 | ModelOpt NVFP4 W4A4 | `flashinfer_cudnn` | on | 待运行 | - | - | - |
 
 ## 预期与判读
@@ -111,15 +111,25 @@
 5. B200 ASG 的第一次实例启动仍返回 `UnfulfillableCapacity`。为避免上限探索只押一个 SKU，新增同集群 `minwm-spot-p6-b300-0703` 的独立固定 720p 矩阵，并将 desired size 临时调到 1。B300 是独立硬件结果；B200 / B300 谁先获得真机，就暂停另一个尚未获得 GPU 的完整矩阵并恢复其 desired size 为 0，避免并行消耗两台 P6。
 6. 多条 P6 路径均持续等待容量时，phx2 集群已有 H200 Spot 节点且存在空闲 GPU。决策：并行运行固定 720p 的 BF16、online FP8、static FP8 eager/compile 子矩阵，用它回答 FP8 路径与 compile 的趋势；Hopper 不具备本轮 NVFP4 硬件路径，因此 6 条 NVFP4 lane 显式标记 `hardware-not-supported`，不尝试后静默失败，也不把 H200 数据与 Blackwell 上限合并。
 
+### 2026-08-05：正式 B200 Spot 获得容量并完成 eager 矩阵
+
+1. east2 Job 在多轮 `InsufficientInstanceCapacity` 后获得 `p6-b200.48xlarge` Spot 节点 `ip-172-31-108-150.us-east-2.compute.internal`，实际 AZ 为 `us-east-2a`。Pod `minwm-quant-r1-b200-20260805-01-use2-v2-52vl7` 请求 1/8 GPU，镜像 digest 与 SHA 均符合合同。
+2. 节点获得后立即暂停 west2d Karpenter Job 与 AWS03 B200/B300 托管节点组 Job；AWS03 两个 ASG 都恢复 `desired=0`、实例数 0。没有删除 Job/PVC/事件。
+3. H200 fallback 确实新建了 `p5e.48xlarge` Spot 节点并完成三条 fixed-720p eager：BF16 `9.122`、online FP8 `9.421`（`+3.28%`）、static FP8 `9.417`（`+3.23%`）。它的 online-FP8 compile 首 chunk 长时间停在 CPU Dynamo/Inductor 冷编译；正式 B200 稳定后暂停 H200 Job，保留 Bound PVC 和 eager 原始数据，不继续占用整台 H200。
+4. 两个集群的 pip 安装都打印了 `ERROR: pip's dependency resolver...`，但随后成功完成安装且 lane status 为 0。决策：将其记录为非致命依赖提示，不能仅按日志关键字判失败；判定以命令退出码与 lane end marker 为准。
+5. H200 新节点注册初期，EBS provisioner 曾报告缺少 topology key，S3 CSI 也曾短暂未注册。节点标签与 CSI DaemonSet 就绪后 PVC 自动 Bound、Pod 自动启动；没有通过重建资源掩盖这个时序问题。
+6. B200 eager client FPS 依次为 BF16 `14.079`、online FP8 `14.122`、static FP8 `14.158`、NVFP4 TRT-LLM `13.706`、NVFP4 Cutlass `13.269`、NVFP4 cuDNN `12.202`。static FP8 暂居第一但只比 BF16 快 `0.56%`；NVFP4 三个 backend 都是负收益。
+7. 旧 480p online FP8 的约 `+15%` 没有迁移到本轮 720p B200（仅 `+0.30%`）。这是本轮最重要的预期偏离，说明分辨率、VAE/传输占比或非 GEMM 部分足以吞掉量化 kernel 收益；后续不能用旧 480p 数据外推 720p。
+
 ## 作业证据
 
-运行前待填写：
-
 - SGLang immutable SHA：`ca2509f03432d07f183f8f1816c1ae1f218ec6a0`
-- Job：`minwm-quant-r1-b200-20260805-01`；Pod / Node 待调度后填写
+- Job：`ray/minwm-quant-r1-b200-20260805-01-use2-v2`
+- Pod：`minwm-quant-r1-b200-20260805-01-use2-v2-52vl7`
+- Node：`ip-172-31-108-150.us-east-2.compute.internal`；`p6-b200.48xlarge`；Spot；`us-east-2a`
 - image digest：`sha256:bedc07ea3ba55059a8c1c569c3b177c4d00d41f37d4fa9105375531534ef5f2a`
 - GPU request：1 x B200
-- 结果 PVC：`minwm-quant-r1-results-20260805`
+- 结果前缀：`/s3/world-model/evals/minwm/quantization/20260805/round1-fixed-720p`
 
 ## 结果结论
 
