@@ -146,8 +146,9 @@ find "${PRETRAINED}" -type f -printf '%s\n' \
       '{bytes += $1; files += 1} END {printf "files=%d bytes=%.0f stage_seconds=%d\n", files, bytes, elapsed}' \
   | tee "${RESULTS}/staging-summary.txt"
 
-if [[ "${MINWM_SKIP_UNUSED_GRPC_RUST:-1}" == "1" ]] && ! command -v cargo >/dev/null; then
-  python3 - /workspace/sglang/python/pyproject.toml <<'PY'
+if [[ "${MINWM_SKIP_INSTALL:-0}" != "1" ]]; then
+  if [[ "${MINWM_SKIP_UNUSED_GRPC_RUST:-1}" == "1" ]] && ! command -v cargo >/dev/null; then
+    python3 - /workspace/sglang/python/pyproject.toml <<'PY'
 import sys
 from pathlib import Path
 
@@ -163,19 +164,22 @@ if text.count(block) != 1:
 path.write_text(text.replace(block, ""))
 print("Skipped unused sglang.srt.grpc Rust extension for diffusion-only benchmark")
 PY
+  fi
+  python3 -m pip install -e "/workspace/sglang/python[diffusion]" \
+    --root-user-action=ignore
+  # The minWM training image pins peft==0.17.0, while this SGLang checkout pins
+  # transformers==5.12.1.  Merely leaving the old PEFT package installed makes
+  # diffusers detect and import it, which then fails on the removed HybridCache
+  # symbol before any model code runs.  Realtime inference does not load LoRA
+  # adapters, so remove that stale optional package instead of changing either
+  # side's model/runtime dependency set.
+  python3 -m pip uninstall -y peft
+  python3 -m pip install --force-reinstall --no-deps \
+    --index-url https://flashinfer.ai/whl/cu130 \
+    'flashinfer-jit-cache==0.6.12+cu130'
+else
+  echo "Skipped dependency installation for reused in-Pod benchmark environment"
 fi
-python3 -m pip install -e "/workspace/sglang/python[diffusion]" \
-  --root-user-action=ignore
-# The minWM training image pins peft==0.17.0, while this SGLang checkout pins
-# transformers==5.12.1.  Merely leaving the old PEFT package installed makes
-# diffusers detect and import it, which then fails on the removed HybridCache
-# symbol before any model code runs.  Realtime inference does not load LoRA
-# adapters, so remove that stale optional package instead of changing either
-# side's model/runtime dependency set.
-python3 -m pip uninstall -y peft
-python3 -m pip install --force-reinstall --no-deps \
-  --index-url https://flashinfer.ai/whl/cu130 \
-  'flashinfer-jit-cache==0.6.12+cu130'
 python3 - <<'PY' | tee "${RESULTS}/runtime.json"
 import importlib.util, json
 import diffusers, torch, transformers
@@ -572,7 +576,7 @@ if [[ "${MINWM_BENCHMARK_MODE}" == "calibratedfp8" ]]; then
   cp "${CALIBRATION_RESULTS}/baseline_run.json" "${RESULTS}/static-fp8-calibration-baseline.json"
   cp "${STATIC_FP8_TRANSFORMER}/minwm_static_fp8_manifest.json" "${RESULTS}/"
   export MINWM_PROFILE_TRANSFORMER_PATH="${STATIC_FP8_TRANSFORMER}"
-  export MINWM_PROFILE_QUANTIZATION_LABEL=static_fp8
+  export MINWM_PROFILE_QUANTIZATION_LABEL="${MINWM_PROFILE_QUANTIZATION_LABEL:-static_fp8}"
 fi
 
 if [[ "${MINWM_BENCHMARK_MODE}" == "nvfp4" ]]; then
@@ -604,7 +608,7 @@ if [[ "${MINWM_BENCHMARK_MODE}" == "nvfp4" ]]; then
   cp "${NVFP4_RESULTS}/baseline_run.json" "${RESULTS}/nvfp4-calibration-baseline.json"
   cp "${NVFP4_TRANSFORMER}/minwm_nvfp4_manifest.json" "${RESULTS}/"
   export MINWM_PROFILE_TRANSFORMER_PATH="${NVFP4_TRANSFORMER}"
-  export MINWM_PROFILE_QUANTIZATION_LABEL=nvfp4
+  export MINWM_PROFILE_QUANTIZATION_LABEL="${MINWM_PROFILE_QUANTIZATION_LABEL:-nvfp4}"
 fi
 
 if [[ "${MINWM_BENCHMARK_MODE}" == "spmatrix720p" ]]; then
@@ -1167,11 +1171,29 @@ run_throughput_profile() {
   local profile_results="${RESULTS}/throughput/${profile}"
   local quantization_args=()
   local transformer_args=()
+  local client_args=(
+    --output "${profile_dir}/throughput.json"
+    --profile-name "${profile}"
+    --kv-cache-num-frames "${kv_frames}"
+  )
   if [[ -n "${MINWM_PROFILE_QUANTIZATION:-}" ]]; then
     quantization_args=(--quantization "${MINWM_PROFILE_QUANTIZATION}")
   fi
   if [[ -n "${MINWM_PROFILE_TRANSFORMER_PATH:-}" ]]; then
     transformer_args=(--transformer-path "${MINWM_PROFILE_TRANSFORMER_PATH}")
+  fi
+  if [[ -n "${MINWM_THROUGHPUT_CASES_PATH:-}" ]]; then
+    [[ -f "${MINWM_THROUGHPUT_CASES_PATH}" ]]
+    client_args+=(--cases "${MINWM_THROUGHPUT_CASES_PATH}")
+  fi
+  if [[ -n "${MINWM_THROUGHPUT_CASE:-}" ]]; then
+    client_args+=(--case "${MINWM_THROUGHPUT_CASE}")
+  fi
+  if [[ -n "${MINWM_THROUGHPUT_WARMUP_CHUNKS:-}" ]]; then
+    client_args+=(--warmup-chunks "${MINWM_THROUGHPUT_WARMUP_CHUNKS}")
+  fi
+  if [[ -n "${MINWM_THROUGHPUT_MEASURED_CHUNKS:-}" ]]; then
+    client_args+=(--measured-chunks "${MINWM_THROUGHPUT_MEASURED_CHUNKS}")
   fi
   mkdir -p "${profile_dir}" "${profile_results}"
   MINWM_ATTENTION_IMPL="${attention_impl}" \
@@ -1196,9 +1218,7 @@ run_throughput_profile() {
   fi
   set +e
   python3 "${SCRIPT_DIR}/benchmark_realtime_throughput.py" \
-    --output "${profile_dir}/throughput.json" \
-    --profile-name "${profile}" \
-    --kv-cache-num-frames "${kv_frames}" \
+    "${client_args[@]}" \
     > >(tee "${profile_results}/client.log") 2>&1
   local profile_status=$?
   set -e
@@ -1249,7 +1269,8 @@ done
 
 python3 - "${RESULTS}/throughput" "${RESULTS}/throughput-summary.json" \
   "${profile_failures[*]}" \
-  "${MINWM_PROFILE_QUANTIZATION_LABEL:-${MINWM_PROFILE_QUANTIZATION:-}}" <<'PY'
+  "${MINWM_PROFILE_QUANTIZATION_LABEL:-${MINWM_PROFILE_QUANTIZATION:-}}" \
+  "${SGLANG_DIFFUSION_FLASHINFER_FP4_GEMM_BACKEND:-}" <<'PY'
 import json, sys
 from pathlib import Path
 
@@ -1262,6 +1283,7 @@ summary = {
     "profiles": profiles,
     "failed_profiles": sys.argv[3].split() if sys.argv[3] else [],
     "quantization": sys.argv[4] or None,
+    "nvfp4_backend": sys.argv[5] or None,
 }
 exact_name = "exact-packed-det-kv45"
 comparisons = {}
