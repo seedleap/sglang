@@ -164,7 +164,7 @@ class _SageAttentionBackendResolver(_CudaAttentionBackendResolver):
 
 class _SageAttention3BackendResolver(_CudaAttentionBackendResolver):
     backend = AttentionBackendEnum.SAGE_ATTN_3
-    _supported_capabilities = {100, 120, 121}
+    _supported_capabilities = {120, 121}
 
     @classmethod
     def resolve(cls, platform) -> str:
@@ -176,7 +176,7 @@ class _SageAttention3BackendResolver(_CudaAttentionBackendResolver):
             raise RuntimeError(
                 "SageAttention3 does not support CUDA capability "
                 f"{capability.as_version_str()}; supported capabilities are "
-                "SM100, SM120, and SM121."
+                "SM120 and SM121."
             )
         try:
             from sglang.multimodal_gen.runtime.layers.attention.backends.sage_attn3 import (  # noqa: F401

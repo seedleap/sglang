@@ -119,12 +119,15 @@ class TestCudaAttentionBackendSelection(unittest.TestCase):
         ):
             self.resolve(AttentionBackendEnum.SAGE_ATTN)
 
-    def test_requested_sage_attention3_rejects_b300(self):
-        FakeCudaPlatform.device_capability = (10, 3)
-        with self.assertRaisesRegex(
-            RuntimeError, "does not support CUDA capability 10.3"
-        ):
-            self.resolve(AttentionBackendEnum.SAGE_ATTN_3)
+    def test_requested_sage_attention3_rejects_datacenter_blackwell(self):
+        for capability in ((10, 0), (10, 3)):
+            with self.subTest(capability=capability):
+                FakeCudaPlatform.device_capability = capability
+                version = f"{capability[0]}.{capability[1]}"
+                with self.assertRaisesRegex(
+                    RuntimeError, f"does not support CUDA capability {version}"
+                ):
+                    self.resolve(AttentionBackendEnum.SAGE_ATTN_3)
 
 
 if __name__ == "__main__":

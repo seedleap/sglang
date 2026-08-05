@@ -54,7 +54,7 @@ def test_sage_attention3_does_not_mutate_key(monkeypatch):
 )
 def test_sage_attention3_real_kernel_does_not_mutate_key():
     capability = torch.cuda.get_device_capability()
-    if capability not in {(10, 0), (12, 0), (12, 1)}:
+    if capability not in {(12, 0), (12, 1)}:
         pytest.skip(f"SageAttention3 does not support SM{capability[0]}{capability[1]}")
 
     from sglang.multimodal_gen.runtime.layers.attention.backends.sage_attn3 import (
