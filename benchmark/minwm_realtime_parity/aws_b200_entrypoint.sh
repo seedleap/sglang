@@ -176,6 +176,10 @@ PY
       'IPython==9.16.0' \
       'pyzmq==27.1.0' \
       --root-user-action=ignore
+    python3 -m pip install \
+      'diffusers==0.37.0' \
+      'transformers==5.12.1' \
+      --root-user-action=ignore
     python3 -m pip install --no-deps \
       'addict==2.4.0' \
       'msgspec==0.21.1' \
