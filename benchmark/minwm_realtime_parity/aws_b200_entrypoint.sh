@@ -1399,12 +1399,10 @@ profiles=(
   "packed-nondeterministic-kv45 packed fa false text_encoder,vae false 45"
   "lingbot-style-dense-native-kv45 dense fa false text_encoder,vae false 45"
   "dense-optimized-components-kv45 dense fa false '' false 45"
+  "dense-optimized-components-kv128 dense fa false '' false 128"
 )
 if [[ "${MINWM_INCLUDE_COMPILE_PROFILE:-true}" == "true" ]]; then
   profiles+=("dense-optimized-compile-kv45 dense fa false '' true 45")
-fi
-if [[ -n "${MINWM_SAGE_ATTENTION_BACKENDS:-}" ]]; then
-  profiles+=("dense-optimized-components-kv128 dense fa false '' false 128")
 fi
 if [[ ",${MINWM_SAGE_ATTENTION_BACKENDS:-}," == *",sage_attn,"* ]]; then
   profiles+=(
