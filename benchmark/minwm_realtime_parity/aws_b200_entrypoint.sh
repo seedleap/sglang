@@ -1220,6 +1220,20 @@ profiles=(
 if [[ "${MINWM_INCLUDE_COMPILE_PROFILE:-true}" == "true" ]]; then
   profiles+=("dense-optimized-compile-kv45 dense false '' true 45")
 fi
+if [[ -n "${MINWM_THROUGHPUT_PROFILES:-}" ]]; then
+  selected_profiles=()
+  for spec in "${profiles[@]}"; do
+    read -r profile _ <<< "${spec}"
+    if [[ ",${MINWM_THROUGHPUT_PROFILES}," == *",${profile},"* ]]; then
+      selected_profiles+=("${spec}")
+    fi
+  done
+  if (( ${#selected_profiles[@]} == 0 )); then
+    echo "No throughput profiles matched MINWM_THROUGHPUT_PROFILES=${MINWM_THROUGHPUT_PROFILES}" >&2
+    exit 1
+  fi
+  profiles=("${selected_profiles[@]}")
+fi
 profile_failures=()
 for spec in "${profiles[@]}"; do
   read -r profile attention_impl packed_deterministic native_components torch_compile kv_frames <<< "${spec}"
