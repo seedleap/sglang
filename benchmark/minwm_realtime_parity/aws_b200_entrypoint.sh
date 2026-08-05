@@ -1374,6 +1374,7 @@ run_throughput_profile() {
 profiles=(
   "exact-packed-det-kv128 packed fa true text_encoder,vae false 128"
   "exact-packed-det-kv45 packed fa true text_encoder,vae false 45"
+  "packed-nondeterministic-kv128 packed fa false text_encoder,vae false 128"
   "packed-nondeterministic-kv45 packed fa false text_encoder,vae false 45"
   "lingbot-style-dense-native-kv45 dense fa false text_encoder,vae false 45"
   "dense-optimized-components-kv45 dense fa false '' false 45"
@@ -1475,6 +1476,10 @@ isolated_pairs = {
     "deterministic_packed_tax": (
         "exact-packed-det-kv45",
         "packed-nondeterministic-kv45",
+    ),
+    "deterministic_packed_tax_kv128": (
+        "exact-packed-det-kv128",
+        "packed-nondeterministic-kv128",
     ),
     "packed_vs_lingbot_style_dense": (
         "exact-packed-det-kv45",
