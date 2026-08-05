@@ -3,6 +3,9 @@ import sys
 import pytest
 import torch
 
+from sglang.multimodal_gen.runtime.layers.quantization import (
+    modelopt_quant as diffusion_modelopt_quant,
+)
 from sglang.multimodal_gen.runtime.layers.quantization.modelopt_quant import (
     ModelOptFp8Config,
     ModelOptFp8LinearMethod,
@@ -81,6 +84,44 @@ def _build_layer(
     return layer, method
 
 
+def test_sm100_static_fp8_routes_to_flashinfer(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(diffusion_modelopt_quant, "cutlass_fp8_supported", lambda: True)
+    monkeypatch.setattr(diffusion_modelopt_quant, "is_sm100_supported", lambda: True)
+    monkeypatch.setattr(
+        diffusion_modelopt_quant, "is_flashinfer_available", lambda: True
+    )
+
+    method = ModelOptFp8LinearMethod(
+        ModelOptFp8Config(is_checkpoint_fp8_serialized=True)
+    )
+    layer = torch.nn.Module()
+    layer.weight = torch.nn.Parameter(torch.ones((8, 4)), requires_grad=False)
+    layer.weight_scale = torch.nn.Parameter(torch.tensor(0.5), requires_grad=False)
+    layer.input_scale = torch.nn.Parameter(torch.tensor(0.25), requires_grad=False)
+    x = torch.ones((2, 8))
+    expected = torch.full((2, 4), 7.0)
+
+    def fake_flashinfer(**kwargs):
+        assert kwargs["input"] is x
+        assert kwargs["weight_scale"].ndim == 0
+        assert kwargs["input_scale"].ndim == 0
+        return expected
+
+    monkeypatch.setattr(
+        diffusion_modelopt_quant,
+        "apply_fp8_linear_bmm_flashinfer",
+        fake_flashinfer,
+    )
+    monkeypatch.setattr(
+        diffusion_modelopt_quant,
+        "apply_fp8_linear",
+        lambda **kwargs: pytest.fail("generic FP8 path must not run on SM100"),
+    )
+
+    assert method.enable_flashinfer_bmm
+    assert method.apply(layer, x) is expected
+
+
 @pytest.mark.skipif(
     not _modelopt_fp8_supported(),
     reason="Diffusion ModelOpt FP8 scaled mm correctness requires CUDA FP8 support",
@@ -94,13 +135,14 @@ def test_checkpoint_processing(m: int, n: int, k: int) -> None:
     weight_q, weight_scale = input_to_float8(weight)
     input_scale = torch.tensor(1.0, device=DEVICE, dtype=torch.float32)
 
-    layer, _ = _build_layer(weight_q, weight_scale, input_scale)
+    layer, method = _build_layer(weight_q, weight_scale, input_scale)
 
     assert tuple(layer.weight.shape) == (k, n)
     assert tuple(layer.weight.stride()) == (1, k)
     assert layer.weight.dtype == torch.float8_e4m3fn
     assert layer.input_scale.ndim == 0
-    assert tuple(layer.weight_scale.shape) == (n, 1)
+    expected_scale_shape = () if method.enable_flashinfer_bmm else (n, 1)
+    assert tuple(layer.weight_scale.shape) == expected_scale_shape
 
     expected_weight = weight_q.t().to(torch.float32) * weight_scale.to(torch.float32)
     actual_weight = _dequantize_fp8_weight(layer.weight, layer.weight_scale)
@@ -126,7 +168,9 @@ def test_shape_correctness(m: int, n: int, k: int) -> None:
     qinput, x_scale = static_quant_fp8(
         x.contiguous(),
         layer.input_scale,
-        repeat_scale=method.cutlass_fp8_supported,
+        repeat_scale=(
+            method.cutlass_fp8_supported and not method.enable_flashinfer_bmm
+        ),
     )
     expected = torch.matmul(
         _dequantize_fp8_input(qinput, x_scale),
