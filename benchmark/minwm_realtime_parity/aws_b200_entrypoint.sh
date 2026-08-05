@@ -298,6 +298,31 @@ if [[ -n "${MINWM_SAGE_ATTENTION_BACKENDS:-}" \
   [[ "$(git -C "${sage_attention_source}" rev-parse HEAD)" == "${sage_attention_ref}" ]]
   printf '%s\n' "${sage_attention_ref}" \
     > "${RESULTS}/sage-attention-source-ref.txt"
+  if [[ "${MINWM_SAGE3_PATCH_SM100_RUNTIME_CHECK:-0}" == "1" ]]; then
+    python3 - "${sage_attention_source}/sageattention3_blackwell/sageattn3/blackwell/api.cu" <<'PY'
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+source = path.read_text()
+old = """    bool is_sm120 = dprops->major == 12 && dprops->minor == 0;
+    bool is_sm121 = dprops->major == 12 && dprops->minor == 1;
+    TORCH_CHECK(is_sm120 || is_sm121, "only supports Blackwell GPUs or newer.");
+"""
+new = """    bool is_sm100 = dprops->major == 10 && dprops->minor == 0;
+    bool is_sm120 = dprops->major == 12 && dprops->minor == 0;
+    bool is_sm121 = dprops->major == 12 && dprops->minor == 1;
+    TORCH_CHECK(is_sm100 || is_sm120 || is_sm121, "only supports Blackwell GPUs or newer.");
+"""
+if source.count(old) != 1:
+    raise RuntimeError("expected exactly one SageAttention3 device guard")
+path.write_text(source.replace(old, new))
+PY
+    git -C "${sage_attention_source}" diff -- \
+      sageattention3_blackwell/sageattn3/blackwell/api.cu \
+      > "${RESULTS}/sageattention3-sm100-runtime-check.patch"
+    [[ -s "${RESULTS}/sageattention3-sm100-runtime-check.patch" ]]
+  fi
   if [[ ",${MINWM_SAGE_ATTENTION_BACKENDS}," == *",sage_attn,"* ]]; then
     python3 -m pip install "${sage_attention_source}" \
       --no-build-isolation --root-user-action=ignore
