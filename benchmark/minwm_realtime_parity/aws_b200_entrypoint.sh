@@ -177,7 +177,10 @@ PY
       'pyzmq==27.1.0' \
       --root-user-action=ignore
     python3 -m pip install \
+      'compressed-tensors' \
       'diffusers==0.37.0' \
+      'gguf' \
+      'partial-json-parser' \
       'transformers==5.12.1' \
       --root-user-action=ignore
     python3 -m pip install --no-deps \
@@ -187,6 +190,7 @@ PY
       'prometheus-client==0.26.0' \
       'pybase64==1.4.3' \
       'python-multipart==0.0.32' \
+      'sgl-deep-gemm==0.1.4' \
       'setproctitle==1.3.7' \
       'uvicorn==0.52.0' \
       'uvloop==0.22.1' \
@@ -194,6 +198,40 @@ PY
       'websockets==17.0.1' \
       'zstandard==0.25.0' \
       --root-user-action=ignore
+    if [[ "${MINWM_BUILD_SGLANG_KERNEL_FROM_SOURCE:-1}" == "1" ]]; then
+      # The SM120 image carries a newer Torch ABI than the released
+      # sglang-kernel wheel. Build the exact checkout against the image's
+      # Torch/CUDA stack so the FP8 ops are both SM120-capable and ABI-safe.
+      python3 -m pip install \
+        'cmake>=3.31' \
+        ninja \
+        'nvidia-cuda-cccl==13.0.85' \
+        'nvidia-cuda-crt==13.0.88' \
+        'nvidia-cuda-nvcc==13.0.88' \
+        'nvidia-nvvm==13.0.88' \
+        scikit-build-core \
+        uv \
+        --root-user-action=ignore
+      export CUDA_HOME=/opt/minwm/venv/lib/python3.12/site-packages/nvidia/cu13
+      export CUDACXX="${CUDA_HOME}/bin/nvcc"
+      export PATH="${CUDA_HOME}/bin:${PATH}"
+      if [[ ! -e "${CUDA_HOME}/lib64" ]]; then
+        ln -s lib "${CUDA_HOME}/lib64"
+      fi
+      if [[ ! -e "${CUDA_HOME}/lib/libcudart.so" ]]; then
+        ln -s libcudart.so.13 "${CUDA_HOME}/lib/libcudart.so"
+      fi
+      nvcc --version
+      CMAKE_ARGS="-DCMAKE_CUDA_COMPILER=${CUDACXX} -DCUDA_VERSION=13.0 -DCUDA_nvrtc_LIBRARY=${CUDA_HOME}/lib/libnvrtc.so.13 -DENABLE_BELOW_SM90=OFF -DSGL_KERNEL_ENABLE_FA3=OFF -DSGL_KERNEL_COMPILE_THREADS=2" \
+        CMAKE_BUILD_PARALLEL_LEVEL=8 \
+        MAX_JOBS=8 \
+        python3 -m pip install /workspace/sglang/sgl-kernel \
+          --no-build-isolation --no-deps --root-user-action=ignore
+    else
+      python3 -m pip install --no-deps \
+        'sglang-kernel==0.4.4' \
+        --root-user-action=ignore
+    fi
   else
     python3 -m pip install -e "/workspace/sglang/python[diffusion]" \
       --root-user-action=ignore
