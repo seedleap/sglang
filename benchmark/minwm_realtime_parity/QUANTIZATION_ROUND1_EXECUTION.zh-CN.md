@@ -94,6 +94,14 @@
 4. 决策：本轮仍保留 20 个 warmup chunk，让 KV45 前的形状编译不进入 measured 200 chunks；east2 Job deadline 从 4 小时延长到 7 小时。各 lane 结果直接写独立 S3 目录，即使 Spot 中断也保留已完成证据，后续只补缺失 lane。
 5. 决策：将运行顺序从“每种量化 eager+compile 连跑”改为“先完成 6 个 eager，再运行 6 个 compile”，且 compile 阶段按旧先验把 online FP8 放在最前。这样长冷编译或 Spot 中断不会阻止其余量化方法先拿到 eager 上限。
 
+### 2026-08-05：增加 west2d 独立 P6 Spot 供给路径
+
+1. east2 B200 Job 持续收到 `InsufficientInstanceCapacity`；NodePool 的另一名称虽然不同，但与现有池使用相同的三组 subnet、security group 和 AMI，不构成新的 AWS 容量路径，因此没有并行提交重复 Job。
+2. `codex-minwm-test-phx2` 集群存在 `minwm-sp12-usw2d-p6-spot`，位于 `us-west-2d`，允许 `p6-b200.48xlarge` 与 `p6-b300.48xlarge` Spot，是真正独立于 east2 / ATL2 的供给路径。另一个名称相似的 `minwm-test-usw2d-p6-spot` 当前 GPU limit 已为 0，不能使用。
+3. 该集群的 `s3-claim` 是只读卷，不能像 east2 一样把每条 lane 直接写回 S3。决策：结果写入专用 `minwm-dmd-0724-p6-gp3` RWO PVC；矩阵末尾仍把完整 summary 打到 Job log，PVC 保留逐 lane 原始数据。
+4. 同集群刚完成的 H200 BF16 / online FP8 作业使用旧 SHA `7cb482cc...`、832x480 默认 case 且仅含 eager，因此只作为供给与执行链路旁证：client FPS 分别为 `18.958` 和 `21.271`（FP8 `+12.2%`），不能并入固定 720p 正式矩阵。
+5. 决策：west2d Job 不锁死 B200 或 B300，让 Karpenter 在该 NodePool 的合法 P6 offering 中选择实际可获得的 Spot 型号；最终结果必须绑定实际 node / instance type / GPU 名称，不与 B200 基线混写。east2 B200 在 west2d Job 获得 GPU 后暂停，避免两个完整矩阵意外同时运行。
+
 ## 作业证据
 
 运行前待填写：
