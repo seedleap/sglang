@@ -190,6 +190,7 @@ def test_serialized_fp8_config_keeps_scalar_scales_on_sm100(
         params_dtype=torch.bfloat16,
         weight_loader=lambda *args, **kwargs: None,
     )
+    layer = layer.to(device=DEVICE)
     layer.weight.data.fill_(1)
     layer.weight_scale.data.fill_(0.5)
     layer.input_scale.data.fill_(0.25)
