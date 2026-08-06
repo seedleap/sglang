@@ -36,6 +36,7 @@ from sglang.srt.layers.quantization.fp8_kernel import (
 )
 from sglang.srt.layers.quantization.fp8_utils import (
     apply_fp8_linear,
+    apply_fp8_linear_scaled_mm,
     can_auto_enable_marlin_fp8,
     cutlass_fp8_supported,
     dispatch_w8a8_block_fp8_linear,
@@ -43,6 +44,7 @@ from sglang.srt.layers.quantization.fp8_utils import (
     normalize_e4m3fn_to_e4m3fnuz,
     requant_weight_ue8m0_inplace,
 )
+from sglang.srt.utils.common import is_sm100_supported
 from sglang.srt.layers.quantization.marlin_utils_fp8 import (
     apply_fp8_marlin_linear,
     prepare_fp8_layer_for_marlin,
@@ -187,6 +189,7 @@ class Fp8LinearMethod(LinearMethodBase):
     def __init__(self, quant_config: Union[Fp8Config, W4AFp8Config]):
         self.quant_config = quant_config
         self.cutlass_fp8_supported = cutlass_fp8_supported()
+        self.enable_sm100_scaled_mm = is_sm100_supported()
 
         # For GPUs that lack FP8 hardware support, we can leverage the Marlin
         # kernel for fast weight-only FP8 quantization
@@ -321,9 +324,9 @@ class Fp8LinearMethod(LinearMethodBase):
                 )
                 layer.input_scale = None
             elif _is_cpu:
-                assert (
-                    _is_cpu_amx_available
-                ), "Fp8LinearMethod on CPU requires that CPU has AMX support"
+                assert _is_cpu_amx_available, (
+                    "Fp8LinearMethod on CPU requires that CPU has AMX support"
+                )
                 _amx_process_weight_after_loading(layer, ["weight"])
                 layer.weight_scale_inv = torch.nn.Parameter(
                     layer.weight_scale_inv.data, requires_grad=False
@@ -398,8 +401,15 @@ class Fp8LinearMethod(LinearMethodBase):
                         layer.input_scale.data, requires_grad=False
                     )
 
-                # cutlass sgl-kernel and marlin only support per-channel scale
-                if self.cutlass_fp8_supported or self.use_marlin:
+                # The serialized static minWM path uses scalar scales with the
+                # native SM100 scaled-mm backend. Dynamic FP8 and older GPUs
+                # keep the generic per-channel CUTLASS/Marlin layout.
+                use_sm100_static_scaled_mm = (
+                    self.enable_sm100_scaled_mm and layer.input_scale is not None
+                )
+                if (
+                    self.cutlass_fp8_supported or self.use_marlin
+                ) and not use_sm100_static_scaled_mm:
                     weight = layer.weight
                     weight_scale = convert_to_channelwise(
                         layer.weight_scale, layer.logical_widths
@@ -494,6 +504,15 @@ class Fp8LinearMethod(LinearMethodBase):
                 block_size=self.quant_config.weight_block_size,
                 weight_scale=layer.weight_scale_inv,
                 input_scale=None,
+                bias=bias,
+            )
+
+        if self.enable_sm100_scaled_mm and layer.input_scale is not None:
+            return apply_fp8_linear_scaled_mm(
+                input=x,
+                weight=layer.weight,
+                weight_scale=layer.weight_scale,
+                input_scale=layer.input_scale,
                 bias=bias,
             )
 

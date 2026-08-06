@@ -4,7 +4,14 @@ import pytest
 import torch
 
 from sglang.multimodal_gen.runtime.layers.quantization import (
+    fp8 as diffusion_fp8_quant,
+)
+from sglang.multimodal_gen.runtime.layers.quantization import (
     modelopt_quant as diffusion_modelopt_quant,
+)
+from sglang.multimodal_gen.runtime.layers.quantization.fp8 import (
+    Fp8Config,
+    Fp8LinearMethod,
 )
 from sglang.multimodal_gen.runtime.layers.quantization.modelopt_quant import (
     ModelOptFp8Config,
@@ -121,6 +128,75 @@ def test_sm100_static_fp8_routes_to_scaled_mm(monkeypatch: pytest.MonkeyPatch) -
 
     assert method.enable_sm100_scaled_mm
     assert method.apply(layer, x) is expected
+
+
+def test_serialized_fp8_config_routes_to_scaled_mm(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cover the quant_method=fp8 format emitted by the minWM builder."""
+    monkeypatch.setattr(diffusion_fp8_quant, "cutlass_fp8_supported", lambda: True)
+    monkeypatch.setattr(diffusion_fp8_quant, "is_sm100_supported", lambda: True)
+
+    method = Fp8LinearMethod(
+        Fp8Config(is_checkpoint_fp8_serialized=True, activation_scheme="static")
+    )
+    layer = torch.nn.Module()
+    layer.weight = torch.nn.Parameter(torch.ones((8, 4)), requires_grad=False)
+    layer.weight_scale = torch.nn.Parameter(torch.tensor(0.5), requires_grad=False)
+    layer.input_scale = torch.nn.Parameter(torch.tensor(0.25), requires_grad=False)
+    x = torch.ones((2, 8))
+    expected = torch.full((2, 4), 7.0)
+
+    def fake_scaled_mm(**kwargs):
+        assert kwargs["input"] is x
+        assert kwargs["weight_scale"].ndim == 0
+        assert kwargs["input_scale"].ndim == 0
+        return expected
+
+    monkeypatch.setattr(
+        diffusion_fp8_quant,
+        "apply_fp8_linear_scaled_mm",
+        fake_scaled_mm,
+    )
+    monkeypatch.setattr(
+        diffusion_fp8_quant,
+        "apply_fp8_linear",
+        lambda **kwargs: pytest.fail("generic FP8 path must not run on SM100"),
+    )
+
+    assert method.enable_sm100_scaled_mm
+    assert method.apply(layer, x) is expected
+
+
+def test_serialized_fp8_config_keeps_scalar_scales_on_sm100(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(diffusion_fp8_quant, "cutlass_fp8_supported", lambda: True)
+    monkeypatch.setattr(diffusion_fp8_quant, "is_sm100_supported", lambda: True)
+
+    method = Fp8LinearMethod(
+        Fp8Config(is_checkpoint_fp8_serialized=True, activation_scheme="static")
+    )
+    layer = torch.nn.Module()
+    method.create_weights(
+        layer=layer,
+        input_size_per_partition=8,
+        output_partition_sizes=[4],
+        input_size=8,
+        output_size=4,
+        params_dtype=torch.bfloat16,
+        weight_loader=lambda *args, **kwargs: None,
+    )
+    layer.weight.data.fill_(1)
+    layer.weight_scale.data.fill_(0.5)
+    layer.input_scale.data.fill_(0.25)
+
+    method.process_weights_after_loading(layer)
+
+    assert tuple(layer.weight.shape) == (8, 4)
+    assert tuple(layer.weight.stride()) == (1, 8)
+    assert layer.weight_scale.ndim == 0
+    assert layer.input_scale.ndim == 0
 
 
 def test_scaled_mm_helper_uses_jit_per_tensor_quant(
