@@ -68,8 +68,18 @@ per-token activation scale，还会把 scalar input scale 物化为 `(M, 1)`。�
 `apply_fp8_linear` / `fp8_scaled_mm`。online FP8 则已经使用 CUDA per-token quant，所以旧 static
 并不天然比 online 少开销。
 
-第一项修复：让 diffusion static FP8 在 SM100 + FlashInfer 可用时复用同一 per-tensor 快路径；
-其他硬件和 fallback 行为保持不变。验证分三层：
+最初假设是让 diffusion static FP8 在 SM100 + FlashInfer 可用时复用主 SRT 的 per-tensor
+`bmm_fp8` 路径。但 `-08` 的真实 B200 数据否定了“主 SRT 路径也适合 DiT 大 M 矩阵”这一
+假设：数值正确不等于性能正确。随后在完全相同的已量化输入、权重和 scalar scale 上增加
+`torch._scaled_mm` 对照；`-09` 证明 cuBLASLt 才是当前 minWM 形状的较优后端。因此正式修复改为：
+
+- SM100 保留 scalar weight/input scale；
+- static activation quant 不再物化 `(M, 1)` scale；
+- 对 16 对齐的 minWM 主矩阵调用 native `torch._scaled_mm`；
+- 对其他 diffusion 模型可能出现的非 16 对齐 `K/N`，仅在该分支 pad 到 16 后裁剪输出；
+- 其他硬件仍保留原 generic CUTLASS 路径。
+
+验证分三层：
 
 1. 单元/正确性：scalar scale、快路径路由、数值误差。
 2. Spot GEMM/DiT：证明不是 silent fallback，并量化 Linear 与完整 denoise 的收益。
@@ -85,7 +95,7 @@ per-token activation scale，还会把 scalar input scale 物化为 `(M, 1)`。�
 若把 VAE 放到同一台 p6 主机的另一张 GPU，并与下一 chunk 的 DiT 重叠，稳态 interval 近似
 `max(DiT + 其他调度, VAE)`。这时要满足 `568.22 ms`，DiT 必须低于约 `467.53 ms`，即相对
 BF16 至少加速 `1.211x`（denoise 时间至少降低 `17.4%`）。这给下一阶段建立了明确的进入条件：
-先用 B200 microbenchmark/完整 denoise 证明新快路径能越过这个阈值，再实现和测量 VAE overlap；
+先用 B200 microbenchmark/完整 denoise 证明新路径能越过这个阈值，再实现和测量 VAE overlap；
 不能把两项收益混在一起归因给 static FP8。
 
 这不是提前降低验收标准。先实测快路径后的 DiT/端到端数字；若 Amdahl 瓶颈按预期转移到
@@ -169,3 +179,43 @@ VAE/调度，则继续做不降低画质的流水化或阶段并行，并分别�
   `pybase64`。因此 `-08` 不再逐项试错，恢复 `-03` 已经验证能完整安装的
   `pip install -e python[diffusion]`，并在安装结束后立即卸载导致 `HybridCache` 冲突的 PEFT；这是目前
   唯一同时覆盖完整依赖和已知兼容性修正的配方。
+
+### 2026-08-06：B200 Spot 微基准 `-08` / `-09`
+
+- `-08` 首次跑通完整证据链：固定镜像和 SHA、B200 SM100、5/5 correctness tests、四个
+  minWM Linear 形状以及 S3 JSON 全部成功。
+- 偏离预期：FlashInfer `bmm_fp8(backend="cublas")` 并不是这些单矩阵 DiT 形状的快路径。
+  对 `(M,N,K)=(3432,3072,3072)` 与 `(13728,3072,3072)`，完整 static Linear 相对 BF16
+  只有 `0.317x/0.728x`；两个大 MLP 形状也只有 `1.309x/1.245x`。纯 FP8 GEMM 已经偏慢，
+  因此不能继续把问题只归因于 static quant 或 repeated scale。
+- `-09` 在同一输入上加入 scalar `torch._scaled_mm`：四个形状的完整 Linear 相对 BF16 p50
+  分别为 `0.804x/1.382x/1.482x/1.334x`。在 720p 4-frame 主形状上，它稳定优于 FlashInfer；
+  输出相对 legacy 的 L2 差异只有 `1.28e-5` 到 `1.54e-5`。
+- 决策：撤销 diffusion 对 FlashInfer BMM 的选择，改为 SM100 scalar cuBLASLt scaled-mm；
+  FlashInfer helper 保留给主 SRT，不扩大改动范围。
+
+### 2026-08-06：B200 Spot 微基准 `-10` / `-11`
+
+- `-10` 的路由和两个 aligned correctness case 通过，但原有非对齐投影用例
+  `(M,N,K)=(19,150,80)` 被 cuBLASLt 拒绝：`mat2 shape (80x150) must be divisible by 16`；
+  总结果为 4 passed / 1 failed，因此没有进入 microbenchmark，也不能验收。
+- 纠偏：只在 `K` 或 `N` 非 16 对齐时构造 column-major padded weight 和 padded activation，
+  scaled-mm 后裁剪到原输出宽度；minWM 全部主矩阵是 16 对齐，正式热路径不承担 padding 成本。
+- `-11` 使用 immutable SHA `3c910b87bc...` 在同一台 B200 Spot 上完成复测：5/5 correctness
+  全部通过，包括 `-10` 失败的非 16 对齐投影；没有进入 generic FP8 fallback。
+- 修复后实际 helper 相对 BF16 的 p50 speedup，按 `(M,N,K)` 分别为：
+  `(3432,3072,3072) 0.743x`、`(13728,3072,3072) 1.301x`、
+  `(13728,13824,3072) 1.578x`、`(13728,3072,13824) 1.268x`。输出相对 legacy
+  static FP8 的 L2 差异为 `1.28e-5` 到 `1.54e-5`。
+- 结论纠偏：cuBLASLt 修复显著抬高了三个大 M 热点形状的上限，但小 M 形状仍慢于 BF16；
+  因此不能从单个 MLP 的 `1.578x` 外推整个 DiT，更不能外推端到端 `2x`。
+- 完整产物：`s3://leap-world-us-east-2/world-model/evals/minwm/quantization/20260805/static-fp8-2x/minwm-static-fp8-fastpath-b200-20260806-11/`。
+
+### 2026-08-06：固定 720p 成对 E2E `-02`
+
+- 已提交 Job `minwm-static-fp8-fastpath-e2e-b200-20260806-02`；AWS profile/context 为
+  `spot` / `minwm-spot`，node selector 强制 `p6-b200.48xlarge` + Spot。
+- BF16 和 static FP8 在同一 Pod 顺序运行，固定 SGLang SHA `3c910b87bc...`、minWM SHA
+  `2efc6485f6...`、checkpoint version、输入 case、20 warmup + 200 measured chunks；static lane
+  复用 BF16 lane 的输入和转换后模型，避免重新取样或模型转换差异。
+- 结果根目录：`s3://leap-world-us-east-2/world-model/evals/minwm/quantization/20260805/static-fp8-2x/e2e-paired-02/`；状态待回填。

@@ -20,6 +20,7 @@ from sglang.srt.layers.quantization.fp8_utils import (
     input_to_float8,
     static_quant_fp8,
 )
+from sglang.srt.layers.quantization.fp8_kernel import scaled_fp8_quant
 from sglang.srt.layers.quantization.utils import convert_to_channelwise
 from sglang.srt.utils.common import is_flashinfer_available, is_sm100_supported
 
@@ -118,6 +119,9 @@ def _benchmark_shape(
     def repeated_scale_static_quant() -> torch.Tensor:
         return static_quant_fp8(x, input_scale, repeat_scale=True)[0]
 
+    def jit_per_tensor_static_quant() -> torch.Tensor:
+        return scaled_fp8_quant(x, input_scale)[0]
+
     def sm100_fp8_gemm_only() -> torch.Tensor:
         return fp8_utils.flashinfer_bmm_fp8(
             qinput, weight_t, input_scale, weight_scale, x.dtype
@@ -165,6 +169,9 @@ def _benchmark_shape(
         ),
         "repeated_scale_static_quant": _measure_ms(
             repeated_scale_static_quant, warmup=warmup, iterations=iterations
+        ),
+        "jit_per_tensor_static_quant": _measure_ms(
+            jit_per_tensor_static_quant, warmup=warmup, iterations=iterations
         ),
         "sm100_fp8_gemm_only": _measure_ms(
             sm100_fp8_gemm_only, warmup=warmup, iterations=iterations

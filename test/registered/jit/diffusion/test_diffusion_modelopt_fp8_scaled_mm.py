@@ -10,7 +10,11 @@ from sglang.multimodal_gen.runtime.layers.quantization.modelopt_quant import (
     ModelOptFp8Config,
     ModelOptFp8LinearMethod,
 )
-from sglang.srt.layers.quantization.fp8_kernel import static_quant_fp8
+from sglang.srt.layers.quantization import fp8_utils
+from sglang.srt.layers.quantization.fp8_kernel import (
+    scaled_fp8_quant,
+    static_quant_fp8,
+)
 from sglang.srt.layers.quantization.fp8_utils import (
     cutlass_fp8_supported,
     input_to_float8,
@@ -119,6 +123,40 @@ def test_sm100_static_fp8_routes_to_scaled_mm(monkeypatch: pytest.MonkeyPatch) -
     assert method.apply(layer, x) is expected
 
 
+def test_scaled_mm_helper_uses_jit_per_tensor_quant(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    x = torch.ones((2, 16))
+    weight = torch.ones((16, 16)).t()
+    weight_scale = torch.tensor(0.5)
+    input_scale = torch.tensor(0.25)
+    qinput = torch.ones_like(x, dtype=torch.float8_e4m3fn)
+    expected = torch.full((2, 16), 3.0)
+
+    def fake_quant(actual_input, actual_scale):
+        assert actual_input is x
+        assert actual_scale is input_scale
+        return qinput, actual_scale
+
+    def fake_scaled_mm(actual_input, actual_weight, **kwargs):
+        assert actual_input is qinput
+        assert actual_weight is weight
+        assert kwargs["scale_a"].data_ptr() == input_scale.data_ptr()
+        assert kwargs["scale_b"].data_ptr() == weight_scale.data_ptr()
+        return expected
+
+    monkeypatch.setattr(fp8_utils, "scaled_fp8_quant", fake_quant)
+    monkeypatch.setattr(torch, "_scaled_mm", fake_scaled_mm)
+
+    actual = fp8_utils.apply_fp8_linear_scaled_mm(
+        input=x,
+        weight=weight,
+        weight_scale=weight_scale,
+        input_scale=input_scale,
+    )
+    torch.testing.assert_close(actual, expected)
+
+
 @pytest.mark.skipif(
     not _modelopt_fp8_supported(),
     reason="Diffusion ModelOpt FP8 scaled mm correctness requires CUDA FP8 support",
@@ -162,13 +200,14 @@ def test_shape_correctness(m: int, n: int, k: int) -> None:
 
     layer, method = _build_layer(weight_q, weight_scale, input_scale)
 
-    qinput, x_scale = static_quant_fp8(
-        x.contiguous(),
-        layer.input_scale,
-        repeat_scale=(
-            method.cutlass_fp8_supported and not method.enable_sm100_scaled_mm
-        ),
-    )
+    if method.enable_sm100_scaled_mm:
+        qinput, x_scale = scaled_fp8_quant(x.contiguous(), layer.input_scale)
+    else:
+        qinput, x_scale = static_quant_fp8(
+            x.contiguous(),
+            layer.input_scale,
+            repeat_scale=method.cutlass_fp8_supported,
+        )
     expected = torch.matmul(
         _dequantize_fp8_input(qinput, x_scale),
         _dequantize_fp8_weight(layer.weight, layer.weight_scale),
