@@ -12,10 +12,12 @@ from typing import Callable
 
 import torch
 
+from sglang.srt.layers.quantization import fp8_utils
 from sglang.srt.layers.quantization.fp8_utils import (
     apply_fp8_linear,
     apply_fp8_linear_bmm_flashinfer,
     input_to_float8,
+    static_quant_fp8,
 )
 from sglang.srt.layers.quantization.utils import convert_to_channelwise
 from sglang.srt.utils.common import is_flashinfer_available, is_sm100_supported
@@ -79,6 +81,7 @@ def _benchmark_shape(
     _, input_scale = input_to_float8(x)
     weight_t = weight_fp8.t()
     channelwise_weight_scale = convert_to_channelwise(weight_scale, [n])
+    qinput, _ = static_quant_fp8(x, input_scale, repeat_scale=False)
 
     def bf16_linear() -> torch.Tensor:
         return torch.matmul(x, weight.t())
@@ -100,6 +103,17 @@ def _benchmark_shape(
             input_scale=input_scale,
         )
 
+    def scalar_static_quant() -> torch.Tensor:
+        return static_quant_fp8(x, input_scale, repeat_scale=False)[0]
+
+    def repeated_scale_static_quant() -> torch.Tensor:
+        return static_quant_fp8(x, input_scale, repeat_scale=True)[0]
+
+    def sm100_fp8_gemm_only() -> torch.Tensor:
+        return fp8_utils.flashinfer_bmm_fp8(
+            qinput, weight_t, input_scale, weight_scale, x.dtype
+        )
+
     bf16_output = bf16_linear()
     legacy_output = legacy_static_fp8()
     sm100_output = sm100_static_fp8()
@@ -117,6 +131,15 @@ def _benchmark_shape(
         ),
         "sm100_static_fp8": _measure_ms(
             sm100_static_fp8, warmup=warmup, iterations=iterations
+        ),
+        "scalar_static_quant": _measure_ms(
+            scalar_static_quant, warmup=warmup, iterations=iterations
+        ),
+        "repeated_scale_static_quant": _measure_ms(
+            repeated_scale_static_quant, warmup=warmup, iterations=iterations
+        ),
+        "sm100_fp8_gemm_only": _measure_ms(
+            sm100_fp8_gemm_only, warmup=warmup, iterations=iterations
         ),
     }
     timings["legacy_static_fp8"]["speedup_vs_bf16_p50"] = (
