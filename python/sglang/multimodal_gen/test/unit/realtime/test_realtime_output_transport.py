@@ -741,7 +741,10 @@ def test_raw_rgb_output_adapter_awaits_same_chunk_remote_vae(monkeypatch):
         def decode(self, request):
             assert request == {"request": "chunk-4"}
             return SimpleNamespace(
-                raw_frame_batches=[[bytes([1, 2, 3])]],
+                raw_frame_batches=None,
+                raw_transport_batches=[
+                    [{"num_frames": 2, "payload": bytes([1, 2, 3, 4, 5, 6])}]
+                ],
                 raw_frame_content_type=RAW_RGB_CONTENT_TYPE,
                 raw_frame_metadata={
                     "format": "rgb24",
@@ -782,4 +785,5 @@ def test_raw_rgb_output_adapter_awaits_same_chunk_remote_vae(monkeypatch):
     [(header, payload)] = _unpack_frame_batch_messages(asyncio.run(run()))
     assert header["chunk_index"] == 4
     assert header["event_id"] == 40
-    assert payload == bytes([1, 2, 3])
+    assert header["num_frames"] == 2
+    assert payload == bytes([1, 2, 3, 4, 5, 6])

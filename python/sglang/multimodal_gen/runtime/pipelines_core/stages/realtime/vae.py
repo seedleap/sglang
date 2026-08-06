@@ -20,7 +20,10 @@ from sglang.multimodal_gen.runtime.platforms import current_platform
 from sglang.multimodal_gen.runtime.realtime.session import (
     BaseRealtimeState,
 )
-from sglang.multimodal_gen.runtime.remote.vae_decode_client import get_remote_vae_url
+from sglang.multimodal_gen.runtime.remote.vae_decode_client import (
+    get_remote_vae_response_transport,
+    get_remote_vae_url,
+)
 from sglang.multimodal_gen.runtime.remote.vae_decode_protocol import (
     SCHEMA_VERSION as REMOTE_VAE_SCHEMA_VERSION,
     tensor_to_payload,
@@ -253,7 +256,8 @@ class CausalVaeDecodingStage(DecodingStage):
 
     @staticmethod
     def _remote_vae_request(batch: Req) -> dict | None:
-        if get_remote_vae_url() is None:
+        remote_url = get_remote_vae_url()
+        if remote_url is None:
             return None
         return {
             "schema_version": REMOTE_VAE_SCHEMA_VERSION,
@@ -269,6 +273,10 @@ class CausalVaeDecodingStage(DecodingStage):
             "width": batch.width,
             "height": batch.height,
             "fps": batch.fps,
+            "realtime_output_format": getattr(
+                batch, "realtime_output_format", None
+            ),
+            "response_transport": get_remote_vae_response_transport(remote_url),
             "trim_leading_frames": 0,
             "latents": tensor_to_payload(batch.latents),
         }

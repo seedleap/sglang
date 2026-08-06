@@ -23,9 +23,11 @@ from sglang.multimodal_gen.runtime.pipelines_core.stages.realtime.vae import (
 from sglang.multimodal_gen.runtime.remote.vae_decode_protocol import (
     RAW_RGB_CONTENT_TYPE,
     SCHEMA_VERSION,
+    build_raw_transport_batches,
     packb,
     payload_to_tensor,
     unpackb,
+    store_raw_transport_batches_in_shared_memory,
 )
 from sglang.multimodal_gen.runtime.server_args import (
     ServerArgs,
@@ -155,16 +157,39 @@ class ExactRealtimeVAEDecoder:
             "schema_version": SCHEMA_VERSION,
             "status": "ok",
             "block_idx": output_block_idx,
-            "raw_frame_batches": raw_frame_batches,
             "raw_frame_content_type": RAW_RGB_CONTENT_TYPE,
             "raw_frame_metadata": raw_frame_metadata,
             "stats": {
                 "server_unpack_ms": unpack_ms,
                 "server_decode_ms": decode_ms,
                 "server_raw_rgb_ms": raw_ms,
-                "server_total_ms": (time.monotonic() - total_start) * 1000.0,
             },
         }
+        if payload.get("realtime_output_format") == "raw":
+            transport_start = time.monotonic()
+            transport_batches = build_raw_transport_batches(
+                raw_frame_batches
+            )
+            result["stats"]["server_raw_transport_build_ms"] = (
+                time.monotonic() - transport_start
+            ) * 1000.0
+            if payload.get("response_transport") == "shared_memory":
+                shared_memory_start = time.monotonic()
+                transport_batches = store_raw_transport_batches_in_shared_memory(
+                    transport_batches
+                )
+                result["raw_transport_storage"] = "shared_memory"
+                result["stats"]["server_shared_memory_write_ms"] = (
+                    time.monotonic() - shared_memory_start
+                ) * 1000.0
+            else:
+                result["raw_transport_storage"] = "http"
+            result["raw_transport_batches"] = transport_batches
+        else:
+            result["raw_frame_batches"] = raw_frame_batches
+        result["stats"]["server_total_ms"] = (
+            time.monotonic() - total_start
+        ) * 1000.0
         logger.info(
             "exact realtime VAE chunk complete: session_id=%s block_idx=%d "
             "decode_ms=%.3f raw_ms=%.3f total_ms=%.3f frames=%d",

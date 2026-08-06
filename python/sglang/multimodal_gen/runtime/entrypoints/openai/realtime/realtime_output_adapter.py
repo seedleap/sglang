@@ -449,6 +449,7 @@ class RawRGBRealtimeOutputAdapter:
         batch: Req,
     ) -> RealtimeFrameSendStats:
         """send frames through ws"""
+        raw_transport_batches = None
         if result.remote_vae_request is not None:
             remote_url = get_remote_vae_url()
             if remote_url is None:
@@ -466,12 +467,15 @@ class RawRGBRealtimeOutputAdapter:
                 result.remote_vae_request,
             )
             result.raw_frame_batches = remote_result.raw_frame_batches
+            raw_transport_batches = getattr(
+                remote_result, "raw_transport_batches", None
+            )
             result.raw_frame_metadata = remote_result.raw_frame_metadata
             result.raw_frame_content_type = remote_result.raw_frame_content_type
             result.remote_vae_request = None
 
         content_type = result.raw_frame_content_type
-        if result.raw_frame_batches is None:
+        if result.raw_frame_batches is None and raw_transport_batches is None:
             return empty_frame_send_stats(content_type)
         if batch.block_idx == 0:
             self.reset()
@@ -490,7 +494,7 @@ class RawRGBRealtimeOutputAdapter:
         )
         stats = await self._send_frame_batches(
             ws,
-            result.raw_frame_batches,
+            result.raw_frame_batches or [],
             content_type=content_type,
             chunk_index_start=(
                 result.realtime_output_chunk_index_start
@@ -509,6 +513,7 @@ class RawRGBRealtimeOutputAdapter:
             output_format=output_format,
             transport_quality=getattr(batch, "output_compression", None),
             preview_max_width=preview_max_width,
+            raw_transport_batches=raw_transport_batches,
         )
         stats["frame_shape"] = _frame_shape_from_metadata(frame_metadata)
         return stats
@@ -527,31 +532,60 @@ class RawRGBRealtimeOutputAdapter:
         output_format: str | None = None,
         transport_quality: int | None = None,
         preview_max_width: int | None = None,
+        raw_transport_batches: list[list[dict[str, object]]] | None = None,
     ) -> RealtimeFrameSendStats:
         chunk_index = chunk_index_start
         metadata = frame_metadata or {}
         stats = empty_frame_send_stats(content_type)
-        for frames in frame_batches:
-            split_batches = (
-                _split_frame_batch(frames, ENCODED_PREVIEW_FRAMES_PER_WS_MESSAGE)
-                if _is_encoded_preview_transport(
-                    content_type=content_type,
-                    output_format=output_format,
+        if raw_transport_batches is not None:
+            if content_type != RAW_RGB_CONTENT_TYPE or output_format != "raw":
+                raise RuntimeError(
+                    "prebuilt remote VAE transport requires raw RGB output"
                 )
-                else (
-                    _split_frame_batch(frames)
-                    if content_type == RAW_RGB_CONTENT_TYPE
-                    else [frames]
+            logical_batches = raw_transport_batches
+        else:
+            logical_batches = frame_batches
+        for logical_batch in logical_batches:
+            if raw_transport_batches is not None:
+                split_batches = logical_batch
+            else:
+                split_batches = (
+                    _split_frame_batch(
+                        logical_batch, ENCODED_PREVIEW_FRAMES_PER_WS_MESSAGE
+                    )
+                    if _is_encoded_preview_transport(
+                        content_type=content_type,
+                        output_format=output_format,
+                    )
+                    else (
+                        _split_frame_batch(logical_batch)
+                        if content_type == RAW_RGB_CONTENT_TYPE
+                        else [logical_batch]
+                    )
                 )
-            )
             num_frame_batches = len(split_batches)
-            for frame_batch_index, transport_frames in enumerate(split_batches):
+            for frame_batch_index, split_batch in enumerate(split_batches):
                 timer = RealtimeStageTimer()
                 transport_metadata = metadata
-                if _is_encoded_preview_transport(
+                if raw_transport_batches is not None:
+                    payload = split_batch["payload"]
+                    if not isinstance(payload, bytes):
+                        raise TypeError("prebuilt raw transport payload must be bytes")
+                    transport_frame_count = int(split_batch["num_frames"])
+                    transport_raw_bytes = len(payload)
+                    transport_payload = _TransportPayload(
+                        content_type=content_type,
+                        payload=payload,
+                        metadata={
+                            "raw_size": len(payload),
+                            "encoding": RAW_LOSSLESS_OUTPUT_FORMAT,
+                        },
+                    )
+                elif _is_encoded_preview_transport(
                     content_type=content_type,
                     output_format=output_format,
                 ):
+                    transport_frames = split_batch
                     transport_payload = await _build_encoded_preview_payload(
                         transport_frames,
                         metadata=metadata,
@@ -560,7 +594,12 @@ class RawRGBRealtimeOutputAdapter:
                         preview_max_width=preview_max_width,
                     )
                     stats["raw_payload_build_ms"] += timer.mark_ms()
+                    transport_frame_count = len(transport_frames)
+                    transport_raw_bytes = sum(
+                        len(frame) for frame in transport_frames
+                    )
                 else:
+                    transport_frames = split_batch
                     if _should_build_payload_off_loop(
                         content_type=content_type,
                         output_format=output_format,
@@ -585,13 +624,17 @@ class RawRGBRealtimeOutputAdapter:
                             preview_max_width=preview_max_width,
                         )
                     stats["raw_payload_build_ms"] += timer.mark_ms()
+                    transport_frame_count = len(transport_frames)
+                    transport_raw_bytes = sum(
+                        len(frame) for frame in transport_frames
+                    )
 
                 header: RealtimeFrameBatchHeader = {
                     "type": "frame_batch_header",
                     "request_id": request_id,
                     "chunk_index": chunk_index,
                     "content_type": transport_payload.content_type,
-                    "num_frames": len(transport_frames),
+                    "num_frames": transport_frame_count,
                     "total_size": len(transport_payload.payload),
                     "frame_batch_index": frame_batch_index,
                     "num_frame_batches": num_frame_batches,
@@ -630,8 +673,8 @@ class RawRGBRealtimeOutputAdapter:
 
                     stats["ws_payload_bytes"] += len(message_payload)
 
-                stats["raw_bytes"] += sum(len(frame) for frame in transport_frames)
-                stats["num_frames"] += len(transport_frames)
+                stats["raw_bytes"] += transport_raw_bytes
+                stats["num_frames"] += transport_frame_count
                 stats["num_batches"] += 1
                 stats["content_type"] = transport_payload.content_type
             chunk_index += 1

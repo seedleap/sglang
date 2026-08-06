@@ -37,6 +37,7 @@ def test_remote_vae_request_round_trips_prepared_latents(monkeypatch):
         width=1248,
         height=704,
         fps=24,
+        realtime_output_format="raw",
         latents=latents,
     )
 
@@ -45,7 +46,29 @@ def test_remote_vae_request_round_trips_prepared_latents(monkeypatch):
     assert request is not None
     assert request["block_idx"] == 7
     assert request["is_final_chunk"] is True
+    assert request["realtime_output_format"] == "raw"
+    assert request["response_transport"] == "http"
     torch.testing.assert_close(payload_to_tensor(request["latents"]), latents)
+
+
+def test_raw_transport_batches_are_prejoined_and_split_at_wire_limit():
+    from sglang.multimodal_gen.runtime.remote.vae_decode_protocol import (
+        RAW_RGB_FRAMES_PER_TRANSPORT_BATCH,
+        build_raw_transport_batches,
+    )
+
+    frames = [bytes([index % 256]) for index in range(17)]
+    batches = build_raw_transport_batches([frames])
+
+    assert batches == [
+        [
+            {
+                "num_frames": RAW_RGB_FRAMES_PER_TRANSPORT_BATCH,
+                "payload": b"".join(frames[:RAW_RGB_FRAMES_PER_TRANSPORT_BATCH]),
+            },
+            {"num_frames": 1, "payload": frames[-1]},
+        ]
+    ]
 
 
 def test_remote_vae_client_posts_msgpack_as_requests_data(monkeypatch):
@@ -86,7 +109,63 @@ def test_remote_vae_client_posts_msgpack_as_requests_data(monkeypatch):
     result = client.decode(request)
 
     assert result.raw_frame_batches == expected_frames
+    assert result.raw_transport_batches is None
     assert result.raw_frame_content_type == RAW_RGB_CONTENT_TYPE
+
+
+def test_remote_vae_client_accepts_shared_memory_raw_transport(
+    monkeypatch, tmp_path
+):
+    from sglang.multimodal_gen.runtime.remote.vae_decode_client import (
+        RemoteVAEDecodeClient,
+    )
+    from sglang.multimodal_gen.runtime.remote.vae_decode_protocol import (
+        RAW_RGB_CONTENT_TYPE,
+        SCHEMA_VERSION,
+        packb,
+        store_raw_transport_batches_in_shared_memory,
+    )
+
+    transport = [[{"num_frames": 2, "payload": b"abcdef"}]]
+    stored_transport = store_raw_transport_batches_in_shared_memory(
+        transport, root=tmp_path
+    )
+    monkeypatch.setenv("SGLANG_REALTIME_VAE_SHM_DIR", str(tmp_path))
+    client = RemoteVAEDecodeClient("http://vae:31000")
+    monkeypatch.setattr(
+        client.session,
+        "post",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            content=packb(
+                {
+                    "schema_version": SCHEMA_VERSION,
+                    "status": "ok",
+                    "raw_transport_batches": stored_transport,
+                    "raw_transport_storage": "shared_memory",
+                    "raw_frame_content_type": RAW_RGB_CONTENT_TYPE,
+                }
+            ),
+            raise_for_status=lambda: None,
+        ),
+    )
+
+    result = client.decode({"schema_version": SCHEMA_VERSION})
+
+    assert result.raw_frame_batches is None
+    assert result.raw_transport_batches == transport
+    assert not any(tmp_path.iterdir())
+
+
+def test_loopback_remote_vae_selects_shared_memory_transport():
+    from sglang.multimodal_gen.runtime.remote.vae_decode_client import (
+        get_remote_vae_response_transport,
+    )
+
+    assert (
+        get_remote_vae_response_transport("http://127.0.0.1:31000")
+        == "shared_memory"
+    )
+    assert get_remote_vae_response_transport("http://vae:31000") == "http"
 
 
 def test_causal_vae_decoding_stage_keeps_wan_decoder_cache(monkeypatch):
