@@ -15,7 +15,7 @@ metadata:
     seedleap.ai/sglang-git-ref: "761b76f5206c4d8f384e5a6ddf6728a1eede0776"
 spec:
   backoffLimit: 0
-  activeDeadlineSeconds: 3600
+  activeDeadlineSeconds: 14400
   template:
     metadata:
       labels:
