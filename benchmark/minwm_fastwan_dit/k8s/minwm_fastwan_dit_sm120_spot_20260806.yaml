@@ -1,0 +1,205 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: minwm-fastwan-dit-sm120-20260806-01
+  namespace: ray
+  labels:
+    app.kubernetes.io/name: minwm-fastwan-dit-sm120-20260806-01
+    seedleap.ai/owner: chenshengdong
+    seedleap.ai/task: minwm-fastwan-dit-profile
+    seedleap.ai/run-id: minwm-fastwan-dit-sm120-20260806-01
+  annotations:
+    seedleap.ai/capacity-type: spot
+    seedleap.ai/hardware-role: rtx-pro-6000-sm120-proxy
+    seedleap.ai/forward-contract: "minwm=4-dmd+1-clean,fastwan=5-dmd"
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 14400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: minwm-fastwan-dit-sm120-20260806-01
+        seedleap.ai/owner: chenshengdong
+        seedleap.ai/task: minwm-fastwan-dit-profile
+        seedleap.ai/run-id: minwm-fastwan-dit-sm120-20260806-01
+    spec:
+      restartPolicy: Never
+      terminationGracePeriodSeconds: 90
+      securityContext:
+        seLinuxOptions:
+          type: spc_t
+      nodeSelector:
+        seedleap.ai/capacity-pool: minwm-quant-rtx6000-spot
+        karpenter.sh/capacity-type: spot
+        node.kubernetes.io/instance-type: g7e.4xlarge
+      tolerations:
+        - key: seedleap.ai/capacity-pool
+          operator: Equal
+          value: minwm-quant-rtx6000-spot
+          effect: NoSchedule
+      containers:
+        - name: benchmark
+          image: 829115578968.dkr.ecr.us-east-2.amazonaws.com/leap-world/minwm-training@sha256:bedc07ea3ba55059a8c1c569c3b177c4d00d41f37d4fa9105375531534ef5f2a
+          imagePullPolicy: IfNotPresent
+          workingDir: /workspace
+          env:
+            - name: GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: github-token
+                  key: token
+            - name: SGLANG_MINWM_GIT_REF
+              value: "66d2f4f85c916ad63b8dcd0d15c1af445a20c8b0"
+            - name: SGLANG_FASTWAN_GIT_REF
+              value: "3654740347f63edd3e8df78b2282ec79782d4f2c"
+            - name: MINWM_GIT_REF
+              value: "2efc6485f65e8fcab506665efde79bc41406385e"
+            - name: MINWM_BENCHMARK_MODE
+              value: profiles
+            - name: MINWM_INCLUDE_COMPILE_PROFILE
+              value: "false"
+            - name: MINWM_THROUGHPUT_PROFILES
+              value: dense-optimized-components-kv20
+            - name: MINWM_THROUGHPUT_WARMUP_CHUNKS
+              value: "5"
+            - name: MINWM_THROUGHPUT_MEASURED_CHUNKS
+              value: "10"
+            - name: MINWM_ATTENTION_KV_SINK_SIZE
+              value: "4"
+            - name: MINWM_ATTENTION_KV_WINDOW_SIZE
+              value: "20"
+            - name: MINWM_PRESERVE_IMAGE_GPU_STACK
+              value: "1"
+            - name: MINWM_SGLANG_KERNEL_WHEEL_PATH
+              value: /s3/world-model/evals/minwm/quantization/20260805/artifacts/sglang_kernel-0.4.4-torch2.12.1-cu130-sm120.whl
+            - name: MINWM_STAGE_FROM_MOUNT
+              value: "1"
+            - name: MINWM_CHECKPOINT_MOUNT_PATH
+              value: /s3/world-model/evals/minwm/checkpoint-staging/wan22-5B-stage3-dmd-8-0721-6a531f0e067/global_step_003200/ema_student/model.pt
+            - name: MINWM_PRETRAINED_MOUNT_PATH
+              value: /s3/world-model/checkpoints/minWM/Wan2.2-TI2V-5B-from-diffusers
+            - name: MINWM_CHECKPOINT_S3_EAST
+              value: s3://leap-world-us-east-2/world-model/evals/minwm/checkpoint-staging/wan22-5B-stage3-dmd-8-0721-6a531f0e067/global_step_003200/ema_student/model.pt
+            - name: MINWM_CHECKPOINT_VERSION_EAST
+              value: wduScksw2f3yPErnG9lBioOuE2AToyAP
+            - name: MINWM_CHECKPOINT_SOURCE_URI
+              value: s3://leap-world-us-west-2/world-model/minwm/checkpoints/run-archive/rolling/Wan21/Action2V/dmd/wan22-5B-stage3-dmd-8-0721-6a531f0e067/global_step_003200/ema_student/model.pt
+            - name: MINWM_CHECKPOINT_SOURCE_VERSION
+              value: x.2zYaRRNzyqngI7O_cYSrsK3NvgPKKt
+            - name: MINWM_CHECKPOINT_SOURCE_ETAG
+              value: 5c29d614972e06fd0df859abfd1d6f4d-191
+            - name: MINWM_CHECKPOINT_BYTES
+              value: "10007171771"
+            - name: MINWM_CHECKPOINT_CRC64
+              value: I0IQ+p0pREI=
+            - name: MINWM_PRETRAINED_S3
+              value: s3://leap-world-us-east-2/world-model/checkpoints/minWM/Wan2.2-TI2V-5B-from-diffusers
+            - name: MINWM_RESULTS_ROOT
+              value: /s3/world-model/evals/minwm/fastwan-dit/20260806/results
+            - name: HF_HOME
+              value: /work/huggingface
+            - name: SGLANG_DIFFUSION_STAGE_LOGGING
+              value: "1"
+            - name: SGLANG_DIFFUSION_SYNC_STAGE_PROFILING
+              value: "1"
+          command:
+            - /bin/bash
+            - -lc
+            - |
+              set -euo pipefail
+              RUN_ID=minwm-fastwan-dit-sm120-20260806-01
+              RESULT_ROOT="${MINWM_RESULTS_ROOT}/${RUN_ID}"
+              mkdir -p "${RESULT_ROOT}" /work/huggingface
+              exec > >(tee "${RESULT_ROOT}/job.log") 2>&1
+
+              clone_private() {
+                local repository="$1" destination="$2" revision="$3"
+                git clone --no-checkout \
+                  "https://x-access-token:${GITHUB_TOKEN}@github.com/seedleap/${repository}.git" \
+                  "${destination}"
+                git -C "${destination}" checkout --detach "${revision}"
+                test "$(git -C "${destination}" rev-parse HEAD)" = "${revision}"
+              }
+              clone_private minWM /workspace/minWM "${MINWM_GIT_REF}"
+              clone_private sglang /workspace/sglang "${SGLANG_MINWM_GIT_REF}"
+              git clone --filter=blob:none --no-checkout \
+                https://github.com/sgl-project/sglang.git /workspace/sglang-fastwan
+              git -C /workspace/sglang-fastwan checkout --detach \
+                "${SGLANG_FASTWAN_GIT_REF}"
+              test "$(git -C /workspace/sglang-fastwan rev-parse HEAD)" = \
+                "${SGLANG_FASTWAN_GIT_REF}"
+
+              nvidia-smi -q > "${RESULT_ROOT}/nvidia-smi-q.txt"
+              nvidia-smi \
+                --query-gpu=timestamp,index,memory.used,utilization.gpu,power.draw \
+                --format=csv,noheader,nounits -l 1 \
+                > "${RESULT_ROOT}/gpu-telemetry.csv" &
+              telemetry_pid=$!
+              trap 'kill "${telemetry_pid}" 2>/dev/null || true' EXIT
+
+              export MINWM_RUN_ID="${RUN_ID}-minwm"
+              export MINWM_THROUGHPUT_CASES_PATH=/workspace/sglang/benchmark/minwm_realtime_parity/cases_720p_compile_smoke.json
+              export MINWM_THROUGHPUT_CASE=00_forward_080_pottery_720p
+              bash /workspace/sglang/benchmark/minwm_realtime_parity/aws_b200_entrypoint.sh
+
+              python3 -m pip install -e /workspace/sglang-fastwan/python \
+                --no-deps --root-user-action=ignore
+              python3 - <<'PY' | tee "${RESULT_ROOT}/fastwan-runtime.json"
+              import json
+              import torch
+              import sglang
+              print(json.dumps({
+                  "cuda": torch.version.cuda,
+                  "gpu": torch.cuda.get_device_name(0),
+                  "sglang": sglang.__file__,
+                  "torch": torch.__version__,
+              }, indent=2, sort_keys=True))
+              PY
+
+              IMAGE=/s3/world-model/eval/platform/eval_sets/minWM/testset100_v2/img/p02.png
+              test -f "${IMAGE}"
+              python3 /workspace/sglang/benchmark/minwm_fastwan_dit/benchmark_fastwan.py \
+                --model-path FastVideo/FastWan2.2-TI2V-5B-FullAttn-Diffusers \
+                --image-path "${IMAGE}" \
+                --timesteps 1000,757,522,300,100 \
+                --height 704 \
+                --width 1280 \
+                --num-frames 81 \
+                --attention-backend auto \
+                --warmup-requests 2 \
+                --measured-requests 5 \
+                --output "${RESULT_ROOT}/fastwan-5forward.json"
+
+              kill "${telemetry_pid}" 2>/dev/null || true
+              wait "${telemetry_pid}" 2>/dev/null || true
+              trap - EXIT
+              sha256sum "${RESULT_ROOT}"/* > "${RESULT_ROOT}/SHA256SUMS"
+              test -s "${RESULT_ROOT}/fastwan-5forward.json"
+              test -s "${MINWM_RESULTS_ROOT}/${MINWM_RUN_ID}/throughput/dense-optimized-components-kv20/throughput.json"
+              echo "MINWM_FASTWAN_DIT_COMPLETE ${RESULT_ROOT}"
+          resources:
+            requests:
+              cpu: "8"
+              memory: 96Gi
+              nvidia.com/gpu: "1"
+            limits:
+              cpu: "14"
+              memory: 112Gi
+              nvidia.com/gpu: "1"
+          volumeMounts:
+            - name: s3
+              mountPath: /s3
+            - name: work
+              mountPath: /work
+            - name: shm
+              mountPath: /dev/shm
+      volumes:
+        - name: s3
+          persistentVolumeClaim:
+            claimName: s3-claim
+        - name: work
+          emptyDir: {}
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 32Gi
