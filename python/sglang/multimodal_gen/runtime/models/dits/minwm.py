@@ -331,6 +331,86 @@ def _minwm_adaln(hidden_states: torch.Tensor, *args, **kwargs):
     )
 
 
+def _minwm_framewise_adaln(
+    hidden_states: torch.Tensor,
+    m_shift: torch.Tensor | None = None,
+    m_scale: torch.Tensor | None = None,
+    e_shift: torch.Tensor | None = None,
+    e_scale: torch.Tensor | None = None,
+    eps: float = 1e-6,
+    *,
+    num_frames: int,
+    y: torch.Tensor | None = None,
+    m_gate: torch.Tensor | None = None,
+    e_gate: torch.Tensor | None = None,
+    r: torch.Tensor | None = None,
+    weight: torch.Tensor | None = None,
+    bias: torch.Tensor | None = None,
+    cast_norm: bool = False,
+):
+    """Run AdaLN with compact per-frame modulation instead of token expansion.
+
+    The eager parity path historically materialized ``temb[:, frame_index]``
+    as ``[B, sequence, 6, D]`` in every transformer block.  For the regular
+    SP1 layout, reshaping activations to ``[B, frames, tokens, D]`` lets the
+    same source-shaped arithmetic broadcast ``[B, frames, D]`` modulation
+    directly.  Uneven sequence shards keep using the explicit-index path.
+    """
+    if hidden_states.dim() != 3:
+        raise ValueError(
+            "MinWM compact framewise AdaLN expects [batch, sequence, hidden]"
+        )
+    if num_frames <= 0 or hidden_states.shape[1] % num_frames:
+        raise ValueError(
+            f"MinWM sequence length {hidden_states.shape[1]} must be divisible "
+            f"by num_frames {num_frames}"
+        )
+    tokens_per_frame = hidden_states.shape[1] // num_frames
+
+    def sequence_view(value: torch.Tensor | None) -> torch.Tensor | None:
+        if value is None:
+            return None
+        return value.unflatten(1, (num_frames, tokens_per_frame))
+
+    def model_view(value: torch.Tensor | None) -> torch.Tensor | None:
+        if value is None:
+            return None
+        return value.unsqueeze(1).unsqueeze(2)
+
+    def timestep_view(value: torch.Tensor | None) -> torch.Tensor | None:
+        if value is None:
+            return None
+        if value.dim() != 3 or value.shape[1] != num_frames:
+            raise ValueError(
+                "MinWM compact timestep modulation must have shape "
+                "[batch, num_frames, hidden]"
+            )
+        return value.unsqueeze(2)
+
+    output = _minwm_adaln(
+        sequence_view(hidden_states),
+        model_view(m_shift),
+        model_view(m_scale),
+        timestep_view(e_shift),
+        timestep_view(e_scale),
+        eps,
+        y=sequence_view(y),
+        m_gate=model_view(m_gate),
+        e_gate=timestep_view(e_gate),
+        r=sequence_view(r),
+        weight=weight,
+        bias=bias,
+        cast_norm=cast_norm,
+    )
+
+    def flatten(value: torch.Tensor) -> torch.Tensor:
+        return value.flatten(1, 2)
+
+    if isinstance(output, tuple):
+        return tuple(flatten(value) for value in output)
+    return flatten(output)
+
+
 def _minwm_frame_indices(hidden_states: torch.Tensor, num_frames: int) -> torch.Tensor:
     """Map each local token to its frame, including shards cut inside a frame."""
     forward_batch = get_forward_context().forward_batch
@@ -841,18 +921,38 @@ class MinWMCausalTransformerBlock(CausalWanTransformerBlock):
         num_frames = temb.shape[1]
         orig_dtype = hidden_states.dtype
         modulation = self.scale_shift_table.to(orig_dtype)
-        frame_index = _minwm_frame_indices(hidden_states, num_frames)
-        # minWM main first expands the full [B, F, 6, D] tensor with advanced
-        # indexing, then selects a modulation slice. Besides equal values, this
-        # preserves its non-contiguous 6*D token stride for the compiled AdaLN.
-        timestep_modulation = temb[:, frame_index]
+        forward_batch = get_forward_context().forward_batch
+        sequence_shard_enabled = (
+            forward_batch is not None
+            and getattr(forward_batch, "enable_sequence_shard", False)
+            and get_ulysses_parallel_world_size() > 1
+        )
+        if sequence_shard_enabled:
+            frame_index = _minwm_frame_indices(hidden_states, num_frames)
+            # A shard may start or end inside a frame, so it cannot use the
+            # uniform frame reshape below.
+            timestep_modulation = temb[:, frame_index]
 
-        _, norm_hidden_states = _minwm_adaln(
+            def timestep_value(index: int) -> torch.Tensor:
+                return timestep_modulation.select(-2, index)
+
+            adaln = _minwm_adaln
+        else:
+
+            def timestep_value(index: int) -> torch.Tensor:
+                return temb.select(-2, index)
+
+            def adaln(states: torch.Tensor, *args, **kwargs):
+                return _minwm_framewise_adaln(
+                    states, *args, num_frames=num_frames, **kwargs
+                )
+
+        _, norm_hidden_states = adaln(
             hidden_states,
             modulation[:, 0],
             modulation[:, 1],
-            timestep_modulation.select(-2, 0),
-            timestep_modulation.select(-2, 1),
+            timestep_value(0),
+            timestep_value(1),
             self.norm1.eps,
         )
 
@@ -901,11 +1001,11 @@ class MinWMCausalTransformerBlock(CausalWanTransformerBlock):
         attn_output, _ = self.to_out(attn_output)
         attn_output = attn_output.squeeze(1)
 
-        hidden_states = _minwm_adaln(
+        hidden_states = adaln(
             hidden_states,
             y=attn_output,
             m_gate=modulation[:, 2],
-            e_gate=timestep_modulation.select(-2, 2),
+            e_gate=timestep_value(2),
         )
         parity_dump_dir = getattr(self, "_minwm_parity_dump_dir", None)
         parity_index = getattr(self, "_minwm_parity_forward_index", 0)
@@ -936,22 +1036,22 @@ class MinWMCausalTransformerBlock(CausalWanTransformerBlock):
             crossattn_cache=crossattn_cache,
         )
 
-        hidden_states, norm_hidden_states = _minwm_adaln(
+        hidden_states, norm_hidden_states = adaln(
             hidden_states,
             modulation[:, 3],
             modulation[:, 4],
-            timestep_modulation.select(-2, 3),
-            timestep_modulation.select(-2, 4),
+            timestep_value(3),
+            timestep_value(4),
             self.cross_attn_residual_norm.norm.eps,
             r=cross_output,
         )
 
         ff_output = self.ffn(norm_hidden_states)
-        return _minwm_adaln(
+        return adaln(
             hidden_states,
             y=ff_output,
             m_gate=modulation[:, 5],
-            e_gate=timestep_modulation.select(-2, 5),
+            e_gate=timestep_value(5),
         )
 
 
@@ -1458,16 +1558,27 @@ class MinWMCausalTransformer3DModel(CausalWanTransformer3DModel):
         num_frames = timestep.shape[1]
         temb = temb.unflatten(dim=0, sizes=timestep.shape).to(hidden_states.dtype)
         modulation = self.scale_shift_table.to(hidden_states.dtype)
-        frame_index = _minwm_frame_indices(hidden_states, num_frames)
-        timestep_value = temb[:, frame_index]
-        _, normalized = _minwm_adaln(
-            hidden_states,
-            modulation[:, 0],
-            modulation[:, 1],
-            timestep_value,
-            timestep_value,
-            self.norm_out.norm.eps,
-        )
+        if sequence_shard_splits is None:
+            _, normalized = _minwm_framewise_adaln(
+                hidden_states,
+                num_frames=num_frames,
+                m_shift=modulation[:, 0],
+                m_scale=modulation[:, 1],
+                e_shift=temb,
+                e_scale=temb,
+                eps=self.norm_out.norm.eps,
+            )
+        else:
+            frame_index = _minwm_frame_indices(hidden_states, num_frames)
+            timestep_value = temb[:, frame_index]
+            _, normalized = _minwm_adaln(
+                hidden_states,
+                modulation[:, 0],
+                modulation[:, 1],
+                timestep_value,
+                timestep_value,
+                self.norm_out.norm.eps,
+            )
         if _minwm_should_restore_reference_output_projection(
             normalized,
             sequence_shard_splits,

@@ -35,6 +35,7 @@ from sglang.multimodal_gen.runtime.models.dits.minwm import (
     _minwm_adaln_modulation,
     _minwm_adaln_op,
     _minwm_apply_qk_op,
+    _minwm_framewise_adaln,
     _minwm_frame_indices,
     _minwm_layer_norm,
     _minwm_packed_attention_backend,
@@ -479,6 +480,75 @@ def test_minwm_action_history_chunk_matches_full_sequence():
     )
     assert token_residual.is_contiguous()
     assert token_residual.stride(-1) == 1
+
+
+@pytest.mark.parametrize("operation", ["norm", "gated_residual", "residual_norm"])
+def test_minwm_compact_framewise_adaln_matches_expanded_tokens(operation):
+    torch.manual_seed(11)
+    batch_size, num_frames, tokens_per_frame, hidden_size = 2, 3, 4, 8
+    sequence_length = num_frames * tokens_per_frame
+    hidden_states = torch.randn(batch_size, sequence_length, hidden_size)
+    modulation = torch.randn(1, 6, hidden_size)
+    timestep = torch.randn(batch_size, num_frames, 6, hidden_size)
+    frame_index = torch.arange(num_frames).repeat_interleave(tokens_per_frame)
+    expanded = timestep[:, frame_index]
+
+    if operation == "norm":
+        expected = _minwm_adaln_op(
+            hidden_states,
+            modulation[:, 0],
+            modulation[:, 1],
+            expanded.select(-2, 0),
+            expanded.select(-2, 1),
+        )
+        actual = _minwm_framewise_adaln(
+            hidden_states,
+            modulation[:, 0],
+            modulation[:, 1],
+            timestep.select(-2, 0),
+            timestep.select(-2, 1),
+            num_frames=num_frames,
+        )
+    elif operation == "gated_residual":
+        update = torch.randn_like(hidden_states)
+        expected = _minwm_adaln_op(
+            hidden_states,
+            y=update,
+            m_gate=modulation[:, 2],
+            e_gate=expanded.select(-2, 2),
+        )
+        actual = _minwm_framewise_adaln(
+            hidden_states,
+            y=update,
+            m_gate=modulation[:, 2],
+            e_gate=timestep.select(-2, 2),
+            num_frames=num_frames,
+        )
+    else:
+        residual = torch.randn_like(hidden_states)
+        expected = _minwm_adaln_op(
+            hidden_states,
+            modulation[:, 3],
+            modulation[:, 4],
+            expanded.select(-2, 3),
+            expanded.select(-2, 4),
+            r=residual,
+        )
+        actual = _minwm_framewise_adaln(
+            hidden_states,
+            modulation[:, 3],
+            modulation[:, 4],
+            timestep.select(-2, 3),
+            timestep.select(-2, 4),
+            r=residual,
+            num_frames=num_frames,
+        )
+
+    expected_values = expected if isinstance(expected, tuple) else (expected,)
+    actual_values = actual if isinstance(actual, tuple) else (actual,)
+    assert len(actual_values) == len(expected_values)
+    for actual_value, expected_value in zip(actual_values, expected_values):
+        torch.testing.assert_close(actual_value, expected_value, rtol=0, atol=0)
 
 
 def test_minwm_bounded_session_presamples_reference_and_full_horizon(monkeypatch):
