@@ -20,6 +20,11 @@ from sglang.multimodal_gen.runtime.platforms import current_platform
 from sglang.multimodal_gen.runtime.realtime.session import (
     BaseRealtimeState,
 )
+from sglang.multimodal_gen.runtime.remote.vae_decode_client import get_remote_vae_url
+from sglang.multimodal_gen.runtime.remote.vae_decode_protocol import (
+    SCHEMA_VERSION as REMOTE_VAE_SCHEMA_VERSION,
+    tensor_to_payload,
+)
 from sglang.multimodal_gen.runtime.server_args import ServerArgs
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 from sglang.multimodal_gen.runtime.utils.realtime_trace import (
@@ -246,6 +251,28 @@ class CausalVaeDecodingStage(DecodingStage):
             return self.vae.clear_cache
         return None
 
+    @staticmethod
+    def _remote_vae_request(batch: Req) -> dict | None:
+        if get_remote_vae_url() is None:
+            return None
+        return {
+            "schema_version": REMOTE_VAE_SCHEMA_VERSION,
+            "session_id": batch.realtime_session_id
+            or getattr(batch, "request_id", None)
+            or "default",
+            "request_id": getattr(batch, "request_id", None) or "",
+            "block_idx": int(batch.block_idx),
+            "output_block_idx": int(batch.block_idx),
+            "event_id": batch.realtime_event_id,
+            "first_chunk": batch.block_idx == 0,
+            "is_final_chunk": bool(batch.extra.get("realtime_is_final_chunk", False)),
+            "width": batch.width,
+            "height": batch.height,
+            "fps": batch.fps,
+            "trim_leading_frames": 0,
+            "latents": tensor_to_payload(batch.latents),
+        }
+
     def _decode_wan_with_persistent_cache(
         self,
         latents: torch.Tensor,
@@ -385,6 +412,21 @@ class CausalVaeDecodingStage(DecodingStage):
             return super().forward(batch, server_args)
 
         decode_state = batch.session.get_or_create_state(RealtimeVAEDecodeState)
+        remote_request = self._remote_vae_request(batch)
+        if remote_request is not None:
+            return OutputBatch(
+                output=None,
+                remote_vae_request=remote_request,
+                realtime_output_chunk_index_start=batch.block_idx,
+                realtime_output_event_id=batch.realtime_event_id,
+                trajectory_timesteps=batch.trajectory_timesteps,
+                trajectory_latents=batch.trajectory_latents,
+                rollout_trajectory_data=batch.rollout_trajectory_data,
+                trajectory_decoded=None,
+                metrics=batch.metrics,
+                noise_pred=None,
+            )
+
         vae_config = getattr(server_args.pipeline_config, "vae_config", None)
         taehv_checkpoint_path = self._taehv_checkpoint_path(vae_config)
         with realtime_trace_span(

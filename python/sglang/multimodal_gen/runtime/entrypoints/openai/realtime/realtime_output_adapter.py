@@ -14,6 +14,10 @@ from PIL import Image
 from sglang.multimodal_gen.runtime.entrypoints.openai.realtime.timer import (
     RealtimeStageTimer,
 )
+from sglang.multimodal_gen.runtime.remote.vae_decode_client import (
+    RemoteVAEDecodeClient,
+    get_remote_vae_url,
+)
 from sglang.multimodal_gen.runtime.utils.realtime_video import (
     JPEG_FRAME_CONTENT_TYPE,
     RAW_RGB_CHANNELS,
@@ -432,7 +436,7 @@ class RawRGBRealtimeOutputAdapter:
     """send raw RGB over WebSocket using lossless transport"""
 
     def __init__(self) -> None:
-        pass
+        self._remote_vae_client: RemoteVAEDecodeClient | None = None
 
     def reset(self) -> None:
         pass
@@ -445,6 +449,27 @@ class RawRGBRealtimeOutputAdapter:
         batch: Req,
     ) -> RealtimeFrameSendStats:
         """send frames through ws"""
+        if result.remote_vae_request is not None:
+            remote_url = get_remote_vae_url()
+            if remote_url is None:
+                raise RuntimeError(
+                    "remote VAE request returned but SGLANG_REALTIME_REMOTE_VAE_URL "
+                    "is unset"
+                )
+            if (
+                self._remote_vae_client is None
+                or self._remote_vae_client.url != remote_url
+            ):
+                self._remote_vae_client = RemoteVAEDecodeClient(remote_url)
+            remote_result = await asyncio.to_thread(
+                self._remote_vae_client.decode,
+                result.remote_vae_request,
+            )
+            result.raw_frame_batches = remote_result.raw_frame_batches
+            result.raw_frame_metadata = remote_result.raw_frame_metadata
+            result.raw_frame_content_type = remote_result.raw_frame_content_type
+            result.remote_vae_request = None
+
         content_type = result.raw_frame_content_type
         if result.raw_frame_batches is None:
             return empty_frame_send_stats(content_type)
@@ -467,9 +492,17 @@ class RawRGBRealtimeOutputAdapter:
             ws,
             result.raw_frame_batches,
             content_type=content_type,
-            chunk_index_start=batch.block_idx,
+            chunk_index_start=(
+                result.realtime_output_chunk_index_start
+                if result.realtime_output_chunk_index_start is not None
+                else batch.block_idx
+            ),
             request_id=batch.request_id,
-            event_id=getattr(batch, "realtime_event_id", None),
+            event_id=(
+                result.realtime_output_event_id
+                if result.realtime_output_event_id is not None
+                else getattr(batch, "realtime_event_id", None)
+            ),
             trace_id=getattr(batch, "realtime_trace_id", None)
             or getattr(session, "trace_id", None),
             frame_metadata=frame_metadata,

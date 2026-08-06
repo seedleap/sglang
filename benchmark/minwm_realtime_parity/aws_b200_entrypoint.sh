@@ -641,28 +641,36 @@ fi
 if [[ "${MINWM_BENCHMARK_MODE}" == "calibratedfp8" ]]; then
   python3 -m pytest -q \
     /workspace/sglang/python/sglang/multimodal_gen/test/unit/test_minwm_static_fp8_transformer.py
-  CALIBRATION_CASES="${MINWM_CASES_PATH:-${SCRIPT_DIR}/cases_720p_compile_smoke.json}"
-  CALIBRATION_RESULTS="${LOCAL_RESULTS}/static-fp8-calibration"
-  CALIBRATION_PATH="${CALIBRATION_RESULTS}/static-fp8-calibration.json"
-  STATIC_FP8_TRANSFORMER="${WORK_ROOT}/static-fp8-transformer"
-  mkdir -p "${CALIBRATION_RESULTS}"
-  python3 "${SCRIPT_DIR}/run_minwm_baseline.py" \
-    --cases "${CALIBRATION_CASES}" \
-    --minwm-root /workspace/minWM \
-    --checkpoint "${CHECKPOINT}" \
-    --pretrained-dir "${PRETRAINED}" \
-    --config "${MINWM_CONFIG}" \
-    --results "${CALIBRATION_RESULTS}" \
-    --fp8-calibration-output "${CALIBRATION_PATH}" \
-    | tee "${RESULTS}/static-fp8-calibration.log"
-  python3 -m sglang.multimodal_gen.tools.build_minwm_static_fp8_transformer \
-    --input-dir "${MODEL_DIR}/transformer" \
-    --calibration "${CALIBRATION_PATH}" \
-    --output-dir "${STATIC_FP8_TRANSFORMER}" \
-    --activation-margin "${MINWM_STATIC_FP8_MARGIN:-1.0}" \
-    | tee "${RESULTS}/static-fp8-conversion.log"
-  cp "${CALIBRATION_PATH}" "${RESULTS}/"
-  cp "${CALIBRATION_RESULTS}/baseline_run.json" "${RESULTS}/static-fp8-calibration-baseline.json"
+  if [[ -n "${MINWM_REUSE_STATIC_FP8_RUN_ID:-}" ]]; then
+    [[ "${MINWM_REUSE_STATIC_FP8_RUN_ID}" =~ ^[A-Za-z0-9._-]+$ ]]
+    STATIC_FP8_TRANSFORMER="/work/minwm-realtime/${MINWM_REUSE_STATIC_FP8_RUN_ID}/static-fp8-transformer"
+    [[ -f "${STATIC_FP8_TRANSFORMER}/minwm_static_fp8_manifest.json" ]]
+    echo "reused-static-fp8:${MINWM_REUSE_STATIC_FP8_RUN_ID}" \
+      | tee "${RESULTS}/static-fp8-calibration.log"
+  else
+    CALIBRATION_CASES="${MINWM_CASES_PATH:-${SCRIPT_DIR}/cases_720p_compile_smoke.json}"
+    CALIBRATION_RESULTS="${LOCAL_RESULTS}/static-fp8-calibration"
+    CALIBRATION_PATH="${CALIBRATION_RESULTS}/static-fp8-calibration.json"
+    STATIC_FP8_TRANSFORMER="${WORK_ROOT}/static-fp8-transformer"
+    mkdir -p "${CALIBRATION_RESULTS}"
+    python3 "${SCRIPT_DIR}/run_minwm_baseline.py" \
+      --cases "${CALIBRATION_CASES}" \
+      --minwm-root /workspace/minWM \
+      --checkpoint "${CHECKPOINT}" \
+      --pretrained-dir "${PRETRAINED}" \
+      --config "${MINWM_CONFIG}" \
+      --results "${CALIBRATION_RESULTS}" \
+      --fp8-calibration-output "${CALIBRATION_PATH}" \
+      | tee "${RESULTS}/static-fp8-calibration.log"
+    python3 -m sglang.multimodal_gen.tools.build_minwm_static_fp8_transformer \
+      --input-dir "${MODEL_DIR}/transformer" \
+      --calibration "${CALIBRATION_PATH}" \
+      --output-dir "${STATIC_FP8_TRANSFORMER}" \
+      --activation-margin "${MINWM_STATIC_FP8_MARGIN:-1.0}" \
+      | tee "${RESULTS}/static-fp8-conversion.log"
+    cp "${CALIBRATION_PATH}" "${RESULTS}/"
+    cp "${CALIBRATION_RESULTS}/baseline_run.json" "${RESULTS}/static-fp8-calibration-baseline.json"
+  fi
   cp "${STATIC_FP8_TRANSFORMER}/minwm_static_fp8_manifest.json" "${RESULTS}/"
   export MINWM_PROFILE_TRANSFORMER_PATH="${STATIC_FP8_TRANSFORMER}"
   export MINWM_PROFILE_QUANTIZATION_LABEL="${MINWM_PROFILE_QUANTIZATION_LABEL:-static_fp8}"

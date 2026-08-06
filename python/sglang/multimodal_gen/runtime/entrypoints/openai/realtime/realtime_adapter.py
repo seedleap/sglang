@@ -250,6 +250,10 @@ class BaseRealtimeModelAdapter:
         batch.realtime_causal_kv_cache_num_frames = (
             session.request.realtime_causal_kv_cache_num_frames
         )
+        if session.request.max_chunks is not None:
+            batch.extra["realtime_is_final_chunk"] = (
+                chunk.index == session.request.max_chunks - 1
+            )
 
     async def send_output(
         self,

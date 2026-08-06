@@ -21,6 +21,33 @@ def test_realtime_vae_decode_state_clears_model_cache_on_dispose():
     assert state.reset_causal_decode_state is None
 
 
+def test_remote_vae_request_round_trips_prepared_latents(monkeypatch):
+    from sglang.multimodal_gen.runtime.remote.vae_decode_protocol import (
+        payload_to_tensor,
+    )
+
+    monkeypatch.setenv("SGLANG_REALTIME_REMOTE_VAE_URL", "http://vae:31000")
+    latents = torch.randn(1, 4, 3, 2, 2, dtype=torch.bfloat16)
+    batch = SimpleNamespace(
+        realtime_session_id="session",
+        request_id="request",
+        block_idx=7,
+        realtime_event_id=9,
+        extra={"realtime_is_final_chunk": True},
+        width=1248,
+        height=704,
+        fps=24,
+        latents=latents,
+    )
+
+    request = CausalVaeDecodingStage._remote_vae_request(batch)
+
+    assert request is not None
+    assert request["block_idx"] == 7
+    assert request["is_final_chunk"] is True
+    torch.testing.assert_close(payload_to_tensor(request["latents"]), latents)
+
+
 def test_causal_vae_decoding_stage_keeps_wan_decoder_cache(monkeypatch):
     from sglang.multimodal_gen.runtime.pipelines_core.stages.realtime import (
         vae as realtime_vae,

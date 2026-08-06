@@ -893,6 +893,48 @@ def test_minwm_t2v_decoder_reseeds_one_latent_first_block(monkeypatch):
     assert regular_batch.latents is regular_latents
 
 
+def test_minwm_remote_vae_preserves_output_index_and_t2v_trim(monkeypatch):
+    def fake_forward(_self, batch, _server_args):
+        return OutputBatch(
+            remote_vae_request={
+                "block_idx": batch.block_idx,
+                "output_block_idx": batch.block_idx,
+                "trim_leading_frames": 0,
+            }
+        )
+
+    monkeypatch.setattr(CausalVaeDecodingStage, "forward", fake_forward)
+    stage = MinWMCausalVaeDecodingStage.__new__(MinWMCausalVaeDecodingStage)
+    session = RealtimeSession()
+    first_latent = torch.full((1, 2, 1, 1, 1), 1.0)
+    regular_latents = torch.full((1, 2, 4, 1, 1), 2.0)
+    first_batch = SimpleNamespace(
+        block_idx=0,
+        image_latent=None,
+        latents=first_latent,
+        session=session,
+        realtime_event_id=10,
+    )
+    regular_batch = SimpleNamespace(
+        block_idx=1,
+        image_latent=None,
+        latents=regular_latents,
+        session=session,
+        realtime_event_id=11,
+    )
+
+    stage.forward(first_batch, SimpleNamespace())
+    result = stage.forward(regular_batch, SimpleNamespace())
+
+    assert result.remote_vae_request["block_idx"] == 0
+    assert result.remote_vae_request["output_block_idx"] == 1
+    assert result.remote_vae_request["trim_leading_frames"] == 1
+    assert result.realtime_output_chunk_index_start == 1
+    assert result.realtime_output_event_id == 11
+    assert regular_batch.block_idx == 1
+    assert regular_batch.latents is regular_latents
+
+
 def test_minwm_unbounded_kv_policy_reaches_cache_allocation():
     stage = MinWMCausalDMDDenoisingStage.__new__(MinWMCausalDMDDenoisingStage)
     stage.num_transformer_blocks = 2
