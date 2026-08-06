@@ -184,7 +184,9 @@ spec:
               echo "MINWM_STATIC_FP8_2X_LANE_END lane=static-local status=0 timestamp=$(date -Iseconds)"
 
               vae_log="${result_root}/${MATRIX_ID}-exact-vae-server.log"
-              CUDA_VISIBLE_DEVICES=1 PYTHONPATH=/workspace/sglang/python \
+              CUDA_VISIBLE_DEVICES=1 \
+                MINWM_NATIVE_COMPONENTS= \
+                PYTHONPATH=/workspace/sglang/python \
                 python3 -m sglang.multimodal_gen.runtime.entrypoints.vae_decode_server \
                   --vae-path "/work/minwm-realtime/${setup_run}/sglang-model/vae" \
                   --model-path "/work/minwm-realtime/${setup_run}/sglang-model" \
@@ -212,6 +214,13 @@ spec:
                 sleep 2
               done
               curl --fail --silent http://127.0.0.1:31000/health >/dev/null
+              if ! grep -Fq \
+                'Loaded vae: AutoencoderKLWan (sgl-diffusion version)' \
+                "${vae_log}"; then
+                echo 'exact VAE server did not load the profile-matched SGLang VAE' >&2
+                tail -300 "${vae_log}" >&2
+                exit 1
+              fi
 
               echo "MINWM_STATIC_FP8_2X_LANE_START lane=bf16-exact-vae-overlap timestamp=$(date -Iseconds)"
               env \
