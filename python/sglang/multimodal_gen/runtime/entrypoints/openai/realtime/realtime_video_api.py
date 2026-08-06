@@ -6,6 +6,7 @@ import shutil
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
+from uuid import uuid4
 
 import msgspec.msgpack
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
@@ -47,6 +48,10 @@ from sglang.multimodal_gen.runtime.realtime.admission import (
     InMemorySessionLeaseStore,
     RealtimeAdmissionController,
     SessionLease,
+)
+from sglang.multimodal_gen.runtime.realtime.worker_reservation import (
+    WorkerReservationRegistry,
+    WorkerReservationRejected,
 )
 from sglang.multimodal_gen.runtime.scheduler_client import async_scheduler_client
 from sglang.multimodal_gen.runtime.server_args import get_global_server_args
@@ -103,7 +108,9 @@ class _GatewayManagedConfig:
     session_id: str
     generation_id: str
     coordinator_token: str
+    worker_epoch: str
     vae_worker_url: str
+    vae_worker_epoch: str
     output_url: str
     output_token: str
 
@@ -116,13 +123,47 @@ def _gateway_managed_config(websocket: WebSocket) -> _GatewayManagedConfig | Non
         "session_id": query.get("session_id"),
         "generation_id": query.get("generation_id"),
         "coordinator_token": query.get("coordinator_token"),
+        "worker_epoch": query.get("worker_epoch"),
         "vae_worker_url": query.get("realtime_vae_worker_url"),
+        "vae_worker_epoch": query.get("realtime_vae_worker_epoch"),
         "output_url": query.get("gateway_output_url"),
         "output_token": query.get("gateway_output_token"),
     }
     if not all(fields.values()):
         raise AdmissionRejected("INVALID_GATEWAY_ASSIGNMENT")
     return _GatewayManagedConfig(**fields)
+
+
+async def _consume_gateway_reservation(
+    websocket: WebSocket,
+    config: _GatewayManagedConfig,
+    *,
+    owner_id: str,
+) -> WorkerReservationRegistry:
+    registry = getattr(websocket.app.state, "worker_reservations", None)
+    if not isinstance(registry, WorkerReservationRegistry):
+        raise AdmissionRejected("WORKER_RESERVATION_UNAVAILABLE")
+    try:
+        await registry.consume(
+            config.coordinator_token,
+            session_id=config.session_id,
+            generation_id=config.generation_id,
+            worker_epoch=config.worker_epoch,
+            owner_id=owner_id,
+        )
+    except WorkerReservationRejected as exc:
+        raise AdmissionRejected(exc.reason) from exc
+    return registry
+
+
+async def _release_gateway_reservation(
+    registry: WorkerReservationRegistry | None,
+    config: _GatewayManagedConfig | None,
+    *,
+    owner_id: str | None,
+) -> None:
+    if registry is not None and config is not None and owner_id is not None:
+        await registry.release(config.coordinator_token, owner_id=owner_id)
 
 
 def _log_previous_chunk_overlap(
@@ -231,10 +272,6 @@ class _NullAsyncContext:
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         return False
-
-
-def _transport_ms(value: float) -> int:
-    return max(0, int(value + 0.5))
 
 
 def _safe_len(value) -> int:
@@ -499,45 +536,6 @@ def _log_realtime_chunk_timing(
     )
 
 
-async def _send_realtime_chunk_stats(
-    ws: WebSocket,
-    session: GenerateSession,
-    chunk: RealtimeChunkContext,
-    batch: "Req",
-    request_prepare_ms: float,
-    scheduler_forward_ms: float,
-    chunk_total_ms: float,
-    send_stats: RealtimeFrameSendStats,
-) -> None:
-    await ws.send_bytes(
-        msgspec.msgpack.encode(
-            {
-                "type": "chunk_stats",
-                "trace_id": session.trace_id,
-                "session_id": session.id,
-                "request_id": chunk.request_id,
-                "chunk_index": batch.block_idx,
-                "event_id": getattr(batch, "realtime_event_id", None),
-                "request_prepare_ms": _transport_ms(request_prepare_ms),
-                "scheduler_forward_ms": _transport_ms(scheduler_forward_ms),
-                "pace_wait_ms": _transport_ms(send_stats["pace_wait_ms"]),
-                "header_write_ms": _transport_ms(send_stats["header_write_ms"]),
-                "raw_payload_build_ms": _transport_ms(
-                    send_stats["raw_payload_build_ms"]
-                ),
-                "raw_write_ms": _transport_ms(send_stats["raw_write_ms"]),
-                "ws_write_ms": _transport_ms(send_stats["ws_write_ms"]),
-                "chunk_total_ms": _transport_ms(chunk_total_ms),
-                "num_batches": send_stats["num_batches"],
-                "num_frames": send_stats["num_frames"],
-                "raw_bytes": send_stats["raw_bytes"],
-                "ws_payload_bytes": send_stats["ws_payload_bytes"],
-                "content_type": send_stats["content_type"],
-            }
-        )
-    )
-
-
 async def _generate_loop(ws: WebSocket, session: GenerateSession):
     server_args = get_global_server_args()
     if session.vae_worker_url or getattr(server_args, "realtime_vae_worker_url", None):
@@ -736,16 +734,6 @@ async def _complete_remote_chunk(
         chunk_total_ms,
         send_stats,
     )
-    await _send_realtime_chunk_stats(
-        ws,
-        session,
-        chunk,
-        batch,
-        request_prepare_ms,
-        scheduler_forward_ms,
-        chunk_total_ms,
-        send_stats,
-    )
     session.generate_chunk_completed(chunk)
 
 
@@ -781,6 +769,8 @@ async def _generate_loop_async_vae(ws, session: GenerateSession, server_args):
             output_url=getattr(session, "gateway_output_url", None),
             output_token=getattr(session, "gateway_output_token", None),
             trace_id=session.trace_id,
+            coordinator_token=getattr(session, "coordinator_token", None),
+            worker_epoch=getattr(session, "vae_worker_epoch", None),
         )
         while session.can_schedule_chunk():
             if coordinator.pending is not None and coordinator.pending.done():
@@ -1080,24 +1070,6 @@ async def _send_output_and_log(
             chunk_total_ms,
             send_stats,
         )
-        await _send_realtime_chunk_stats(
-            ws,
-            session,
-            chunk,
-            batch,
-            request_prepare_ms,
-            scheduler_forward_ms,
-            chunk_total_ms,
-            send_stats,
-        )
-    log_realtime_trace(
-        logger,
-        session,
-        "server.chunk_stats_sent",
-        request_id=chunk.request_id,
-        chunk_index=batch.block_idx,
-        event_id=getattr(batch, "realtime_event_id", None),
-    )
     return send_stats
 
 
@@ -1341,7 +1313,6 @@ async def _listen_generate_request(
                 fps=realtime_req.fps,
                 num_frames=realtime_req.num_frames,
                 max_chunks=realtime_req.max_chunks,
-                client_trace=session.client_trace,
             )
             adapter = get_realtime_model_adapter(get_global_server_args())
             session.set_adapter(adapter)
@@ -1513,6 +1484,8 @@ async def generate(websocket: WebSocket):
     )
     if gateway_config is not None:
         session.vae_worker_url = gateway_config.vae_worker_url
+        session.vae_worker_epoch = gateway_config.vae_worker_epoch
+        session.coordinator_token = gateway_config.coordinator_token
         session.gateway_output_url = gateway_config.output_url
         session.gateway_output_token = gateway_config.output_token
     session.trace_id = normalize_trace_id(
@@ -1533,7 +1506,15 @@ async def generate(websocket: WebSocket):
     listen_task = None
     watchdog_task = None
     close_after_cleanup = None
+    worker_reservations = None
+    worker_reservation_owner = uuid4().hex if gateway_config is not None else None
     try:
+        if gateway_config is not None:
+            worker_reservations = await _consume_gateway_reservation(
+                websocket,
+                gateway_config,
+                owner_id=worker_reservation_owner,
+            )
         if controller is not None:
             try:
                 lease = await controller.admit(
@@ -1608,6 +1589,12 @@ async def generate(websocket: WebSocket):
             close_after_cleanup = (1000, init_close_reason)
             return
 
+        if worker_reservations is not None and worker_reservation_owner is not None:
+            await worker_reservations.mark_runnable(
+                gateway_config.coordinator_token,
+                owner_id=worker_reservation_owner,
+            )
+
         # continuously generate video chunk
         generate_task = asyncio.create_task(_generate_loop(ws, session))
         # continuously listen for user events
@@ -1628,6 +1615,9 @@ async def generate(websocket: WebSocket):
             )
             close_after_cleanup = (1000, reason)
 
+    except AdmissionRejected as exc:
+        await write_error_msg(f"realtime admission rejected: {exc.reason}", ws)
+        await _close_realtime_websocket(ws, code=1008, reason=exc.reason)
     except WebSocketDisconnect:
         log_realtime_trace(logger, session, "server.client_disconnected")
         logger.info("client disconnected, session_id=%s", session.id)
@@ -1649,6 +1639,11 @@ async def generate(websocket: WebSocket):
         finally:
             if lease is not None and controller is not None:
                 await controller.release(lease)
+            await _release_gateway_reservation(
+                worker_reservations,
+                gateway_config,
+                owner_id=worker_reservation_owner,
+            )
 
 
 async def write_error_msg(error_msg: str, websocket: WebSocket):
