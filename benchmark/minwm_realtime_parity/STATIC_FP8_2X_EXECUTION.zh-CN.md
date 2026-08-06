@@ -42,8 +42,10 @@ static FP8 `24.859` client FPS。它与本轮不能直接横比：
    因而不是只改变 activation scale 来源的同构 A/B。
 3. 旧矩阵使用 step-3200 checkpoint 和默认 480p case；本轮固定 720p 的正式矩阵使用另一套
    checkpoint/case 合同。
-4. 两轮 static FP8 都进入 diffusion ModelOpt 的旧实现，尚未使用主 SRT 已有的 SM100
-   per-tensor FlashInfer GEMM。因此 `+7.2%` 与 `+0.56%` 都不是 B200 static FP8 的合理上限。
+4. 两轮 static checkpoint 的配置都是 `quant_method=fp8`；量化 registry 实际选择的是
+   `Fp8LinearMethod`，而不是键为 `modelopt_fp8` 的 `ModelOptFp8LinearMethod`。旧
+   `Fp8LinearMethod` 在 SM100 上仍把 serialized scalar weight scale 展开为 per-channel，
+   并调用 generic `apply_fp8_linear`。因此 `+7.2%` 与 `+0.56%` 都不是修复后路径的上限。
 
 隔壁任务还有一个容易造成“static 看起来很差/online 看起来很好”的计时事实：在它的 480p
 实验里，online/static 的 denoise 分别为 `357.15/402.55 ms`，VAE 为
@@ -54,19 +56,30 @@ static quant 和 generic scaled-mm dispatch 开销的量级，而不是 FP8 Tens
 另外，隔壁 A/B 的 online SHA 为 `47a8bcbf...`，static 实际 SHA 为 `4a66501d...`，Job
 annotation 还记录 `afbee9c...`；static builder、权重量化尺度、calibration 分辨率和吞吐
 case 也没有完全对齐。它适合发现候选方向，不足以给出“量化方法本身”的因果排序。本轮差异大，
-主要是口径（720p vs 480p）和实验同构性不同；两边共同指向的代码根因反而是一致的。
+首先来自口径（720p vs 480p）和实验非同构；更关键的是，早期本轮 micro 一度测了正式 E2E
+根本不会调用的 `ModelOptFp8LinearMethod`。隔壁旧 static 和本轮旧 E2E 实际都走
+`Fp8LinearMethod`，所以两边旧数字并不矛盾，也都不能代表修复后的上限。
 
-后续会在同一 immutable SHA、同一 B200 Spot、同一输入上重跑分层 A/B；不再用旧矩阵外推。
+最终已在同一 immutable SHA、同一 B200 Spot 节点、同一输入上完成四泳道
+分层 A/B，见执行日志 `-06`；旧矩阵只用于解释历史偏差，没有被用来外推本轮上限。
 
 ## 4. 根因与修复决策
 
-代码审计发现，主 SRT 的 `ModelOptFp8LinearMethod` 已在 SM100 使用
+最初的代码审计发现，主 SRT 的 `ModelOptFp8LinearMethod` 已在 SM100 使用
 `apply_fp8_linear_bmm_flashinfer`：保留 scalar weight/input scale，并调用 FlashInfer per-tensor
-FP8 BMM。diffusion 复制版没有同步该实现：它把 scalar weight scale 扩成 per-channel scale，
-static activation 又先进入 Triton `_static_quant_fp8`；因为 generic CUTLASS 路径只接收
-per-token activation scale，还会把 scalar input scale 物化为 `(M, 1)`。最后才调用通用
-`apply_fp8_linear` / `fp8_scaled_mm`。online FP8 则已经使用 CUDA per-token quant，所以旧 static
-并不天然比 online 少开销。
+FP8 BMM；diffusion 的同名复制版则落后。早期修复和 micro 因此集中在这个类上。
+
+随后把 builder 配置、量化 registry 和正式日志三者串起来，发现上述审计漏掉了运行时身份：
+minWM static builder 写出的是 `quant_method=fp8`，registry 选择
+`multimodal_gen/runtime/layers/quantization/fp8.py::Fp8LinearMethod`；正式日志也明确打印
+`Detected fp8 checkpoint`。只有配置写 `modelopt_fp8` 才会进入此前修过的
+`ModelOptFp8LinearMethod`。这意味着早期 helper micro 与正式 E2E 测的是两个不同实现。
+
+真实旧 `Fp8LinearMethod` 在 serialized static SM100 上会把 scalar weight scale 展成
+per-channel，并进入 generic `apply_fp8_linear`；static activation 还经旧通用 quant/scale
+layout。online FP8 使用 CUDA per-token quant，所以旧 static 并不天然比 online 少开销。
+这解释了为什么 helper micro 可见 `1.3x--1.58x`，而完整 DiT 约为 `1.0x`：不是 Amdahl
+定律把明显的 DiT 收益吞掉，而是生产路径压根没有调用被测 helper。
 
 最初假设是让 diffusion static FP8 在 SM100 + FlashInfer 可用时复用主 SRT 的 per-tensor
 `bmm_fp8` 路径。但 `-08` 的真实 B200 数据否定了“主 SRT 路径也适合 DiT 大 M 矩阵”这一
@@ -79,24 +92,32 @@ per-token activation scale，还会把 scalar input scale 物化为 `(M, 1)`。�
 - 对其他 diffusion 模型可能出现的非 16 对齐 `K/N`，仅在该分支 pad 到 16 后裁剪输出；
 - 其他硬件仍保留原 generic CUTLASS 路径。
 
+最终修复 `f32df1c9b8...` 把同一组 SM100 scalar/native scaled-mm 规则接入真正的
+`Fp8LinearMethod`：serialized static FP8 保留 scalar scale、构造 column-major transposed
+weight，并在 `apply()` 直接路由 native scaled-mm；dynamic/online FP8 和旧 GPU 保持原路径。
+测试使用真实 `Fp8Config(is_checkpoint_fp8_serialized=True, activation_scheme="static")`，并规定
+generic helper 一旦被调用就失败，从而防止再次出现“测试通过但生产 registry 不会调用”的假阳性。
+
 验证分三层：
 
 1. 单元/正确性：scalar scale、快路径路由、数值误差。
 2. Spot GEMM/DiT：证明不是 silent fallback，并量化 Linear 与完整 denoise 的收益。
 3. Spot 端到端：复用固定 720p 的 20+200 合同。
 
-## 5. Amdahl 上限与待决事项
+## 5. Amdahl 上限与最终归因
 
 按全部 200 chunks 的 BF16 scheduler 均值，DiT 为 `566.045 ms`、VAE 为 `468.655 ms`、
 其余调度约 `100.695 ms`。客户端基线 `14.079 FPS` 的 2× 目标要求 chunk interval 不超过
 `16 / 28.158 = 568.22 ms`。当前顺序执行即使把 DiT 降到零，VAE + 其他调度仍约
 `569.35 ms`，已略高于目标。因此只修 static FP8 GEMM 在物理上无法稳定满足客户端端到端 2×。
 
-若把 VAE 放到同一台 p6 主机的另一张 GPU，并与下一 chunk 的 DiT 重叠，稳态 interval 近似
-`max(DiT + 其他调度, VAE)`。这时要满足 `568.22 ms`，DiT 必须低于约 `467.53 ms`，即相对
-BF16 至少加速 `1.211x`（denoise 时间至少降低 `17.4%`）。这给下一阶段建立了明确的进入条件：
-先用 B200 microbenchmark/完整 denoise 证明新路径能越过这个阈值，再实现和测量 VAE overlap；
-不能把两项收益混在一起归因给 static FP8。
+若把 VAE 放到同一台 p6 主机的另一张 GPU，并与下一 chunk 的 DiT 重叠，稳态 interval 不是把
+VAE 再加到 DiT 上，而是近似
+`max(DiT + scheduler CPU, VAE decode + raw transport + client delivery)`。早期把约 100 ms 的
+“其它调度”全部加到 DiT 上、推导出 `DiT < 467.53 ms`，属于重复记账；正式 overlap trace 已纠正
+这个模型。真正的进入条件是两个分支都低于 `16 / (2 * BF16 client FPS)`：一边看
+`scheduler_forward/client`，另一边必须把远端 VAE 的解码、42.2 MB raw RGB 搬运和 WebSocket
+交付都算进去。两项收益仍必须隔离报告，不能把两张 GPU 流水化全部归因给 static FP8。
 
 这不是提前降低验收标准。先实测快路径后的 DiT/端到端数字；若 Amdahl 瓶颈按预期转移到
 VAE/调度，则继续做不降低画质的流水化或阶段并行，并分别报告：
@@ -104,6 +125,11 @@ VAE/调度，则继续做不降低画质的流水化或阶段并行，并分别�
 - static FP8 本身的隔离收益；
 - 后续流水线优化的隔离收益；
 - 组合方案相对当前 BF16 生产基线的端到端收益。
+
+最终 `-06` 与上述模型一致：BF16-overlap 的 remote VAE 分支均值约
+`478.398 ms`，低于 BF16 计算分支的 `581.595 ms`；static-overlap 的 remote VAE
+分支约 `474.673 ms`，低于 static 计算分支的 `560.105 ms`。因此稳态间隔由
+GPU0 计算分支决定，shared-memory 回传没有再成为新的隐性串行项。
 
 ## 6. 执行日志
 
@@ -270,3 +296,172 @@ VAE/调度，则继续做不降低画质的流水化或阶段并行，并分别�
   也不能用于判断代码正确性或性能。
 - 决策：保留 Job 等待优惠 Spot 容量，不切换到 `aws03` 或 on-demand。容量到达后先执行固定镜像
   pytest 门禁和 `-12` micro；失败必须使用新 run id 保全 S3 证据，不能覆盖既有结果。
+
+### 2026-08-06：activation quant micro `-12` / `-13`
+
+- `-12` 的新增单测错误地用 `reshape()` 后张量对象是否同一来判断是否发生复制；即使连续内存
+  reshape 不复制，Python Tensor wrapper 也不保证 identity。它是测试断言错误，不是 CUDA
+  quant correctness 或性能失败；修复为比较 storage/data pointer 与输出数值。
+- `-13` 在 B200 Spot 上完成 6/6 tests。四个 `(M,N,K)` 代表形状的完整 helper 相对 BF16 p50
+  分别为 `0.8525x`、`1.3277x`、`1.5854x`、`1.2776x`。旧/新 activation quant p50 分别为
+  `33.888/22.912 us`、`46.064/41.584 us`、`50.800/47.504 us`、`122.848/136.880 us`。
+- 偏离预期：vectorized quant 不是所有大形状都更快；down projection 反而变慢。更重要的是，
+  这些数字后来被确认属于 `ModelOptFp8LinearMethod` helper，不能证明正式 minWM static E2E
+  已走这条路。产物：`s3://leap-world-us-east-2/world-model/evals/minwm/quantization/20260805/`
+  `static-fp8-2x/minwm-static-fp8-fastpath-b200-20260806-13/`。
+
+### 2026-08-06：真实 static FP8 路由根因与门禁 `-14` / `-15` / `-16`
+
+- builder 生成的量化配置、registry 和正式日志共同确认：实际配置键是 `fp8`，实例是
+  `Fp8LinearMethod`；此前优化的是键 `modelopt_fp8` 对应的另一个类。旧正式 E2E 因而从未执行
+  此前的 fastpath。这是“micro 明显改善、whole DiT 完全不动”的首要原因。
+- immutable SHA `f32df1c9b8...` 把 scalar/native scaled-mm fastpath 接入真实
+  `Fp8LinearMethod`；测试用真实 static serialized config，并禁止 generic fallback。
+- `-14` 在 7/8 tests 后失败：新增 weight-processing test 没初始化 tensor-parallel group；
+  `-15` mock TP 后仍在 7/8 失败，因为测试层还在 CPU，而 `requantize_with_max_scale` 是 CUDA
+  custom op。两次都发生在测试搭建，micro 未执行，不能当作 kernel 或实现失败。
+- `-16` 把被测层移到 CUDA 后重跑完整 8-test 门禁和同形状 micro。正式四-lane E2E 必须等该
+  门禁成功后才独占提交，避免把失败实现或并发 GPU 负载带入验收窗口。
+- `-16` 最终在 B200 Spot 上 8/8 tests 通过，Job 正常 Completed。native scaled-mm helper
+  相对 BF16 的四个 p50 speedup 为 `0.851x/1.323x/1.631x/1.286x`；该 micro 仍只用于确认
+  backend/形状上限，生产覆盖证据来自真实 config 的路由与 weight-layout 测试，最终收益必须看
+  whole-DiT/E2E。产物：`s3://leap-world-us-east-2/world-model/evals/minwm/quantization/20260805/`
+  `static-fp8-2x/minwm-static-fp8-fastpath-b200-20260806-16/`。
+
+### 2026-08-06：精确 VAE overlap `-01` / `-02` 的协议与实现身份纠偏
+
+- `-01` 的 BF16-local/static-local 仍约为 `14.055/14.107 FPS`，这是尚未接入真实
+  `Fp8LinearMethod` 的旧路径。首次 remote lane 在客户端调用
+  `requests.Session.post(content=...)` 时失败；Requests 接口应使用 `data=`。修复仅改变 HTTP
+  body 传递，不改变 payload 或解码语义。
+- `-02` 修正 HTTP 后，BF16/static local 分别为 `14.004/14.074 FPS`；remote server 首个
+  chunk 成功，第二个 chunk 返回 500。服务端日志显示 temporal tensor 大小 `2` 与 `4` 冲突。
+- 根因不是网络：主 lane 的 optimized profile 显式 `MINWM_NATIVE_COMPONENTS=''`，加载日志为
+  `AutoencoderKLWan (sgl-diffusion version)`；remote server 继承默认
+  `MINWM_NATIVE_COMPONENTS=text_encoder,vae`，实际加载
+  `AutoencoderKLWan (native-required version)`。两者即使模型目录和类短名相同，persistent
+  causal cache 语义也不同；native 版本冷态首 chunk 约 `545 ms decode + 274 ms raw`，且第二
+  chunk cache 失配，不能作为“精确 overlap”证据。
+- `-03` 固定 remote server 的 `MINWM_NATIVE_COMPONENTS=`，并在健康检查后强制日志必须包含
+  `Loaded vae: AutoencoderKLWan (sgl-diffusion version)`，否则正式 lane 立即失败。这样 remote
+  与 optimized local 使用完全相同的 VAE 实现/权重/预后处理，再比较流水化收益。
+
+### 2026-08-06：正式 `-03` 与 Nsight Systems 根因定位
+
+- `-03` 在同一台 Spot B200 上完成 BF16-local/static-local；客户端分别为
+  `14.0761/13.8870 FPS`，static 为 `0.9866x`。CUDA trace 中 BF16/static denoise p50 为
+  `567.172/589.371 ms`，即真实 all-linear static FP8 反而慢 `3.94%`；VAE p50
+  `466.727/463.526 ms`，不能解释 DiT 的退化。static checkpoint 日志明确为
+  `Detected fp8 checkpoint`，builder 也记录 300 个量化权重，故不能再用 silent fallback 解释。
+- `-03` 在进入 overlap lane 前失败，原因是进程仍把 VAE 日志文件打开在 S3 CSI 上时，shell
+  同时读取该文件，返回 `Operation not permitted`；VAE 进程退出后远端日志实际存在，且包含
+  预期的 `AutoencoderKLWan (sgl-diffusion version)`。`-04` 改为先写本地 `/work`，健康检查和
+  实现身份检查都读本地文件，cleanup 在 kill/wait 后再复制到 S3。它不是 VAE 模型或 cache 失败。
+- 依照 Nsight Systems 服务抓取流程，Job
+  `minwm-static-fp8-nsys-b200-20260806-01` 在同一台 Spot B200 上分别启动 BF16/static server，
+  每个 lane 先完成一次不计入结果的完整 warmup，再用 `nsys start/stop` 抓稳态窗口；trace 固定
+  `cuda,nvtx`、fork tracing 与 CUDA graph node tracing，没有混用 PyTorch profiler。
+- 原始 trace 因捕获边界包含不同数量的 block invocation，以下均用代表性的 FFN GEMM instance
+  数 `930/997` 归一化。BF16/static 的 GPU kernel 总时间为 `6.797/6.387 ms`，说明 FP8 GPU
+  计算本体其实快约 `6.0%`；但 capture wall time为 `8.159/8.466 ms`，static 仍慢 `3.76%`。
+  这与 20+200 whole-DiT 的方向一致。
+- 线性 GEMM 本体从 BF16 的约 `590.3 us` 降到 static FP8 的 `310.6 us`；输入量化增加
+  `77.8 us`。真正异常是严格确定性模式：static 每个归一化 block 的 kernel 数从 `97.1`
+  增至 `127.6`，`cudaLaunchKernel` 类 API 时间从 `1.787` 增至 `1.872 ms`；同时出现
+  `per_tensor_quant_fp8` 7970 次、Float8 poison-fill 7970 次，并比 BF16 多约 16 次 BF16
+  fill/block。根因是 `torch.use_deterministic_algorithms(True)` 默认给 `torch.empty` 输出插入
+  uninitialized-memory fill，而 quant custom op 和 `_scaled_mm` 随后又完整覆写这些输出。
+- 决策：保留确定性算法，只在 static FP8 quant + scaled-mm 两个“完整覆写输出”的操作范围内暂时
+  关闭 poison fill，并用 `finally` 恢复全局设置；不关闭 deterministic attention，也不改变 scale、
+  权重、输出 dtype 或数值路径。提交 `417d47cace...` 增加了作用域恢复测试与 deterministic B200
+  micro。若 whole-DiT 仍不足，再采用已实现但尚未启用的 FFN-only scope，避免用无证据的层级猜测
+  替换 kernel 证据。
+- Nsight 产物：`s3://leap-world-us-east-2/world-model/evals/minwm/quantization/20260805/`
+  `static-fp8-2x/nsys-static-fp8-01/minwm-static-fp8-nsys-b200-20260806-01-profile/`，每个 lane
+  均保留 `.nsys-rep`、SQLite、stats、server/client log 与 throughput JSON。
+
+### 2026-08-06：deterministic fill 修复复测 `-17` 与正式 all-linear `-04`
+
+- deterministic B200 micro `-17` 为 9/9 tests；作用域退出后
+  `deterministic_algorithms=true`、`fill_uninitialized_memory=true`，证明异常和正常路径都恢复全局设置。
+  四个代表形状的完整 helper speedup 为 `0.820x/1.308x/1.709x/1.304x`：两个 FFN 大矩阵
+  明显获益，小 M attention 仍亏损。
+- 正式 `-04` 固定同一 Spot B200、同 checkpoint/case、20+200。BF16-local/all-static-local 为
+  `14.0331/14.1382 FPS`，BF16-overlap/all-static-overlap 为 `26.3780/26.4198 FPS`；联合结果相对
+  BF16-local 只有 `1.8827x`，未过线。
+- all-static 的 local denoise CUDA mean 为 `571.623 ms`，BF16 为 `566.224 ms`；去掉 poison fill
+  已把上一版 static 的约 `589 ms` 明显拉回，但全量 attention FP8 仍使 whole-DiT 慢约 `5.4 ms`。
+  这证明 fill 是重要根因之一，但不是唯一根因。
+- exact VAE server 日志最终从本地 `/work` 复制到 S3，且强制包含
+  `AutoencoderKLWan (sgl-diffusion version)`；`-03` 的 S3 CSI open-file 权限问题不再出现。
+- 产物：`s3://leap-world-us-east-2/world-model/evals/minwm/quantization/20260805/`
+  `static-fp8-2x/e2e-exact-vae-overlap-04/`。
+
+### 2026-08-06：FFN-only static FP8 `-05`
+
+- Nsight 与 micro 均显示“并非所有 Linear 都该量化”。离线 builder 新增 `module_scope=ffn`：只把
+  30 blocks × 2 FFN weights（共 60 个）写成 FP8；self/cross attention 仍只保存 BF16 权重，
+  不保留同一层的第二份权重副本。输出 transformer 为 `7,364,523,872` bytes。
+- 偏离预期：minWM 非 TP block 原先没有把完整 module prefix 传给 Linear，`ignored_layers` 无法在
+  运行时区分 attention 和 FFN。修复为 self projection、`attn2`、`ffn` 都传真实 prefix；门禁用
+  生产 `Fp8Config` 验证 attention 为 `UnquantizedLinearMethod`、FFN 为 `Fp8LinearMethod`。
+- 目标镜像上 150 tests 全通过；转换 manifest 为 `module_scope=ffn`、`quantized_weights=60`、
+  ignored `to_q/to_k/to_v/to_out/attn2`，排除了全量误量化和 silent fallback。
+- 四 lane client FPS：BF16-local `14.12754`、FFN-static-local `14.41120`、BF16-overlap
+  `26.07334`、FFN-static-overlap `26.53392`。FFN-only 隔离收益为 `1.02008x`，联合收益为
+  `1.87815x`，仍未达到 client 2×。
+- whole-DiT 根因被进一步隔离：local BF16/FFN-only denoise CUDA mean 为
+  `565.985/545.165 ms`，FFN-only 实际省 `20.820 ms`。overlap lane 为 `569.503/543.853 ms`。
+  static-overlap 的 scheduler 已到 `28.25582 FPS`，相对同作业 BF16-local 恰为 `2.00005x`；
+  但 client 只有 `26.53392 FPS`，因为 scheduler `566.255 ms` 后，输出关键路径仍有
+  `14.73 ms` raw payload join、`17.32 ms` WebSocket write 以及 42.2 MB HTTP MessagePack 搬运，
+  client interarrival 被拉到 `603.002 ms`。
+- 决策：计算路径已经过线，不继续无目标地改 GEMM。loopback exact VAE 对 raw 输出改为 GPU1 先
+  拼 16 帧 transport batch，再通过 `/dev/shm` 返回小句柄；API 只读一次并删除文件。仅
+  `127.0.0.1/localhost` 选择共享内存，非 loopback 或 WebP/JPEG 保留原 HTTP frame payload。
+  同时依据 `-17` 的直接数据，大 M（`M>=8192` 且 contiguous）static quant 选择更快的 row-wise
+  Triton kernel，小 M 继续使用 flat JIT kernel，给 2× 边界留出真实计算余量。
+- 产物：`s3://leap-world-us-east-2/world-model/evals/minwm/quantization/20260805/`
+  `static-fp8-2x/e2e-exact-vae-overlap-05/`。
+
+### 2026-08-06：shared-memory 最终验收 `-06`
+
+- 正式 Job `minwm-static-fp8-exact-vae-overlap-b200-20260806-06` 仅使用
+  `AWS_PROFILE=spot` / context `minwm-spot`；Pod 调度到
+  `ip-172-31-68-105.us-east-2.compute.internal`，node selector 为
+  `capacity-type=spot` / `p6-b200.48xlarge`，申请 2 张 B200。Job 终态为
+  `SuccessCriteriaMet=True`，没有调用 `aws03`。
+- 运行时 SGLang SHA 为 `1ad71533009d72c04b4fc20c16ad73c1cd3d9540`，MinWM SHA 为
+  `2efc6485f65e8fcab506665efde79bc41406385e`。目标 B200 镜像上 154/154 tests 通过；
+  static manifest 仍为 `module_scope=ffn`、60 个 FP8 weights、attention ignored，排除了
+  路由回退或全量误量化。
+- 四泳道都使用同一 checkpoint/case、KV45、4 steps、20 warmup + 200 measured
+  chunks：
+
+| lane | client FPS | scheduler FPS | 相对 BF16-local |
+|---|---:|---:|---:|
+| BF16-local | `13.962218` | `13.975386` | `1.000000x` |
+| FFN-static-local | `14.337702` | `14.351320` | `1.026893x` |
+| BF16-exact-VAE-overlap | `27.455537` | `27.510553` | `1.966417x` |
+| FFN-static-exact-VAE-overlap | `28.513450` | `28.566072` | **`2.042186x`** |
+
+- 严格客户端验收线为 `2 * 13.962218 = 27.924437 FPS`，组合方案高出
+  `0.589014 FPS`，即相对 2x 线有 `2.109%` 余量；客户端稳态间隔为
+  `561.139 ms`，低于门槛 `572.975 ms`。因此结论不依赖 scheduler 内部口径。
+- 隔离归因：FFN-only static 本地收益为 `1.026893x`；BF16 VAE overlap
+  收益为 `1.966417x`；在 overlap 拓扑上再加 static 为
+  `28.513450 / 27.455537 = 1.038532x`。对 BF16-local 的 `2.042186x` 是联合收益，
+  不归因为“static FP8 单独 2x”。
+- 关键输出瓶颈已解决：BF16/static overlap 的 `raw_payload_build_ms.mean`
+  均为 `0.0 ms`，而 `-05` static 为 `14.73 ms`；远端完整 SGL VAE 的 200-chunk
+  均值分别为 `decode/raw/total = 213.546/239.562/478.398 ms` 与
+  `213.318/238.656/474.673 ms`，低于对应 GPU0 scheduler forward。运行中抽查
+  `/dev/shm/sglang-realtime-vae` 未见遗留文件，API 读取后删除的契约生效。
+- 本轮对“不到 2x”的完整解决链是：修复生产 registry 路由 -> 用 Nsight
+  定位 deterministic poison fill / launch 税 -> 根据真实形状仅量化 FFN -> 大 M 选择
+  更快 static quant kernel -> 用 GPU1 重叠原始完整 causal VAE -> 用本机共享内存
+  移除 42.2 MB/chunk HTTP MessagePack 回传。每一步都有独立 lane 或 kernel/trace
+  证据，没有用降低画质的近似 VAE 换取验收。
+- S3 根目录：`s3://leap-world-us-east-2/world-model/evals/minwm/quantization/20260805/`
+  `static-fp8-2x/e2e-exact-vae-overlap-06/`。其中保留 provenance、Job 日志、
+  154-test 日志、四份 throughput JSON/server log、static manifest 和 exact-VAE server log。
