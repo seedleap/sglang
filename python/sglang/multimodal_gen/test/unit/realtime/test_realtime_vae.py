@@ -48,6 +48,47 @@ def test_remote_vae_request_round_trips_prepared_latents(monkeypatch):
     torch.testing.assert_close(payload_to_tensor(request["latents"]), latents)
 
 
+def test_remote_vae_client_posts_msgpack_as_requests_data(monkeypatch):
+    from sglang.multimodal_gen.runtime.remote.vae_decode_client import (
+        RemoteVAEDecodeClient,
+    )
+    from sglang.multimodal_gen.runtime.remote.vae_decode_protocol import (
+        RAW_RGB_CONTENT_TYPE,
+        SCHEMA_VERSION,
+        packb,
+        unpackb,
+    )
+
+    request = {"schema_version": SCHEMA_VERSION, "session_id": "session"}
+    expected_frames = [[b"rgb"]]
+    client = RemoteVAEDecodeClient("http://vae:31000", timeout=17)
+
+    def fake_post(url, **kwargs):
+        assert url == "http://vae:31000/decode"
+        assert "content" not in kwargs
+        assert unpackb(kwargs["data"]) == request
+        assert kwargs["headers"] == {"content-type": "application/msgpack"}
+        assert kwargs["timeout"] == 17
+        return SimpleNamespace(
+            content=packb(
+                {
+                    "schema_version": SCHEMA_VERSION,
+                    "status": "ok",
+                    "raw_frame_batches": expected_frames,
+                    "raw_frame_content_type": RAW_RGB_CONTENT_TYPE,
+                }
+            ),
+            raise_for_status=lambda: None,
+        )
+
+    monkeypatch.setattr(client.session, "post", fake_post)
+
+    result = client.decode(request)
+
+    assert result.raw_frame_batches == expected_frames
+    assert result.raw_frame_content_type == RAW_RGB_CONTENT_TYPE
+
+
 def test_causal_vae_decoding_stage_keeps_wan_decoder_cache(monkeypatch):
     from sglang.multimodal_gen.runtime.pipelines_core.stages.realtime import (
         vae as realtime_vae,

@@ -46,7 +46,7 @@ class RemoteVAEDecodeClient:
         started_at = time.monotonic()
         response = self.session.post(
             f"{self.url}/decode",
-            content=body,
+            data=body,
             headers={"content-type": "application/msgpack"},
             timeout=self.timeout,
         )
