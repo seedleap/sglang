@@ -132,9 +132,20 @@ class _SlidingTileAttentionBackendResolver(_CudaAttentionBackendResolver):
 
 class _SageAttentionBackendResolver(_CudaAttentionBackendResolver):
     backend = AttentionBackendEnum.SAGE_ATTN
+    _supported_capabilities = {80, 86, 89, 90, 120, 121}
 
     @classmethod
-    def resolve(cls, platform) -> str | AttentionBackendEnum:
+    def resolve(cls, platform) -> str:
+        capability = platform.get_device_capability()
+        if (
+            capability is not None
+            and capability.to_int() not in cls._supported_capabilities
+        ):
+            raise RuntimeError(
+                "SageAttention 2.2.0 does not support CUDA capability "
+                f"{capability.as_version_str()}; use another supported attention "
+                "backend."
+            )
         try:
             from sageattention import sageattn  # noqa: F401
 
@@ -144,18 +155,29 @@ class _SageAttentionBackendResolver(_CudaAttentionBackendResolver):
 
             return "sglang.multimodal_gen.runtime.layers.attention.backends.sage_attn.SageAttentionBackend"
         except ImportError as e:
-            logger.info(e)
-            logger.info(
-                "Sage Attention backend is not installed (To install it, run `pip install sageattention==2.2.0 --no-build-isolation`). Falling back to Flash Attention."
-            )
-            return AttentionBackendEnum.FA
+            raise ImportError(
+                "Sage Attention backend was requested but is not installed. "
+                "Install it with `pip install sageattention==2.2.0 "
+                "--no-build-isolation`."
+            ) from e
 
 
 class _SageAttention3BackendResolver(_CudaAttentionBackendResolver):
     backend = AttentionBackendEnum.SAGE_ATTN_3
+    _supported_capabilities = {120, 121}
 
     @classmethod
-    def resolve(cls, platform) -> str | AttentionBackendEnum:
+    def resolve(cls, platform) -> str:
+        capability = platform.get_device_capability()
+        if (
+            capability is not None
+            and capability.to_int() not in cls._supported_capabilities
+        ):
+            raise RuntimeError(
+                "SageAttention3 does not support CUDA capability "
+                f"{capability.as_version_str()}; supported capabilities are "
+                "SM120 and SM121."
+            )
         try:
             from sglang.multimodal_gen.runtime.layers.attention.backends.sage_attn3 import (  # noqa: F401
                 SageAttention3Backend,
@@ -163,11 +185,10 @@ class _SageAttention3BackendResolver(_CudaAttentionBackendResolver):
 
             return "sglang.multimodal_gen.runtime.layers.attention.backends.sage_attn3.SageAttention3Backend"
         except ImportError as e:
-            logger.info(e)
-            logger.info(
-                "Sage Attention 3 backend is not installed (To install it, see https://github.com/thu-ml/SageAttention/tree/main/sageattention3_blackwell#installation). Falling back to Torch SDPA."
-            )
-            return AttentionBackendEnum.TORCH_SDPA
+            raise ImportError(
+                "Sage Attention 3 backend was requested but is not installed. "
+                "Build it from the upstream sageattention3_blackwell source."
+            ) from e
 
 
 class _VideoSparseAttentionBackendResolver(_CudaAttentionBackendResolver):

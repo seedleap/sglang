@@ -1,0 +1,233 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: minwm-attention-kernel-sm120-20260806-04
+  namespace: ray
+  labels:
+    app.kubernetes.io/name: minwm-attention-kernel-sm120-20260806-04
+    seedleap.ai/owner: chenshengdong
+    seedleap.ai/task: minwm-attention-kernel-profile
+    seedleap.ai/run-id: minwm-attention-kernel-sm120-20260806-04
+  annotations:
+    seedleap.ai/capacity-type: spot
+    seedleap.ai/hardware-role: rtx-5090-sm120-proxy
+    seedleap.ai/repo: seedleap/sglang
+    seedleap.ai/branch: codex/minwm-sage-attention
+    seedleap.ai/sglang-git-ref: "876118db8419c2ead4bd84b5f0f6c5c10784da86"
+    seedleap.ai/kv-contract: sink4-window20
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 10800
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: minwm-attention-kernel-sm120-20260806-04
+        seedleap.ai/owner: chenshengdong
+        seedleap.ai/task: minwm-attention-kernel-profile
+        seedleap.ai/run-id: minwm-attention-kernel-sm120-20260806-04
+      annotations:
+        seedleap.ai/repo: seedleap/sglang
+        seedleap.ai/branch: codex/minwm-sage-attention
+        seedleap.ai/sglang-git-ref: "876118db8419c2ead4bd84b5f0f6c5c10784da86"
+    spec:
+      restartPolicy: Never
+      terminationGracePeriodSeconds: 90
+      securityContext:
+        seLinuxOptions:
+          type: spc_t
+      nodeSelector:
+        seedleap.ai/capacity-pool: minwm-quant-rtx6000-spot
+        karpenter.sh/capacity-type: spot
+        node.kubernetes.io/instance-type: g7e.4xlarge
+      tolerations:
+        - key: seedleap.ai/capacity-pool
+          operator: Equal
+          value: minwm-quant-rtx6000-spot
+          effect: NoSchedule
+      containers:
+        - name: profile
+          image: 829115578968.dkr.ecr.us-east-2.amazonaws.com/leap-world/minwm-training@sha256:bedc07ea3ba55059a8c1c569c3b177c4d00d41f37d4fa9105375531534ef5f2a
+          imagePullPolicy: IfNotPresent
+          workingDir: /workspace
+          securityContext:
+            capabilities:
+              add:
+                - SYS_ADMIN
+          env:
+            - name: GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: github-token
+                  key: token
+            - name: SGLANG_GIT_REF
+              value: "876118db8419c2ead4bd84b5f0f6c5c10784da86"
+            - name: SAGE_ATTENTION_GIT_REF
+              value: "d1a57a546c3d395b1ffcbeecc66d81db76f3b4b5"
+            - name: RESULT_RUN_ID
+              value: minwm-attention-kernel-sm120-20260806-04
+            - name: RESULT_ROOT
+              value: /s3/world-model/evals/minwm/attention/20260806/profiles
+          command:
+            - /bin/bash
+            - -lc
+            - |
+              set -euo pipefail
+              WORK=/work/profile
+              PUBLISH="${RESULT_ROOT}/${RESULT_RUN_ID}"
+              mkdir -p "${WORK}" "${PUBLISH}"
+              exec > >(tee "${WORK}/job.log") 2>&1
+              publish() {
+                # S3 FUSE rejects timestamp preservation and overwriting an
+                # existing object. GNU cp's explicit update policy avoids
+                # both while keeping partial Spot evidence recoverable.
+                cp -r --update=none "${WORK}/." "${PUBLISH}/" || true
+              }
+              trap publish EXIT
+
+              git clone --no-checkout \
+                "https://x-access-token:${GITHUB_TOKEN}@github.com/seedleap/sglang.git" \
+                /workspace/sglang
+              git -C /workspace/sglang checkout --detach "${SGLANG_GIT_REF}"
+              test "$(git -C /workspace/sglang rev-parse HEAD)" = "${SGLANG_GIT_REF}"
+              git -C /workspace/sglang status --short --branch \
+                | tee "${WORK}/sglang-source.txt"
+
+              python3 -m pip install --force-reinstall --no-deps \
+                nvidia-cuda-cccl==13.0.85 \
+                nvidia-cuda-crt==13.0.88 \
+                nvidia-cuda-nvcc==13.0.88 \
+                nvidia-nvvm==13.0.88 \
+                --root-user-action=ignore
+              CUDA_HOME=/opt/minwm/venv/lib/python3.12/site-packages/nvidia/cu13
+              export CUDA_HOME CUDACXX="${CUDA_HOME}/bin/nvcc"
+              export PATH="${CUDA_HOME}/bin:${PATH}"
+              if [[ ! -e "${CUDA_HOME}/lib64" ]]; then
+                ln -s lib "${CUDA_HOME}/lib64"
+              fi
+              if [[ ! -e "${CUDA_HOME}/lib/libcudart.so" ]]; then
+                ln -s libcudart.so.13 "${CUDA_HOME}/lib/libcudart.so"
+              fi
+              nvcc --version | tee "${WORK}/nvcc-version.txt"
+
+              git clone --filter=blob:none --no-checkout \
+                https://github.com/thu-ml/SageAttention.git \
+                /workspace/SageAttention
+              git -C /workspace/SageAttention checkout --detach \
+                "${SAGE_ATTENTION_GIT_REF}"
+              test "$(git -C /workspace/SageAttention rev-parse HEAD)" = \
+                "${SAGE_ATTENTION_GIT_REF}"
+              python3 -m pip install /workspace/SageAttention \
+                --no-build-isolation --root-user-action=ignore
+              python3 -m pip install /workspace/SageAttention/sageattention3_blackwell \
+                --no-build-isolation --root-user-action=ignore
+
+              apt-get update
+              apt-get install -y --no-install-recommends gnupg ca-certificates
+              os_release="$(. /etc/os-release; printf '%s' "${VERSION_ID//./}")"
+              architecture="$(dpkg --print-architecture)"
+              echo "deb https://developer.download.nvidia.com/devtools/repos/ubuntu${os_release}/${architecture}/ /" \
+                > /etc/apt/sources.list.d/nvidia-devtools.list
+              apt-key adv --fetch-keys \
+                https://developer.download.nvidia.com/compute/cuda/repos/ubuntu1804/x86_64/7fa2af80.pub
+              apt-get update
+              apt-get install -y --no-install-recommends nsight-systems-cli
+              nsys --version | tee "${WORK}/nsys-version.txt"
+              nsys status -e | tee "${WORK}/nsys-environment.txt" || true
+
+              nvidia-smi -q > "${WORK}/nvidia-smi-q.txt"
+              python3 - <<'PY' | tee "${WORK}/runtime.json"
+              import importlib.metadata
+              import json
+              import torch
+
+              print(json.dumps({
+                  "compute_capability": torch.cuda.get_device_capability(0),
+                  "cuda": torch.version.cuda,
+                  "flash_attn": importlib.metadata.version("flash-attn"),
+                  "gpu": torch.cuda.get_device_name(0),
+                  "sageattention": importlib.metadata.version("sageattention"),
+                  "torch": torch.__version__,
+              }, indent=2, sort_keys=True))
+              PY
+
+              BENCH=/workspace/sglang/benchmark/minwm_realtime_parity/benchmark_attention_kernels.py
+              python3 "${BENCH}" \
+                --presets smoke,480p,480p-cross,704p,704p-cross \
+                --backends sdpa,fa4_dense,fa4,sage2,sage3 \
+                --sink-frames 4 \
+                --window-frames 20 \
+                --warmup 3 \
+                --iterations 10 \
+                --output "${WORK}/benchmark.json" \
+                > "${WORK}/benchmark.stdout.log" 2>&1
+
+              nsys profile \
+                --trace=cuda,nvtx \
+                --sample=none \
+                --cpuctxsw=none \
+                --cuda-graph-trace=node \
+                --force-overwrite=true \
+                --output="${WORK}/minwm-attention-sm120" \
+                python3 "${BENCH}" \
+                  --presets smoke,480p,480p-cross,704p,704p-cross \
+                  --backends sdpa,fa4_dense,fa4,sage2,sage3 \
+                  --sink-frames 4 \
+                  --window-frames 20 \
+                  --warmup 2 \
+                  --iterations 3 \
+                  --output "${WORK}/profile-benchmark.json" \
+                > "${WORK}/nsys-profile.log" 2>&1
+
+              nsys export \
+                --type sqlite \
+                --force-overwrite=true \
+                --output "${WORK}/minwm-attention-sm120.sqlite" \
+                "${WORK}/minwm-attention-sm120.nsys-rep"
+              nsys stats --force-export=true \
+                --report cuda_gpu_kern_sum --format csv \
+                "${WORK}/minwm-attention-sm120.nsys-rep" \
+                > "${WORK}/cuda-gpu-kernel-summary.raw.txt"
+              nsys stats --force-export=true \
+                --report cuda_api_sum --format csv \
+                "${WORK}/minwm-attention-sm120.nsys-rep" \
+                > "${WORK}/cuda-api-summary.raw.txt"
+              nsys stats --force-export=true \
+                --report nvtx_sum --format csv \
+                "${WORK}/minwm-attention-sm120.nsys-rep" \
+                > "${WORK}/nvtx-summary.raw.txt"
+              for report in cuda-gpu-kernel-summary cuda-api-summary nvtx-summary; do
+                sed -n '/^Time (%)/,$p' "${WORK}/${report}.raw.txt" \
+                  > "${WORK}/${report}.csv"
+                test -s "${WORK}/${report}.csv"
+              done
+              sha256sum "${WORK}"/* > "${WORK}/SHA256SUMS"
+              publish
+              test -s "${PUBLISH}/benchmark.json"
+              test -s "${PUBLISH}/minwm-attention-sm120.nsys-rep"
+              echo "MINWM_ATTENTION_KERNEL_PROFILE_COMPLETE ${PUBLISH}"
+          resources:
+            requests:
+              cpu: "8"
+              memory: 96Gi
+              nvidia.com/gpu: "1"
+            limits:
+              cpu: "14"
+              memory: 112Gi
+              nvidia.com/gpu: "1"
+          volumeMounts:
+            - name: s3
+              mountPath: /s3
+            - name: work
+              mountPath: /work
+            - name: shm
+              mountPath: /dev/shm
+      volumes:
+        - name: s3
+          persistentVolumeClaim:
+            claimName: s3-claim
+        - name: work
+          emptyDir: {}
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 32Gi

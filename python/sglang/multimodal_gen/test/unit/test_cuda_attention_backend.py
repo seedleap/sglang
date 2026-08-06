@@ -1,10 +1,14 @@
 import unittest
+import sys
 from unittest.mock import patch
 
 import torch
 
 from sglang.multimodal_gen.runtime.platforms.cuda import CudaPlatformBase
-from sglang.multimodal_gen.runtime.platforms.interface import AttentionBackendEnum
+from sglang.multimodal_gen.runtime.platforms.interface import (
+    AttentionBackendEnum,
+    DeviceCapability,
+)
 
 SDPA_BACKEND_CLS_STR = (
     "sglang.multimodal_gen.runtime.layers.attention.backends.sdpa.SDPABackend"
@@ -15,6 +19,7 @@ class FakeCudaPlatform(CudaPlatformBase):
     is_sm120_device = False
     is_blackwell_device = False
     supports_flash_attention = True
+    device_capability = (9, 0)
 
     @classmethod
     def is_sm120(cls):
@@ -32,12 +37,18 @@ class FakeCudaPlatform(CudaPlatformBase):
     ) -> bool:
         return cls.supports_flash_attention
 
+    @classmethod
+    def get_device_capability(cls, device_id: int = 0) -> DeviceCapability:
+        del device_id
+        return DeviceCapability(*cls.device_capability)
+
 
 class TestCudaAttentionBackendSelection(unittest.TestCase):
     def setUp(self):
         FakeCudaPlatform.is_sm120_device = False
         FakeCudaPlatform.is_blackwell_device = False
         FakeCudaPlatform.supports_flash_attention = True
+        FakeCudaPlatform.device_capability = (9, 0)
 
     def resolve(
         self,
@@ -94,6 +105,29 @@ class TestCudaAttentionBackendSelection(unittest.TestCase):
     def test_invalid_backend_raises(self):
         with self.assertRaisesRegex(ValueError, "Invalid attention backend"):
             self.resolve(AttentionBackendEnum.AITER_SAGE)
+
+    def test_requested_sage_attention_fails_without_dependency(self):
+        FakeCudaPlatform.device_capability = (12, 0)
+        with patch.dict(sys.modules, {"sageattention": None}):
+            with self.assertRaisesRegex(ImportError, "requested but is not installed"):
+                self.resolve(AttentionBackendEnum.SAGE_ATTN)
+
+    def test_requested_sage_attention_rejects_b200(self):
+        FakeCudaPlatform.device_capability = (10, 0)
+        with self.assertRaisesRegex(
+            RuntimeError, "does not support CUDA capability 10.0"
+        ):
+            self.resolve(AttentionBackendEnum.SAGE_ATTN)
+
+    def test_requested_sage_attention3_rejects_datacenter_blackwell(self):
+        for capability in ((10, 0), (10, 3)):
+            with self.subTest(capability=capability):
+                FakeCudaPlatform.device_capability = capability
+                version = f"{capability[0]}.{capability[1]}"
+                with self.assertRaisesRegex(
+                    RuntimeError, f"does not support CUDA capability {version}"
+                ):
+                    self.resolve(AttentionBackendEnum.SAGE_ATTN_3)
 
 
 if __name__ == "__main__":

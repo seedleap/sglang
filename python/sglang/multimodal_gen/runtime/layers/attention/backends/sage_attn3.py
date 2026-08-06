@@ -87,6 +87,9 @@ class SageAttention3Impl(AttentionImpl):
                 enable_gqa=True,
             )
         else:
+            # Upstream SageAttention3 centers K in place before quantizing. The
+            # caller may pass a persistent KV-cache view, so isolate it here.
+            key = key.clone(memory_format=torch.contiguous_format)
             output = sageattn3_blackwell(query, key, value, is_causal=self.causal)
         output = output.transpose(1, 2)
         return output

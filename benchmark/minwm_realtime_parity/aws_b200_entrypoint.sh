@@ -269,6 +269,44 @@ PY
 else
   echo "Skipped dependency installation for reused in-Pod benchmark environment"
 fi
+if [[ -n "${MINWM_SAGE_ATTENTION_BACKENDS:-}" \
+  && "${MINWM_SKIP_INSTALL:-0}" != "1" ]]; then
+  python3 -m pip install --force-reinstall --no-deps \
+    'nvidia-cuda-cccl==13.0.85' \
+    'nvidia-cuda-crt==13.0.88' \
+    'nvidia-cuda-nvcc==13.0.88' \
+    'nvidia-nvvm==13.0.88' \
+    --root-user-action=ignore
+  sage_cuda_home="${MINWM_SAGE_CUDA_HOME:-/opt/minwm/venv/lib/python3.12/site-packages/nvidia/cu13}"
+  [[ -x "${sage_cuda_home}/bin/nvcc" ]]
+  export CUDA_HOME="${sage_cuda_home}"
+  export CUDACXX="${CUDA_HOME}/bin/nvcc"
+  export PATH="${CUDA_HOME}/bin:${PATH}"
+  if [[ ! -e "${CUDA_HOME}/lib64" ]]; then
+    ln -s lib "${CUDA_HOME}/lib64"
+  fi
+  if [[ ! -e "${CUDA_HOME}/lib/libcudart.so" ]]; then
+    ln -s libcudart.so.13 "${CUDA_HOME}/lib/libcudart.so"
+  fi
+  nvcc --version | tee "${RESULTS}/sage-attention-nvcc.txt"
+  grep -q 'release 13\.0' "${RESULTS}/sage-attention-nvcc.txt"
+  sage_attention_ref="${MINWM_SAGE_ATTENTION_REF:-d1a57a546c3d395b1ffcbeecc66d81db76f3b4b5}"
+  sage_attention_source="$(mktemp -d)/SageAttention"
+  git clone --filter=blob:none --no-checkout \
+    https://github.com/thu-ml/SageAttention.git "${sage_attention_source}"
+  git -C "${sage_attention_source}" checkout --detach "${sage_attention_ref}"
+  [[ "$(git -C "${sage_attention_source}" rev-parse HEAD)" == "${sage_attention_ref}" ]]
+  printf '%s\n' "${sage_attention_ref}" \
+    > "${RESULTS}/sage-attention-source-ref.txt"
+  if [[ ",${MINWM_SAGE_ATTENTION_BACKENDS}," == *",sage_attn,"* ]]; then
+    python3 -m pip install "${sage_attention_source}" \
+      --no-build-isolation --root-user-action=ignore
+  fi
+  if [[ ",${MINWM_SAGE_ATTENTION_BACKENDS}," == *",sage_attn_3,"* ]]; then
+    python3 -m pip install "${sage_attention_source}/sageattention3_blackwell" \
+      --no-build-isolation --root-user-action=ignore
+  fi
+fi
 python3 - <<'PY' | tee "${RESULTS}/runtime.json"
 import importlib.util, json
 import diffusers, torch, transformers
@@ -277,10 +315,20 @@ print(json.dumps({
     "cuda": torch.version.cuda,
     "diffusers": diffusers.__version__,
     "peft_installed": importlib.util.find_spec("peft") is not None,
+    "sageattention_installed": importlib.util.find_spec("sageattention") is not None,
+    "sageattn3_installed": importlib.util.find_spec("sageattn3") is not None,
     "transformers": transformers.__version__,
     "gpu": torch.cuda.get_device_name(0),
 }, sort_keys=True))
 PY
+
+if [[ "${MINWM_RUN_SAGE_TESTS:-0}" == "1" ]]; then
+  python3 -m pytest -q \
+    /workspace/sglang/python/sglang/multimodal_gen/test/unit/test_sage_attention3_backend.py \
+    /workspace/sglang/python/sglang/multimodal_gen/test/unit/test_cuda_attention_backend.py \
+    /workspace/sglang/python/sglang/multimodal_gen/test/unit/realtime/test_minwm_realtime.py \
+    -k 'sage'
+fi
 
 if [[ -n "${MINWM_REUSE_MODEL_RUN_ID:-}" ]]; then
   [[ -f "${MODEL_DIR}/transformer/diffusion_pytorch_model.safetensors.index.json" ]]
@@ -1263,8 +1311,9 @@ else
 fi
 
 run_throughput_profile() {
-  local profile="$1" attention_impl="$2" packed_deterministic="$3"
-  local native_components="$4" torch_compile="$5" kv_frames="$6"
+  local profile="$1" attention_impl="$2" attention_backend="$3"
+  local packed_deterministic="$4" native_components="$5"
+  local torch_compile="$6" kv_frames="$7"
   local profile_dir="${LOCAL_RESULTS}/throughput/${profile}"
   local profile_results="${RESULTS}/throughput/${profile}"
   local quantization_args=()
@@ -1272,6 +1321,7 @@ run_throughput_profile() {
   local client_args=(
     --output "${profile_dir}/throughput.json"
     --profile-name "${profile}"
+    --sink-size "${MINWM_ATTENTION_KV_SINK_SIZE}"
     --kv-cache-num-frames "${kv_frames}"
   )
   if [[ -n "${MINWM_PROFILE_QUANTIZATION:-}" ]]; then
@@ -1300,7 +1350,7 @@ run_throughput_profile() {
   sglang serve \
     --model-path "${MODEL_DIR}" \
     --pipeline-class-name MinWMCausalDMDPipeline \
-    --attention-backend fa \
+    --attention-backend "${attention_backend}" \
     --performance-mode speed \
     "${quantization_args[@]}" \
     "${transformer_args[@]}" \
@@ -1341,15 +1391,32 @@ run_throughput_profile() {
   return "${profile_status}"
 }
 
+MINWM_ATTENTION_KV_SINK_SIZE="${MINWM_ATTENTION_KV_SINK_SIZE:-4}"
+MINWM_ATTENTION_KV_WINDOW_SIZE="${MINWM_ATTENTION_KV_WINDOW_SIZE:-20}"
+if (( MINWM_ATTENTION_KV_SINK_SIZE < 0 )); then
+  echo "MINWM_ATTENTION_KV_SINK_SIZE must be non-negative" >&2
+  exit 1
+fi
+if (( MINWM_ATTENTION_KV_WINDOW_SIZE <= MINWM_ATTENTION_KV_SINK_SIZE )); then
+  echo "MINWM_ATTENTION_KV_WINDOW_SIZE must be greater than MINWM_ATTENTION_KV_SINK_SIZE" >&2
+  exit 1
+fi
+attention_kv_suffix="kv${MINWM_ATTENTION_KV_WINDOW_SIZE}"
 profiles=(
-  "exact-packed-det-kv128 packed true text_encoder,vae false 128"
-  "exact-packed-det-kv45 packed true text_encoder,vae false 45"
-  "packed-nondeterministic-kv45 packed false text_encoder,vae false 45"
-  "lingbot-style-dense-native-kv45 dense false text_encoder,vae false 45"
-  "dense-optimized-components-kv45 dense false '' false 45"
+  "exact-packed-det-${attention_kv_suffix} packed fa true text_encoder,vae false ${MINWM_ATTENTION_KV_WINDOW_SIZE}"
+  "packed-optimized-components-${attention_kv_suffix} packed fa false '' false ${MINWM_ATTENTION_KV_WINDOW_SIZE}"
+  "packed-nondeterministic-${attention_kv_suffix} packed fa false text_encoder,vae false ${MINWM_ATTENTION_KV_WINDOW_SIZE}"
+  "lingbot-style-dense-native-${attention_kv_suffix} dense fa false text_encoder,vae false ${MINWM_ATTENTION_KV_WINDOW_SIZE}"
+  "dense-optimized-components-${attention_kv_suffix} dense fa false '' false ${MINWM_ATTENTION_KV_WINDOW_SIZE}"
 )
 if [[ "${MINWM_INCLUDE_COMPILE_PROFILE:-true}" == "true" ]]; then
-  profiles+=("dense-optimized-compile-kv45 dense false '' true 45")
+  profiles+=("dense-optimized-compile-${attention_kv_suffix} dense fa false '' true ${MINWM_ATTENTION_KV_WINDOW_SIZE}")
+fi
+if [[ ",${MINWM_SAGE_ATTENTION_BACKENDS:-}," == *",sage_attn,"* ]]; then
+  profiles+=("dense-sage-attn-${attention_kv_suffix} dense sage_attn false '' false ${MINWM_ATTENTION_KV_WINDOW_SIZE}")
+fi
+if [[ ",${MINWM_SAGE_ATTENTION_BACKENDS:-}," == *",sage_attn_3,"* ]]; then
+  profiles+=("dense-sage-attn-3-${attention_kv_suffix} dense sage_attn_3 false '' false ${MINWM_ATTENTION_KV_WINDOW_SIZE}")
 fi
 if [[ -n "${MINWM_THROUGHPUT_PROFILES:-}" ]]; then
   selected_profiles=()
@@ -1367,12 +1434,13 @@ if [[ -n "${MINWM_THROUGHPUT_PROFILES:-}" ]]; then
 fi
 profile_failures=()
 for spec in "${profiles[@]}"; do
-  read -r profile attention_impl packed_deterministic native_components torch_compile kv_frames <<< "${spec}"
+  read -r profile attention_impl attention_backend packed_deterministic native_components torch_compile kv_frames <<< "${spec}"
   if [[ "${native_components}" == "''" ]]; then
     native_components=""
   fi
   if ! run_throughput_profile \
-    "${profile}" "${attention_impl}" "${packed_deterministic}" \
+    "${profile}" "${attention_impl}" "${attention_backend}" \
+    "${packed_deterministic}" \
     "${native_components}" "${torch_compile}" "${kv_frames}"; then
     profile_failures+=("${profile}")
   fi
@@ -1381,7 +1449,9 @@ done
 python3 - "${RESULTS}/throughput" "${RESULTS}/throughput-summary.json" \
   "${profile_failures[*]}" \
   "${MINWM_PROFILE_QUANTIZATION_LABEL:-${MINWM_PROFILE_QUANTIZATION:-}}" \
-  "${SGLANG_DIFFUSION_FLASHINFER_FP4_GEMM_BACKEND:-}" <<'PY'
+  "${SGLANG_DIFFUSION_FLASHINFER_FP4_GEMM_BACKEND:-}" \
+  "${MINWM_ATTENTION_KV_SINK_SIZE}" \
+  "${MINWM_ATTENTION_KV_WINDOW_SIZE}" <<'PY'
 import json, sys
 from pathlib import Path
 
@@ -1395,8 +1465,13 @@ summary = {
     "failed_profiles": sys.argv[3].split() if sys.argv[3] else [],
     "quantization": sys.argv[4] or None,
     "nvfp4_backend": sys.argv[5] or None,
+    "kv_contract": {
+        "sink_size": int(sys.argv[6]),
+        "window_size": int(sys.argv[7]),
+    },
 }
-exact_name = "exact-packed-det-kv45"
+kv_suffix = f"kv{sys.argv[7]}"
+exact_name = f"exact-packed-det-{kv_suffix}"
 comparisons = {}
 if exact_name in profiles:
     exact = profiles[exact_name]
@@ -1427,24 +1502,32 @@ if exact_name in profiles:
 summary["comparisons"] = comparisons
 isolated_pairs = {
     "deterministic_packed_tax": (
-        "exact-packed-det-kv45",
-        "packed-nondeterministic-kv45",
+        f"exact-packed-det-{kv_suffix}",
+        f"packed-nondeterministic-{kv_suffix}",
     ),
     "packed_vs_lingbot_style_dense": (
-        "exact-packed-det-kv45",
-        "lingbot-style-dense-native-kv45",
+        f"exact-packed-det-{kv_suffix}",
+        f"lingbot-style-dense-native-{kv_suffix}",
     ),
     "native_component_tax": (
-        "lingbot-style-dense-native-kv45",
-        "dense-optimized-components-kv45",
+        f"lingbot-style-dense-native-{kv_suffix}",
+        f"dense-optimized-components-{kv_suffix}",
     ),
     "whole_compile_effect": (
-        "dense-optimized-components-kv45",
-        "dense-optimized-compile-kv45",
+        f"dense-optimized-components-{kv_suffix}",
+        f"dense-optimized-compile-{kv_suffix}",
     ),
-    "kv128_vs_kv45_effect": (
-        "exact-packed-det-kv128",
-        "exact-packed-det-kv45",
+    "packed_vs_dense_fa": (
+        f"dense-optimized-components-{kv_suffix}",
+        f"packed-optimized-components-{kv_suffix}",
+    ),
+    "sage_attn_vs_dense_fa": (
+        f"dense-optimized-components-{kv_suffix}",
+        f"dense-sage-attn-{kv_suffix}",
+    ),
+    "sage_attn_3_vs_dense_fa": (
+        f"dense-optimized-components-{kv_suffix}",
+        f"dense-sage-attn-3-{kv_suffix}",
     ),
 }
 isolated = {}
@@ -1485,6 +1568,144 @@ print(json.dumps({
     for name, value in profiles.items()
 }, indent=2, sort_keys=True))
 PY
+
+run_attention_quality_profile() {
+  local profile="$1" attention_impl="$2" attention_backend="$3"
+  local packed_deterministic="$4" kv_frames="$5"
+  local profile_dir="${LOCAL_RESULTS}/attention-quality/${profile}"
+  local profile_results="${RESULTS}/attention-quality/${profile}"
+  mkdir -p "${profile_dir}" "${profile_results}"
+  MINWM_ATTENTION_IMPL="${attention_impl}" \
+  MINWM_PACKED_ATTENTION_DETERMINISTIC="${packed_deterministic}" \
+  MINWM_NATIVE_COMPONENTS="" \
+  sglang serve \
+    --model-path "${MODEL_DIR}" \
+    --pipeline-class-name MinWMCausalDMDPipeline \
+    --attention-backend "${attention_backend}" \
+    --performance-mode speed \
+    --enable-torch-compile false \
+    --warmup-mode off \
+    --port 30000 \
+    > "${profile_results}/server.log" 2>&1 &
+  local profile_server_pid=$!
+  if ! wait_for_server "${profile_server_pid}" "${profile_results}/server.log"; then
+    kill "${profile_server_pid}" 2>/dev/null || true
+    wait "${profile_server_pid}" 2>/dev/null || true
+    return 1
+  fi
+  set +e
+  python3 "${SCRIPT_DIR}/run_sglang_api.py" \
+    --cases "${MINWM_ATTENTION_QUALITY_CASES_PATH}" \
+    --results "${profile_dir}" \
+    --ws-url ws://127.0.0.1:30000/v1/realtime_video/generate \
+    --case "${MINWM_ATTENTION_QUALITY_CASE}" \
+    --sink-size "${MINWM_ATTENTION_KV_SINK_SIZE}" \
+    --kv-cache-num-frames "${kv_frames}" \
+    --output-prefix output \
+    --engine-name "minwm-${profile}" \
+    > >(tee "${profile_results}/client.log") 2>&1
+  local profile_status=$?
+  set -e
+  kill "${profile_server_pid}" 2>/dev/null || true
+  wait "${profile_server_pid}" 2>/dev/null || true
+  if (( profile_status == 0 )); then
+    cp -r "${profile_dir}/." "${profile_results}/"
+  fi
+  return "${profile_status}"
+}
+
+if [[ "${MINWM_RUN_ATTENTION_QUALITY:-0}" == "1" ]]; then
+  : "${MINWM_ATTENTION_QUALITY_CASES_PATH:=${MINWM_THROUGHPUT_CASES_PATH:-${SCRIPT_DIR}/cases_720p_compile_smoke.json}}"
+  : "${MINWM_ATTENTION_QUALITY_CASE:=${MINWM_THROUGHPUT_CASE:-00_forward_080_pottery_720p}}"
+  quality_kv_frames="${MINWM_ATTENTION_QUALITY_KV_FRAMES:-${MINWM_ATTENTION_KV_WINDOW_SIZE}}"
+  quality_specs=(
+    "packed-fa packed fa true"
+    "dense-fa dense fa false"
+  )
+  if [[ ",${MINWM_SAGE_ATTENTION_BACKENDS:-}," == *",sage_attn,"* ]]; then
+    quality_specs+=("dense-sage-attn dense sage_attn false")
+  fi
+  if [[ ",${MINWM_SAGE_ATTENTION_BACKENDS:-}," == *",sage_attn_3,"* ]]; then
+    quality_specs+=("dense-sage-attn-3 dense sage_attn_3 false")
+  fi
+  quality_failures=()
+  for spec in "${quality_specs[@]}"; do
+    read -r profile attention_impl attention_backend packed_deterministic <<< "${spec}"
+    if ! run_attention_quality_profile \
+      "${profile}" "${attention_impl}" "${attention_backend}" \
+      "${packed_deterministic}" "${quality_kv_frames}"; then
+      quality_failures+=("${profile}")
+    fi
+  done
+  python3 - \
+    "${LOCAL_RESULTS}/attention-quality" \
+    "${RESULTS}/attention-quality-summary.json" \
+    "${MINWM_ATTENTION_QUALITY_CASE}" \
+    "${quality_failures[*]}" <<'PY'
+import concurrent.futures
+import json
+import math
+import sys
+from pathlib import Path
+
+import numpy as np
+from skimage.metrics import structural_similarity
+
+root = Path(sys.argv[1])
+output = Path(sys.argv[2])
+case = sys.argv[3]
+failures = sys.argv[4].split() if sys.argv[4] else []
+reference_path = root / "dense-fa" / "cases" / case / "output.npy"
+reference = np.load(reference_path, mmap_mode="r", allow_pickle=False)
+
+
+def frame_ssim(pair):
+    reference_frame, candidate_frame = pair
+    return structural_similarity(
+        reference_frame,
+        candidate_frame,
+        channel_axis=-1,
+        data_range=255,
+    )
+
+
+comparisons = {}
+for path in sorted(root.glob(f"*/cases/{case}/output.npy")):
+    profile = path.parents[2].name
+    candidate = np.load(path, mmap_mode="r", allow_pickle=False)
+    if candidate.shape != reference.shape:
+        raise ValueError(
+            f"{profile} shape {candidate.shape} != dense-fa shape {reference.shape}"
+        )
+    difference = candidate.astype(np.float32) - reference.astype(np.float32)
+    mse = float(np.mean(np.square(difference), dtype=np.float64))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+        ssim_values = list(executor.map(frame_ssim, zip(reference, candidate)))
+    comparisons[profile] = {
+        "reference_profile": "dense-fa",
+        "shape": list(candidate.shape),
+        "bitwise_equal": bool(np.array_equal(reference, candidate)),
+        "max_abs": float(np.max(np.abs(difference), initial=0)),
+        "mae": float(np.mean(np.abs(difference), dtype=np.float64)),
+        "rmse": math.sqrt(mse),
+        "psnr_db": None if mse == 0 else 20 * math.log10(255 / math.sqrt(mse)),
+        "mean_frame_ssim": float(np.mean(ssim_values)),
+        "min_frame_ssim": float(np.min(ssim_values)),
+        "changed_value_fraction": float(np.count_nonzero(difference) / difference.size),
+    }
+summary = {
+    "case": case,
+    "reference_profile": "dense-fa",
+    "failed_profiles": failures,
+    "comparisons": comparisons,
+}
+output.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
+print(json.dumps(summary, indent=2, sort_keys=True))
+PY
+  if (( ${#quality_failures[@]} != 0 )); then
+    profile_failures+=("attention-quality:${quality_failures[*]}")
+  fi
+fi
 
 echo "MINWM_B200_FULL_COMPLETE results=${RESULTS} bitwise_status=${bitwise_status} numeric_status=${numeric_status} profile_failures=${profile_failures[*]}"
 if (( bitwise_status != 0 && numeric_status != 0 )); then
