@@ -1,6 +1,6 @@
 # MinWM static FP8 2× 调查与执行记录
 
-更新时间：2026-08-05
+更新时间：2026-08-06
 
 ## 1. 验收合同
 
@@ -16,15 +16,21 @@
 固定 720p B200 Spot 第一轮结果：BF16 `14.079` client FPS，online FP8
 `14.122`，static FP8 `14.158`。static FP8 只提高 `0.56%`，没有达到目标。
 
-同一轮 server trace 的代表性 steady chunk：
+同一轮 server trace 的全部 200 个 measured chunks 聚合（不是挑单个最优 chunk）：
 
-| 阶段 | BF16 | static FP8 | 结论 |
-|---|---:|---:|---|
-| DiT denoise | 568.381 ms | 571.671 ms | static FP8 没有加速 DiT |
-| VAE decode pipeline | 468.084 ms | 467.182 ms | 未量化路径，基本相同 |
-| scheduler total | 1126.456 ms | 1129.172 ms | 与 DiT/VAE 事实一致 |
+| 阶段 | BF16 mean / p50 | static FP8 mean / p50 | static 相对 BF16 |
+|---|---:|---:|---:|
+| DiT denoise | 566.045 / 565.869 ms | 569.782 / 569.182 ms | `-0.66%`（变慢） |
+| VAE decode pipeline | 468.655 / 468.592 ms | 466.961 / 467.032 ms | `+0.36%` |
+| scheduler total | 1135.394 ms | 1129.063 ms | `+0.56%` |
+| chunk total | 1173.071 ms | 1160.667 ms | `+1.07%` |
 
-这排除了“客户端传输吞掉了一个很大的 DiT 收益”：static FP8 在模型层就没有拿到收益。
+BF16 denoise 的 min/max 为 `560.364/579.700 ms`，static 为 `566.532/574.714 ms`；两组分布
+整体重叠但 static 均值更慢。客户端的 `+0.56%` 不能归因于 FP8 DiT：它来自 VAE、raw frame
+构造、WebSocket 写入及运行间噪声的合计差异。代表性 chunk 219（BF16/static 的 denoise
+`568.381/571.671 ms`）与全量聚合结论一致。
+
+这排除了“客户端传输吞掉了一个很大的 DiT 收益”：旧 static FP8 在模型层就没有拿到收益。
 
 ## 3. 与“调研 minWM 量化吞吐方案”任务的差异
 
@@ -39,6 +45,17 @@ static FP8 `24.859` client FPS。它与本轮不能直接横比：
 4. 两轮 static FP8 都进入 diffusion ModelOpt 的旧实现，尚未使用主 SRT 已有的 SM100
    per-tensor FlashInfer GEMM。因此 `+7.2%` 与 `+0.56%` 都不是 B200 static FP8 的合理上限。
 
+隔壁任务还有一个容易造成“static 看起来很差/online 看起来很好”的计时事实：在它的 480p
+实验里，online/static 的 denoise 分别为 `357.15/402.55 ms`，VAE 为
+`219.97/219.26 ms`。约 30 blocks × 10 Linear × 4 steps，即约 1200 次 Linear/chunk；
+`45.4 ms / 1200 ≈ 37.8 µs/Linear`，正好符合旧 static 路径每层额外 scale layout、Triton
+static quant 和 generic scaled-mm dispatch 开销的量级，而不是 FP8 Tensor Core 的硬件极限。
+
+另外，隔壁 A/B 的 online SHA 为 `47a8bcbf...`，static 实际 SHA 为 `4a66501d...`，Job
+annotation 还记录 `afbee9c...`；static builder、权重量化尺度、calibration 分辨率和吞吐
+case 也没有完全对齐。它适合发现候选方向，不足以给出“量化方法本身”的因果排序。本轮差异大，
+主要是口径（720p vs 480p）和实验同构性不同；两边共同指向的代码根因反而是一致的。
+
 后续会在同一 immutable SHA、同一 B200 Spot、同一输入上重跑分层 A/B；不再用旧矩阵外推。
 
 ## 4. 根因与修复决策
@@ -46,7 +63,10 @@ static FP8 `24.859` client FPS。它与本轮不能直接横比：
 代码审计发现，主 SRT 的 `ModelOptFp8LinearMethod` 已在 SM100 使用
 `apply_fp8_linear_bmm_flashinfer`：保留 scalar weight/input scale，并调用 FlashInfer per-tensor
 FP8 BMM。diffusion 复制版没有同步该实现：它把 scalar weight scale 扩成 per-channel scale，
-随后调用通用 CUTLASS `apply_fp8_linear`。
+static activation 又先进入 Triton `_static_quant_fp8`；因为 generic CUTLASS 路径只接收
+per-token activation scale，还会把 scalar input scale 物化为 `(M, 1)`。最后才调用通用
+`apply_fp8_linear` / `fp8_scaled_mm`。online FP8 则已经使用 CUDA per-token quant，所以旧 static
+并不天然比 online 少开销。
 
 第一项修复：让 diffusion static FP8 在 SM100 + FlashInfer 可用时复用同一 per-tensor 快路径；
 其他硬件和 fallback 行为保持不变。验证分三层：
@@ -57,9 +77,16 @@ FP8 BMM。diffusion 复制版没有同步该实现：它把 scalar weight scale 
 
 ## 5. Amdahl 上限与待决事项
 
-当前顺序流水线中，BF16 代表 chunk 的 DiT 约 `568 ms`、VAE 约 `468 ms`。即使把 DiT
-时间降为零，其他阶段仍接近 `558 ms`；客户端理论上限约 `28.7 FPS`，只略高于
-`2x BF16 = 28.158 FPS`。因此单独修 GEMM 几乎不可能稳定满足端到端 2×。
+按全部 200 chunks 的 BF16 scheduler 均值，DiT 为 `566.045 ms`、VAE 为 `468.655 ms`、
+其余调度约 `100.695 ms`。客户端基线 `14.079 FPS` 的 2× 目标要求 chunk interval 不超过
+`16 / 28.158 = 568.22 ms`。当前顺序执行即使把 DiT 降到零，VAE + 其他调度仍约
+`569.35 ms`，已略高于目标。因此只修 static FP8 GEMM 在物理上无法稳定满足客户端端到端 2×。
+
+若把 VAE 放到同一台 p6 主机的另一张 GPU，并与下一 chunk 的 DiT 重叠，稳态 interval 近似
+`max(DiT + 其他调度, VAE)`。这时要满足 `568.22 ms`，DiT 必须低于约 `467.53 ms`，即相对
+BF16 至少加速 `1.211x`（denoise 时间至少降低 `17.4%`）。这给下一阶段建立了明确的进入条件：
+先用 B200 microbenchmark/完整 denoise 证明新快路径能越过这个阈值，再实现和测量 VAE overlap；
+不能把两项收益混在一起归因给 static FP8。
 
 这不是提前降低验收标准。先实测快路径后的 DiT/端到端数字；若 Amdahl 瓶颈按预期转移到
 VAE/调度，则继续做不降低画质的流水化或阶段并行，并分别报告：
@@ -115,3 +142,12 @@ VAE/调度，则继续做不降低画质的流水化或阶段并行，并分别�
   留有 provenance 和 `pytest.log`，证明主因是 PEFT/Transformers API 不兼容。最终判断以 S3 日志为准。
 - 决策：暂停尚未拿到节点的 `-04`，避免它用同样环境失败；`-05` 沿用短安装路径并显式
   `pip uninstall -y peft`。保留 suspended `-04`，不删除旧 Job。
+
+### 2026-08-06：B200 Spot 微基准 `-05`
+
+- profile/context：仍严格为 `spot` / `minwm-spot`；代码固定在 `761b76f520...`，镜像固定为
+  `sha256:bedc07ea...`。
+- 当前状态：Pod 已触发 `minwm-test-b200-spot-j9hbq` NodeClaim，正在等待 AWS 提供
+  `p6-b200.48xlarge` Spot 容量。正式性能数字尚未产生。
+- 现场变量：同集群同时存在另一个请求 B200 的任务，会影响获取节点的等待时间；它不会共享本 Pod
+  的 GPU，也不会进入正式计时窗口，因此节点成功独占后不影响测量合同。
