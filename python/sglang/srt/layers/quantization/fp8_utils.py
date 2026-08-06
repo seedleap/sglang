@@ -1626,6 +1626,28 @@ def apply_fp8_linear_bmm_flashinfer(
     return output.view(*output_shape)
 
 
+def apply_fp8_linear_scaled_mm(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    input_scale: torch.Tensor,
+    bias: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """Per-tensor static FP8 linear via the native scaled-mm backend."""
+    output_shape = [*input.shape[:-1], weight.shape[1]]
+    input_2d = input.view(-1, input.shape[-1])
+    qinput, x_scale = static_quant_fp8(input_2d, input_scale, repeat_scale=False)
+    output = torch._scaled_mm(
+        qinput,
+        weight,
+        scale_a=x_scale.reshape(1),
+        scale_b=weight_scale.reshape(1),
+        out_dtype=input.dtype,
+        bias=bias,
+    )
+    return output.view(*output_shape)
+
+
 def apply_fp8_linear(
     input: torch.Tensor,
     weight: torch.Tensor,

@@ -84,12 +84,9 @@ def _build_layer(
     return layer, method
 
 
-def test_sm100_static_fp8_routes_to_flashinfer(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_sm100_static_fp8_routes_to_scaled_mm(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(diffusion_modelopt_quant, "cutlass_fp8_supported", lambda: True)
     monkeypatch.setattr(diffusion_modelopt_quant, "is_sm100_supported", lambda: True)
-    monkeypatch.setattr(
-        diffusion_modelopt_quant, "is_flashinfer_available", lambda: True
-    )
 
     method = ModelOptFp8LinearMethod(
         ModelOptFp8Config(is_checkpoint_fp8_serialized=True)
@@ -101,7 +98,7 @@ def test_sm100_static_fp8_routes_to_flashinfer(monkeypatch: pytest.MonkeyPatch) 
     x = torch.ones((2, 8))
     expected = torch.full((2, 4), 7.0)
 
-    def fake_flashinfer(**kwargs):
+    def fake_scaled_mm(**kwargs):
         assert kwargs["input"] is x
         assert kwargs["weight_scale"].ndim == 0
         assert kwargs["input_scale"].ndim == 0
@@ -109,8 +106,8 @@ def test_sm100_static_fp8_routes_to_flashinfer(monkeypatch: pytest.MonkeyPatch) 
 
     monkeypatch.setattr(
         diffusion_modelopt_quant,
-        "apply_fp8_linear_bmm_flashinfer",
-        fake_flashinfer,
+        "apply_fp8_linear_scaled_mm",
+        fake_scaled_mm,
     )
     monkeypatch.setattr(
         diffusion_modelopt_quant,
@@ -118,7 +115,7 @@ def test_sm100_static_fp8_routes_to_flashinfer(monkeypatch: pytest.MonkeyPatch) 
         lambda **kwargs: pytest.fail("generic FP8 path must not run on SM100"),
     )
 
-    assert method.enable_flashinfer_bmm
+    assert method.enable_sm100_scaled_mm
     assert method.apply(layer, x) is expected
 
 
@@ -141,7 +138,7 @@ def test_checkpoint_processing(m: int, n: int, k: int) -> None:
     assert tuple(layer.weight.stride()) == (1, k)
     assert layer.weight.dtype == torch.float8_e4m3fn
     assert layer.input_scale.ndim == 0
-    expected_scale_shape = () if method.enable_flashinfer_bmm else (n, 1)
+    expected_scale_shape = () if method.enable_sm100_scaled_mm else (n, 1)
     assert tuple(layer.weight_scale.shape) == expected_scale_shape
 
     expected_weight = weight_q.t().to(torch.float32) * weight_scale.to(torch.float32)
@@ -169,7 +166,7 @@ def test_shape_correctness(m: int, n: int, k: int) -> None:
         x.contiguous(),
         layer.input_scale,
         repeat_scale=(
-            method.cutlass_fp8_supported and not method.enable_flashinfer_bmm
+            method.cutlass_fp8_supported and not method.enable_sm100_scaled_mm
         ),
     )
     expected = torch.matmul(

@@ -16,6 +16,7 @@ from sglang.srt.layers.quantization import fp8_utils
 from sglang.srt.layers.quantization.fp8_utils import (
     apply_fp8_linear,
     apply_fp8_linear_bmm_flashinfer,
+    apply_fp8_linear_scaled_mm,
     input_to_float8,
     static_quant_fp8,
 )
@@ -104,15 +105,11 @@ def _benchmark_shape(
         )
 
     def torch_scaled_mm_static_fp8() -> torch.Tensor:
-        quantized_input, quantized_input_scale = static_quant_fp8(
-            x, input_scale, repeat_scale=False
-        )
-        return torch._scaled_mm(
-            quantized_input,
-            weight_t,
-            scale_a=quantized_input_scale.reshape(1),
-            scale_b=weight_scale.reshape(1),
-            out_dtype=x.dtype,
+        return apply_fp8_linear_scaled_mm(
+            input=x,
+            weight=weight_t,
+            weight_scale=weight_scale,
+            input_scale=input_scale,
         )
 
     def scalar_static_quant() -> torch.Tensor:
