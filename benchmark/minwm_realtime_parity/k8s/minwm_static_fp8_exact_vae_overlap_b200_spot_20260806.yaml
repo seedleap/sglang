@@ -1,18 +1,18 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: minwm-static-fp8-exact-vae-overlap-b200-20260806-03
+  name: minwm-static-fp8-exact-vae-overlap-b200-20260806-04
   namespace: ray
   labels:
-    app.kubernetes.io/name: minwm-static-fp8-exact-vae-overlap-b200-20260806-03
+    app.kubernetes.io/name: minwm-static-fp8-exact-vae-overlap-b200-20260806-04
     seedleap.ai/owner: chenshengdong
     seedleap.ai/task: minwm-static-fp8-2x
-    seedleap.ai/run-id: minwm-static-fp8-exact-vae-overlap-b200-20260806-03
+    seedleap.ai/run-id: minwm-static-fp8-exact-vae-overlap-b200-20260806-04
   annotations:
     seedleap.ai/capacity-type: spot
     seedleap.ai/repo: seedleap/sglang
     seedleap.ai/branch: codex/minwm-realtime-api
-    seedleap.ai/sglang-git-ref: "f8db2001adc02925daf8aeac00065481634da7ef"
+    seedleap.ai/sglang-git-ref: "417d47cace97b450b536cf855536e8d9f44c1eba"
     seedleap.ai/minwm-git-ref: "2efc6485f65e8fcab506665efde79bc41406385e"
     seedleap.ai/checkpoint-version-id: "wduScksw2f3yPErnG9lBioOuE2AToyAP"
 spec:
@@ -21,14 +21,14 @@ spec:
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: minwm-static-fp8-exact-vae-overlap-b200-20260806-03
+        app.kubernetes.io/name: minwm-static-fp8-exact-vae-overlap-b200-20260806-04
         seedleap.ai/owner: chenshengdong
         seedleap.ai/task: minwm-static-fp8-2x
-        seedleap.ai/run-id: minwm-static-fp8-exact-vae-overlap-b200-20260806-03
+        seedleap.ai/run-id: minwm-static-fp8-exact-vae-overlap-b200-20260806-04
       annotations:
         seedleap.ai/repo: seedleap/sglang
         seedleap.ai/branch: codex/minwm-realtime-api
-        seedleap.ai/sglang-git-ref: "f8db2001adc02925daf8aeac00065481634da7ef"
+        seedleap.ai/sglang-git-ref: "417d47cace97b450b536cf855536e8d9f44c1eba"
     spec:
       restartPolicy: Never
       terminationGracePeriodSeconds: 60
@@ -62,9 +62,9 @@ spec:
                 fieldRef:
                   fieldPath: spec.nodeName
             - name: MATRIX_ID
-              value: minwm-static-fp8-exact-vae-overlap-b200-20260806-03
+              value: minwm-static-fp8-exact-vae-overlap-b200-20260806-04
             - name: SGLANG_GIT_REF
-              value: "f8db2001adc02925daf8aeac00065481634da7ef"
+              value: "417d47cace97b450b536cf855536e8d9f44c1eba"
             - name: MINWM_GIT_REF
               value: "2efc6485f65e8fcab506665efde79bc41406385e"
             - name: MINWM_STAGE_FROM_MOUNT
@@ -90,7 +90,7 @@ spec:
             - name: MINWM_PRETRAINED_S3
               value: s3://leap-world-us-east-2/world-model/checkpoints/minWM/Wan2.2-TI2V-5B-from-diffusers
             - name: MINWM_RESULTS_ROOT
-              value: /s3/world-model/evals/minwm/quantization/20260805/static-fp8-2x/e2e-exact-vae-overlap-03
+              value: /s3/world-model/evals/minwm/quantization/20260805/static-fp8-2x/e2e-exact-vae-overlap-04
             - name: MINWM_CASES_PATH
               value: /workspace/sglang/benchmark/minwm_realtime_parity/cases_720p_compile_smoke.json
             - name: MINWM_THROUGHPUT_CASES_PATH
@@ -183,6 +183,7 @@ spec:
                 bash "${entrypoint}"
               echo "MINWM_STATIC_FP8_2X_LANE_END lane=static-local status=0 timestamp=$(date -Iseconds)"
 
+              vae_log_local="/work/${MATRIX_ID}-exact-vae-server.log"
               vae_log="${result_root}/${MATRIX_ID}-exact-vae-server.log"
               CUDA_VISIBLE_DEVICES=1 \
                 MINWM_NATIVE_COMPONENTS= \
@@ -198,17 +199,18 @@ spec:
                   --warmup-mode off \
                   --vae-decoder-host 127.0.0.1 \
                   --vae-decoder-port 31000 \
-                  > "${vae_log}" 2>&1 &
+                  > "${vae_log_local}" 2>&1 &
               vae_pid=$!
               cleanup_vae() {
                 kill "${vae_pid}" 2>/dev/null || true
                 wait "${vae_pid}" 2>/dev/null || true
+                cp "${vae_log_local}" "${vae_log}" 2>/dev/null || true
               }
               trap cleanup_vae EXIT INT TERM
               for _ in $(seq 1 300); do
                 curl --fail --silent http://127.0.0.1:31000/health >/dev/null && break
                 if ! kill -0 "${vae_pid}" 2>/dev/null; then
-                  tail -300 "${vae_log}" >&2
+                  tail -300 "${vae_log_local}" >&2
                   exit 1
                 fi
                 sleep 2
@@ -216,9 +218,9 @@ spec:
               curl --fail --silent http://127.0.0.1:31000/health >/dev/null
               if ! grep -Fq \
                 'Loaded vae: AutoencoderKLWan (sgl-diffusion version)' \
-                "${vae_log}"; then
+                "${vae_log_local}"; then
                 echo 'exact VAE server did not load the profile-matched SGLang VAE' >&2
-                tail -300 "${vae_log}" >&2
+                tail -300 "${vae_log_local}" >&2
                 exit 1
               fi
 
