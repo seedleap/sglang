@@ -667,6 +667,7 @@ if [[ "${MINWM_BENCHMARK_MODE}" == "calibratedfp8" ]]; then
       --calibration "${CALIBRATION_PATH}" \
       --output-dir "${STATIC_FP8_TRANSFORMER}" \
       --activation-margin "${MINWM_STATIC_FP8_MARGIN:-1.0}" \
+      --module-scope "${MINWM_STATIC_FP8_SCOPE:-all}" \
       | tee "${RESULTS}/static-fp8-conversion.log"
     cp "${CALIBRATION_PATH}" "${RESULTS}/"
     cp "${CALIBRATION_RESULTS}/baseline_run.json" "${RESULTS}/static-fp8-calibration-baseline.json"

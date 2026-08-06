@@ -22,6 +22,7 @@ from safetensors.torch import load_file, save_file
 FP8_MAX = 448.0
 INDEX_FILENAME = "diffusion_pytorch_model.safetensors.index.json"
 EXPECTED_MODULE_COUNT = 300
+EXPECTED_FFN_MODULE_COUNT = 60
 
 
 def _read_json(path: Path) -> dict:
@@ -69,6 +70,7 @@ def build_minwm_static_fp8_transformer(
     calibration_path: str,
     output_dir: str,
     activation_margin: float = 1.0,
+    module_scope: str = "all",
     overwrite: bool = False,
 ) -> dict:
     source = Path(input_dir).expanduser().resolve()
@@ -76,6 +78,8 @@ def build_minwm_static_fp8_transformer(
     calibration_file = Path(calibration_path).expanduser().resolve()
     if activation_margin < 1.0 or not math.isfinite(activation_margin):
         raise ValueError("activation_margin must be finite and >= 1")
+    if module_scope not in {"all", "ffn"}:
+        raise ValueError("module_scope must be 'all' or 'ffn'")
     if not (source / "config.json").is_file():
         raise FileNotFoundError(source / "config.json")
     if not (source / INDEX_FILENAME).is_file():
@@ -87,10 +91,22 @@ def build_minwm_static_fp8_transformer(
     output.mkdir(parents=True)
 
     input_amax = _load_calibration(calibration_file)
+    if module_scope == "ffn":
+        selected_input_amax = {
+            name: value for name, value in input_amax.items() if ".ffn." in name
+        }
+        # minWM maps checkpoint self_attn.* weights to block-level to_{q,k,v,out}
+        # modules and cross_attn.* weights below attn2 at runtime.
+        ignored_layers = ["to_q", "to_k", "to_v", "to_out", "attn2"]
+    else:
+        selected_input_amax = input_amax
+        ignored_layers = []
     index = _read_json(source / INDEX_FILENAME)
     source_weight_map = dict(index["weight_map"])
     missing = sorted(
-        name for name in input_amax if f"{name}.weight" not in source_weight_map
+        name
+        for name in selected_input_amax
+        if f"{name}.weight" not in source_weight_map
     )
     if missing:
         raise ValueError(
@@ -110,12 +126,12 @@ def build_minwm_static_fp8_transformer(
             shutil.copy2(entry, output / entry.name)
 
     modules_by_shard: dict[str, list[str]] = defaultdict(list)
-    for module_name in input_amax:
+    for module_name in selected_input_amax:
         modules_by_shard[source_weight_map[f"{module_name}.weight"]].append(module_name)
 
     quant_config = {
         "activation_scheme": "static",
-        "ignored_layers": [],
+        "ignored_layers": ignored_layers,
         "quant_method": "fp8",
     }
     config = _read_json(source / "config.json")
@@ -136,7 +152,7 @@ def build_minwm_static_fp8_transformer(
             weight_name = f"{module_name}.weight"
             quantized, weight_scale = _quantize_weight(tensors[weight_name])
             input_scale = torch.tensor(
-                [input_amax[module_name] * activation_margin / FP8_MAX],
+                [selected_input_amax[module_name] * activation_margin / FP8_MAX],
                 dtype=torch.float32,
             )
             tensors[weight_name] = quantized
@@ -148,9 +164,13 @@ def build_minwm_static_fp8_transformer(
             updated_weight_map[name] = shard_name
             total_size += tensor.numel() * tensor.element_size()
 
-    if quantized_count != EXPECTED_MODULE_COUNT:
+    expected_quantized_count = (
+        EXPECTED_FFN_MODULE_COUNT if module_scope == "ffn" else EXPECTED_MODULE_COUNT
+    )
+    if quantized_count != expected_quantized_count:
         raise RuntimeError(
-            f"expected to quantize {EXPECTED_MODULE_COUNT} weights, got {quantized_count}"
+            f"expected to quantize {expected_quantized_count} weights, "
+            f"got {quantized_count}"
         )
     with (output / INDEX_FILENAME).open("w", encoding="utf-8") as handle:
         json.dump(
@@ -169,6 +189,8 @@ def build_minwm_static_fp8_transformer(
         "activation_margin": activation_margin,
         "calibration_sha256": calibration_sha256,
         "format": "sglang-minwm-static-fp8-v1",
+        "ignored_layers": ignored_layers,
+        "module_scope": module_scope,
         "output_bytes": total_size,
         "quantized_weights": quantized_count,
     }
@@ -186,6 +208,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--calibration", required=True)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--activation-margin", type=float, default=1.0)
+    parser.add_argument("--module-scope", choices=("all", "ffn"), default="all")
     parser.add_argument("--overwrite", action="store_true")
     return parser.parse_args()
 
@@ -197,6 +220,7 @@ def main() -> None:
         calibration_path=args.calibration,
         output_dir=args.output_dir,
         activation_margin=args.activation_margin,
+        module_scope=args.module_scope,
         overwrite=args.overwrite,
     )
     print(json.dumps(manifest, indent=2, sort_keys=True))
