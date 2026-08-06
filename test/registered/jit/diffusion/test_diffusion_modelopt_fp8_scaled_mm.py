@@ -239,6 +239,39 @@ def test_scaled_mm_helper_uses_jit_per_tensor_quant(
     torch.testing.assert_close(actual, expected)
 
 
+def test_scaled_mm_helper_uses_triton_static_quant_for_large_m(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    x = torch.ones((8192, 16))
+    weight = torch.ones((16, 16)).t()
+    weight_scale = torch.tensor(0.5)
+    input_scale = torch.tensor(0.25)
+    qinput = torch.ones_like(x, dtype=torch.float8_e4m3fn)
+    expected = torch.full((8192, 16), 3.0)
+
+    def fake_quant(actual_input, actual_scale, repeat_scale):
+        assert actual_input.shape == x.shape
+        assert actual_input.data_ptr() == x.data_ptr()
+        assert actual_scale is input_scale
+        assert repeat_scale is False
+        return qinput, actual_scale
+
+    def fail_jit_quant(*_args, **_kwargs):
+        raise AssertionError("large-M static quant must not use the flat JIT kernel")
+
+    monkeypatch.setattr(fp8_utils, "static_quant_fp8", fake_quant)
+    monkeypatch.setattr(fp8_utils, "scaled_fp8_quant", fail_jit_quant)
+    monkeypatch.setattr(torch, "_scaled_mm", lambda *_args, **_kwargs: expected)
+
+    actual = fp8_utils.apply_fp8_linear_scaled_mm(
+        input=x,
+        weight=weight,
+        weight_scale=weight_scale,
+        input_scale=input_scale,
+    )
+    torch.testing.assert_close(actual, expected)
+
+
 def test_scaled_mm_helper_scopes_deterministic_fill_override(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -1661,7 +1661,15 @@ def apply_fp8_linear_scaled_mm(
     output_shape = [*input.shape[:-1], weight.shape[1]]
     input_2d = input.view(-1, input.shape[-1])
     with _skip_deterministic_fill_for_full_overwrite():
-        qinput, x_scale = scaled_fp8_quant(input_2d, input_scale)
+        # B200 measurements show the row-wise Triton kernel is faster once M is
+        # large (the minWM self-attention and both FFN projections), while the
+        # flat JIT kernel remains better for the small-M cross-attention shape.
+        if input_2d.is_contiguous() and input_2d.shape[0] >= 8192:
+            qinput, x_scale = static_quant_fp8(
+                input_2d, input_scale, repeat_scale=False
+            )
+        else:
+            qinput, x_scale = scaled_fp8_quant(input_2d, input_scale)
         output_size = weight.shape[1]
         needs_padding = weight.shape[0] % 16 != 0 or output_size % 16 != 0
         if needs_padding:
