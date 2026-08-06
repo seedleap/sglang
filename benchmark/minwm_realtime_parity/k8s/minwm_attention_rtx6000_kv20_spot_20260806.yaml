@@ -1,0 +1,171 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: minwm-attention-rtx6000-kv20-704p-20260806-01
+  namespace: ray
+  labels:
+    app.kubernetes.io/name: minwm-attention-rtx6000-kv20-704p-20260806-01
+    seedleap.ai/owner: chenshengdong
+    seedleap.ai/task: minwm-attention
+    seedleap.ai/run-id: minwm-attention-rtx6000-kv20-704p-20260806-01
+  annotations:
+    seedleap.ai/capacity-type: spot
+    seedleap.ai/hardware-role: rtx-5090-sm120-proxy
+    seedleap.ai/repo: seedleap/sglang
+    seedleap.ai/branch: codex/minwm-sage-attention
+    seedleap.ai/sglang-git-ref: "75931d09a47f67f87866bc9ba0cba8cf56d6b8f4"
+    seedleap.ai/minwm-git-ref: "2efc6485f65e8fcab506665efde79bc41406385e"
+    seedleap.ai/checkpoint-version-id: "wduScksw2f3yPErnG9lBioOuE2AToyAP"
+    seedleap.ai/kv-contract: sink4-window20
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 12600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: minwm-attention-rtx6000-kv20-704p-20260806-01
+        seedleap.ai/owner: chenshengdong
+        seedleap.ai/task: minwm-attention
+        seedleap.ai/run-id: minwm-attention-rtx6000-kv20-704p-20260806-01
+      annotations:
+        seedleap.ai/repo: seedleap/sglang
+        seedleap.ai/branch: codex/minwm-sage-attention
+        seedleap.ai/sglang-git-ref: "75931d09a47f67f87866bc9ba0cba8cf56d6b8f4"
+    spec:
+      restartPolicy: Never
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        seLinuxOptions:
+          type: spc_t
+      nodeSelector:
+        seedleap.ai/capacity-pool: minwm-quant-rtx6000-spot
+        karpenter.sh/capacity-type: spot
+        node.kubernetes.io/instance-type: g7e.4xlarge
+      tolerations:
+        - key: seedleap.ai/capacity-pool
+          operator: Equal
+          value: minwm-quant-rtx6000-spot
+          effect: NoSchedule
+      containers:
+        - name: benchmark
+          image: 829115578968.dkr.ecr.us-east-2.amazonaws.com/leap-world/minwm-training@sha256:bedc07ea3ba55059a8c1c569c3b177c4d00d41f37d4fa9105375531534ef5f2a
+          imagePullPolicy: IfNotPresent
+          workingDir: /workspace
+          env:
+            - name: GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: github-token
+                  key: token
+            - name: SGLANG_GIT_REF
+              value: "75931d09a47f67f87866bc9ba0cba8cf56d6b8f4"
+            - name: MINWM_GIT_REF
+              value: "2efc6485f65e8fcab506665efde79bc41406385e"
+            - name: MINWM_BENCHMARK_MODE
+              value: profiles
+            - name: MINWM_INCLUDE_COMPILE_PROFILE
+              value: "false"
+            - name: MINWM_SAGE_ATTENTION_BACKENDS
+              value: sage_attn,sage_attn_3
+            - name: MINWM_RUN_SAGE_TESTS
+              value: "1"
+            - name: MINWM_RUN_ATTENTION_QUALITY
+              value: "0"
+            - name: MINWM_ATTENTION_KV_SINK_SIZE
+              value: "4"
+            - name: MINWM_ATTENTION_KV_WINDOW_SIZE
+              value: "20"
+            - name: MINWM_THROUGHPUT_PROFILES
+              value: dense-optimized-components-kv20,dense-sage-attn-kv20,dense-sage-attn-3-kv20
+            - name: MINWM_THROUGHPUT_WARMUP_CHUNKS
+              value: "10"
+            - name: MINWM_THROUGHPUT_MEASURED_CHUNKS
+              value: "100"
+            - name: MINWM_PRESERVE_IMAGE_GPU_STACK
+              value: "1"
+            - name: MINWM_SGLANG_KERNEL_WHEEL_PATH
+              value: /s3/world-model/evals/minwm/quantization/20260805/artifacts/sglang_kernel-0.4.4-torch2.12.1-cu130-sm120.whl
+            - name: MINWM_STAGE_FROM_MOUNT
+              value: "0"
+            - name: MINWM_CHECKPOINT_MOUNT_PATH
+              value: /s3/world-model/evals/minwm/checkpoint-staging/wan22-5B-stage3-dmd-8-0721-6a531f0e067/global_step_003200/ema_student/model.pt
+            - name: MINWM_PRETRAINED_MOUNT_PATH
+              value: /s3/world-model/checkpoints/minWM/Wan2.2-TI2V-5B-from-diffusers
+            - name: MINWM_CHECKPOINT_S3_EAST
+              value: s3://leap-world-us-east-2/world-model/evals/minwm/checkpoint-staging/wan22-5B-stage3-dmd-8-0721-6a531f0e067/global_step_003200/ema_student/model.pt
+            - name: MINWM_CHECKPOINT_VERSION_EAST
+              value: wduScksw2f3yPErnG9lBioOuE2AToyAP
+            - name: MINWM_CHECKPOINT_SOURCE_URI
+              value: s3://leap-world-us-west-2/world-model/minwm/checkpoints/run-archive/rolling/Wan21/Action2V/dmd/wan22-5B-stage3-dmd-8-0721-6a531f0e067/global_step_003200/ema_student/model.pt
+            - name: MINWM_CHECKPOINT_SOURCE_VERSION
+              value: x.2zYaRRNzyqngI7O_cYSrsK3NvgPKKt
+            - name: MINWM_CHECKPOINT_SOURCE_ETAG
+              value: 5c29d614972e06fd0df859abfd1d6f4d-191
+            - name: MINWM_CHECKPOINT_BYTES
+              value: "10007171771"
+            - name: MINWM_CHECKPOINT_CRC64
+              value: I0IQ+p0pREI=
+            - name: MINWM_PRETRAINED_S3
+              value: s3://leap-world-us-east-2/world-model/checkpoints/minWM/Wan2.2-TI2V-5B-from-diffusers
+            - name: MINWM_RESULTS_ROOT
+              value: /s3/world-model/evals/minwm/attention/20260806/results
+          command:
+            - /bin/bash
+            - -lc
+            - |
+              set -euo pipefail
+              clone_at() {
+                local repository="$1" destination="$2" revision="$3"
+                git clone --no-checkout \
+                  "https://x-access-token:${GITHUB_TOKEN}@github.com/seedleap/${repository}.git" \
+                  "${destination}"
+                git -C "${destination}" checkout --detach "${revision}"
+                [[ "$(git -C "${destination}" rev-parse HEAD)" == "${revision}" ]]
+              }
+              clone_at minWM /workspace/minWM "${MINWM_GIT_REF}"
+              clone_at sglang /workspace/sglang "${SGLANG_GIT_REF}"
+
+              export MINWM_RUN_ID=minwm-attention-rtx6000-kv20-704p-20260806-01
+              export MINWM_THROUGHPUT_CASES_PATH=/workspace/sglang/benchmark/minwm_realtime_parity/cases_720p_compile_smoke.json
+              export MINWM_THROUGHPUT_CASE=00_forward_080_pottery_720p
+              set +e
+              bash /workspace/sglang/benchmark/minwm_realtime_parity/aws_b200_entrypoint.sh
+              run_status=$?
+              set -e
+
+              results="${MINWM_RESULTS_ROOT}/${MINWM_RUN_ID}"
+              test -f "${results}/throughput-summary.json"
+              for profile in \
+                dense-optimized-components-kv20 \
+                dense-sage-attn-kv20 \
+                dense-sage-attn-3-kv20; do
+                test -f "${results}/throughput/${profile}/throughput.json"
+              done
+              echo "MINWM_RTX6000_KV20_704P_COMPLETE run_status=${run_status} results=${results}"
+              exit "${run_status}"
+          resources:
+            requests:
+              cpu: "8"
+              memory: 96Gi
+              nvidia.com/gpu: "1"
+            limits:
+              cpu: "14"
+              memory: 112Gi
+              nvidia.com/gpu: "1"
+          volumeMounts:
+            - name: s3
+              mountPath: /s3
+            - name: work
+              mountPath: /work
+            - name: shm
+              mountPath: /dev/shm
+      volumes:
+        - name: s3
+          persistentVolumeClaim:
+            claimName: s3-claim
+        - name: work
+          emptyDir: {}
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 32Gi

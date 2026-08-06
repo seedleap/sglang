@@ -1,8 +1,8 @@
 # MinWM attention 选型与 Spot 实测（2026-08-05/06）
 
-本文记录 issue #15 的实现边界、真实硬件验证和可复现实验合同。结论只适用于
-MinWM 5B、单卡、完整历史 KV、本文固定 checkpoint 与输入；不能把不同分辨率、
-硬件或 KV 长度的 FPS 直接横比。
+本文记录 issue #15 的实现边界、真实硬件验证和可复现实验合同。2026-08-05 的历史
+矩阵使用 KV45/KV128；从 2026-08-06 起的新实验统一使用 `sink=4、window=20`，
+与天鹏 serving 配置对齐。不能把不同分辨率、硬件或 KV 合同的 FPS 直接横比。
 
 ## 结论
 
@@ -39,7 +39,8 @@ MinWM 5B、单卡、完整历史 KV、本文固定 checkpoint 与输入；不能
 | SageAttention | `thu-ml/SageAttention@d1a57a546c3d395b1ffcbeecc66d81db76f3b4b5` |
 | 704 档 | `1248x704`；用户所称 702 按现有 VAE 对齐后的 720-class case 验收 |
 | 480 档 | `832x480` |
-| KV | 完整历史，分别在 45 和 128 latent frames 取样 |
+| 历史 KV 合同 | 完整历史，分别在 45 和 128 latent frames 取样 |
+| 当前 KV 合同 | `sink=4、window=20`；后续新测试的固定默认值 |
 | 设备数 | 每个 Job 只申请 1 GPU |
 | 容量 | Spot only；不借用现有 Capacity Block / On-Demand 节点 |
 
@@ -89,9 +90,11 @@ parity 语义，因此 B200 默认仍推荐 packed FA。
 KV128 反而是 `-0.94%/-0.42%`，均属于单轮噪声范围。
 
 长 KV 下 dense FA 相对 optimized packed 在 704/480 分别快 `0.88%/1.01%`；结合
-短 KV 的 `+0.53%/-1.95%`，差距都很小且方向不完全一致。真正稳定的收益来自启用
-现有 optimized components：相对 exact packed，704 的 KV45/KV128 分别提升
-`3.68%/1.74%`，480 分别提升 `4.44%/2.67%`。
+短 KV 的 `+0.53%/-1.95%`，差距都很小且方向不完全一致。旧版总结把
+optimized-components 相对 exact packed 的差值全部归因给 native components 并不严谨，
+因为两条 lane 同时改变了 deterministic 等变量。使用只隔离 native components 的
+packed-nondeterministic 对照，704 的 KV45/KV128 分别提升 `3.03%/2.71%`，480
+分别提升 `4.36%/3.10%`；仍缺一条 deterministic+optimized lane 来做完全正交归因。
 
 画质 harness 以 dense FA 为数值基准，但这不代表 dense 是产品 ground truth。packed
 与 dense 的 129/65 帧 rollout 并不等价：704 的 PSNR 为 `21.94 dB`、mean/min
@@ -164,6 +167,49 @@ KV 都最快：
 
 这些是 129/65 帧自回归 rollout，不是单次 attention output；数值误差会跨 chunk
 放大，但这正是产品实际消费的路径。两种 Sage 都不能按“近似无损”接纳。
+
+### sink=4/window=20 的最小 kernel 与 Nsight
+
+Job `ray/minwm-attention-kernel-sm120-20260806-02` 在同一 SM120 Spot 代理机上固定
+`batch=1、heads=40、head_dim=128、chunk=4`，直接调用当前 SGLang wrapper。计时
+包含 Sage2 的 smooth/量化和 Sage3 为保护持久 KV 所需的 contiguous K clone、布局转换
+与量化，不是只截取低精度 MMA kernel：
+
+| shape | Q / K tokens | BF16 SDPA | Sage2 API | Sage3 API |
+| --- | ---: | ---: | ---: | ---: |
+| smoke | 1,024 / 5,120 | 0.408 ms | 0.447 ms（慢 9.5%） | 0.567 ms（慢 38.8%） |
+| 832x480 | 6,240 / 31,200 | 11.571 ms | 8.213 ms（快 29.0%） | 9.749 ms（快 15.7%） |
+| 1248x704 | 13,728 / 68,640 | 52.544 ms | 32.189 ms（快 38.7%） | 34.868 ms（快 33.6%） |
+
+因此“低位宽核心在生产尺寸上不应全面慢于 BF16”的判断成立；旧端到端表格不能被
+解释为 Sage kernel 本体更慢。小 shape 会被固定启动、量化和布局成本反噬，生产尺寸
+才进入 Sage 的收益区间。
+
+Nsight 用包含 2 次 warmup 和 3 次 measured call 的 backend NVTX range 关联 GPU
+kernel。704 每次 Sage2 GPU 总计 `32.20 ms`，其中 INT8-QK/FP8-PV 主 kernel
+`28.51 ms`、wrapper `3.70 ms`；Sage3 总计 `34.83 ms`，其中 NVFP4 主 kernel
+只需 `25.16 ms`，但 wrapper 达 `9.68 ms`。480 也相同：Sage2 主 kernel/wrapper
+为 `6.61/1.53 ms`，Sage3 为 `5.47/3.97 ms`。也就是说 Sage3 的 NVFP4 kernel
+确实最快，但 K 隔离、中心化、布局和 block-wise 量化吞掉了相对 Sage2 的优势。
+704 单次 API 的 incremental peak allocated 为 SDPA/Sage2/Sage3
+`0.14/1.62/4.16 GB`，480 为 `0.065/0.74/1.60 GB`；因此 Sage3 的核心速度
+收益同时伴随更高临时显存峰值，不能从 96 GB 代理卡外推 32 GB RTX 5090。
+
+当前镜像里的 packed FA4 在三个 shape 都于 ragged output epilogue 的 CuTe MLIR
+构造阶段失败，尚未启动 GPU kernel，错误为
+`expects coord and shape of view are weakly congruent`。这是一条独立兼容性问题，不能
+用失败 lane 推导 FA4 与 Sage 的性能比例。
+
+原始 `.nsys-rep`、SQLite、CUDA kernel/API/NVTX CSV、benchmark JSON、运行时信息、
+`nvidia-smi` 与按 backend range 拆分的 `nsys-analysis.json` 位于：
+`s3://leap-world-us-east-2/world-model/evals/minwm/attention/20260806/profiles/minwm-attention-kernel-sm120-20260806-02/`。
+
+线上部署还必须做到：按真实 compute capability fail fast；记录 requested/resolved
+backend 和 fallback reason；预构建固定 Torch cu130/NVCC 13.0/Sage SHA 的 wheel，
+不在 serving Pod 冷启动现场编译；Sage3 调用后校验 KV bitwise 不变；把 sink/window
+写进请求、服务与结果合同；分别监控 API P50/P95、显存瞬时峰值、OOM/CUDA fault、
+fallback 比例和长 rollout 质量。发生异常时只在 session 边界回退，不能在已被消费的
+KV 上热切换 backend。
 
 ## 上游兼容性依据
 
