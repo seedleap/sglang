@@ -65,9 +65,7 @@ class MinWMAttentionShape:
 
 
 PRESETS = {
-    "smoke": MinWMAttentionShape(
-        name="smoke", width=256, height=256, window_frames=8
-    ),
+    "smoke": MinWMAttentionShape(name="smoke", width=256, height=256, window_frames=8),
     "480p": MinWMAttentionShape(name="480p", width=832, height=480),
     "704p": MinWMAttentionShape(name="704p", width=1248, height=704),
 }
@@ -76,7 +74,7 @@ PRESETS = {
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--presets", default="smoke,480p,704p")
-    parser.add_argument("--backends", default="sdpa,fa4,sage2,sage3")
+    parser.add_argument("--backends", default="sdpa,fa4_dense,fa4,sage2,sage3")
     parser.add_argument("--sink-frames", type=int, default=4)
     parser.add_argument("--window-frames", type=int, default=20)
     parser.add_argument("--warmup", type=int, default=3)
@@ -94,15 +92,24 @@ def _module_available(name: str) -> bool:
 
 
 def backend_availability() -> dict[str, dict[str, object]]:
-    capability = torch.cuda.get_device_capability() if torch.cuda.is_available() else None
+    capability = (
+        torch.cuda.get_device_capability() if torch.cuda.is_available() else None
+    )
     return {
         "sdpa": {"available": torch.cuda.is_available(), "precision": "BF16"},
         "fa4": {
-            "available": torch.cuda.is_available() and _module_available("flash_attn.cute"),
+            "available": torch.cuda.is_available()
+            and _module_available("flash_attn.cute"),
+            "precision": "BF16",
+        },
+        "fa4_dense": {
+            "available": torch.cuda.is_available()
+            and _module_available("flash_attn.cute"),
             "precision": "BF16",
         },
         "sage2": {
-            "available": torch.cuda.is_available() and _module_available("sageattention"),
+            "available": torch.cuda.is_available()
+            and _module_available("sageattention"),
             "precision": "INT8 QK + FP8 PV on SM120",
         },
         "sage3": {
@@ -174,6 +181,26 @@ def make_backend(
 
         return fa4
 
+    if name == "fa4_dense":
+        from flash_attn.cute import flash_attn_func
+
+        def fa4_dense() -> torch.Tensor:
+            output = flash_attn_func(
+                q=query,
+                k=key,
+                v=value,
+                softmax_scale=None,
+                causal=False,
+                deterministic=False,
+                window_size=(None, None),
+                return_lse=False,
+            )
+            if isinstance(output, tuple):
+                output = output[0]
+            return output
+
+        return fa4_dense
+
     if name == "sage2":
         from sageattention import sageattn
 
@@ -197,13 +224,9 @@ def make_backend(
             query_hnd = query.transpose(1, 2)
             # This clone is part of the production SGLang boundary because the
             # upstream Sage3 implementation centers K in place.
-            key_hnd = key.transpose(1, 2).clone(
-                memory_format=torch.contiguous_format
-            )
+            key_hnd = key.transpose(1, 2).clone(memory_format=torch.contiguous_format)
             value_hnd = value.transpose(1, 2)
-            output = sageattn3_blackwell(
-                query_hnd, key_hnd, value_hnd, is_causal=False
-            )
+            output = sageattn3_blackwell(query_hnd, key_hnd, value_hnd, is_causal=False)
             return output.transpose(1, 2)
 
         return sage3
@@ -262,7 +285,9 @@ def benchmark_backend(
     )
 
 
-def compare_output(reference: torch.Tensor, candidate: torch.Tensor) -> dict[str, float]:
+def compare_output(
+    reference: torch.Tensor, candidate: torch.Tensor
+) -> dict[str, float]:
     reference_float = reference.float()
     candidate_float = candidate.float()
     difference = candidate_float - reference_float
@@ -309,7 +334,13 @@ def main() -> None:
     requested_presets = [item.strip() for item in args.presets.split(",") if item]
     requested_backends = [item.strip() for item in args.backends.split(",") if item]
     unknown_presets = set(requested_presets) - PRESETS.keys()
-    unknown_backends = set(requested_backends) - {"sdpa", "fa4", "sage2", "sage3"}
+    unknown_backends = set(requested_backends) - {
+        "sdpa",
+        "fa4",
+        "fa4_dense",
+        "sage2",
+        "sage3",
+    }
     if unknown_presets or unknown_backends:
         raise ValueError(
             f"unknown presets/backends: {sorted(unknown_presets)}, "
