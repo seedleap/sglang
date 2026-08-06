@@ -16,7 +16,6 @@ from common import (  # noqa: E402
     prompt_switch_event,
 )
 
-
 CASES = Path(__file__).with_name("cases_prompt_switch_kv_roll_832x480.json")
 
 

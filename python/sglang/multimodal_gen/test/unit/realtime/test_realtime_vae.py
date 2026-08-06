@@ -113,9 +113,7 @@ def test_remote_vae_client_posts_msgpack_as_requests_data(monkeypatch):
     assert result.raw_frame_content_type == RAW_RGB_CONTENT_TYPE
 
 
-def test_remote_vae_client_accepts_shared_memory_raw_transport(
-    monkeypatch, tmp_path
-):
+def test_remote_vae_client_accepts_shared_memory_raw_transport(monkeypatch, tmp_path):
     from sglang.multimodal_gen.runtime.remote.vae_decode_client import (
         RemoteVAEDecodeClient,
     )
@@ -162,8 +160,7 @@ def test_loopback_remote_vae_selects_shared_memory_transport():
     )
 
     assert (
-        get_remote_vae_response_transport("http://127.0.0.1:31000")
-        == "shared_memory"
+        get_remote_vae_response_transport("http://127.0.0.1:31000") == "shared_memory"
     )
     assert get_remote_vae_response_transport("http://vae:31000") == "http"
 

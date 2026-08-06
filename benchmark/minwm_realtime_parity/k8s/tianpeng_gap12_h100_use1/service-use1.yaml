@@ -7,4 +7,3 @@ metadata:
     service.beta.kubernetes.io/aws-load-balancer-subnets: subnet-015571b6146f10903,subnet-00769f1a545d7d317
 spec:
   loadBalancerClass: eks.amazonaws.com/nlb
-

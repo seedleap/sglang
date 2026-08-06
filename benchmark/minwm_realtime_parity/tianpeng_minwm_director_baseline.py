@@ -13,7 +13,6 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
-
 from common import save_video, sha256_file, write_json
 from tianpeng_alignment import (
     EXPECTED_MINWM_COMMIT,
@@ -109,7 +108,6 @@ def main() -> None:
 
     sys.path[:0] = [str(minwm_root / "Wan21"), str(minwm_root)]
     import torch
-
     from demo_utils.director_service import DirectedSession, _load_runtime
 
     pipeline, processor = _load_runtime(

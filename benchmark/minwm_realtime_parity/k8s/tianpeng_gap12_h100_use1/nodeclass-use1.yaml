@@ -16,4 +16,3 @@ spec:
   subnetSelectorTerms:
     - id: subnet-04c3517ba5a04303c
     - id: subnet-00bfb61f4542441b4
-

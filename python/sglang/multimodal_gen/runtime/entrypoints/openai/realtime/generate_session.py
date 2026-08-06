@@ -10,12 +10,12 @@ from uuid import uuid4
 from sglang.multimodal_gen.runtime.entrypoints.openai.protocol import (
     RealtimeVideoGenerationsRequest,
 )
+from sglang.multimodal_gen.runtime.realtime.session import (
+    RealtimeSession,
+)
 from sglang.multimodal_gen.runtime.utils.realtime_trace import (
     compact_client_trace,
     normalize_trace_id,
-)
-from sglang.multimodal_gen.runtime.realtime.session import (
-    RealtimeSession,
 )
 
 if TYPE_CHECKING:

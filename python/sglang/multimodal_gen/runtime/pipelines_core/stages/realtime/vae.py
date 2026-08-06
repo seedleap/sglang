@@ -26,6 +26,8 @@ from sglang.multimodal_gen.runtime.remote.vae_decode_client import (
 )
 from sglang.multimodal_gen.runtime.remote.vae_decode_protocol import (
     SCHEMA_VERSION as REMOTE_VAE_SCHEMA_VERSION,
+)
+from sglang.multimodal_gen.runtime.remote.vae_decode_protocol import (
     tensor_to_payload,
 )
 from sglang.multimodal_gen.runtime.server_args import ServerArgs
@@ -273,9 +275,7 @@ class CausalVaeDecodingStage(DecodingStage):
             "width": batch.width,
             "height": batch.height,
             "fps": batch.fps,
-            "realtime_output_format": getattr(
-                batch, "realtime_output_format", None
-            ),
+            "realtime_output_format": getattr(batch, "realtime_output_format", None),
             "response_transport": get_remote_vae_response_transport(remote_url),
             "trim_leading_frames": 0,
             "latents": tensor_to_payload(batch.latents),
@@ -468,15 +468,13 @@ class CausalVaeDecodingStage(DecodingStage):
             input_tensor=batch.latents,
             chunk_index=batch.block_idx,
             first_chunk=batch.block_idx == 0,
-            decoder_backend="taehv"
-            if taehv_checkpoint_path is not None
-            else "causal_vae",
+            decoder_backend=(
+                "taehv" if taehv_checkpoint_path is not None else "causal_vae"
+            ),
             taehv_checkpoint_path=taehv_checkpoint_path,
             vae_precision=server_args.pipeline_config.vae_precision,
             vae_tiling=server_args.pipeline_config.vae_tiling,
-            use_parallel_decode=bool(
-                getattr(vae_config, "use_parallel_decode", False)
-            ),
+            use_parallel_decode=bool(getattr(vae_config, "use_parallel_decode", False)),
             parallel_decode_mode=getattr(vae_config, "parallel_decode_mode", None),
         ) as trace_span:
             frames = self.decode_causal(

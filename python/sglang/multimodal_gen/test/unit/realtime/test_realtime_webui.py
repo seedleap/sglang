@@ -108,7 +108,9 @@ def test_realtime_webui_presets_do_not_emit_camera_scripts():
     assert 'id="guidance" type="number" value="1"' in index_html
     assert "styles.css?v=realtime-t2v-dump-trace-v1" in index_html
     assert "app.js?v=realtime-t2v-dump-trace-v1" in index_html
-    assert 'const DECODER_WORKER_URL = "./decoder_worker.js?v=rgb-worker-v10";' in app_js
+    assert (
+        'const DECODER_WORKER_URL = "./decoder_worker.js?v=rgb-worker-v10";' in app_js
+    )
     assert 'const DEFAULT_TARGET_FPS = configuredNumber("targetFps", 16);' in app_js
     assert "const DEFAULT_FRAME_INTERPOLATION_EXP = 1;" in app_js
     assert "const DEFAULT_FRAME_INTERPOLATION_SCALE = 1.0;" in app_js
@@ -132,7 +134,9 @@ def test_realtime_webui_presets_do_not_emit_camera_scripts():
     assert "preview_scale" in app_js
     assert "sr_scale" in app_js
     assert "playbackController.render(now" in app_js
-    assert "playbackController.enqueueDecodedFrames(header, decodedFrames, now)" in app_js
+    assert (
+        "playbackController.enqueueDecodedFrames(header, decodedFrames, now)" in app_js
+    )
     assert (
         'const REACTOR_PRESET_BASE_URL = "https://www.reactor.inc/lingbot-world-fast-v1";'
         in app_js
@@ -227,11 +231,16 @@ def test_realtime_webui_exposes_live_trace_topology_with_dump_trace_id():
     assert 'id="traceVaeEncodeText"' in index_html
     assert 'id="traceDenoiseText"' in index_html
     assert 'id="traceVaeDecodeText"' in index_html
-    assert "const traceTopologyApi = window.SGLangRealtimeTraceTopology || {};" in app_js
+    assert (
+        "const traceTopologyApi = window.SGLangRealtimeTraceTopology || {};" in app_js
+    )
     assert "function currentTracePayload" in app_js
     assert "function traceWebSocketUrl" in app_js
     assert 'message.type === "trace_event"' in app_js
-    assert 'recordTraceTopologyEvent({ event: "server.chunk_complete", ...stats }' in app_js
+    assert (
+        'recordTraceTopologyEvent({ event: "server.chunk_complete", ...stats }'
+        in app_js
+    )
     assert "currentSessionArtifact.trace_id = currentTrace.traceId" in app_js
     assert "client_trace: currentTracePayload()" in app_js
     assert "trace-panel" in styles_css

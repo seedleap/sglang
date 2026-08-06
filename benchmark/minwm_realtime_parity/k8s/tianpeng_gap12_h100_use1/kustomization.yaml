@@ -7,4 +7,3 @@ patches:
   - path: nodepool-use1.yaml
   - path: deployment-use1.yaml
   - path: service-use1.yaml
-

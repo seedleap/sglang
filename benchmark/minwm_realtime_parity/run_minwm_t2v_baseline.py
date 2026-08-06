@@ -12,7 +12,6 @@ import time
 from pathlib import Path
 
 import numpy as np
-
 from common import (
     load_cases,
     resolve_case_contract,
@@ -64,9 +63,8 @@ def main() -> None:
     sys.path.insert(0, str(minwm_root))
 
     import torch
-    from einops import rearrange
-
     from configs.configuration import PretrainedConfig
+    from einops import rearrange
     from pipeline import PipelineBase
     from wan_utils.misc import set_seed
 

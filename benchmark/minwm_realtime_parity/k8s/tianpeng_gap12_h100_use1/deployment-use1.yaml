@@ -13,4 +13,3 @@ spec:
               ephemeral-storage: 100Gi
             limits:
               ephemeral-storage: 300Gi
-

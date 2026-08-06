@@ -3,4 +3,3 @@ apiVersion: karpenter.sh/v1
 kind: NodePool
 metadata:
   name: minwm-tianpeng-h100-single-fast
-

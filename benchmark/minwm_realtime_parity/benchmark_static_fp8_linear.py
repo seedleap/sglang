@@ -13,6 +13,7 @@ from typing import Callable
 import torch
 
 from sglang.srt.layers.quantization import fp8_utils
+from sglang.srt.layers.quantization.fp8_kernel import scaled_fp8_quant
 from sglang.srt.layers.quantization.fp8_utils import (
     apply_fp8_linear,
     apply_fp8_linear_bmm_flashinfer,
@@ -20,7 +21,6 @@ from sglang.srt.layers.quantization.fp8_utils import (
     input_to_float8,
     static_quant_fp8,
 )
-from sglang.srt.layers.quantization.fp8_kernel import scaled_fp8_quant
 from sglang.srt.layers.quantization.utils import convert_to_channelwise
 from sglang.srt.utils.common import is_flashinfer_available, is_sm100_supported
 
@@ -247,9 +247,7 @@ def main() -> None:
             "capability": list(torch.cuda.get_device_capability(0)),
             "flashinfer_available": is_flashinfer_available(),
             "sm100_supported": is_sm100_supported(),
-            "deterministic_algorithms": (
-                torch.are_deterministic_algorithms_enabled()
-            ),
+            "deterministic_algorithms": (torch.are_deterministic_algorithms_enabled()),
             "fill_uninitialized_memory": (
                 torch.utils.deterministic.fill_uninitialized_memory
             ),

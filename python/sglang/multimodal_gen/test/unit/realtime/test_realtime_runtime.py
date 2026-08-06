@@ -57,10 +57,10 @@ from sglang.multimodal_gen.runtime.realtime.session import (
 from sglang.multimodal_gen.runtime.realtime.states import (
     RealtimeCausalDecodeState,
 )
+from sglang.multimodal_gen.runtime.utils.perf_logger import RequestMetrics
 from sglang.multimodal_gen.runtime.utils.realtime_video import (
     RAW_RGB_CONTENT_TYPE,
 )
-from sglang.multimodal_gen.runtime.utils.perf_logger import RequestMetrics
 
 
 class _Req(SimpleNamespace):
@@ -592,7 +592,9 @@ def test_scheduler_stage_metrics_emit_dedicated_realtime_trace_events(monkeypatc
     def fake_log_realtime_trace(_logger, _session, event, **fields):
         emitted.append((event, fields))
 
-    monkeypatch.setattr(realtime_video_api, "log_realtime_trace", fake_log_realtime_trace)
+    monkeypatch.setattr(
+        realtime_video_api, "log_realtime_trace", fake_log_realtime_trace
+    )
 
     session = GenerateSession()
     session.trace_id = "trace-stage"

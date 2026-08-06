@@ -3,9 +3,7 @@ import sys
 import pytest
 import torch
 
-from sglang.multimodal_gen.runtime.layers.quantization import (
-    fp8 as diffusion_fp8_quant,
-)
+from sglang.multimodal_gen.runtime.layers.quantization import fp8 as diffusion_fp8_quant
 from sglang.multimodal_gen.runtime.layers.quantization import (
     modelopt_quant as diffusion_modelopt_quant,
 )

@@ -14,7 +14,6 @@ import time
 from pathlib import Path
 
 import numpy as np
-
 from common import (
     action_label_sequence,
     action_weights,
@@ -114,11 +113,10 @@ def main() -> None:
     sys.path.insert(0, str(minwm_root))
 
     import torch
-    from einops import rearrange
-    from omegaconf import OmegaConf
-
     from configs.configuration import PretrainedConfig
     from dataloader.processors.wan_packed import WanPackedProcessor
+    from einops import rearrange
+    from omegaconf import OmegaConf
     from pipeline import PipelineBase
     from wan_utils.misc import set_seed
 
@@ -182,8 +180,7 @@ def main() -> None:
     calibration_handles = []
     if args.fp8_calibration_output:
         block_linear_pattern = re.compile(
-            r"^blocks\.\d+\."
-            r"(?:self_attn\.[qkvo]|cross_attn\.[qkvo]|ffn\.(?:0|2))$"
+            r"^blocks\.\d+\." r"(?:self_attn\.[qkvo]|cross_attn\.[qkvo]|ffn\.(?:0|2))$"
         )
         calibration_modules = {
             name: module

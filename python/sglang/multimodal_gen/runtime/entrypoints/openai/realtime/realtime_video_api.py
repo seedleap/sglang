@@ -22,14 +22,6 @@ from sglang.multimodal_gen.runtime.entrypoints.openai.realtime.realtime_output_a
 from sglang.multimodal_gen.runtime.entrypoints.openai.realtime.registry import (
     get_realtime_model_adapter,
 )
-from sglang.multimodal_gen.runtime.utils.realtime_trace import (
-    CLIENT_TRACE_EVENT_KIND,
-    compact_client_trace_event,
-    log_realtime_trace,
-    normalize_trace_id,
-    register_realtime_trace_sink,
-    unregister_realtime_trace_sink,
-)
 from sglang.multimodal_gen.runtime.entrypoints.openai.realtime.timer import (
     RealtimeStageTimer,
 )
@@ -42,6 +34,14 @@ from sglang.multimodal_gen.runtime.entrypoints.utils import (
 from sglang.multimodal_gen.runtime.scheduler_client import async_scheduler_client
 from sglang.multimodal_gen.runtime.server_args import get_global_server_args
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
+from sglang.multimodal_gen.runtime.utils.realtime_trace import (
+    CLIENT_TRACE_EVENT_KIND,
+    compact_client_trace_event,
+    log_realtime_trace,
+    normalize_trace_id,
+    register_realtime_trace_sink,
+    unregister_realtime_trace_sink,
+)
 
 if TYPE_CHECKING:
     from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import Req
@@ -275,9 +275,11 @@ def _emit_realtime_result_stage_traces(
     if not getattr(session, "trace_id", None):
         return
 
-    for stage_name, duration_ms, metrics_request_id in _iter_realtime_result_stage_metrics(
-        result
-    ):
+    for (
+        stage_name,
+        duration_ms,
+        metrics_request_id,
+    ) in _iter_realtime_result_stage_metrics(result):
         request_id = getattr(chunk, "request_id", None) or metrics_request_id
         log_realtime_trace(
             logger,
@@ -352,7 +354,9 @@ def _log_realtime_chunk_timing(
         request_id=chunk.request_id,
         chunk_index=batch.block_idx,
         event_id=getattr(batch, "realtime_event_id", None),
-        condition_kinds=sorted(batch.condition_inputs) if batch.condition_inputs else [],
+        condition_kinds=(
+            sorted(batch.condition_inputs) if batch.condition_inputs else []
+        ),
         request_prepare_ms=round(request_prepare_ms, 3),
         scheduler_forward_ms=round(scheduler_forward_ms, 3),
         output_pace_ms=round(send_stats["pace_wait_ms"], 3),
@@ -468,7 +472,9 @@ async def _generate_loop(ws: WebSocket, session: GenerateSession):
                 chunk_index=batch.block_idx,
                 request_prepare_ms=round(request_prepare_ms, 3),
                 event_id=getattr(batch, "realtime_event_id", None),
-                condition_kinds=sorted(batch.condition_inputs) if batch.condition_inputs else [],
+                condition_kinds=(
+                    sorted(batch.condition_inputs) if batch.condition_inputs else []
+                ),
             )
 
             _, result = await process_generation_batch(async_scheduler_client, batch)
@@ -886,9 +892,7 @@ async def generate(websocket: WebSocket):
             active_sessions=sorted(_ACTIVE_SESSION_IDS),
         )
         try:
-            await write_error_msg(
-                "another realtime session is already active", ws
-            )
+            await write_error_msg("another realtime session is already active", ws)
         finally:
             await ws.close(code=1008)
             trace_task.cancel()

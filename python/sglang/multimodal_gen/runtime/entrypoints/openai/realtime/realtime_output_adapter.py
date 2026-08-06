@@ -595,9 +595,7 @@ class RawRGBRealtimeOutputAdapter:
                     )
                     stats["raw_payload_build_ms"] += timer.mark_ms()
                     transport_frame_count = len(transport_frames)
-                    transport_raw_bytes = sum(
-                        len(frame) for frame in transport_frames
-                    )
+                    transport_raw_bytes = sum(len(frame) for frame in transport_frames)
                 else:
                     transport_frames = split_batch
                     if _should_build_payload_off_loop(
@@ -625,9 +623,7 @@ class RawRGBRealtimeOutputAdapter:
                         )
                     stats["raw_payload_build_ms"] += timer.mark_ms()
                     transport_frame_count = len(transport_frames)
-                    transport_raw_bytes = sum(
-                        len(frame) for frame in transport_frames
-                    )
+                    transport_raw_bytes = sum(len(frame) for frame in transport_frames)
 
                 header: RealtimeFrameBatchHeader = {
                     "type": "frame_batch_header",

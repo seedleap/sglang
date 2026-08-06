@@ -19,7 +19,6 @@ from sglang.multimodal_gen.runtime.remote.vae_decode_protocol import (
     unpackb,
 )
 
-
 REMOTE_VAE_URL_ENV = "SGLANG_REALTIME_REMOTE_VAE_URL"
 REMOTE_VAE_TIMEOUT_ENV = "SGLANG_REALTIME_REMOTE_VAE_TIMEOUT"
 
@@ -31,11 +30,7 @@ def get_remote_vae_url() -> str | None:
 
 def get_remote_vae_response_transport(url: str) -> str:
     hostname = urlparse(url).hostname
-    return (
-        "shared_memory"
-        if hostname in {"127.0.0.1", "localhost", "::1"}
-        else "http"
-    )
+    return "shared_memory" if hostname in {"127.0.0.1", "localhost", "::1"} else "http"
 
 
 @dataclass(frozen=True)
@@ -80,10 +75,8 @@ class RemoteVAEDecodeClient:
         materialize_ms = 0.0
         if result.get("raw_transport_storage") == "shared_memory":
             materialize_start = time.monotonic()
-            transport_batches = (
-                materialize_raw_transport_batches_from_shared_memory(
-                    transport_batches
-                )
+            transport_batches = materialize_raw_transport_batches_from_shared_memory(
+                transport_batches
             )
             materialize_ms = (time.monotonic() - materialize_start) * 1000.0
         return RemoteVAEDecodeResult(

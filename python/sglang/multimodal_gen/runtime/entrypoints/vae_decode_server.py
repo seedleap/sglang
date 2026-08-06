@@ -26,8 +26,8 @@ from sglang.multimodal_gen.runtime.remote.vae_decode_protocol import (
     build_raw_transport_batches,
     packb,
     payload_to_tensor,
-    unpackb,
     store_raw_transport_batches_in_shared_memory,
+    unpackb,
 )
 from sglang.multimodal_gen.runtime.server_args import (
     ServerArgs,
@@ -167,9 +167,7 @@ class ExactRealtimeVAEDecoder:
         }
         if payload.get("realtime_output_format") == "raw":
             transport_start = time.monotonic()
-            transport_batches = build_raw_transport_batches(
-                raw_frame_batches
-            )
+            transport_batches = build_raw_transport_batches(raw_frame_batches)
             result["stats"]["server_raw_transport_build_ms"] = (
                 time.monotonic() - transport_start
             ) * 1000.0
@@ -187,9 +185,7 @@ class ExactRealtimeVAEDecoder:
             result["raw_transport_batches"] = transport_batches
         else:
             result["raw_frame_batches"] = raw_frame_batches
-        result["stats"]["server_total_ms"] = (
-            time.monotonic() - total_start
-        ) * 1000.0
+        result["stats"]["server_total_ms"] = (time.monotonic() - total_start) * 1000.0
         logger.info(
             "exact realtime VAE chunk complete: session_id=%s block_idx=%d "
             "decode_ms=%.3f raw_ms=%.3f total_ms=%.3f frames=%d",

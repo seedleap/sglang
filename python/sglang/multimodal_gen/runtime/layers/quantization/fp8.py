@@ -44,7 +44,6 @@ from sglang.srt.layers.quantization.fp8_utils import (
     normalize_e4m3fn_to_e4m3fnuz,
     requant_weight_ue8m0_inplace,
 )
-from sglang.srt.utils.common import is_sm100_supported
 from sglang.srt.layers.quantization.marlin_utils_fp8 import (
     apply_fp8_marlin_linear,
     prepare_fp8_layer_for_marlin,
@@ -54,6 +53,7 @@ from sglang.srt.layers.quantization.utils import (
     is_layer_skipped,
     requantize_with_max_scale,
 )
+from sglang.srt.utils.common import is_sm100_supported
 
 if TYPE_CHECKING:
     from sglang.srt.layers.quantization.w4afp8 import W4AFp8Config
@@ -324,9 +324,9 @@ class Fp8LinearMethod(LinearMethodBase):
                 )
                 layer.input_scale = None
             elif _is_cpu:
-                assert _is_cpu_amx_available, (
-                    "Fp8LinearMethod on CPU requires that CPU has AMX support"
-                )
+                assert (
+                    _is_cpu_amx_available
+                ), "Fp8LinearMethod on CPU requires that CPU has AMX support"
                 _amx_process_weight_after_loading(layer, ["weight"])
                 layer.weight_scale_inv = torch.nn.Parameter(
                     layer.weight_scale_inv.data, requires_grad=False

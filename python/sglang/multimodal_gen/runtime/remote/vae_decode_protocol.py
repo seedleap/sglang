@@ -4,14 +4,12 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from pathlib import Path
-
 import msgspec.msgpack
 import torch
-
 
 SCHEMA_VERSION = "sglang-realtime-vae/v1"
 RAW_RGB_CONTENT_TYPE = "application/x-raw-rgb"
