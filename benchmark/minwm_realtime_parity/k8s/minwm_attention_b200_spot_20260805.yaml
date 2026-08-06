@@ -1,18 +1,18 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: minwm-attention-b200-20260805-03
+  name: minwm-attention-b200-20260805-06
   namespace: ray
   labels:
-    app.kubernetes.io/name: minwm-attention-b200-20260805-03
+    app.kubernetes.io/name: minwm-attention-b200-20260805-06
     seedleap.ai/owner: chenshengdong
     seedleap.ai/task: minwm-attention
-    seedleap.ai/run-id: minwm-attention-b200-20260805-03
+    seedleap.ai/run-id: minwm-attention-b200-20260805-06
   annotations:
     seedleap.ai/capacity-type: spot
     seedleap.ai/repo: seedleap/sglang
     seedleap.ai/branch: codex/minwm-sage-attention
-    seedleap.ai/sglang-git-ref: "3b5b7842003d26b0f8bd53bbe70b3538ba06b5fc"
+    seedleap.ai/sglang-git-ref: "450a9a796ab51c1201e62b74dce7a57bb97a6af7"
     seedleap.ai/minwm-git-ref: "2efc6485f65e8fcab506665efde79bc41406385e"
     seedleap.ai/checkpoint-version-id: "wduScksw2f3yPErnG9lBioOuE2AToyAP"
 spec:
@@ -21,14 +21,14 @@ spec:
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: minwm-attention-b200-20260805-03
+        app.kubernetes.io/name: minwm-attention-b200-20260805-06
         seedleap.ai/owner: chenshengdong
         seedleap.ai/task: minwm-attention
-        seedleap.ai/run-id: minwm-attention-b200-20260805-03
+        seedleap.ai/run-id: minwm-attention-b200-20260805-06
       annotations:
         seedleap.ai/repo: seedleap/sglang
         seedleap.ai/branch: codex/minwm-sage-attention
-        seedleap.ai/sglang-git-ref: "3b5b7842003d26b0f8bd53bbe70b3538ba06b5fc"
+        seedleap.ai/sglang-git-ref: "450a9a796ab51c1201e62b74dce7a57bb97a6af7"
     spec:
       restartPolicy: Never
       terminationGracePeriodSeconds: 60
@@ -54,21 +54,19 @@ spec:
                   name: github-token
                   key: token
             - name: SGLANG_GIT_REF
-              value: "3b5b7842003d26b0f8bd53bbe70b3538ba06b5fc"
+              value: "450a9a796ab51c1201e62b74dce7a57bb97a6af7"
             - name: MINWM_GIT_REF
               value: "2efc6485f65e8fcab506665efde79bc41406385e"
             - name: MINWM_BENCHMARK_MODE
               value: profiles
             - name: MINWM_INCLUDE_COMPILE_PROFILE
               value: "false"
-            - name: MINWM_SAGE_ATTENTION_BACKENDS
-              value: sage_attn_3
             - name: MINWM_RUN_SAGE_TESTS
               value: "1"
             - name: MINWM_RUN_ATTENTION_QUALITY
-              value: "1"
+              value: "0"
             - name: MINWM_THROUGHPUT_PROFILES
-              value: exact-packed-det-kv45,exact-packed-det-kv128,packed-optimized-components-kv45,packed-optimized-components-kv128,packed-nondeterministic-kv45,packed-nondeterministic-kv128,dense-optimized-components-kv45,dense-optimized-components-kv128,dense-sage-attn-3-kv45,dense-sage-attn-3-kv128
+              value: dense-optimized-components-kv128
             - name: MINWM_THROUGHPUT_WARMUP_CHUNKS
               value: "20"
             - name: MINWM_THROUGHPUT_MEASURED_CHUNKS
@@ -114,14 +112,14 @@ spec:
               clone_at sglang /workspace/sglang "${SGLANG_GIT_REF}"
               git -C /workspace/sglang rev-parse HEAD
 
-              export MINWM_RUN_ID=minwm-attn-b200-704p-20260805-03
+              export MINWM_RUN_ID=minwm-attn-b200-704p-20260805-06
               export MINWM_THROUGHPUT_CASES_PATH=/workspace/sglang/benchmark/minwm_realtime_parity/cases_720p_compile_smoke.json
               export MINWM_THROUGHPUT_CASE=00_forward_080_pottery_720p
               bash /workspace/sglang/benchmark/minwm_realtime_parity/aws_b200_entrypoint.sh
 
-              export MINWM_RUN_ID=minwm-attn-b200-480p-20260805-03
-              export MINWM_REUSE_INPUT_RUN_ID=minwm-attn-b200-704p-20260805-03
-              export MINWM_REUSE_MODEL_RUN_ID=minwm-attn-b200-704p-20260805-03
+              export MINWM_RUN_ID=minwm-attn-b200-480p-20260805-06
+              export MINWM_REUSE_INPUT_RUN_ID=minwm-attn-b200-704p-20260805-06
+              export MINWM_REUSE_MODEL_RUN_ID=minwm-attn-b200-704p-20260805-06
               export MINWM_SKIP_INSTALL=1
               export MINWM_RUN_SAGE_TESTS=0
               export MINWM_THROUGHPUT_CASES_PATH=/workspace/sglang/benchmark/minwm_realtime_parity/cases_action_controls_832x480.json
