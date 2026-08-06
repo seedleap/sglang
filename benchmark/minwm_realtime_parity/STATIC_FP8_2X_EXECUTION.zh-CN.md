@@ -218,4 +218,22 @@ VAE/调度，则继续做不降低画质的流水化或阶段并行，并分别�
 - BF16 和 static FP8 在同一 Pod 顺序运行，固定 SGLang SHA `3c910b87bc...`、minWM SHA
   `2efc6485f6...`、checkpoint version、输入 case、20 warmup + 200 measured chunks；static lane
   复用 BF16 lane 的输入和转换后模型，避免重新取样或模型转换差异。
-- 结果根目录：`s3://leap-world-us-east-2/world-model/evals/minwm/quantization/20260805/static-fp8-2x/e2e-paired-02/`；状态待回填。
+- Job 成功完成，两个 lane 都各收集 200 个 measured chunks。客户端 BF16/static 分别为
+  `13.9848/13.9918 FPS`，static 仅为 `1.00050x`，未达到 `2x`。
+- 全量 server trace 显示 BF16/static 的 DiT denoise mean 为 `570.829/575.734 ms`，即修复后的
+  旧 static helper 在完整 DiT 中仍慢 `0.85%`；VAE decode 为 `470.452/468.994 ms`，scheduler
+  total 为 `1143.043/1142.478 ms`。客户端的微小正差全部可由非 DiT 阶段与运行噪声解释，不能
+  归因成 FP8 收益。
+- 偏离预期：static 在最初 4 个非首 chunk 的 DiT 是 `423.425 ms`，看起来明显快于 BF16 的
+  `446.304 ms`；但 KV45 尚未填满，二者在 chunk 10--19 已升到 `569.613/565.110 ms`，进入
+  measured window 后稳定为上述结论。这证明必须保留 20-chunk warmup，不能引用短 smoke 的
+  冷 KV 数字作为吞吐上限。
+- 根因进一步收敛为两个独立层次：`-11` 已证明大 M Linear 的 native FP8 GEMM 有
+  `1.27x--1.58x` 收益，但旧 Triton static activation quant 是逐行 program，约 1200 次
+  Linear/chunk 的量化与 dispatch 开销抵消了 GEMM 收益；即使 DiT 修好，未量化且顺序执行的
+  VAE 仍占 scheduler 的约 `41.2%`，按 Amdahl 上限无法单靠 static FP8 达到端到端 `2x`。
+- 纠偏实现 `711537c535...` 把 activation quant 改为仓库已有的扁平 vectorized CUDA
+  per-tensor static quant custom op；它跳过动态 absmax，并避免旧 Triton inline-asm 进入
+  TorchInductor。B200 Spot 微基准 `-12` 将分别测旧 quant、新 quant、纯 scaled-mm 和完整
+  helper，结果不与本次 `3c910b87bc...` 的 E2E 混写。
+- 结果根目录：`s3://leap-world-us-east-2/world-model/evals/minwm/quantization/20260805/static-fp8-2x/e2e-paired-02/`。
