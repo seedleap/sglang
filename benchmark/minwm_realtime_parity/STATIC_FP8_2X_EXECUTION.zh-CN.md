@@ -165,3 +165,7 @@ VAE/调度，则继续做不降低画质的流水化或阶段并行，并分别�
 - 偏离预期与纠偏：顶层包逐个 `--no-deps` 升级破坏了固定镜像原有的一致环境。停止继续追补依赖；
   `-07` 回到镜像原生 Transformers/Diffusers/PEFT，只安装 `-01` 已确认缺失的 `orjson` 和固定
   FlashInfer JIT cache。新 run id 保留 `-06` 失败证据，并继续复用已启动的 B200 Spot 节点。
+- `-07` 进一步证明训练镜像并不是完整 SGLang 开发环境：补完 `orjson` 后，collection 下一个缺失项是
+  `pybase64`。因此 `-08` 不再逐项试错，恢复 `-03` 已经验证能完整安装的
+  `pip install -e python[diffusion]`，并在安装结束后立即卸载导致 `HybridCache` 冲突的 PEFT；这是目前
+  唯一同时覆盖完整依赖和已知兼容性修正的配方。
