@@ -134,7 +134,9 @@ def test_scaled_mm_helper_uses_jit_per_tensor_quant(
     expected = torch.full((2, 16), 3.0)
 
     def fake_quant(actual_input, actual_scale):
-        assert actual_input is x
+        assert actual_input.shape == x.shape
+        assert actual_input.stride() == x.stride()
+        assert actual_input.data_ptr() == x.data_ptr()
         assert actual_scale is input_scale
         return qinput, actual_scale
 
