@@ -170,39 +170,11 @@ KV 都最快：
 
 ### sink=4/window=20 的最小 kernel 与 Nsight
 
-Job `ray/minwm-attention-kernel-sm120-20260806-02` 在同一 SM120 Spot 代理机上固定
-`batch=1、heads=40、head_dim=128、chunk=4`，直接调用当前 SGLang wrapper。计时
-包含 Sage2 的 smooth/量化和 Sage3 为保护持久 KV 所需的 contiguous K clone、布局转换
-与量化，不是只截取低精度 MMA kernel：
-
-| shape | Q / K tokens | BF16 SDPA | Sage2 API | Sage3 API |
-| --- | ---: | ---: | ---: | ---: |
-| smoke | 1,024 / 5,120 | 0.408 ms | 0.447 ms（慢 9.5%） | 0.567 ms（慢 38.8%） |
-| 832x480 | 6,240 / 31,200 | 11.571 ms | 8.213 ms（快 29.0%） | 9.749 ms（快 15.7%） |
-| 1248x704 | 13,728 / 68,640 | 52.544 ms | 32.189 ms（快 38.7%） | 34.868 ms（快 33.6%） |
-
-因此“低位宽核心在生产尺寸上不应全面慢于 BF16”的判断成立；旧端到端表格不能被
-解释为 Sage kernel 本体更慢。小 shape 会被固定启动、量化和布局成本反噬，生产尺寸
-才进入 Sage 的收益区间。
-
-Nsight 用包含 2 次 warmup 和 3 次 measured call 的 backend NVTX range 关联 GPU
-kernel。704 每次 Sage2 GPU 总计 `32.20 ms`，其中 INT8-QK/FP8-PV 主 kernel
-`28.51 ms`、wrapper `3.70 ms`；Sage3 总计 `34.83 ms`，其中 NVFP4 主 kernel
-只需 `25.16 ms`，但 wrapper 达 `9.68 ms`。480 也相同：Sage2 主 kernel/wrapper
-为 `6.61/1.53 ms`，Sage3 为 `5.47/3.97 ms`。也就是说 Sage3 的 NVFP4 kernel
-确实最快，但 K 隔离、中心化、布局和 block-wise 量化吞掉了相对 Sage2 的优势。
-704 单次 API 的 incremental peak allocated 为 SDPA/Sage2/Sage3
-`0.14/1.62/4.16 GB`，480 为 `0.065/0.74/1.60 GB`；因此 Sage3 的核心速度
-收益同时伴随更高临时显存峰值，不能从 96 GB 代理卡外推 32 GB RTX 5090。
-
-当前镜像里的 packed FA4 在三个 shape 都于 ragged output epilogue 的 CuTe MLIR
-构造阶段失败，尚未启动 GPU kernel，错误为
-`expects coord and shape of view are weakly congruent`。这是一条独立兼容性问题，不能
-用失败 lane 推导 FA4 与 Sage 的性能比例。
-
-原始 `.nsys-rep`、SQLite、CUDA kernel/API/NVTX CSV、benchmark JSON、运行时信息、
-`nvidia-smi` 与按 backend range 拆分的 `nsys-analysis.json` 位于：
-`s3://leap-world-us-east-2/world-model/evals/minwm/attention/20260806/profiles/minwm-attention-kernel-sm120-20260806-02/`。
+`ray/minwm-attention-kernel-sm120-20260806-02` 完成了第一轮 Nsight 工具链与
+wrapper 趋势预跑，但合同复核发现它误用了 Wan 通用配置的 40 heads；当前 MinWM 5B
+转换配置是 `24 heads x 128 dim`。因此 run02 原始文件保留作排障证据，但不进入最终
+性能结论。最终 run 使用 24 heads，并同时补测 fixed-length dense FA4 与产品当前的
+packed varlen FA4。
 
 线上部署还必须做到：按真实 compute capability fail fast；记录 requested/resolved
 backend 和 fallback reason；预构建固定 Torch cu130/NVCC 13.0/Sage SHA 的 wheel，
