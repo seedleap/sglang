@@ -103,6 +103,18 @@ def _benchmark_shape(
             input_scale=input_scale,
         )
 
+    def torch_scaled_mm_static_fp8() -> torch.Tensor:
+        quantized_input, quantized_input_scale = static_quant_fp8(
+            x, input_scale, repeat_scale=False
+        )
+        return torch._scaled_mm(
+            quantized_input,
+            weight_t,
+            scale_a=quantized_input_scale.reshape(1),
+            scale_b=weight_scale.reshape(1),
+            out_dtype=x.dtype,
+        )
+
     def scalar_static_quant() -> torch.Tensor:
         return static_quant_fp8(x, input_scale, repeat_scale=False)[0]
 
@@ -114,15 +126,31 @@ def _benchmark_shape(
             qinput, weight_t, input_scale, weight_scale, x.dtype
         )
 
+    def torch_scaled_mm_gemm_only() -> torch.Tensor:
+        return torch._scaled_mm(
+            qinput,
+            weight_t,
+            scale_a=input_scale.reshape(1),
+            scale_b=weight_scale.reshape(1),
+            out_dtype=x.dtype,
+        )
+
     bf16_output = bf16_linear()
     legacy_output = legacy_static_fp8()
     sm100_output = sm100_static_fp8()
+    torch_scaled_mm_output = torch_scaled_mm_static_fp8()
     errors = {
         "legacy_vs_bf16_relative_l2": _relative_l2(legacy_output, bf16_output),
         "sm100_vs_bf16_relative_l2": _relative_l2(sm100_output, bf16_output),
         "sm100_vs_legacy_relative_l2": _relative_l2(sm100_output, legacy_output),
+        "torch_scaled_mm_vs_bf16_relative_l2": _relative_l2(
+            torch_scaled_mm_output, bf16_output
+        ),
+        "torch_scaled_mm_vs_legacy_relative_l2": _relative_l2(
+            torch_scaled_mm_output, legacy_output
+        ),
     }
-    del bf16_output, legacy_output, sm100_output
+    del bf16_output, legacy_output, sm100_output, torch_scaled_mm_output
 
     timings = {
         "bf16": _measure_ms(bf16_linear, warmup=warmup, iterations=iterations),
@@ -131,6 +159,9 @@ def _benchmark_shape(
         ),
         "sm100_static_fp8": _measure_ms(
             sm100_static_fp8, warmup=warmup, iterations=iterations
+        ),
+        "torch_scaled_mm_static_fp8": _measure_ms(
+            torch_scaled_mm_static_fp8, warmup=warmup, iterations=iterations
         ),
         "scalar_static_quant": _measure_ms(
             scalar_static_quant, warmup=warmup, iterations=iterations
@@ -141,6 +172,9 @@ def _benchmark_shape(
         "sm100_fp8_gemm_only": _measure_ms(
             sm100_fp8_gemm_only, warmup=warmup, iterations=iterations
         ),
+        "torch_scaled_mm_gemm_only": _measure_ms(
+            torch_scaled_mm_gemm_only, warmup=warmup, iterations=iterations
+        ),
     }
     timings["legacy_static_fp8"]["speedup_vs_bf16_p50"] = (
         timings["bf16"]["p50"] / timings["legacy_static_fp8"]["p50"]
@@ -150,6 +184,13 @@ def _benchmark_shape(
     )
     timings["sm100_static_fp8"]["speedup_vs_legacy_p50"] = (
         timings["legacy_static_fp8"]["p50"] / timings["sm100_static_fp8"]["p50"]
+    )
+    timings["torch_scaled_mm_static_fp8"]["speedup_vs_bf16_p50"] = (
+        timings["bf16"]["p50"] / timings["torch_scaled_mm_static_fp8"]["p50"]
+    )
+    timings["torch_scaled_mm_static_fp8"]["speedup_vs_legacy_p50"] = (
+        timings["legacy_static_fp8"]["p50"]
+        / timings["torch_scaled_mm_static_fp8"]["p50"]
     )
 
     return {
