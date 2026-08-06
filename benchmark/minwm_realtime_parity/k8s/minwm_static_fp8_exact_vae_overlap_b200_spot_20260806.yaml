@@ -1,18 +1,18 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: minwm-static-fp8-exact-vae-overlap-b200-20260806-01
+  name: minwm-static-fp8-exact-vae-overlap-b200-20260806-02
   namespace: ray
   labels:
-    app.kubernetes.io/name: minwm-static-fp8-exact-vae-overlap-b200-20260806-01
+    app.kubernetes.io/name: minwm-static-fp8-exact-vae-overlap-b200-20260806-02
     seedleap.ai/owner: chenshengdong
     seedleap.ai/task: minwm-static-fp8-2x
-    seedleap.ai/run-id: minwm-static-fp8-exact-vae-overlap-b200-20260806-01
+    seedleap.ai/run-id: minwm-static-fp8-exact-vae-overlap-b200-20260806-02
   annotations:
     seedleap.ai/capacity-type: spot
     seedleap.ai/repo: seedleap/sglang
     seedleap.ai/branch: codex/minwm-realtime-api
-    seedleap.ai/sglang-git-ref: "0b695a919c0c1f595794749697dd147da7e0a1ea"
+    seedleap.ai/sglang-git-ref: "ec531908def684d385d6d9c03d3d918c68e304c0"
     seedleap.ai/minwm-git-ref: "2efc6485f65e8fcab506665efde79bc41406385e"
     seedleap.ai/checkpoint-version-id: "wduScksw2f3yPErnG9lBioOuE2AToyAP"
 spec:
@@ -21,14 +21,14 @@ spec:
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: minwm-static-fp8-exact-vae-overlap-b200-20260806-01
+        app.kubernetes.io/name: minwm-static-fp8-exact-vae-overlap-b200-20260806-02
         seedleap.ai/owner: chenshengdong
         seedleap.ai/task: minwm-static-fp8-2x
-        seedleap.ai/run-id: minwm-static-fp8-exact-vae-overlap-b200-20260806-01
+        seedleap.ai/run-id: minwm-static-fp8-exact-vae-overlap-b200-20260806-02
       annotations:
         seedleap.ai/repo: seedleap/sglang
         seedleap.ai/branch: codex/minwm-realtime-api
-        seedleap.ai/sglang-git-ref: "0b695a919c0c1f595794749697dd147da7e0a1ea"
+        seedleap.ai/sglang-git-ref: "ec531908def684d385d6d9c03d3d918c68e304c0"
     spec:
       restartPolicy: Never
       terminationGracePeriodSeconds: 60
@@ -62,9 +62,9 @@ spec:
                 fieldRef:
                   fieldPath: spec.nodeName
             - name: MATRIX_ID
-              value: minwm-static-fp8-exact-vae-overlap-b200-20260806-01
+              value: minwm-static-fp8-exact-vae-overlap-b200-20260806-02
             - name: SGLANG_GIT_REF
-              value: "0b695a919c0c1f595794749697dd147da7e0a1ea"
+              value: "ec531908def684d385d6d9c03d3d918c68e304c0"
             - name: MINWM_GIT_REF
               value: "2efc6485f65e8fcab506665efde79bc41406385e"
             - name: MINWM_STAGE_FROM_MOUNT
@@ -90,7 +90,7 @@ spec:
             - name: MINWM_PRETRAINED_S3
               value: s3://leap-world-us-east-2/world-model/checkpoints/minWM/Wan2.2-TI2V-5B-from-diffusers
             - name: MINWM_RESULTS_ROOT
-              value: /s3/world-model/evals/minwm/quantization/20260805/static-fp8-2x/e2e-exact-vae-overlap-01
+              value: /s3/world-model/evals/minwm/quantization/20260805/static-fp8-2x/e2e-exact-vae-overlap-02
             - name: MINWM_CASES_PATH
               value: /workspace/sglang/benchmark/minwm_realtime_parity/cases_720p_compile_smoke.json
             - name: MINWM_THROUGHPUT_CASES_PATH
