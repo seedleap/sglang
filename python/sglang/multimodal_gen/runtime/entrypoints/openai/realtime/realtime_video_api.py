@@ -10,7 +10,6 @@ from uuid import uuid4
 
 import msgspec.msgpack
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
-
 from sglang.multimodal_gen.runtime.entrypoints.openai.protocol import (
     RealtimeEvent,
     RealtimeVideoGenerationsRequest,
@@ -37,17 +36,17 @@ from sglang.multimodal_gen.runtime.entrypoints.utils import (
     ReplaceQueuedRealtimeReq,
 )
 from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import OutputBatch
-from sglang.multimodal_gen.runtime.realtime.async_vae_client import (
-    RealtimeVAEClient,
-    RemoteDecodeHandle,
-    RemoteFrameBatch,
-)
 from sglang.multimodal_gen.runtime.realtime.admission import (
     AdmissionRejected,
     DynamoDBSessionLeaseStore,
     InMemorySessionLeaseStore,
     RealtimeAdmissionController,
     SessionLease,
+)
+from sglang.multimodal_gen.runtime.realtime.async_vae_client import (
+    RealtimeVAEClient,
+    RemoteDecodeHandle,
+    RemoteFrameBatch,
 )
 from sglang.multimodal_gen.runtime.realtime.worker_reservation import (
     WorkerReservationRegistry,
@@ -57,14 +56,10 @@ from sglang.multimodal_gen.runtime.scheduler_client import async_scheduler_clien
 from sglang.multimodal_gen.runtime.server_args import get_global_server_args
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 from sglang.multimodal_gen.runtime.utils.realtime_trace import (
-    CLIENT_TRACE_EVENT_KIND,
     calculate_overlap_ms,
     calculate_overlap_ratio,
-    compact_client_trace_event,
     log_realtime_trace,
     normalize_trace_id,
-    register_realtime_trace_sink,
-    unregister_realtime_trace_sink,
 )
 
 if TYPE_CHECKING:
