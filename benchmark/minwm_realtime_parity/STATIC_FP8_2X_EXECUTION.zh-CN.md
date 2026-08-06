@@ -237,3 +237,36 @@ VAE/调度，则继续做不降低画质的流水化或阶段并行，并分别�
   TorchInductor。B200 Spot 微基准 `-12` 将分别测旧 quant、新 quant、纯 scaled-mm 和完整
   helper，结果不与本次 `3c910b87bc...` 的 E2E 混写。
 - 结果根目录：`s3://leap-world-us-east-2/world-model/evals/minwm/quantization/20260805/static-fp8-2x/e2e-paired-02/`。
+
+### 2026-08-06：优化 activation quant 与精确 VAE overlap
+
+- immutable SHA `711537c535...` 将 static per-tensor activation quant 改为已注册的扁平
+  vectorized CUDA custom op，并继续使用 SM100 native `torch._scaled_mm`。它不是动态 quant：
+  scale 仍来自离线 calibration，只把逐行 Triton program 和旧 inline-asm 路径替换掉。
+- 微基准 Job `minwm-static-fp8-fastpath-b200-20260806-12` 会在同一输入上分别记录旧 quant、
+  新 JIT quant、纯 scaled-mm 与实际 helper；只有 B200 测试和 JSON 完整后才能判断优化是否有效，
+  不能从代码形态直接推断收益。
+- 以当前 strict BF16 `13.9848408 FPS` 重算，2x 门槛为 `27.9696816 FPS`，对应每 16 帧 chunk
+  间隔不超过 `572.05 ms`。当前 BF16 scheduler `1143.043 ms` 中 DiT 为 `570.829 ms`；即使
+  DiT 变成 0，剩余约 `572.214 ms`，已经略高于门槛。这是“单 GPU 串行 static FP8 不可能
+  稳定过线”的实测 Amdahl 证据，不是降低验收标准。
+- 为测联合上限，immutable SHA `0b695a919c...` 实现第二张 GPU 上的原始完整 causal VAE decode。
+  GPU0 返回已经完成 MinWM 预处理的 latent，API 层在发送 chunk N 时异步调用 GPU1，同时 GPU0
+  计算 chunk N+1 的 DiT。协议保持 request/event/chunk index 一一对应；T2V 首 latent 重播后裁掉
+  重复首帧，final chunk 只关闭一次 session。没有使用集群已有的 L4 + TAEHV 服务，因为 TAEHV
+  是近似 decoder，会改变画质和验收语义。
+- 四 lane Job `minwm-static-fp8-exact-vae-overlap-b200-20260806-01` 固定同一 setup/checkpoint/
+  input，依次测 BF16-local、optimized static-local、BF16-exact-overlap、static-exact-overlap。
+  其中 static-local 隔离量化收益，BF16-overlap 隔离拓扑收益，static-overlap 才是联合上限；
+  最终不能把两张 GPU 流水化的全部收益归因给 static FP8。
+
+### 2026-08-06：Spot 容量等待（偏离预期）
+
+- 两个正式 Job 均使用 `AWS_PROFILE=spot`、context `minwm-spot`，node selector 强制
+  `karpenter.sh/capacity-type=spot` 和 `p6-b200.48xlarge`；没有调用 `aws03`。
+- 提交后 Pod 均停留在 `Pending`，NodePool `minwm-test-b200-spot` 自身为 `Ready`、nodes=0。
+  Karpenter 多次创建并提名 NodeClaim，但 AWS Fleet 返回 `InsufficientCapacityError` /
+  `UnfulfillableCapacity`，其中包含 east2b 的 p6-b200 容量不足。该状态不产生 B200 GPU 运行费，
+  也不能用于判断代码正确性或性能。
+- 决策：保留 Job 等待优惠 Spot 容量，不切换到 `aws03` 或 on-demand。容量到达后先执行固定镜像
+  pytest 门禁和 `-12` micro；失败必须使用新 run id 保全 S3 证据，不能覆盖既有结果。
