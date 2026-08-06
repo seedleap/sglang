@@ -173,6 +173,9 @@ def test_serialized_fp8_config_keeps_scalar_scales_on_sm100(
 ) -> None:
     monkeypatch.setattr(diffusion_fp8_quant, "cutlass_fp8_supported", lambda: True)
     monkeypatch.setattr(diffusion_fp8_quant, "is_sm100_supported", lambda: True)
+    monkeypatch.setattr(
+        diffusion_fp8_quant, "get_tensor_model_parallel_world_size", lambda: 1
+    )
 
     method = Fp8LinearMethod(
         Fp8Config(is_checkpoint_fp8_serialized=True, activation_scheme="static")
