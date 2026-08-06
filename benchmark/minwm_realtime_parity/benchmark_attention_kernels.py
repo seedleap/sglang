@@ -34,7 +34,7 @@ class MinWMAttentionShape:
     window_frames: int = 20
     chunk_frames: int = 4
     batch_size: int = 1
-    num_heads: int = 40
+    num_heads: int = 24
     head_dim: int = 128
     vae_spatial_compression: int = 8
     patch_size: int = 2
