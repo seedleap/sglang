@@ -1,32 +1,32 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: minwm-static-fp8-fastpath-b200-20260806-11
+  name: minwm-static-fp8-fastpath-b200-20260806-12
   namespace: ray
   labels:
-    app.kubernetes.io/name: minwm-static-fp8-fastpath-b200-20260806-11
+    app.kubernetes.io/name: minwm-static-fp8-fastpath-b200-20260806-12
     seedleap.ai/owner: chenshengdong
     seedleap.ai/task: minwm-static-fp8-2x
-    seedleap.ai/run-id: minwm-static-fp8-fastpath-b200-20260806-11
+    seedleap.ai/run-id: minwm-static-fp8-fastpath-b200-20260806-12
   annotations:
     seedleap.ai/capacity-type: spot
     seedleap.ai/repo: seedleap/sglang
     seedleap.ai/branch: codex/minwm-realtime-api
-    seedleap.ai/sglang-git-ref: "3c910b87bc7f966ab898da6121f8237aea87e5a1"
+    seedleap.ai/sglang-git-ref: "711537c535aac06545f6f9ff7077154682495c8c"
 spec:
   backoffLimit: 0
   activeDeadlineSeconds: 14400
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: minwm-static-fp8-fastpath-b200-20260806-11
+        app.kubernetes.io/name: minwm-static-fp8-fastpath-b200-20260806-12
         seedleap.ai/owner: chenshengdong
         seedleap.ai/task: minwm-static-fp8-2x
-        seedleap.ai/run-id: minwm-static-fp8-fastpath-b200-20260806-11
+        seedleap.ai/run-id: minwm-static-fp8-fastpath-b200-20260806-12
       annotations:
         seedleap.ai/repo: seedleap/sglang
         seedleap.ai/branch: codex/minwm-realtime-api
-        seedleap.ai/sglang-git-ref: "3c910b87bc7f966ab898da6121f8237aea87e5a1"
+        seedleap.ai/sglang-git-ref: "711537c535aac06545f6f9ff7077154682495c8c"
     spec:
       restartPolicy: Never
       terminationGracePeriodSeconds: 30
@@ -52,9 +52,9 @@ spec:
                   name: github-token
                   key: token
             - name: SGLANG_GIT_REF
-              value: "3c910b87bc7f966ab898da6121f8237aea87e5a1"
+              value: "711537c535aac06545f6f9ff7077154682495c8c"
             - name: RUN_ID
-              value: minwm-static-fp8-fastpath-b200-20260806-11
+              value: minwm-static-fp8-fastpath-b200-20260806-12
             - name: NODE_NAME
               valueFrom:
                 fieldRef:
