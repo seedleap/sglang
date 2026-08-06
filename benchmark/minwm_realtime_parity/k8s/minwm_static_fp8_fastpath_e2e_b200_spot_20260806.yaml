@@ -1,18 +1,18 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: minwm-static-fp8-fastpath-e2e-b200-20260806-01
+  name: minwm-static-fp8-fastpath-e2e-b200-20260806-02
   namespace: ray
   labels:
-    app.kubernetes.io/name: minwm-static-fp8-fastpath-e2e-b200-20260806-01
+    app.kubernetes.io/name: minwm-static-fp8-fastpath-e2e-b200-20260806-02
     seedleap.ai/owner: chenshengdong
     seedleap.ai/task: minwm-static-fp8-2x
-    seedleap.ai/run-id: minwm-static-fp8-fastpath-e2e-b200-20260806-01
+    seedleap.ai/run-id: minwm-static-fp8-fastpath-e2e-b200-20260806-02
   annotations:
     seedleap.ai/capacity-type: spot
     seedleap.ai/repo: seedleap/sglang
     seedleap.ai/branch: codex/minwm-realtime-api
-    seedleap.ai/sglang-git-ref: "aae6435e9160c94c045200f3fd0191ce62450deb"
+    seedleap.ai/sglang-git-ref: "8b5fb1e9c9585865c40b60b82a5cb545a58750e4"
     seedleap.ai/minwm-git-ref: "2efc6485f65e8fcab506665efde79bc41406385e"
     seedleap.ai/checkpoint-version-id: "wduScksw2f3yPErnG9lBioOuE2AToyAP"
 spec:
@@ -21,14 +21,14 @@ spec:
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: minwm-static-fp8-fastpath-e2e-b200-20260806-01
+        app.kubernetes.io/name: minwm-static-fp8-fastpath-e2e-b200-20260806-02
         seedleap.ai/owner: chenshengdong
         seedleap.ai/task: minwm-static-fp8-2x
-        seedleap.ai/run-id: minwm-static-fp8-fastpath-e2e-b200-20260806-01
+        seedleap.ai/run-id: minwm-static-fp8-fastpath-e2e-b200-20260806-02
       annotations:
         seedleap.ai/repo: seedleap/sglang
         seedleap.ai/branch: codex/minwm-realtime-api
-        seedleap.ai/sglang-git-ref: "aae6435e9160c94c045200f3fd0191ce62450deb"
+        seedleap.ai/sglang-git-ref: "8b5fb1e9c9585865c40b60b82a5cb545a58750e4"
     spec:
       restartPolicy: Never
       terminationGracePeriodSeconds: 60
@@ -62,9 +62,9 @@ spec:
                 fieldRef:
                   fieldPath: spec.nodeName
             - name: MATRIX_ID
-              value: minwm-static-fp8-fastpath-e2e-b200-20260806-01
+              value: minwm-static-fp8-fastpath-e2e-b200-20260806-02
             - name: SGLANG_GIT_REF
-              value: "aae6435e9160c94c045200f3fd0191ce62450deb"
+              value: "8b5fb1e9c9585865c40b60b82a5cb545a58750e4"
             - name: MINWM_GIT_REF
               value: "2efc6485f65e8fcab506665efde79bc41406385e"
             - name: MINWM_STAGE_FROM_MOUNT
@@ -90,7 +90,7 @@ spec:
             - name: MINWM_PRETRAINED_S3
               value: s3://leap-world-us-east-2/world-model/checkpoints/minWM/Wan2.2-TI2V-5B-from-diffusers
             - name: MINWM_RESULTS_ROOT
-              value: /s3/world-model/evals/minwm/quantization/20260805/static-fp8-2x/e2e-paired-01
+              value: /s3/world-model/evals/minwm/quantization/20260805/static-fp8-2x/e2e-paired-02
             - name: MINWM_CASES_PATH
               value: /workspace/sglang/benchmark/minwm_realtime_parity/cases_720p_compile_smoke.json
             - name: MINWM_THROUGHPUT_CASES_PATH
@@ -157,7 +157,7 @@ spec:
                 MINWM_REUSE_MODEL_RUN_ID="${bf16_run}" \
                 MINWM_SKIP_INSTALL=1 \
                 MINWM_BENCHMARK_MODE=calibratedfp8 \
-                MINWM_PROFILE_QUANTIZATION_LABEL=static_fp8_sm100_flashinfer \
+                MINWM_PROFILE_QUANTIZATION_LABEL=static_fp8_sm100_cublaslt \
                 MINWM_THROUGHPUT_PROFILES="${profile}" \
                 bash "${entrypoint}"
               echo "MINWM_STATIC_FP8_2X_LANE_END lane=static-fp8-fastpath status=0 timestamp=$(date -Iseconds)"
