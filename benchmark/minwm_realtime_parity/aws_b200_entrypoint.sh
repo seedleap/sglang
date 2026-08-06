@@ -1321,6 +1321,7 @@ run_throughput_profile() {
   local client_args=(
     --output "${profile_dir}/throughput.json"
     --profile-name "${profile}"
+    --sink-size "${MINWM_ATTENTION_KV_SINK_SIZE}"
     --kv-cache-num-frames "${kv_frames}"
   )
   if [[ -n "${MINWM_PROFILE_QUANTIZATION:-}" ]]; then
@@ -1390,31 +1391,32 @@ run_throughput_profile() {
   return "${profile_status}"
 }
 
+MINWM_ATTENTION_KV_SINK_SIZE="${MINWM_ATTENTION_KV_SINK_SIZE:-4}"
+MINWM_ATTENTION_KV_WINDOW_SIZE="${MINWM_ATTENTION_KV_WINDOW_SIZE:-20}"
+if (( MINWM_ATTENTION_KV_SINK_SIZE < 0 )); then
+  echo "MINWM_ATTENTION_KV_SINK_SIZE must be non-negative" >&2
+  exit 1
+fi
+if (( MINWM_ATTENTION_KV_WINDOW_SIZE <= MINWM_ATTENTION_KV_SINK_SIZE )); then
+  echo "MINWM_ATTENTION_KV_WINDOW_SIZE must be greater than MINWM_ATTENTION_KV_SINK_SIZE" >&2
+  exit 1
+fi
+attention_kv_suffix="kv${MINWM_ATTENTION_KV_WINDOW_SIZE}"
 profiles=(
-  "exact-packed-det-kv128 packed fa true text_encoder,vae false 128"
-  "exact-packed-det-kv45 packed fa true text_encoder,vae false 45"
-  "packed-optimized-components-kv128 packed fa false '' false 128"
-  "packed-optimized-components-kv45 packed fa false '' false 45"
-  "packed-nondeterministic-kv128 packed fa false text_encoder,vae false 128"
-  "packed-nondeterministic-kv45 packed fa false text_encoder,vae false 45"
-  "lingbot-style-dense-native-kv45 dense fa false text_encoder,vae false 45"
-  "dense-optimized-components-kv45 dense fa false '' false 45"
-  "dense-optimized-components-kv128 dense fa false '' false 128"
+  "exact-packed-det-${attention_kv_suffix} packed fa true text_encoder,vae false ${MINWM_ATTENTION_KV_WINDOW_SIZE}"
+  "packed-optimized-components-${attention_kv_suffix} packed fa false '' false ${MINWM_ATTENTION_KV_WINDOW_SIZE}"
+  "packed-nondeterministic-${attention_kv_suffix} packed fa false text_encoder,vae false ${MINWM_ATTENTION_KV_WINDOW_SIZE}"
+  "lingbot-style-dense-native-${attention_kv_suffix} dense fa false text_encoder,vae false ${MINWM_ATTENTION_KV_WINDOW_SIZE}"
+  "dense-optimized-components-${attention_kv_suffix} dense fa false '' false ${MINWM_ATTENTION_KV_WINDOW_SIZE}"
 )
 if [[ "${MINWM_INCLUDE_COMPILE_PROFILE:-true}" == "true" ]]; then
-  profiles+=("dense-optimized-compile-kv45 dense fa false '' true 45")
+  profiles+=("dense-optimized-compile-${attention_kv_suffix} dense fa false '' true ${MINWM_ATTENTION_KV_WINDOW_SIZE}")
 fi
 if [[ ",${MINWM_SAGE_ATTENTION_BACKENDS:-}," == *",sage_attn,"* ]]; then
-  profiles+=(
-    "dense-sage-attn-kv45 dense sage_attn false '' false 45"
-    "dense-sage-attn-kv128 dense sage_attn false '' false 128"
-  )
+  profiles+=("dense-sage-attn-${attention_kv_suffix} dense sage_attn false '' false ${MINWM_ATTENTION_KV_WINDOW_SIZE}")
 fi
 if [[ ",${MINWM_SAGE_ATTENTION_BACKENDS:-}," == *",sage_attn_3,"* ]]; then
-  profiles+=(
-    "dense-sage-attn-3-kv45 dense sage_attn_3 false '' false 45"
-    "dense-sage-attn-3-kv128 dense sage_attn_3 false '' false 128"
-  )
+  profiles+=("dense-sage-attn-3-${attention_kv_suffix} dense sage_attn_3 false '' false ${MINWM_ATTENTION_KV_WINDOW_SIZE}")
 fi
 if [[ -n "${MINWM_THROUGHPUT_PROFILES:-}" ]]; then
   selected_profiles=()
@@ -1447,7 +1449,9 @@ done
 python3 - "${RESULTS}/throughput" "${RESULTS}/throughput-summary.json" \
   "${profile_failures[*]}" \
   "${MINWM_PROFILE_QUANTIZATION_LABEL:-${MINWM_PROFILE_QUANTIZATION:-}}" \
-  "${SGLANG_DIFFUSION_FLASHINFER_FP4_GEMM_BACKEND:-}" <<'PY'
+  "${SGLANG_DIFFUSION_FLASHINFER_FP4_GEMM_BACKEND:-}" \
+  "${MINWM_ATTENTION_KV_SINK_SIZE}" \
+  "${MINWM_ATTENTION_KV_WINDOW_SIZE}" <<'PY'
 import json, sys
 from pathlib import Path
 
@@ -1461,8 +1465,13 @@ summary = {
     "failed_profiles": sys.argv[3].split() if sys.argv[3] else [],
     "quantization": sys.argv[4] or None,
     "nvfp4_backend": sys.argv[5] or None,
+    "kv_contract": {
+        "sink_size": int(sys.argv[6]),
+        "window_size": int(sys.argv[7]),
+    },
 }
-exact_name = "exact-packed-det-kv45"
+kv_suffix = f"kv{sys.argv[7]}"
+exact_name = f"exact-packed-det-{kv_suffix}"
 comparisons = {}
 if exact_name in profiles:
     exact = profiles[exact_name]
@@ -1493,52 +1502,32 @@ if exact_name in profiles:
 summary["comparisons"] = comparisons
 isolated_pairs = {
     "deterministic_packed_tax": (
-        "exact-packed-det-kv45",
-        "packed-nondeterministic-kv45",
-    ),
-    "deterministic_packed_tax_kv128": (
-        "exact-packed-det-kv128",
-        "packed-nondeterministic-kv128",
+        f"exact-packed-det-{kv_suffix}",
+        f"packed-nondeterministic-{kv_suffix}",
     ),
     "packed_vs_lingbot_style_dense": (
-        "exact-packed-det-kv45",
-        "lingbot-style-dense-native-kv45",
+        f"exact-packed-det-{kv_suffix}",
+        f"lingbot-style-dense-native-{kv_suffix}",
     ),
     "native_component_tax": (
-        "lingbot-style-dense-native-kv45",
-        "dense-optimized-components-kv45",
+        f"lingbot-style-dense-native-{kv_suffix}",
+        f"dense-optimized-components-{kv_suffix}",
     ),
     "whole_compile_effect": (
-        "dense-optimized-components-kv45",
-        "dense-optimized-compile-kv45",
+        f"dense-optimized-components-{kv_suffix}",
+        f"dense-optimized-compile-{kv_suffix}",
     ),
-    "kv128_vs_kv45_effect": (
-        "exact-packed-det-kv128",
-        "exact-packed-det-kv45",
+    "packed_vs_dense_fa": (
+        f"dense-optimized-components-{kv_suffix}",
+        f"packed-optimized-components-{kv_suffix}",
     ),
-    "packed_vs_dense_fa_kv45": (
-        "dense-optimized-components-kv45",
-        "packed-optimized-components-kv45",
+    "sage_attn_vs_dense_fa": (
+        f"dense-optimized-components-{kv_suffix}",
+        f"dense-sage-attn-{kv_suffix}",
     ),
-    "packed_vs_dense_fa_kv128": (
-        "dense-optimized-components-kv128",
-        "packed-optimized-components-kv128",
-    ),
-    "sage_attn_vs_dense_fa_kv45": (
-        "dense-optimized-components-kv45",
-        "dense-sage-attn-kv45",
-    ),
-    "sage_attn_3_vs_dense_fa_kv45": (
-        "dense-optimized-components-kv45",
-        "dense-sage-attn-3-kv45",
-    ),
-    "sage_attn_vs_dense_fa_kv128": (
-        "dense-optimized-components-kv128",
-        "dense-sage-attn-kv128",
-    ),
-    "sage_attn_3_vs_dense_fa_kv128": (
-        "dense-optimized-components-kv128",
-        "dense-sage-attn-3-kv128",
+    "sage_attn_3_vs_dense_fa": (
+        f"dense-optimized-components-{kv_suffix}",
+        f"dense-sage-attn-3-{kv_suffix}",
     ),
 }
 isolated = {}
@@ -1610,6 +1599,7 @@ run_attention_quality_profile() {
     --results "${profile_dir}" \
     --ws-url ws://127.0.0.1:30000/v1/realtime_video/generate \
     --case "${MINWM_ATTENTION_QUALITY_CASE}" \
+    --sink-size "${MINWM_ATTENTION_KV_SINK_SIZE}" \
     --kv-cache-num-frames "${kv_frames}" \
     --output-prefix output \
     --engine-name "minwm-${profile}" \
@@ -1627,7 +1617,7 @@ run_attention_quality_profile() {
 if [[ "${MINWM_RUN_ATTENTION_QUALITY:-0}" == "1" ]]; then
   : "${MINWM_ATTENTION_QUALITY_CASES_PATH:=${MINWM_THROUGHPUT_CASES_PATH:-${SCRIPT_DIR}/cases_720p_compile_smoke.json}}"
   : "${MINWM_ATTENTION_QUALITY_CASE:=${MINWM_THROUGHPUT_CASE:-00_forward_080_pottery_720p}}"
-  quality_kv_frames="${MINWM_ATTENTION_QUALITY_KV_FRAMES:-128}"
+  quality_kv_frames="${MINWM_ATTENTION_QUALITY_KV_FRAMES:-${MINWM_ATTENTION_KV_WINDOW_SIZE}}"
   quality_specs=(
     "packed-fa packed fa true"
     "dense-fa dense fa false"
