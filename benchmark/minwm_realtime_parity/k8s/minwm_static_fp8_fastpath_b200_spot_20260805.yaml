@@ -1,32 +1,32 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: minwm-static-fp8-fastpath-b200-20260806-16
+  name: minwm-static-fp8-fastpath-b200-20260806-17
   namespace: ray
   labels:
-    app.kubernetes.io/name: minwm-static-fp8-fastpath-b200-20260806-16
+    app.kubernetes.io/name: minwm-static-fp8-fastpath-b200-20260806-17
     seedleap.ai/owner: chenshengdong
     seedleap.ai/task: minwm-static-fp8-2x
-    seedleap.ai/run-id: minwm-static-fp8-fastpath-b200-20260806-16
+    seedleap.ai/run-id: minwm-static-fp8-fastpath-b200-20260806-17
   annotations:
     seedleap.ai/capacity-type: spot
     seedleap.ai/repo: seedleap/sglang
     seedleap.ai/branch: codex/minwm-realtime-api
-    seedleap.ai/sglang-git-ref: "f8db2001adc02925daf8aeac00065481634da7ef"
+    seedleap.ai/sglang-git-ref: "417d47cace97b450b536cf855536e8d9f44c1eba"
 spec:
   backoffLimit: 0
   activeDeadlineSeconds: 14400
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: minwm-static-fp8-fastpath-b200-20260806-16
+        app.kubernetes.io/name: minwm-static-fp8-fastpath-b200-20260806-17
         seedleap.ai/owner: chenshengdong
         seedleap.ai/task: minwm-static-fp8-2x
-        seedleap.ai/run-id: minwm-static-fp8-fastpath-b200-20260806-16
+        seedleap.ai/run-id: minwm-static-fp8-fastpath-b200-20260806-17
       annotations:
         seedleap.ai/repo: seedleap/sglang
         seedleap.ai/branch: codex/minwm-realtime-api
-        seedleap.ai/sglang-git-ref: "f8db2001adc02925daf8aeac00065481634da7ef"
+        seedleap.ai/sglang-git-ref: "417d47cace97b450b536cf855536e8d9f44c1eba"
     spec:
       restartPolicy: Never
       terminationGracePeriodSeconds: 30
@@ -52,9 +52,9 @@ spec:
                   name: github-token
                   key: token
             - name: SGLANG_GIT_REF
-              value: "f8db2001adc02925daf8aeac00065481634da7ef"
+              value: "417d47cace97b450b536cf855536e8d9f44c1eba"
             - name: RUN_ID
-              value: minwm-static-fp8-fastpath-b200-20260806-16
+              value: minwm-static-fp8-fastpath-b200-20260806-17
             - name: NODE_NAME
               valueFrom:
                 fieldRef:
@@ -110,6 +110,7 @@ spec:
                 test/registered/jit/diffusion/test_diffusion_modelopt_fp8_scaled_mm.py \
                 2>&1 | tee "${result_dir}/pytest.log"
               python3 benchmark/minwm_realtime_parity/benchmark_static_fp8_linear.py \
+                --deterministic \
                 --warmup 10 \
                 --iterations 30 \
                 --output "${result_dir}/linear-benchmark.json" \
