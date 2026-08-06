@@ -239,6 +239,48 @@ def test_scaled_mm_helper_uses_jit_per_tensor_quant(
     torch.testing.assert_close(actual, expected)
 
 
+def test_scaled_mm_helper_scopes_deterministic_fill_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    x = torch.ones((2, 16))
+    weight = torch.ones((16, 16)).t()
+    weight_scale = torch.tensor(0.5)
+    input_scale = torch.tensor(0.25)
+    qinput = torch.ones_like(x, dtype=torch.float8_e4m3fn)
+    expected = torch.full((2, 16), 3.0)
+    previous_enabled = torch.are_deterministic_algorithms_enabled()
+    previous_warn_only = torch.is_deterministic_algorithms_warn_only_enabled()
+    previous_fill = torch.utils.deterministic.fill_uninitialized_memory
+
+    def fake_quant(actual_input, actual_scale):
+        assert not torch.utils.deterministic.fill_uninitialized_memory
+        return qinput, actual_scale
+
+    def fake_scaled_mm(*args, **kwargs):
+        assert not torch.utils.deterministic.fill_uninitialized_memory
+        return expected
+
+    monkeypatch.setattr(fp8_utils, "scaled_fp8_quant", fake_quant)
+    monkeypatch.setattr(torch, "_scaled_mm", fake_scaled_mm)
+    try:
+        torch.use_deterministic_algorithms(True)
+        torch.utils.deterministic.fill_uninitialized_memory = True
+        actual = fp8_utils.apply_fp8_linear_scaled_mm(
+            input=x,
+            weight=weight,
+            weight_scale=weight_scale,
+            input_scale=input_scale,
+        )
+        torch.testing.assert_close(actual, expected)
+        assert torch.utils.deterministic.fill_uninitialized_memory
+    finally:
+        torch.utils.deterministic.fill_uninitialized_memory = previous_fill
+        torch.use_deterministic_algorithms(
+            previous_enabled,
+            warn_only=previous_warn_only,
+        )
+
+
 @pytest.mark.skipif(
     not _modelopt_fp8_supported(),
     reason="Diffusion ModelOpt FP8 scaled mm correctness requires CUDA FP8 support",

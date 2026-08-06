@@ -219,6 +219,7 @@ def main() -> None:
     )
     parser.add_argument("--warmup", type=int, default=10)
     parser.add_argument("--iterations", type=int, default=30)
+    parser.add_argument("--deterministic", action="store_true")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
 
@@ -228,6 +229,8 @@ def main() -> None:
         raise RuntimeError("This benchmark requires an SM100 GPU")
     if not is_flashinfer_available():
         raise RuntimeError("FlashInfer is required")
+    if args.deterministic:
+        torch.use_deterministic_algorithms(True)
 
     shapes = args.shape or [
         (3432, 3072, 3072),
@@ -244,6 +247,12 @@ def main() -> None:
             "capability": list(torch.cuda.get_device_capability(0)),
             "flashinfer_available": is_flashinfer_available(),
             "sm100_supported": is_sm100_supported(),
+            "deterministic_algorithms": (
+                torch.are_deterministic_algorithms_enabled()
+            ),
+            "fill_uninitialized_memory": (
+                torch.utils.deterministic.fill_uninitialized_memory
+            ),
         },
         "warmup": args.warmup,
         "iterations": args.iterations,
