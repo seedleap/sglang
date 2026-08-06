@@ -44,3 +44,16 @@ def test_sink_must_fit_inside_window() -> None:
     )
     with pytest.raises(ValueError, match="sink_frames"):
         shape.validate()
+
+
+@pytest.mark.parametrize(
+    ("preset", "query_length"),
+    [("480p-cross", 6240), ("704p-cross", 13728)],
+)
+def test_cross_attention_shape_geometry(preset: str, query_length: int) -> None:
+    shape = MODULE.PRESETS[preset]
+    shape.validate()
+    assert shape.num_heads == 24
+    assert shape.head_dim == 128
+    assert shape.query_length == query_length
+    assert shape.key_length == 512

@@ -32,6 +32,7 @@ class MinWMAttentionShape:
     height: int
     sink_frames: int = 4
     window_frames: int = 20
+    key_length_override: int | None = None
     chunk_frames: int = 4
     batch_size: int = 1
     num_heads: int = 24
@@ -54,6 +55,8 @@ class MinWMAttentionShape:
 
     @property
     def key_length(self) -> int:
+        if self.key_length_override is not None:
+            return self.key_length_override
         return self.window_frames * self.tokens_per_frame
 
     def validate(self) -> None:
@@ -61,19 +64,27 @@ class MinWMAttentionShape:
             raise ValueError("sink_frames must be in [0, window_frames)")
         if self.chunk_frames <= 0 or self.num_heads <= 0 or self.head_dim <= 0:
             raise ValueError("chunk/head geometry must be positive")
+        if self.key_length_override is not None and self.key_length_override <= 0:
+            raise ValueError("key_length_override must be positive")
         _ = self.tokens_per_frame
 
 
 PRESETS = {
     "smoke": MinWMAttentionShape(name="smoke", width=256, height=256, window_frames=8),
     "480p": MinWMAttentionShape(name="480p", width=832, height=480),
+    "480p-cross": MinWMAttentionShape(
+        name="480p-cross", width=832, height=480, key_length_override=512
+    ),
     "704p": MinWMAttentionShape(name="704p", width=1248, height=704),
+    "704p-cross": MinWMAttentionShape(
+        name="704p-cross", width=1248, height=704, key_length_override=512
+    ),
 }
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--presets", default="smoke,480p,704p")
+    parser.add_argument("--presets", default="smoke,480p,480p-cross,704p,704p-cross")
     parser.add_argument("--backends", default="sdpa,fa4_dense,fa4,sage2,sage3")
     parser.add_argument("--sink-frames", type=int, default=4)
     parser.add_argument("--window-frames", type=int, default=20)

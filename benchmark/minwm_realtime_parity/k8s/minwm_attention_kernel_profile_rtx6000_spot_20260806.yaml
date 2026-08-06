@@ -149,7 +149,7 @@ spec:
 
               BENCH=/workspace/sglang/benchmark/minwm_realtime_parity/benchmark_attention_kernels.py
               python3 "${BENCH}" \
-                --presets smoke,480p,704p \
+                --presets smoke,480p,480p-cross,704p,704p-cross \
                 --backends sdpa,fa4_dense,fa4,sage2,sage3 \
                 --sink-frames 4 \
                 --window-frames 20 \
@@ -166,7 +166,7 @@ spec:
                 --force-overwrite=true \
                 --output="${WORK}/minwm-attention-sm120" \
                 python3 "${BENCH}" \
-                  --presets smoke,480p,704p \
+                  --presets smoke,480p,480p-cross,704p,704p-cross \
                   --backends sdpa,fa4_dense,fa4,sage2,sage3 \
                   --sink-frames 4 \
                   --window-frames 20 \
