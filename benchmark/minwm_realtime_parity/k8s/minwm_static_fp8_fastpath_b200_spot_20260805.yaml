@@ -1,13 +1,13 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: minwm-static-fp8-fastpath-b200-20260806-06
+  name: minwm-static-fp8-fastpath-b200-20260806-07
   namespace: ray
   labels:
-    app.kubernetes.io/name: minwm-static-fp8-fastpath-b200-20260806-06
+    app.kubernetes.io/name: minwm-static-fp8-fastpath-b200-20260806-07
     seedleap.ai/owner: chenshengdong
     seedleap.ai/task: minwm-static-fp8-2x
-    seedleap.ai/run-id: minwm-static-fp8-fastpath-b200-20260806-06
+    seedleap.ai/run-id: minwm-static-fp8-fastpath-b200-20260806-07
   annotations:
     seedleap.ai/capacity-type: spot
     seedleap.ai/repo: seedleap/sglang
@@ -19,10 +19,10 @@ spec:
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: minwm-static-fp8-fastpath-b200-20260806-06
+        app.kubernetes.io/name: minwm-static-fp8-fastpath-b200-20260806-07
         seedleap.ai/owner: chenshengdong
         seedleap.ai/task: minwm-static-fp8-2x
-        seedleap.ai/run-id: minwm-static-fp8-fastpath-b200-20260806-06
+        seedleap.ai/run-id: minwm-static-fp8-fastpath-b200-20260806-07
       annotations:
         seedleap.ai/repo: seedleap/sglang
         seedleap.ai/branch: codex/minwm-realtime-api
@@ -54,7 +54,7 @@ spec:
             - name: SGLANG_GIT_REF
               value: "aae6435e9160c94c045200f3fd0191ce62450deb"
             - name: RUN_ID
-              value: minwm-static-fp8-fastpath-b200-20260806-06
+              value: minwm-static-fp8-fastpath-b200-20260806-07
             - name: NODE_NAME
               valueFrom:
                 fieldRef:
@@ -99,30 +99,7 @@ spec:
               PY
               python3 -m pip install -e /workspace/sglang/python \
                 --no-deps --root-user-action=ignore
-              python3 -m pip install --no-deps \
-                'addict==2.4.0' \
-                'compressed-tensors' \
-                'diffusers==0.37.0' \
-                'fastapi==0.141.1' \
-                'gguf' \
-                'IPython==9.16.0' \
-                'msgspec==0.21.1' \
-                'orjson==3.11.9' \
-                'partial-json-parser' \
-                'prometheus-client==0.26.0' \
-                'pybase64==1.4.3' \
-                'python-multipart==0.0.32' \
-                'pyzmq==27.1.0' \
-                'setproctitle==1.3.7' \
-                'transformers==5.12.1' \
-                'uvicorn==0.52.0' \
-                'uvloop==0.22.1' \
-                'watchfiles==1.2.0' \
-                'websockets==17.0.1' \
-                'zstandard==0.25.0' \
-                --root-user-action=ignore
-              python3 -m pip uninstall -y peft
-              python3 -m pip install 'IPython==9.16.0' \
+              python3 -m pip install 'orjson==3.11.9' \
                 --root-user-action=ignore
               python3 -m pip install --force-reinstall --no-deps \
                 --index-url https://flashinfer.ai/whl/cu130 \

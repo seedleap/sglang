@@ -156,3 +156,12 @@ VAE/调度，则继续做不降低画质的流水化或阶段并行，并分别�
   把 `activeDeadlineSeconds` 延长到 4 小时。此次变更不改变 profile、实例类型、镜像、代码或计时合同。
 - 决策：保留 `-05` S3 日志；`-06` 使用新 run id，在最小依赖后让 pip 补齐 IPython 的传递依赖，
   并升级到含 quant/GEMM 分解计时的 immutable SHA `aae6435e9160...`。复用当前 Spot 节点，不覆盖旧结果。
+
+### 2026-08-06：B200 Spot 微基准 `-06` / `-07`
+
+- `-06` 补齐 IPython 后，pytest collection 继续暴露 `transformers==5.12.1` 与镜像原生
+  `huggingface_hub` 的 API 不兼容（缺少 `is_offline_mode`）；CUDA test 与 microbenchmark
+  仍未执行。
+- 偏离预期与纠偏：顶层包逐个 `--no-deps` 升级破坏了固定镜像原有的一致环境。停止继续追补依赖；
+  `-07` 回到镜像原生 Transformers/Diffusers/PEFT，只安装 `-01` 已确认缺失的 `orjson` 和固定
+  FlashInfer JIT cache。新 run id 保留 `-06` 失败证据，并继续复用已启动的 B200 Spot 节点。
