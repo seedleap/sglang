@@ -12,7 +12,7 @@ metadata:
     seedleap.ai/capacity-type: spot
     seedleap.ai/repo: seedleap/sglang
     seedleap.ai/branch: codex/minwm-realtime-api
-    seedleap.ai/sglang-git-ref: "f4228463c0f4b5a7f840f929b6f9ebbfbf5b0e0e"
+    seedleap.ai/sglang-git-ref: "69cc3d365c8b627c956817eecc5e214cb8ae1f9d"
     seedleap.ai/minwm-git-ref: "2efc6485f65e8fcab506665efde79bc41406385e"
     seedleap.ai/checkpoint-version-id: "wduScksw2f3yPErnG9lBioOuE2AToyAP"
 spec:
@@ -28,7 +28,7 @@ spec:
       annotations:
         seedleap.ai/repo: seedleap/sglang
         seedleap.ai/branch: codex/minwm-realtime-api
-        seedleap.ai/sglang-git-ref: "f4228463c0f4b5a7f840f929b6f9ebbfbf5b0e0e"
+        seedleap.ai/sglang-git-ref: "69cc3d365c8b627c956817eecc5e214cb8ae1f9d"
     spec:
       restartPolicy: Never
       terminationGracePeriodSeconds: 60
@@ -64,7 +64,7 @@ spec:
             - name: MATRIX_ID
               value: minwm-static-fp8-exact-vae-overlap-b200-20260806-03
             - name: SGLANG_GIT_REF
-              value: "f4228463c0f4b5a7f840f929b6f9ebbfbf5b0e0e"
+              value: "69cc3d365c8b627c956817eecc5e214cb8ae1f9d"
             - name: MINWM_GIT_REF
               value: "2efc6485f65e8fcab506665efde79bc41406385e"
             - name: MINWM_STAGE_FROM_MOUNT
