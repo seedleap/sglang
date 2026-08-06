@@ -1,19 +1,19 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: minwm-attention-kernel-sm120-20260806-02
+  name: minwm-attention-kernel-sm120-20260806-04
   namespace: ray
   labels:
-    app.kubernetes.io/name: minwm-attention-kernel-sm120-20260806-02
+    app.kubernetes.io/name: minwm-attention-kernel-sm120-20260806-04
     seedleap.ai/owner: chenshengdong
     seedleap.ai/task: minwm-attention-kernel-profile
-    seedleap.ai/run-id: minwm-attention-kernel-sm120-20260806-02
+    seedleap.ai/run-id: minwm-attention-kernel-sm120-20260806-04
   annotations:
     seedleap.ai/capacity-type: spot
     seedleap.ai/hardware-role: rtx-5090-sm120-proxy
     seedleap.ai/repo: seedleap/sglang
     seedleap.ai/branch: codex/minwm-sage-attention
-    seedleap.ai/sglang-git-ref: "75931d09a47f67f87866bc9ba0cba8cf56d6b8f4"
+    seedleap.ai/sglang-git-ref: "876118db8419c2ead4bd84b5f0f6c5c10784da86"
     seedleap.ai/kv-contract: sink4-window20
 spec:
   backoffLimit: 0
@@ -21,14 +21,14 @@ spec:
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: minwm-attention-kernel-sm120-20260806-02
+        app.kubernetes.io/name: minwm-attention-kernel-sm120-20260806-04
         seedleap.ai/owner: chenshengdong
         seedleap.ai/task: minwm-attention-kernel-profile
-        seedleap.ai/run-id: minwm-attention-kernel-sm120-20260806-02
+        seedleap.ai/run-id: minwm-attention-kernel-sm120-20260806-04
       annotations:
         seedleap.ai/repo: seedleap/sglang
         seedleap.ai/branch: codex/minwm-sage-attention
-        seedleap.ai/sglang-git-ref: "75931d09a47f67f87866bc9ba0cba8cf56d6b8f4"
+        seedleap.ai/sglang-git-ref: "876118db8419c2ead4bd84b5f0f6c5c10784da86"
     spec:
       restartPolicy: Never
       terminationGracePeriodSeconds: 90
@@ -60,11 +60,11 @@ spec:
                   name: github-token
                   key: token
             - name: SGLANG_GIT_REF
-              value: "75931d09a47f67f87866bc9ba0cba8cf56d6b8f4"
+              value: "876118db8419c2ead4bd84b5f0f6c5c10784da86"
             - name: SAGE_ATTENTION_GIT_REF
               value: "d1a57a546c3d395b1ffcbeecc66d81db76f3b4b5"
             - name: RESULT_RUN_ID
-              value: minwm-attention-kernel-sm120-20260806-02
+              value: minwm-attention-kernel-sm120-20260806-04
             - name: RESULT_ROOT
               value: /s3/world-model/evals/minwm/attention/20260806/profiles
           command:
@@ -77,7 +77,10 @@ spec:
               mkdir -p "${WORK}" "${PUBLISH}"
               exec > >(tee "${WORK}/job.log") 2>&1
               publish() {
-                cp -rn "${WORK}/." "${PUBLISH}/" || true
+                # S3 FUSE rejects timestamp preservation and overwriting an
+                # existing object. GNU cp's explicit update policy avoids
+                # both while keeping partial Spot evidence recoverable.
+                cp -r --update=none "${WORK}/." "${PUBLISH}/" || true
               }
               trap publish EXIT
 
