@@ -1,32 +1,32 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: minwm-static-fp8-fastpath-b200-20260805-05
+  name: minwm-static-fp8-fastpath-b200-20260806-06
   namespace: ray
   labels:
-    app.kubernetes.io/name: minwm-static-fp8-fastpath-b200-20260805-05
+    app.kubernetes.io/name: minwm-static-fp8-fastpath-b200-20260806-06
     seedleap.ai/owner: chenshengdong
     seedleap.ai/task: minwm-static-fp8-2x
-    seedleap.ai/run-id: minwm-static-fp8-fastpath-b200-20260805-05
+    seedleap.ai/run-id: minwm-static-fp8-fastpath-b200-20260806-06
   annotations:
     seedleap.ai/capacity-type: spot
     seedleap.ai/repo: seedleap/sglang
     seedleap.ai/branch: codex/minwm-realtime-api
-    seedleap.ai/sglang-git-ref: "761b76f5206c4d8f384e5a6ddf6728a1eede0776"
+    seedleap.ai/sglang-git-ref: "aae6435e9160c94c045200f3fd0191ce62450deb"
 spec:
   backoffLimit: 0
   activeDeadlineSeconds: 14400
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: minwm-static-fp8-fastpath-b200-20260805-05
+        app.kubernetes.io/name: minwm-static-fp8-fastpath-b200-20260806-06
         seedleap.ai/owner: chenshengdong
         seedleap.ai/task: minwm-static-fp8-2x
-        seedleap.ai/run-id: minwm-static-fp8-fastpath-b200-20260805-05
+        seedleap.ai/run-id: minwm-static-fp8-fastpath-b200-20260806-06
       annotations:
         seedleap.ai/repo: seedleap/sglang
         seedleap.ai/branch: codex/minwm-realtime-api
-        seedleap.ai/sglang-git-ref: "761b76f5206c4d8f384e5a6ddf6728a1eede0776"
+        seedleap.ai/sglang-git-ref: "aae6435e9160c94c045200f3fd0191ce62450deb"
     spec:
       restartPolicy: Never
       terminationGracePeriodSeconds: 30
@@ -52,9 +52,9 @@ spec:
                   name: github-token
                   key: token
             - name: SGLANG_GIT_REF
-              value: "761b76f5206c4d8f384e5a6ddf6728a1eede0776"
+              value: "aae6435e9160c94c045200f3fd0191ce62450deb"
             - name: RUN_ID
-              value: minwm-static-fp8-fastpath-b200-20260805-05
+              value: minwm-static-fp8-fastpath-b200-20260806-06
             - name: NODE_NAME
               valueFrom:
                 fieldRef:
@@ -122,6 +122,8 @@ spec:
                 'zstandard==0.25.0' \
                 --root-user-action=ignore
               python3 -m pip uninstall -y peft
+              python3 -m pip install 'IPython==9.16.0' \
+                --root-user-action=ignore
               python3 -m pip install --force-reinstall --no-deps \
                 --index-url https://flashinfer.ai/whl/cu130 \
                 'flashinfer-jit-cache==0.6.12+cu130'

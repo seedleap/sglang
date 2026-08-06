@@ -147,10 +147,12 @@ VAE/调度，则继续做不降低画质的流水化或阶段并行，并分别�
 
 - profile/context：仍严格为 `spot` / `minwm-spot`；代码固定在 `761b76f520...`，镜像固定为
   `sha256:bedc07ea...`。
-- 当前状态：Pod 已触发 `minwm-test-b200-spot-j9hbq` NodeClaim，正在等待 AWS 提供
-  `p6-b200.48xlarge` Spot 容量；后续 NodeClaim 也收到 `UnfulfillableCapacity`。正式性能数字
-  尚未产生。
+- 结果：多轮 `UnfulfillableCapacity` 后，NodeClaim `minwm-test-b200-spot-7hsjl` 在 east2b
+  成功启动 `p6-b200.48xlarge` Spot。依赖安装继续推进，但 pytest collection 在导入 IPython 时
+  因缺少 `traitlets` 失败；CUDA test 与 microbenchmark 均未执行，不能作为性能证据。
 - 现场变量：同集群同时存在另一个请求 B200 的任务，会影响获取节点的等待时间；它不会共享本 Pod
   的 GPU，也不会进入正式计时窗口，因此节点成功独占后不影响测量合同。
 - 决策：Pending 不产生 GPU 费用；为避免低 placement-score 时被 1 小时 deadline 人为截断，
   把 `activeDeadlineSeconds` 延长到 4 小时。此次变更不改变 profile、实例类型、镜像、代码或计时合同。
+- 决策：保留 `-05` S3 日志；`-06` 使用新 run id，在最小依赖后让 pip 补齐 IPython 的传递依赖，
+  并升级到含 quant/GEMM 分解计时的 immutable SHA `aae6435e9160...`。复用当前 Spot 节点，不覆盖旧结果。
