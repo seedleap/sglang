@@ -143,8 +143,8 @@ class _SageAttentionBackendResolver(_CudaAttentionBackendResolver):
         ):
             raise RuntimeError(
                 "SageAttention 2.2.0 does not support CUDA capability "
-                f"{capability.as_version_str()}; use sage_attn_3 on SM100/SM120 "
-                "or another supported attention backend."
+                f"{capability.as_version_str()}; use another supported attention "
+                "backend."
             )
         try:
             from sageattention import sageattn  # noqa: F401
