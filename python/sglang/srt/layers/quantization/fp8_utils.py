@@ -1637,14 +1637,29 @@ def apply_fp8_linear_scaled_mm(
     output_shape = [*input.shape[:-1], weight.shape[1]]
     input_2d = input.view(-1, input.shape[-1])
     qinput, x_scale = static_quant_fp8(input_2d, input_scale, repeat_scale=False)
+    output_size = weight.shape[1]
+    needs_padding = weight.shape[0] % 16 != 0 or output_size % 16 != 0
+    if needs_padding:
+        padded_k = ceil_align(weight.shape[0], 16)
+        padded_n = ceil_align(output_size, 16)
+        padded_qinput = qinput.new_zeros((qinput.shape[0], padded_k))
+        padded_qinput[:, : qinput.shape[1]] = qinput
+        padded_weight = weight.new_zeros((padded_n, padded_k)).t()
+        padded_weight[: weight.shape[0], :output_size] = weight
+        qinput = padded_qinput
+        weight = padded_weight
     output = torch._scaled_mm(
         qinput,
         weight,
         scale_a=x_scale.reshape(1),
         scale_b=weight_scale.reshape(1),
         out_dtype=input.dtype,
-        bias=bias,
+        bias=None if needs_padding else bias,
     )
+    if needs_padding:
+        output = output[:, :output_size]
+        if bias is not None:
+            output = output + bias
     return output.view(*output_shape)
 
 
