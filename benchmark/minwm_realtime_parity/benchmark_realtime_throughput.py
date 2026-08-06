@@ -42,6 +42,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--profile-name", required=True)
     parser.add_argument("--warmup-chunks", type=int, default=20)
     parser.add_argument("--measured-chunks", type=int, default=200)
+    parser.add_argument("--sink-size", type=int)
     parser.add_argument("--kv-cache-num-frames", type=int)
     parser.add_argument("--timeout", type=float, default=1800.0)
     return parser.parse_args()
@@ -79,6 +80,14 @@ def validate_contract(manifest: dict, args: argparse.Namespace) -> tuple[dict, d
         raise ValueError("warmup-chunks and measured-chunks must be positive")
     if args.kv_cache_num_frames is not None and args.kv_cache_num_frames < 1:
         raise ValueError("kv-cache-num-frames must be positive")
+    if args.sink_size is not None and args.sink_size < 0:
+        raise ValueError("sink-size must be non-negative")
+    if (
+        args.sink_size is not None
+        and args.kv_cache_num_frames is not None
+        and args.sink_size >= args.kv_cache_num_frames
+    ):
+        raise ValueError("sink-size must be smaller than kv-cache-num-frames")
     cases = {case["id"]: case for case in manifest["cases"]}
     if args.case not in cases:
         raise ValueError(f"unknown case {args.case!r}; choose from {sorted(cases)}")
@@ -159,6 +168,8 @@ async def receive_run(args: argparse.Namespace, contract: dict, case: dict) -> d
     }
     if args.kv_cache_num_frames is not None:
         request["realtime_causal_kv_cache_num_frames"] = args.kv_cache_num_frames
+    if args.sink_size is not None:
+        request["realtime_causal_sink_size"] = args.sink_size
     stats_by_chunk: dict[int, dict[str, Any]] = {}
     payload_complete_ns: dict[int, int] = {}
     frame_batches_by_chunk: dict[int, dict[str, Any]] = {}
@@ -291,6 +302,7 @@ async def receive_run(args: argparse.Namespace, contract: dict, case: dict) -> d
             "latent_frames_per_chunk": latent_frames_per_chunk,
             "generated_pixel_frames_per_steady_chunk": pixel_frames_per_latent
             * latent_frames_per_chunk,
+            "sink_size": args.sink_size,
             "kv_cache_num_frames": args.kv_cache_num_frames,
             "required_fixed_between_profiles": [
                 "checkpoint bytes",
