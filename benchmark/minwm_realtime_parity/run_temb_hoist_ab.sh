@@ -5,12 +5,27 @@ set -euo pipefail
 : "${MINWM_RESULTS_ROOT:?set MINWM_RESULTS_ROOT}"
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
 RESULT_ROOT="${MINWM_RESULTS_ROOT%/}/${MINWM_RUN_ID}"
 BITWISE_CASE="00_forward_080_pottery_720p"
 BITWISE_ROOT="${RESULT_ROOT}/temb-hoist-bitwise/cases/${BITWISE_CASE}"
 
 export MINWM_S0_KV_CACHE_NUM_FRAMES=45
 export MINWM_S0_RUN_BITWISE=1
+export PYTHONPATH="${REPO_ROOT}/python${PYTHONPATH:+:${PYTHONPATH}}"
+
+python3 - "${REPO_ROOT}" <<'PY'
+import os
+import sys
+from pathlib import Path
+
+source_python = str(Path(sys.argv[1]) / "python")
+if source_python not in os.environ["PYTHONPATH"].split(os.pathsep):
+    raise SystemExit(f"source tree missing from PYTHONPATH: {source_python}")
+import sglang.test.ci.ci_register  # noqa: F401, E402
+
+print(f"S1 source-registration preflight passed: {source_python}")
+PY
 
 python3 -m pytest -q \
   "${SCRIPT_DIR}/../../python/sglang/multimodal_gen/test/unit/realtime/test_minwm_realtime.py" \
