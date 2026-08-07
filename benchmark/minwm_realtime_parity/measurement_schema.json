@@ -1,0 +1,520 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/seedleap/sglang/benchmark/minwm_realtime_parity/measurement_schema.json",
+  "title": "MinWM realtime measurement",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "mode",
+    "run_id",
+    "timestamp_utc",
+    "provenance",
+    "workload",
+    "measurement_contract",
+    "metrics",
+    "artifacts",
+    "degradations"
+  ],
+  "properties": {
+    "schema_version": {"const": "minwm-realtime-measurement/v1"},
+    "mode": {"enum": ["profiler_off", "profiler_on"]},
+    "run_id": {"type": "string", "minLength": 1},
+    "timestamp_utc": {"type": "string", "minLength": 1},
+    "provenance": {
+      "type": "object",
+      "required": ["sglang_commit", "minwm_commit", "container_image", "gpu"],
+      "properties": {
+        "sglang_commit": {"type": "string", "minLength": 1},
+        "minwm_commit": {"$ref": "#/$defs/availability"},
+        "container_image": {"$ref": "#/$defs/availability"},
+        "gpu": {
+          "type": "object",
+          "required": ["model", "count", "allocated_count"],
+          "properties": {
+            "model": {"$ref": "#/$defs/availability"},
+            "count": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Active GPUs used by this workload, not idle GPUs reserved for isolation."
+            },
+            "allocated_count": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "GPUs reserved by the job/allocation, including idle isolation capacity."
+            }
+          }
+        }
+      }
+    },
+    "workload": {
+      "type": "object",
+      "required": [
+        "model",
+        "checkpoint",
+        "resolution",
+        "precision",
+        "fast_lane",
+        "sp_degree",
+        "dmd_forwards_per_chunk",
+        "clean_cache_forwards_per_chunk",
+        "latent_frames_per_chunk",
+        "pixel_frames_per_chunk",
+        "warmup_chunks",
+        "precondition_warmup_chunks",
+        "measured_chunks"
+      ],
+      "properties": {
+        "model": {"const": "MinWM 5B"},
+        "precision": {"type": "string", "minLength": 1},
+        "fast_lane": {"type": "boolean"},
+        "sp_degree": {"type": "integer", "minimum": 1},
+        "dmd_forwards_per_chunk": {"const": 4},
+        "clean_cache_forwards_per_chunk": {"const": 1},
+        "latent_frames_per_chunk": {"const": 4},
+        "pixel_frames_per_chunk": {"const": 16},
+        "warmup_chunks": {"type": "integer", "minimum": 1},
+        "precondition_warmup_chunks": {"type": "integer", "minimum": 0},
+        "measured_chunks": {"type": "integer", "minimum": 1}
+      }
+    },
+    "measurement_contract": {
+      "type": "object",
+      "required": ["headline_eligible", "headline_rule", "timing_domains"]
+    },
+    "metrics": {
+      "oneOf": [
+        {"$ref": "#/$defs/profiler_off_metrics_container"},
+        {"$ref": "#/$defs/profiler_on_metrics_container"}
+      ]
+    },
+    "artifacts": {"type": "object"},
+    "degradations": {"type": "array"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"mode": {"const": "profiler_off"}}},
+      "then": {
+        "properties": {
+          "metrics": {"$ref": "#/$defs/profiler_off_metrics_container"}
+        }
+      },
+      "else": {
+        "properties": {
+          "metrics": {"$ref": "#/$defs/profiler_on_metrics_container"}
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "profiler_off_metrics_container": {
+      "type": "object",
+      "required": ["profiler_off", "profiler_on"],
+      "properties": {
+        "profiler_off": {
+          "type": "object",
+          "required": [
+            "client_fps",
+            "scheduler_fps",
+            "scheduler_chunk_wall_ms",
+            "dit_wall_ms",
+            "vae_wall_ms"
+          ],
+          "properties": {
+            "client_fps": {"$ref": "#/$defs/availability"},
+            "scheduler_fps": {"$ref": "#/$defs/availability"},
+            "scheduler_chunk_wall_ms": {"$ref": "#/$defs/latency_metric"},
+            "dit_wall_ms": {"$ref": "#/$defs/latency_metric"},
+            "vae_wall_ms": {"$ref": "#/$defs/latency_metric"}
+          }
+        },
+        "profiler_on": {"type": "null"}
+      }
+    },
+    "profiler_on_metrics_container": {
+      "type": "object",
+      "required": ["profiler_off", "profiler_on"],
+      "properties": {
+        "profiler_off": {"type": "null"},
+        "profiler_on": {
+          "type": "object",
+          "required": [
+            "observed_wall_with_profiler_overhead",
+            "dit_cuda_ms",
+            "vae_cuda_ms",
+            "kernel_count",
+            "cuda_api_count",
+            "kernel_launch_api_count",
+            "short_kernel_buckets",
+            "gpu_kernel_busy",
+            "stable_window_coverage",
+            "capture_coverage",
+            "gpu_metrics"
+          ],
+          "properties": {
+            "observed_wall_with_profiler_overhead": {
+              "type": "object",
+              "required": [
+                "client_fps",
+                "scheduler_fps",
+                "scheduler_chunk_wall_ms",
+                "dit_wall_ms",
+                "vae_wall_ms"
+              ],
+              "properties": {
+                "client_fps": {"$ref": "#/$defs/availability"},
+                "scheduler_fps": {"$ref": "#/$defs/availability"},
+                "scheduler_chunk_wall_ms": {"$ref": "#/$defs/latency_metric"},
+                "dit_wall_ms": {"$ref": "#/$defs/latency_metric"},
+                "vae_wall_ms": {"$ref": "#/$defs/latency_metric"}
+              }
+            },
+            "dit_cuda_ms": {"$ref": "#/$defs/latency_metric"},
+            "vae_cuda_ms": {"$ref": "#/$defs/latency_metric"},
+            "kernel_count": {"$ref": "#/$defs/normalized_kernel_count"},
+            "cuda_api_count": {"$ref": "#/$defs/normalized_api_count"},
+            "kernel_launch_api_count": {"$ref": "#/$defs/normalized_api_count"},
+            "short_kernel_buckets": {"$ref": "#/$defs/normalized_kernel_buckets"},
+            "gpu_kernel_busy": {"$ref": "#/$defs/availability"},
+            "stable_window_coverage": {"$ref": "#/$defs/stable_window_coverage"},
+            "capture_coverage": {"$ref": "#/$defs/availability"},
+            "gpu_metrics": {
+              "type": "object",
+              "required": ["sm_active", "tensor_active", "dram"],
+              "properties": {
+                "sm_active": {"$ref": "#/$defs/gpu_metric"},
+                "tensor_active": {"$ref": "#/$defs/gpu_metric"},
+                "dram": {"$ref": "#/$defs/gpu_metric"}
+              }
+            }
+          }
+        }
+      }
+    },
+    "stable_window_coverage": {
+      "oneOf": [
+        {"$ref": "#/$defs/unavailable"},
+        {
+          "allOf": [
+            {"$ref": "#/$defs/available"},
+            {
+              "properties": {
+                "value": {
+                  "type": "object",
+                  "required": [
+                    "window_source",
+                    "marker_prefix",
+                    "trace_id",
+                    "clock_domain",
+                    "expected_stable_chunk_indices",
+                    "observed_stable_chunk_indices",
+                    "expected_stable_chunk_count",
+                    "observed_stable_chunk_count",
+                    "excluded_precondition_chunks",
+                    "excluded_warmup_chunk_indices",
+                    "observed_discard_chunk_indices",
+                    "normalization_denominator",
+                    "attribution_policy",
+                    "intervals"
+                  ],
+                  "properties": {
+                    "window_source": {"type": "string", "minLength": 1},
+                    "marker_prefix": {"const": "sglang.realtime.chunk"},
+                    "trace_id": {"type": "string", "minLength": 1},
+                    "clock_domain": {"type": "string", "minLength": 1},
+                    "expected_stable_chunk_indices": {"type": "array", "items": {"type": "integer"}},
+                    "observed_stable_chunk_indices": {"type": "array", "items": {"type": "integer"}},
+                    "expected_stable_chunk_count": {"type": "integer", "minimum": 10},
+                    "observed_stable_chunk_count": {"type": "integer", "minimum": 10},
+                    "excluded_precondition_chunks": {"type": "integer", "minimum": 0},
+                    "excluded_warmup_chunk_indices": {"type": "array", "items": {"type": "integer"}},
+                    "observed_discard_chunk_indices": {"type": "array", "items": {"type": "integer"}},
+                    "normalization_denominator": {"type": "integer", "minimum": 10},
+                    "attribution_policy": {"type": "string", "minLength": 1},
+                    "intervals": {
+                      "type": "array",
+                      "minItems": 10,
+                      "items": {
+                        "type": "object",
+                        "required": ["chunk_index", "request_id", "role", "start_ns", "end_ns"],
+                        "properties": {
+                          "chunk_index": {"type": "integer"},
+                          "request_id": {"type": "string", "minLength": 1},
+                          "role": {"const": "measured"},
+                          "start_ns": {"type": "integer", "minimum": 0},
+                          "end_ns": {"type": "integer", "minimum": 1}
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "normalized_kernel_count": {
+      "oneOf": [
+        {"$ref": "#/$defs/unavailable"},
+        {
+          "allOf": [
+            {"$ref": "#/$defs/available"},
+            {
+              "properties": {
+                "value": {
+                  "type": "object",
+                  "required": ["raw_total", "captured_raw_total", "excluded_raw_total", "boundary_overlap_count", "per_stable_chunk", "per_device", "stable_chunk_denominator", "capture_scope"],
+                  "properties": {
+                    "raw_total": {"type": "integer", "minimum": 0},
+                    "captured_raw_total": {"type": "integer", "minimum": 0},
+                    "excluded_raw_total": {"type": "integer", "minimum": 0},
+                    "boundary_overlap_count": {"const": 0},
+                    "per_stable_chunk": {"type": "number", "minimum": 0},
+                    "per_device": {"type": "object"},
+                    "stable_chunk_denominator": {"type": "integer", "minimum": 10},
+                    "capture_scope": {"type": "string", "minLength": 1}
+                  }
+                }
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "normalized_api_count": {
+      "oneOf": [
+        {"$ref": "#/$defs/unavailable"},
+        {
+          "allOf": [
+            {"$ref": "#/$defs/available"},
+            {
+              "properties": {
+                "value": {
+                  "type": "object",
+                  "required": ["raw_total", "captured_raw_total", "excluded_raw_total", "boundary_spanning_count", "boundary_included_by_start_count", "boundary_excluded_by_start_count", "boundary_event_examples", "boundary_event_examples_truncated", "boundary_attribution_policy", "total_per_chunk", "per_rank_per_chunk", "stable_chunk_denominator", "capture_scope"],
+                  "properties": {
+                    "raw_total": {"type": "integer", "minimum": 0},
+                    "captured_raw_total": {"type": "integer", "minimum": 0},
+                    "excluded_raw_total": {"type": "integer", "minimum": 0},
+                    "boundary_spanning_count": {"type": "integer", "minimum": 0},
+                    "boundary_included_by_start_count": {"type": "integer", "minimum": 0},
+                    "boundary_excluded_by_start_count": {"type": "integer", "minimum": 0},
+                    "boundary_event_examples": {
+                      "type": "array",
+                      "maxItems": 20,
+                      "items": {
+                        "type": "object",
+                        "required": ["raw_api_name", "process_global_pid", "start_ns", "end_ns", "duration_ns", "owner_range_chunk_index", "overlap_chunk_indices", "included_by_start"],
+                        "properties": {
+                          "raw_api_name": {"type": "string", "minLength": 1},
+                          "process_global_pid": {"type": ["integer", "null"]},
+                          "start_ns": {"type": "integer", "minimum": 0},
+                          "end_ns": {"type": "integer", "minimum": 1},
+                          "duration_ns": {"type": "integer", "minimum": 1},
+                          "owner_range_chunk_index": {"type": ["integer", "null"]},
+                          "overlap_chunk_indices": {
+                            "type": "array",
+                            "minItems": 1,
+                            "items": {"type": "integer"}
+                          },
+                          "included_by_start": {"type": "boolean"}
+                        }
+                      }
+                    },
+                    "boundary_event_examples_truncated": {"type": "boolean"},
+                    "boundary_attribution_policy": {"const": "CUDA runtime/API counts use call start_ns in the measured NVTX range union; a boundary-crossing call is included exactly once when its start is inside, otherwise excluded"},
+                    "total_per_chunk": {"type": "number", "minimum": 0},
+                    "per_rank_per_chunk": {"$ref": "#/$defs/availability"},
+                    "stable_chunk_denominator": {"type": "integer", "minimum": 10},
+                    "capture_scope": {"type": "string", "minLength": 1}
+                  }
+                }
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "normalized_kernel_buckets": {
+      "oneOf": [
+        {"$ref": "#/$defs/unavailable"},
+        {
+          "allOf": [
+            {"$ref": "#/$defs/available"},
+            {
+              "properties": {
+                "value": {
+                  "type": "object",
+                  "required": ["raw_total", "captured_raw_total", "excluded_raw_total", "boundary_overlap_count", "per_stable_chunk", "per_device", "stable_chunk_denominator", "capture_scope"],
+                  "properties": {
+                    "raw_total": {"$ref": "#/$defs/kernel_bucket_counts"},
+                    "captured_raw_total": {"type": "integer", "minimum": 0},
+                    "excluded_raw_total": {"type": "integer", "minimum": 0},
+                    "boundary_overlap_count": {"const": 0},
+                    "per_stable_chunk": {"$ref": "#/$defs/kernel_bucket_rates"},
+                    "per_device": {"type": "object"},
+                    "stable_chunk_denominator": {"type": "integer", "minimum": 10},
+                    "capture_scope": {"type": "string", "minLength": 1}
+                  }
+                }
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "kernel_bucket_counts": {
+      "type": "object",
+      "required": ["lt_10_us", "10_to_lt_50_us", "50_to_lt_100_us", "gte_100_us"],
+      "additionalProperties": false,
+      "properties": {
+        "lt_10_us": {"type": "integer", "minimum": 0},
+        "10_to_lt_50_us": {"type": "integer", "minimum": 0},
+        "50_to_lt_100_us": {"type": "integer", "minimum": 0},
+        "gte_100_us": {"type": "integer", "minimum": 0}
+      }
+    },
+    "kernel_bucket_rates": {
+      "type": "object",
+      "required": ["lt_10_us", "10_to_lt_50_us", "50_to_lt_100_us", "gte_100_us"],
+      "additionalProperties": false,
+      "properties": {
+        "lt_10_us": {"type": "number", "minimum": 0},
+        "10_to_lt_50_us": {"type": "number", "minimum": 0},
+        "50_to_lt_100_us": {"type": "number", "minimum": 0},
+        "gte_100_us": {"type": "number", "minimum": 0}
+      }
+    },
+    "gpu_metric": {
+      "oneOf": [
+        {"$ref": "#/$defs/unavailable"},
+        {
+          "allOf": [
+            {"$ref": "#/$defs/available"},
+            {
+              "properties": {
+                "value": {
+                  "type": "object",
+                  "required": ["raw_metric_name", "mean", "min", "p50", "p95", "max", "nonzero_sample_count", "sample_count", "captured_sample_count", "excluded_sample_count", "all_collected_sample_count", "excluded_inactive_target_sample_count", "per_chunk_sample_count", "per_type_per_chunk_sample_count", "per_device_per_chunk_sample_count", "observed_type_ids", "active_cuda_device_ids", "active_pw_gpu_ids", "collected_type_ids", "collected_target_count", "active_target_count", "allocated_target_count", "target_mapping", "gpu_id_extraction", "type_id_coverage_semantics", "aggregation_mode", "exposed_metric_names", "capture_scope", "timestamp_column"],
+                  "properties": {
+                    "raw_metric_name": {"type": "string", "minLength": 1},
+                    "mean": {"type": "number"},
+                    "min": {"type": "number"},
+                    "p50": {"type": "number"},
+                    "p95": {"type": "number"},
+                    "max": {"type": "number"},
+                    "nonzero_sample_count": {"type": "integer", "minimum": 0},
+                    "sample_count": {"type": "integer", "minimum": 1},
+                    "captured_sample_count": {"type": "integer", "minimum": 1},
+                    "excluded_sample_count": {"type": "integer", "minimum": 0},
+                    "all_collected_sample_count": {"type": "integer", "minimum": 1},
+                    "excluded_inactive_target_sample_count": {"type": "integer", "minimum": 0},
+                    "per_chunk_sample_count": {
+                      "type": "object",
+                      "minProperties": 10,
+                      "additionalProperties": {"type": "integer", "minimum": 1}
+                    },
+                    "per_type_per_chunk_sample_count": {
+                      "type": "object",
+                      "minProperties": 1,
+                      "additionalProperties": {
+                        "type": "object",
+                        "minProperties": 10,
+                        "additionalProperties": {"type": "integer", "minimum": 1}
+                      }
+                    },
+                    "per_device_per_chunk_sample_count": {
+                      "type": "object",
+                      "minProperties": 1,
+                      "additionalProperties": {
+                        "type": "object",
+                        "minProperties": 10,
+                        "additionalProperties": {"type": "integer", "minimum": 1}
+                      }
+                    },
+                    "observed_type_ids": {"type": "array", "items": {"type": "integer"}},
+                    "active_cuda_device_ids": {"type": "array", "items": {"type": "integer", "minimum": 0}},
+                    "active_pw_gpu_ids": {"type": "array", "items": {"type": "integer", "minimum": 0}},
+                    "collected_type_ids": {"type": "array", "items": {"type": "integer"}},
+                    "collected_target_count": {"type": "integer", "minimum": 1},
+                    "active_target_count": {"type": "integer", "minimum": 1},
+                    "allocated_target_count": {"type": "integer", "minimum": 1},
+                    "target_mapping": {
+                      "type": "array",
+                      "minItems": 1,
+                      "items": {
+                        "type": "object",
+                        "required": ["type_id", "pw_gpu_id", "cuda_device_id", "bus_location", "uuid", "gpu_name", "active"],
+                        "properties": {
+                          "type_id": {"type": "integer"},
+                          "pw_gpu_id": {"type": "integer", "minimum": 0},
+                          "cuda_device_id": {"type": "integer", "minimum": 0},
+                          "bus_location": {"type": "string"},
+                          "uuid": {"type": "string"},
+                          "gpu_name": {"type": "string"},
+                          "active": {"type": "boolean"}
+                        }
+                      }
+                    },
+                    "gpu_id_extraction": {"type": "string", "minLength": 1},
+                    "type_id_coverage_semantics": {"type": "string", "minLength": 1},
+                    "aggregation_mode": {"const": "streaming selected metricId rows into metric×type×chunk counters and a bounded native-value histogram"},
+                    "capture_scope": {"const": "union of exact measured outer chunk NVTX ranges"},
+                    "timestamp_column": {"type": "string", "minLength": 1},
+                    "exposed_metric_names": {
+                      "type": "array",
+                      "items": {"type": "string"}
+                    }
+                  }
+                }
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "latency_summary": {
+      "type": "object",
+      "required": ["count", "mean", "p50", "p95", "p99", "max"],
+      "properties": {
+        "count": {"type": "integer", "minimum": 1},
+        "mean": {"type": "number"},
+        "p50": {"type": "number"},
+        "p95": {"type": "number"},
+        "p99": {"type": "number"},
+        "max": {"type": "number"}
+      }
+    },
+    "latency_metric": {
+      "oneOf": [
+        {"$ref": "#/$defs/unavailable"},
+        {
+          "allOf": [
+            {"$ref": "#/$defs/available"},
+            {
+              "properties": {
+                "value": {"$ref": "#/$defs/latency_summary"}
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "available": {
+      "type": "object",
+      "required": ["status", "value", "unit", "source"],
+      "properties": {"status": {"const": "available"}}
+    },
+    "unavailable": {
+      "type": "object",
+      "required": ["status", "reason", "evidence"],
+      "properties": {"status": {"const": "unavailable"}}
+    },
+    "availability": {
+      "oneOf": [
+        {"$ref": "#/$defs/available"},
+        {"$ref": "#/$defs/unavailable"}
+      ]
+    }
+  }
+}

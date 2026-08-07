@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import os
 import shutil
 import time
 from typing import TYPE_CHECKING, Any
@@ -34,6 +35,7 @@ from sglang.multimodal_gen.runtime.entrypoints.utils import (
 from sglang.multimodal_gen.runtime.scheduler_client import async_scheduler_client
 from sglang.multimodal_gen.runtime.server_args import get_global_server_args
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
+from sglang.multimodal_gen.runtime.utils.nvtx_pytorch_hooks import maybe_nvtx_range
 from sglang.multimodal_gen.runtime.utils.realtime_trace import (
     CLIENT_TRACE_EVENT_KIND,
     compact_client_trace_event,
@@ -53,6 +55,10 @@ _ACTIVE_SESSION_WAIT_SECONDS = 1.0
 _ACTIVE_SESSION_WAIT_INTERVAL_SECONDS = 0.1
 _TRACE_EVENT_QUEUE_LIMIT = 256
 _REALTIME_RESULT_STAGE_MARKERS = ("vae", "denois")
+_NSYS_CHUNK_MARKER_PREFIX = "sglang.realtime.chunk"
+_NSYS_WARMUP_CHUNKS_ENV = "SGLANG_REALTIME_NSYS_WARMUP_CHUNKS"
+_NSYS_MEASURED_CHUNKS_ENV = "SGLANG_REALTIME_NSYS_MEASURED_CHUNKS"
+_REALTIME_COMPONENT_TIMING_SOURCE = "scheduler_result_component_timing"
 
 
 class _LockedRealtimeWebSocket:
@@ -143,6 +149,7 @@ def _make_trace_queue_sink(
             if queue.full():
                 try:
                     queue.get_nowait()
+                    queue.task_done()
                 except asyncio.QueueEmpty:
                     pass
             try:
@@ -182,14 +189,81 @@ async def _send_realtime_trace_events(
 ) -> None:
     while True:
         payload = await queue.get()
-        await ws.send_bytes(
-            msgspec.msgpack.encode(
-                {
-                    "type": "trace_event",
-                    "trace": payload,
-                }
+        try:
+            await ws.send_bytes(
+                msgspec.msgpack.encode(
+                    {
+                        "type": "trace_event",
+                        "trace": payload,
+                    }
+                )
             )
+        finally:
+            queue.task_done()
+
+
+async def _drain_realtime_trace_events(
+    queue: asyncio.Queue,
+    trace_task: asyncio.Task,
+) -> None:
+    """Flush trace callbacks scheduled before generation task completion."""
+    loop = asyncio.get_running_loop()
+    callbacks_flushed = loop.create_future()
+    loop.call_soon(callbacks_flushed.set_result, None)
+    await callbacks_flushed
+    if trace_task.done():
+        await trace_task
+
+    join_task = asyncio.create_task(queue.join())
+    try:
+        done, _pending = await asyncio.wait(
+            (join_task, trace_task), return_when=asyncio.FIRST_COMPLETED
         )
+        if trace_task in done:
+            await trace_task
+        await join_task
+    finally:
+        if not join_task.done():
+            join_task.cancel()
+            try:
+                await join_task
+            except asyncio.CancelledError:
+                pass
+
+
+def _nsys_chunk_role(chunk_index: int) -> str | None:
+    measured_raw = os.environ.get(_NSYS_MEASURED_CHUNKS_ENV)
+    if measured_raw is None:
+        return None
+    warmup_raw = os.environ.get(_NSYS_WARMUP_CHUNKS_ENV, "0")
+    try:
+        warmup = int(warmup_raw)
+        measured = int(measured_raw)
+    except ValueError as exc:
+        raise ValueError(
+            "Nsight realtime chunk counts must be integers: "
+            f"{_NSYS_WARMUP_CHUNKS_ENV}={warmup_raw!r}, "
+            f"{_NSYS_MEASURED_CHUNKS_ENV}={measured_raw!r}"
+        ) from exc
+    if warmup < 0 or measured < 1:
+        raise ValueError("Nsight realtime warmup/measured chunk counts are invalid")
+    if chunk_index < warmup:
+        return "discard"
+    if chunk_index < warmup + measured:
+        return "measured"
+    return "outside"
+
+
+def _nsys_chunk_marker(
+    session: GenerateSession, chunk: RealtimeChunkContext
+) -> str | None:
+    role = _nsys_chunk_role(chunk.index)
+    if role is None:
+        return None
+    return (
+        f"{_NSYS_CHUNK_MARKER_PREFIX}|trace_id={session.trace_id}|"
+        f"request_id={chunk.request_id}|chunk_index={chunk.index}|role={role}"
+    )
 
 
 async def _wait_for_active_session_slot(
@@ -264,6 +338,86 @@ def _iter_realtime_result_stage_metrics(result: Any):
                 continue
             seen_stages.add(stage_name)
             yield stage_name, metric_ms, getattr(metrics, "request_id", None)
+
+
+def _iter_realtime_result_component_timings(result: Any):
+    """Yield unique worker timings carried through result metrics."""
+    metrics_candidates = []
+    metrics_list = getattr(result, "metrics_list", None)
+    if metrics_list:
+        metrics_candidates.extend(
+            metrics for metrics in metrics_list if metrics is not None
+        )
+    metrics = getattr(result, "metrics", None)
+    if metrics is not None:
+        metrics_candidates.append(metrics)
+
+    seen_metrics: set[int] = set()
+    seen_timings: dict[tuple[str, str, int, str | None], dict[str, Any]] = {}
+    for metrics in metrics_candidates:
+        metrics_id = id(metrics)
+        if metrics_id in seen_metrics:
+            continue
+        seen_metrics.add(metrics_id)
+
+        timings = getattr(metrics, "realtime_component_timings", None)
+        if not isinstance(timings, list):
+            continue
+        for timing in timings:
+            if not isinstance(timing, dict):
+                continue
+            try:
+                event = str(timing["event"])
+                component = str(timing["component"])
+                duration_ms = float(timing["duration_ms"])
+                chunk_index = int(timing["chunk_index"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if not event or not component:
+                continue
+            request_id_value = timing.get("request_id")
+            request_id = str(request_id_value) if request_id_value is not None else None
+            normalized: dict[str, Any] = {
+                "event": event,
+                "component": component,
+                "duration_ms": duration_ms,
+                "chunk_index": chunk_index,
+            }
+            if request_id is not None:
+                normalized["request_id"] = request_id
+            if timing.get("cuda_ms") is not None:
+                try:
+                    normalized["cuda_ms"] = float(timing["cuda_ms"])
+                except (TypeError, ValueError):
+                    continue
+
+            identity = (event, component, chunk_index, request_id)
+            previous = seen_timings.get(identity)
+            if previous is not None:
+                if previous != normalized:
+                    raise ValueError(
+                        "conflicting realtime component timings for "
+                        f"identity={identity}: {previous!r} != {normalized!r}"
+                    )
+                continue
+            seen_timings[identity] = normalized
+            yield normalized
+
+
+def _emit_realtime_result_component_timings(
+    session: GenerateSession,
+    result: Any,
+) -> None:
+    for timing in _iter_realtime_result_component_timings(result):
+        fields = dict(timing)
+        event = fields.pop("event")
+        log_realtime_trace(
+            logger,
+            session,
+            event,
+            source=_REALTIME_COMPONENT_TIMING_SOURCE,
+            **fields,
+        )
 
 
 def _emit_realtime_result_stage_traces(
@@ -477,7 +631,11 @@ async def _generate_loop(ws: WebSocket, session: GenerateSession):
                 ),
             )
 
-            _, result = await process_generation_batch(async_scheduler_client, batch)
+            nsys_marker = _nsys_chunk_marker(session, chunk)
+            with maybe_nvtx_range(nsys_marker or "", enabled=nsys_marker is not None):
+                _, result = await process_generation_batch(
+                    async_scheduler_client, batch
+                )
             scheduler_forward_ms = timer.mark_ms()
             log_realtime_trace(
                 logger,
@@ -488,6 +646,7 @@ async def _generate_loop(ws: WebSocket, session: GenerateSession):
                 scheduler_forward_ms=round(scheduler_forward_ms, 3),
             )
             _emit_realtime_result_stage_traces(session, chunk, batch, result)
+            _emit_realtime_result_component_timings(session, result)
 
             # finish
             adapter.on_chunk_complete(session, result)
@@ -915,6 +1074,7 @@ async def generate(websocket: WebSocket):
         wait_tasks = [generate_task, listen_task]
         await asyncio.wait(wait_tasks, return_when=asyncio.FIRST_COMPLETED)
         if generate_task.done() and session.reached_max_chunks():
+            await _drain_realtime_trace_events(trace_queue, trace_task)
             await _close_realtime_websocket(
                 ws,
                 code=1000,

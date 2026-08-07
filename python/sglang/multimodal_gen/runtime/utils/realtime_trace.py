@@ -207,6 +207,23 @@ class RealtimeTraceSpan:
             fields["cuda_ms"] = round(cuda_ms, 3)
         if exc_val is not None:
             fields["error"] = str(exc_val).splitlines()[0]
+        metrics = getattr(self.batch, "metrics", None)
+        record_timing = getattr(metrics, "record_realtime_component_timing", None)
+        if callable(record_timing) and fields.get("component") is not None:
+            timing = {
+                "event": self.event,
+                "component": fields["component"],
+                "duration_ms": fields["duration_ms"],
+                "chunk_index": fields.get(
+                    "chunk_index", getattr(self.batch, "block_idx", None)
+                ),
+                "request_id": getattr(self.batch, "request_id", None),
+            }
+            if cuda_ms is not None:
+                timing["cuda_ms"] = fields["cuda_ms"]
+            record_timing(
+                {key: value for key, value in timing.items() if value is not None}
+            )
         log_realtime_trace_for_batch(self.logger, self.batch, self.event, **fields)
         return False
 

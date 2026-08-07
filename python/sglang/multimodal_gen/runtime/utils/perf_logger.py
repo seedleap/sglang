@@ -52,6 +52,10 @@ class RequestMetrics:
         self.request_id = request_id
         self.stages: Dict[str, float] = {}
         self.steps: list[float] = []
+        # Small, pickle-safe records used to carry worker-side realtime CUDA
+        # timings back to the API process.  Keep tensor metadata and payloads
+        # out of this transport field.
+        self.realtime_component_timings: list[dict[str, Any]] = []
         self.total_duration_ms: float = 0.0
         self.suppress_stage_breakdown: bool = False
         # memory tracking: {checkpoint_name: MemorySnapshot}
@@ -72,6 +76,10 @@ class RequestMetrics:
         if self.suppress_stage_breakdown:
             return
         self.steps.append(duration_s * 1000)
+
+    def record_realtime_component_timing(self, timing: dict[str, Any]) -> None:
+        """Records a compact worker timing for relay by the realtime API."""
+        self.realtime_component_timings.append(dict(timing))
 
     def record_memory_snapshot(self, checkpoint_name: str, snapshot: MemorySnapshot):
         if self.suppress_stage_breakdown:

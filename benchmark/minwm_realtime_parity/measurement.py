@@ -1,0 +1,904 @@
+"""Shared MinWM realtime measurement schema and metric helpers."""
+
+from __future__ import annotations
+
+import math
+import statistics
+from datetime import datetime, timezone
+from typing import Any
+
+SCHEMA_VERSION = "minwm-realtime-measurement/v1"
+SHORT_KERNEL_BUCKETS_US = ((0, 10), (10, 50), (50, 100), (100, None))
+API_BOUNDARY_ATTRIBUTION_POLICY = (
+    "CUDA runtime/API counts use call start_ns in the measured NVTX range union; "
+    "a boundary-crossing call is included exactly once when its start is inside, "
+    "otherwise excluded"
+)
+
+TIMING_DOMAINS = {
+    "client": (
+        "Client monotonic wall time between complete steady-chunk payloads. "
+        "It includes server work, transport, and client receive overhead."
+    ),
+    "scheduler": (
+        "Server monotonic wall time around scheduler request execution. It excludes "
+        "client transport and output serialization."
+    ),
+    "stage_wall": (
+        "Server monotonic wall time around the named pipeline stage. The realtime "
+        "stage hook synchronizes its ending CUDA event, so queued GPU work is included."
+    ),
+    "cuda": (
+        "CUDA-event or Nsight device time. It is not interchangeable with wall time "
+        "and does not include CPU gaps or transport."
+    ),
+}
+
+
+class MeasurementValidationError(ValueError):
+    pass
+
+
+def available(value: Any, unit: str, source: str) -> dict[str, Any]:
+    return {
+        "status": "available",
+        "value": value,
+        "unit": unit,
+        "source": source,
+    }
+
+
+def unavailable(reason: str, evidence: str) -> dict[str, str]:
+    return {
+        "status": "unavailable",
+        "reason": reason,
+        "evidence": evidence,
+    }
+
+
+def percentile(values: list[float], quantile: float) -> float:
+    if not values:
+        raise ValueError("percentile requires at least one value")
+    ordered = sorted(values)
+    index = min(len(ordered) - 1, math.ceil(quantile * len(ordered)) - 1)
+    return ordered[max(index, 0)]
+
+
+def latency_summary(values: list[float]) -> dict[str, float | int]:
+    if not values:
+        raise ValueError("latency summary requires at least one value")
+    return {
+        "count": len(values),
+        "mean": statistics.fmean(values),
+        "p50": statistics.median(values),
+        "p95": percentile(values, 0.95),
+        "p99": percentile(values, 0.99),
+        "max": max(values),
+    }
+
+
+def stage_trace_values(
+    trace_events: list[dict[str, Any]],
+    *,
+    event: str,
+    field: str,
+    measured_indices: set[int],
+    source: str | None = None,
+    component: str | None = None,
+) -> list[float]:
+    """Return one selected trace value per measured chunk in chunk order."""
+    by_chunk: dict[int, float] = {}
+    for item in trace_events:
+        if item.get("event") != event or field not in item:
+            continue
+        if source is not None and item.get("source") != source:
+            continue
+        if component is not None and item.get("component") != component:
+            continue
+        try:
+            chunk_index = int(item["chunk_index"])
+            value = float(item[field])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if chunk_index not in measured_indices:
+            continue
+        if chunk_index in by_chunk:
+            raise MeasurementValidationError(
+                f"duplicate {event}/{field} trace for chunk {chunk_index}"
+            )
+        by_chunk[chunk_index] = value
+    return [by_chunk[index] for index in sorted(by_chunk)]
+
+
+def optional_latency_metric(
+    values: list[float], *, unit: str, source: str, missing_evidence: str
+) -> dict[str, Any]:
+    if values:
+        return available(latency_summary(values), unit, source)
+    return unavailable("trace_metric_missing", missing_evidence)
+
+
+def build_measurement(
+    *,
+    mode: str,
+    run_id: str,
+    profile_name: str,
+    timestamp_utc: str | None,
+    sglang_commit: str,
+    minwm_commit: dict[str, Any],
+    container_image: dict[str, Any],
+    gpu_model: dict[str, Any],
+    gpu_count: int,
+    allocated_gpu_count: int,
+    sp_degree: int,
+    checkpoint_id: str,
+    checkpoint_step: int,
+    width: int,
+    height: int,
+    warmup_chunks: int,
+    measured_chunks: int,
+    precondition_warmup_chunks: int,
+    precision: str,
+    fast_lane: bool,
+    comparison_contract: dict[str, Any],
+    profiler_off_metrics: dict[str, Any],
+    profiler_on_cuda_metrics: dict[str, Any],
+    artifacts: dict[str, str],
+) -> dict[str, Any]:
+    if mode not in {"profiler_off", "profiler_on"}:
+        raise ValueError(f"unsupported measurement mode: {mode}")
+    if gpu_count < 1 or allocated_gpu_count < 1 or sp_degree < 1:
+        raise ValueError("GPU counts and sp_degree must be positive")
+    if allocated_gpu_count < gpu_count:
+        raise ValueError("allocated_gpu_count cannot be smaller than active gpu_count")
+
+    pending_nsys = unavailable(
+        "nsys_result_not_merged",
+        "Run measurement_tool.py merge-nsys with the .sqlite export and status log.",
+    )
+    metrics: dict[str, Any]
+    if mode == "profiler_off":
+        metrics = {"profiler_off": profiler_off_metrics, "profiler_on": None}
+        headline_eligible = True
+    else:
+        metrics = {
+            "profiler_off": None,
+            "profiler_on": {
+                "observed_wall_with_profiler_overhead": profiler_off_metrics,
+                **profiler_on_cuda_metrics,
+                "kernel_count": pending_nsys,
+                "cuda_api_count": pending_nsys,
+                "kernel_launch_api_count": pending_nsys,
+                "short_kernel_buckets": pending_nsys,
+                "gpu_kernel_busy": pending_nsys,
+                "stable_window_coverage": pending_nsys,
+                "capture_coverage": pending_nsys,
+                "gpu_metrics": {
+                    "sm_active": pending_nsys,
+                    "tensor_active": pending_nsys,
+                    "dram": pending_nsys,
+                },
+            },
+        }
+        headline_eligible = False
+
+    result = {
+        "schema_version": SCHEMA_VERSION,
+        "mode": mode,
+        "run_id": run_id,
+        "profile_name": profile_name,
+        "timestamp_utc": timestamp_utc or datetime.now(timezone.utc).isoformat(),
+        "provenance": {
+            "sglang_commit": sglang_commit,
+            "minwm_commit": minwm_commit,
+            "container_image": container_image,
+            "gpu": {
+                "model": gpu_model,
+                "count": gpu_count,
+                "allocated_count": allocated_gpu_count,
+            },
+        },
+        "workload": {
+            "model": "MinWM 5B",
+            "checkpoint": {"id": checkpoint_id, "step": checkpoint_step},
+            "resolution": {"width": width, "height": height},
+            "precision": precision,
+            "fast_lane": fast_lane,
+            "sp_degree": sp_degree,
+            "dmd_forwards_per_chunk": 4,
+            "clean_cache_forwards_per_chunk": 1,
+            "latent_frames_per_chunk": 4,
+            "pixel_frames_per_chunk": 16,
+            "warmup_chunks": warmup_chunks,
+            "precondition_warmup_chunks": precondition_warmup_chunks,
+            "measured_chunks": measured_chunks,
+        },
+        "measurement_contract": {
+            "headline_eligible": headline_eligible,
+            "headline_rule": (
+                "Only profiler_off Client/Scheduler FPS may be used as headline. "
+                "Profiler-on wall/FPS values include Nsight overhead."
+            ),
+            "timing_domains": TIMING_DOMAINS,
+            "gpu_count_semantics": {
+                "provenance.gpu.count": "active GPUs used by the workload",
+                "provenance.gpu.allocated_count": (
+                    "GPUs reserved by the job, including idle isolation capacity"
+                ),
+            },
+            "profiler_on": {
+                "tool": "nsys launch/start/stop",
+                "trace": ["cuda", "nvtx"],
+                "trace_fork_before_exec": True,
+                "cuda_graph_trace": "node",
+                "torch_profiler_concurrent": False,
+                "minimum_stable_chunks": 10,
+            },
+        },
+        "comparison_contract": comparison_contract,
+        "metrics": metrics,
+        "artifacts": artifacts,
+        "degradations": [],
+    }
+    validate_measurement(result)
+    return result
+
+
+def coefficient_of_variation(values: list[float]) -> float:
+    if len(values) < 2:
+        raise ValueError("CV requires at least two values")
+    mean = statistics.fmean(values)
+    if mean == 0:
+        raise ValueError("CV is undefined for zero mean")
+    return statistics.stdev(values) / mean
+
+
+def _require_availability(value: Any, path: str, errors: list[str]) -> None:
+    if not isinstance(value, dict):
+        errors.append(f"{path} must be an availability object")
+        return
+    status = value.get("status")
+    if status == "available":
+        if (
+            value.get("value") is None
+            or not value.get("unit")
+            or not value.get("source")
+        ):
+            errors.append(f"{path} available metric requires value, unit, and source")
+    elif status == "unavailable":
+        if not value.get("reason") or not value.get("evidence"):
+            errors.append(f"{path} unavailable metric requires reason and evidence")
+    else:
+        errors.append(f"{path}.status must be available or unavailable")
+
+
+def _require_latency_metric(
+    metric: Any, path: str, measured_chunks: Any, errors: list[str]
+) -> None:
+    _require_availability(metric, path, errors)
+    if not isinstance(metric, dict) or metric.get("status") != "available":
+        return
+    value = metric.get("value")
+    if not isinstance(value, dict):
+        errors.append(f"{path}.value must be a latency summary")
+        return
+    count = value.get("count")
+    if not isinstance(count, int):
+        errors.append(f"{path}.value.count must be an integer")
+    elif count != measured_chunks:
+        errors.append(
+            f"{path}.value.count must equal workload.measured_chunks "
+            f"({measured_chunks}); got {count}"
+        )
+
+
+def _require_normalized_count(
+    metric: Any, path: str, fields: tuple[str, ...], errors: list[str]
+) -> None:
+    _require_availability(metric, path, errors)
+    if not isinstance(metric, dict) or metric.get("status") != "available":
+        return
+    value = metric.get("value")
+    if not isinstance(value, dict):
+        errors.append(f"{path}.value must contain raw and normalized counts")
+        return
+    missing = [field for field in fields if field not in value]
+    if missing:
+        errors.append(f"{path}.value missing normalized fields: {missing}")
+
+
+def _require_stable_window(
+    metric: Any, workload: dict[str, Any], errors: list[str]
+) -> None:
+    path = "metrics.profiler_on.stable_window_coverage"
+    _require_availability(metric, path, errors)
+    if not isinstance(metric, dict) or metric.get("status") != "available":
+        return
+    value = metric.get("value")
+    if not isinstance(value, dict):
+        errors.append(f"{path}.value must be a stable window description")
+        return
+    warmup = workload.get("warmup_chunks")
+    measured = workload.get("measured_chunks")
+    precondition = workload.get("precondition_warmup_chunks")
+    if not isinstance(warmup, int) or not isinstance(measured, int):
+        return
+    expected_indices = list(range(warmup, warmup + measured))
+    expected_discard = list(range(warmup))
+    checks = {
+        "expected_stable_chunk_indices": expected_indices,
+        "observed_stable_chunk_indices": expected_indices,
+        "expected_stable_chunk_count": measured,
+        "observed_stable_chunk_count": measured,
+        "excluded_precondition_chunks": precondition,
+        "excluded_warmup_chunk_indices": expected_discard,
+        "observed_discard_chunk_indices": expected_discard,
+        "normalization_denominator": measured,
+    }
+    for field, expected in checks.items():
+        if value.get(field) != expected:
+            errors.append(f"{path}.value.{field} must equal {expected!r}")
+    intervals = value.get("intervals")
+    if not isinstance(intervals, list) or len(intervals) != measured:
+        errors.append(f"{path}.value.intervals must contain {measured} ranges")
+    elif [
+        item.get("chunk_index") for item in intervals if isinstance(item, dict)
+    ] != expected_indices:
+        errors.append(f"{path}.value.intervals must cover indices {expected_indices!r}")
+
+
+def validate_measurement(result: dict[str, Any]) -> None:
+    errors: list[str] = []
+    if result.get("schema_version") != SCHEMA_VERSION:
+        errors.append(f"schema_version must be {SCHEMA_VERSION}")
+    if result.get("mode") not in {"profiler_off", "profiler_on"}:
+        errors.append("mode must be profiler_off or profiler_on")
+    for path, value in (
+        ("run_id", result.get("run_id")),
+        ("timestamp_utc", result.get("timestamp_utc")),
+        ("provenance.sglang_commit", result.get("provenance", {}).get("sglang_commit")),
+    ):
+        if not isinstance(value, str) or not value.strip():
+            errors.append(f"{path} must be a non-empty string")
+
+    provenance = result.get("provenance", {})
+    _require_availability(
+        provenance.get("container_image"), "provenance.container_image", errors
+    )
+    _require_availability(
+        provenance.get("minwm_commit"), "provenance.minwm_commit", errors
+    )
+    gpu = provenance.get("gpu", {})
+    _require_availability(gpu.get("model"), "provenance.gpu.model", errors)
+    if not isinstance(gpu.get("count"), int) or gpu.get("count", 0) < 1:
+        errors.append("provenance.gpu.count must be a positive integer")
+    if (
+        not isinstance(gpu.get("allocated_count"), int)
+        or gpu.get("allocated_count", 0) < 1
+    ):
+        errors.append("provenance.gpu.allocated_count must be a positive integer")
+    elif isinstance(gpu.get("count"), int) and gpu["allocated_count"] < gpu["count"]:
+        errors.append("provenance.gpu.allocated_count must be >= active count")
+
+    workload = result.get("workload", {})
+    required_workload = {
+        "precision": str,
+        "fast_lane": bool,
+        "sp_degree": int,
+        "warmup_chunks": int,
+        "measured_chunks": int,
+    }
+    for key, expected_type in required_workload.items():
+        if not isinstance(workload.get(key), expected_type):
+            errors.append(f"workload.{key} must be {expected_type.__name__}")
+    if isinstance(gpu.get("count"), int) and isinstance(workload.get("sp_degree"), int):
+        if gpu["count"] != workload["sp_degree"]:
+            errors.append(
+                "provenance.gpu.count must equal workload.sp_degree for this S0 lane"
+            )
+    if workload.get("dmd_forwards_per_chunk") != 4:
+        errors.append("workload.dmd_forwards_per_chunk must be 4")
+    if workload.get("clean_cache_forwards_per_chunk") != 1:
+        errors.append("workload.clean_cache_forwards_per_chunk must be 1")
+    if result.get("mode") == "profiler_on" and workload.get("measured_chunks", 0) < 10:
+        errors.append("profiler_on requires at least 10 measured stable chunks")
+
+    contract = result.get("measurement_contract", {})
+    expected_headline = result.get("mode") == "profiler_off"
+    if contract.get("headline_eligible") is not expected_headline:
+        errors.append("headline_eligible must be true only for profiler_off")
+
+    metrics = result.get("metrics", {})
+    if result.get("mode") == "profiler_off":
+        if metrics.get("profiler_on") is not None:
+            errors.append("profiler_off record must not contain profiler_on metrics")
+        off = metrics.get("profiler_off")
+        if not isinstance(off, dict):
+            errors.append("profiler_off record requires profiler_off metrics")
+        else:
+            for name in ("client_fps", "scheduler_fps"):
+                _require_availability(
+                    off.get(name), f"metrics.profiler_off.{name}", errors
+                )
+            for name in ("scheduler_chunk_wall_ms", "dit_wall_ms", "vae_wall_ms"):
+                _require_latency_metric(
+                    off.get(name),
+                    f"metrics.profiler_off.{name}",
+                    workload.get("measured_chunks"),
+                    errors,
+                )
+    elif result.get("mode") == "profiler_on":
+        if metrics.get("profiler_off") is not None:
+            errors.append(
+                "profiler_on record must not contain headline profiler_off metrics"
+            )
+        on = metrics.get("profiler_on")
+        if not isinstance(on, dict):
+            errors.append("profiler_on record requires profiler_on metrics")
+        else:
+            for name in ("gpu_kernel_busy", "capture_coverage"):
+                _require_availability(
+                    on.get(name), f"metrics.profiler_on.{name}", errors
+                )
+            _require_stable_window(on.get("stable_window_coverage"), workload, errors)
+            observed_wall = on.get("observed_wall_with_profiler_overhead")
+            if not isinstance(observed_wall, dict):
+                errors.append(
+                    "metrics.profiler_on.observed_wall_with_profiler_overhead "
+                    "must be an object"
+                )
+            else:
+                for name in ("client_fps", "scheduler_fps"):
+                    _require_availability(
+                        observed_wall.get(name),
+                        "metrics.profiler_on."
+                        f"observed_wall_with_profiler_overhead.{name}",
+                        errors,
+                    )
+                for name in (
+                    "scheduler_chunk_wall_ms",
+                    "dit_wall_ms",
+                    "vae_wall_ms",
+                ):
+                    _require_latency_metric(
+                        observed_wall.get(name),
+                        "metrics.profiler_on."
+                        f"observed_wall_with_profiler_overhead.{name}",
+                        workload.get("measured_chunks"),
+                        errors,
+                    )
+            for name in ("dit_cuda_ms", "vae_cuda_ms"):
+                _require_latency_metric(
+                    on.get(name),
+                    f"metrics.profiler_on.{name}",
+                    workload.get("measured_chunks"),
+                    errors,
+                )
+            _require_normalized_count(
+                on.get("kernel_count"),
+                "metrics.profiler_on.kernel_count",
+                (
+                    "raw_total",
+                    "captured_raw_total",
+                    "excluded_raw_total",
+                    "boundary_overlap_count",
+                    "per_stable_chunk",
+                    "per_device",
+                    "stable_chunk_denominator",
+                    "capture_scope",
+                ),
+                errors,
+            )
+            for name in ("cuda_api_count", "kernel_launch_api_count"):
+                _require_normalized_count(
+                    on.get(name),
+                    f"metrics.profiler_on.{name}",
+                    (
+                        "raw_total",
+                        "captured_raw_total",
+                        "excluded_raw_total",
+                        "boundary_spanning_count",
+                        "boundary_included_by_start_count",
+                        "boundary_excluded_by_start_count",
+                        "boundary_event_examples",
+                        "boundary_event_examples_truncated",
+                        "boundary_attribution_policy",
+                        "total_per_chunk",
+                        "per_rank_per_chunk",
+                        "stable_chunk_denominator",
+                        "capture_scope",
+                    ),
+                    errors,
+                )
+                metric = on.get(name)
+                if isinstance(metric, dict) and metric.get("status") == "available":
+                    metric_value = metric.get("value", {})
+                    nested = metric_value.get("per_rank_per_chunk")
+                    _require_availability(
+                        nested,
+                        f"metrics.profiler_on.{name}.value.per_rank_per_chunk",
+                        errors,
+                    )
+                    raw_total = metric_value.get("raw_total")
+                    captured_raw_total = metric_value.get("captured_raw_total")
+                    excluded_raw_total = metric_value.get("excluded_raw_total")
+                    spanning = metric_value.get("boundary_spanning_count")
+                    included = metric_value.get("boundary_included_by_start_count")
+                    excluded = metric_value.get("boundary_excluded_by_start_count")
+                    examples = metric_value.get("boundary_event_examples")
+                    if (
+                        all(
+                            isinstance(value, int)
+                            for value in (
+                                raw_total,
+                                captured_raw_total,
+                                excluded_raw_total,
+                            )
+                        )
+                        and raw_total + excluded_raw_total != captured_raw_total
+                    ):
+                        errors.append(
+                            f"metrics.profiler_on.{name}.value raw_total + "
+                            "excluded_raw_total must equal captured_raw_total"
+                        )
+                    if (
+                        all(
+                            isinstance(value, int)
+                            for value in (spanning, included, excluded)
+                        )
+                        and spanning != included + excluded
+                    ):
+                        errors.append(
+                            f"metrics.profiler_on.{name}.value boundary counts "
+                            "must partition boundary_spanning_count"
+                        )
+                    if metric_value.get("boundary_attribution_policy") != (
+                        API_BOUNDARY_ATTRIBUTION_POLICY
+                    ):
+                        errors.append(
+                            f"metrics.profiler_on.{name}.value."
+                            "boundary_attribution_policy must use the S0 start rule"
+                        )
+                    if not isinstance(examples, list) or (
+                        isinstance(spanning, int) and len(examples) != min(spanning, 20)
+                    ):
+                        errors.append(
+                            f"metrics.profiler_on.{name}.value."
+                            "boundary_event_examples must retain up to 20 events"
+                        )
+                    elif any(
+                        not isinstance(example, dict)
+                        or not isinstance(example.get("raw_api_name"), str)
+                        or not example.get("raw_api_name")
+                        or not isinstance(example.get("start_ns"), int)
+                        or not isinstance(example.get("end_ns"), int)
+                        or example.get("end_ns", 0) <= example.get("start_ns", 0)
+                        or example.get("included_by_start")
+                        != (example.get("owner_range_chunk_index") is not None)
+                        for example in examples
+                    ):
+                        errors.append(
+                            f"metrics.profiler_on.{name}.value."
+                            "boundary_event_examples must retain raw name/process/"
+                            "start/end/owner evidence"
+                        )
+                    expected_truncated = isinstance(spanning, int) and spanning > 20
+                    if (
+                        metric_value.get("boundary_event_examples_truncated")
+                        is not expected_truncated
+                    ):
+                        errors.append(
+                            f"metrics.profiler_on.{name}.value."
+                            "boundary_event_examples_truncated must match the count"
+                        )
+                    if (
+                        isinstance(included, int)
+                        and isinstance(raw_total, int)
+                        and included > raw_total
+                    ) or (
+                        isinstance(excluded, int)
+                        and isinstance(excluded_raw_total, int)
+                        and excluded > excluded_raw_total
+                    ):
+                        errors.append(
+                            f"metrics.profiler_on.{name}.value boundary inclusion "
+                            "counts must be subsets of normalized/excluded totals"
+                        )
+            cuda_api = on.get("cuda_api_count")
+            launch_api = on.get("kernel_launch_api_count")
+            if all(
+                isinstance(metric, dict) and metric.get("status") == "available"
+                for metric in (cuda_api, launch_api)
+            ):
+                cuda_value = cuda_api["value"]
+                launch_value = launch_api["value"]
+                for field in (
+                    "raw_total",
+                    "captured_raw_total",
+                    "excluded_raw_total",
+                    "boundary_spanning_count",
+                    "boundary_included_by_start_count",
+                    "boundary_excluded_by_start_count",
+                ):
+                    launch_field = launch_value.get(field)
+                    cuda_field = cuda_value.get(field)
+                    if (
+                        isinstance(launch_field, int)
+                        and isinstance(cuda_field, int)
+                        and launch_field > cuda_field
+                    ):
+                        errors.append(
+                            "metrics.profiler_on.kernel_launch_api_count.value."
+                            f"{field} must not exceed cuda_api_count"
+                        )
+            _require_normalized_count(
+                on.get("short_kernel_buckets"),
+                "metrics.profiler_on.short_kernel_buckets",
+                (
+                    "raw_total",
+                    "captured_raw_total",
+                    "excluded_raw_total",
+                    "boundary_overlap_count",
+                    "per_stable_chunk",
+                    "per_device",
+                    "stable_chunk_denominator",
+                    "capture_scope",
+                ),
+                errors,
+            )
+            gpu_metrics = on.get("gpu_metrics", {})
+            for name in ("sm_active", "tensor_active", "dram"):
+                _require_availability(
+                    gpu_metrics.get(name),
+                    f"metrics.profiler_on.gpu_metrics.{name}",
+                    errors,
+                )
+                metric = gpu_metrics.get(name)
+                if isinstance(metric, dict) and metric.get("status") == "available":
+                    metric_value = metric.get("value")
+                    required = {
+                        "raw_metric_name",
+                        "mean",
+                        "min",
+                        "p50",
+                        "p95",
+                        "max",
+                        "nonzero_sample_count",
+                        "sample_count",
+                        "captured_sample_count",
+                        "excluded_sample_count",
+                        "all_collected_sample_count",
+                        "excluded_inactive_target_sample_count",
+                        "per_chunk_sample_count",
+                        "per_type_per_chunk_sample_count",
+                        "per_device_per_chunk_sample_count",
+                        "observed_type_ids",
+                        "active_cuda_device_ids",
+                        "active_pw_gpu_ids",
+                        "collected_type_ids",
+                        "collected_target_count",
+                        "active_target_count",
+                        "allocated_target_count",
+                        "target_mapping",
+                        "gpu_id_extraction",
+                        "type_id_coverage_semantics",
+                        "aggregation_mode",
+                        "exposed_metric_names",
+                    }
+                    if not isinstance(metric_value, dict) or not required.issubset(
+                        metric_value
+                    ):
+                        errors.append(
+                            f"metrics.profiler_on.gpu_metrics.{name}.value must "
+                            "retain raw_metric_name, sample_count, and "
+                            "exposed_metric_names"
+                        )
+                        continue
+                    expected_types = gpu.get("count")
+                    allocated_types = gpu.get("allocated_count")
+                    observed_types = metric_value.get("observed_type_ids")
+                    observed_type_values = (
+                        observed_types if isinstance(observed_types, list) else []
+                    )
+                    if (
+                        not isinstance(observed_types, list)
+                        or not all(isinstance(value, int) for value in observed_types)
+                        or len(observed_types) != expected_types
+                        or len(set(observed_type_values)) != len(observed_type_values)
+                    ):
+                        errors.append(
+                            f"metrics.profiler_on.gpu_metrics.{name}.value."
+                            "observed_type_ids must uniquely cover every active GPU"
+                        )
+                    active_cuda_device_ids = metric_value.get("active_cuda_device_ids")
+                    active_pw_gpu_ids = metric_value.get("active_pw_gpu_ids")
+                    collected_type_ids = metric_value.get("collected_type_ids")
+                    if (
+                        not isinstance(active_cuda_device_ids, list)
+                        or not all(
+                            isinstance(value, int) for value in active_cuda_device_ids
+                        )
+                        or len(set(active_cuda_device_ids)) != expected_types
+                    ):
+                        errors.append(
+                            f"metrics.profiler_on.gpu_metrics.{name}.value."
+                            "active_cuda_device_ids must uniquely cover every active GPU"
+                        )
+                    if (
+                        not isinstance(active_pw_gpu_ids, list)
+                        or not all(
+                            isinstance(value, int) for value in active_pw_gpu_ids
+                        )
+                        or len(set(active_pw_gpu_ids)) != expected_types
+                    ):
+                        errors.append(
+                            f"metrics.profiler_on.gpu_metrics.{name}.value."
+                            "active_pw_gpu_ids must uniquely cover every active GPU"
+                        )
+                    if (
+                        not isinstance(collected_type_ids, list)
+                        or not all(
+                            isinstance(value, int) for value in collected_type_ids
+                        )
+                        or len(set(collected_type_ids)) != allocated_types
+                    ):
+                        errors.append(
+                            f"metrics.profiler_on.gpu_metrics.{name}.value."
+                            "collected_type_ids must uniquely cover every allocated GPU"
+                        )
+                    for field, expected in (
+                        ("collected_target_count", allocated_types),
+                        ("active_target_count", expected_types),
+                        ("allocated_target_count", allocated_types),
+                    ):
+                        if metric_value.get(field) != expected:
+                            errors.append(
+                                f"metrics.profiler_on.gpu_metrics.{name}.value."
+                                f"{field} must equal {expected!r}"
+                            )
+                    target_mapping = metric_value.get("target_mapping")
+                    if (
+                        not isinstance(target_mapping, list)
+                        or len(target_mapping) != allocated_types
+                        or not all(isinstance(item, dict) for item in target_mapping)
+                    ):
+                        errors.append(
+                            f"metrics.profiler_on.gpu_metrics.{name}.value."
+                            "target_mapping must cover every allocated GPU"
+                        )
+                    else:
+                        active_mappings = [
+                            item
+                            for item in target_mapping
+                            if item.get("active") is True
+                        ]
+                        if (
+                            len(active_mappings) != expected_types
+                            or {item.get("type_id") for item in active_mappings}
+                            != set(observed_type_values)
+                            or {item.get("cuda_device_id") for item in active_mappings}
+                            != set(active_cuda_device_ids or [])
+                            or {item.get("pw_gpu_id") for item in active_mappings}
+                            != set(active_pw_gpu_ids or [])
+                        ):
+                            errors.append(
+                                f"metrics.profiler_on.gpu_metrics.{name}.value."
+                                "target_mapping active rows must match CUDA, PerfWorks, "
+                                "and typeId coverage"
+                            )
+                    sample_count = metric_value.get("sample_count")
+                    nonzero_sample_count = metric_value.get("nonzero_sample_count")
+                    if (
+                        not isinstance(nonzero_sample_count, int)
+                        or not isinstance(sample_count, int)
+                        or not 0 <= nonzero_sample_count <= sample_count
+                    ):
+                        errors.append(
+                            f"metrics.profiler_on.gpu_metrics.{name}.value."
+                            "nonzero_sample_count must be within sample_count"
+                        )
+                    if name == "sm_active" and nonzero_sample_count == 0:
+                        errors.append(
+                            "metrics.profiler_on.gpu_metrics.sm_active cannot be all "
+                            "zero when stable-window CUDA kernels cover active devices"
+                        )
+                    expected_chunk_keys = {
+                        str(index)
+                        for index in range(
+                            (
+                                workload.get("warmup_chunks", 0)
+                                if isinstance(workload.get("warmup_chunks"), int)
+                                else 0
+                            ),
+                            (
+                                workload.get("warmup_chunks", 0)
+                                + workload.get("measured_chunks", 0)
+                                if isinstance(workload.get("warmup_chunks"), int)
+                                and isinstance(workload.get("measured_chunks"), int)
+                                else 0
+                            ),
+                        )
+                    }
+                    coverage = metric_value.get("per_type_per_chunk_sample_count")
+                    if not isinstance(coverage, dict) or {
+                        str(type_id) for type_id in observed_type_values
+                    } != set(coverage):
+                        errors.append(
+                            f"metrics.profiler_on.gpu_metrics.{name}.value."
+                            "per_type_per_chunk_sample_count must cover observed typeIds"
+                        )
+                    elif any(
+                        not isinstance(chunk_counts, dict)
+                        or set(chunk_counts) != expected_chunk_keys
+                        or any(
+                            not isinstance(count, int) or count < 1
+                            for count in chunk_counts.values()
+                        )
+                        for chunk_counts in coverage.values()
+                    ):
+                        errors.append(
+                            f"metrics.profiler_on.gpu_metrics.{name}.value."
+                            "per_type_per_chunk_sample_count must cover every stable chunk"
+                        )
+                    device_coverage = metric_value.get(
+                        "per_device_per_chunk_sample_count"
+                    )
+                    if not isinstance(device_coverage, dict) or {
+                        str(device_id) for device_id in (active_cuda_device_ids or [])
+                    } != set(device_coverage):
+                        errors.append(
+                            f"metrics.profiler_on.gpu_metrics.{name}.value."
+                            "per_device_per_chunk_sample_count must cover active CUDA "
+                            "devices"
+                        )
+                    elif any(
+                        not isinstance(chunk_counts, dict)
+                        or set(chunk_counts) != expected_chunk_keys
+                        or any(
+                            not isinstance(count, int) or count < 1
+                            for count in chunk_counts.values()
+                        )
+                        for chunk_counts in device_coverage.values()
+                    ):
+                        errors.append(
+                            f"metrics.profiler_on.gpu_metrics.{name}.value."
+                            "per_device_per_chunk_sample_count must cover every stable "
+                            "chunk"
+                        )
+
+            window = on.get("stable_window_coverage")
+            window_available = (
+                isinstance(window, dict) and window.get("status") == "available"
+            )
+            for name in (
+                "kernel_count",
+                "cuda_api_count",
+                "kernel_launch_api_count",
+                "short_kernel_buckets",
+            ):
+                metric = on.get(name)
+                if not isinstance(metric, dict) or metric.get("status") != "available":
+                    continue
+                value = metric.get("value", {})
+                if not window_available:
+                    errors.append(
+                        f"metrics.profiler_on.{name} cannot be normalized without "
+                        "an available stable_window_coverage"
+                    )
+                if value.get("stable_chunk_denominator") != workload.get(
+                    "measured_chunks"
+                ):
+                    errors.append(
+                        f"metrics.profiler_on.{name}.value.stable_chunk_denominator "
+                        "must equal workload.measured_chunks"
+                    )
+                if value.get("capture_scope") != (
+                    "union of exact measured outer chunk NVTX ranges"
+                ):
+                    errors.append(
+                        f"metrics.profiler_on.{name}.value.capture_scope must use "
+                        "the exact measured NVTX range union"
+                    )
+
+    if errors:
+        raise MeasurementValidationError("; ".join(errors))
