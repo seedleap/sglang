@@ -37,7 +37,6 @@ from measurement import (
     unavailable,
 )
 
-
 TraceSelector = tuple[str, str, str]
 
 
