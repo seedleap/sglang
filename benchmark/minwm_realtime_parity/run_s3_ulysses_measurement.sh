@@ -80,7 +80,66 @@ stop_server() {
     server_pid=""
   fi
 }
-trap stop_server EXIT INT TERM
+
+record_invalid_attempt() {
+  local status="$1"
+  python3 - "${RUN_ROOT}" "${status}" <<'PY'
+import hashlib
+import json
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+root = Path(sys.argv[1])
+status = int(sys.argv[2])
+files = []
+for path in sorted(root.rglob("*")):
+    if not path.is_file() or "invalid" in path.relative_to(root).parts:
+        continue
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    files.append(
+        {
+            "path": str(path.relative_to(root)),
+            "size_bytes": path.stat().st_size,
+            "sha256": digest.hexdigest(),
+        }
+    )
+marker = root / "invalid" / "attempt.json"
+marker.parent.mkdir(parents=True, exist_ok=True)
+marker.write_text(
+    json.dumps(
+        {
+            "reason": "runner_exit_nonzero",
+            "exit_status": status,
+            "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+            "evidence_location": str(root),
+            "recoverability": "all listed evidence remains in place on the PVC",
+            "files": files,
+        },
+        indent=2,
+        sort_keys=True,
+    )
+    + "\n"
+)
+print(f"marked invalid attempt: {marker}")
+PY
+}
+
+on_exit() {
+  local status=$?
+  trap - EXIT
+  stop_server
+  if (( status != 0 )); then
+    record_invalid_attempt "${status}" || true
+  fi
+  exit "${status}"
+}
+trap on_exit EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 start_server() {
   local degree="$1" log_path="$2"
@@ -222,8 +281,12 @@ import sys
 from pathlib import Path
 
 root = Path(sys.argv[1])
-results = sorted(root.glob("lane*/**/profiler-off-repeat*.json"))
-results += sorted(root.glob("lane*/**/measurement.json"))
+results = [
+    path
+    for pattern in ("lane*/**/profiler-off-repeat*.json", "lane*/**/measurement.json")
+    for path in sorted(root.glob(pattern))
+    if "invalid" not in path.relative_to(root).parts
+]
 if not results:
     raise RuntimeError(f"no S3 measurement JSON found under {root}")
 for result in results:
@@ -256,6 +319,7 @@ while IFS= read -r result; do
 done < <(
   find "${measurement_root}" -type f \
     \( -name 'profiler-off-repeat*.json' -o -name measurement.json \) \
+    -not -path '*/invalid/*' \
     | sort
 )
 
