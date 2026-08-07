@@ -193,7 +193,11 @@ class PrimitiveTokenResidualActionEncoder(nn.Module):
         )
         self.encode_2 = CausalActionTemporalBlock(hidden_dim, hidden_dim, kernel_size)
         self.proj = nn.Linear(hidden_dim, dim)
-        self.register_buffer("_label_to_bits", _LABEL_TO_BITS.clone(), persistent=False)
+        self.register_buffer(
+            "_label_to_bits",
+            _LABEL_TO_BITS.to(device=self.proj.weight.device, copy=True),
+            persistent=False,
+        )
         self.validate_runtime_action = True
 
     @staticmethod
@@ -290,7 +294,11 @@ class PrimitiveRoPETokenResidualActionEncoder(nn.Module):
         )
         self.encode_2 = CausalActionTemporalBlock(hidden_dim, hidden_dim, kernel_size)
         self.proj = nn.Linear(hidden_dim, dim)
-        self.register_buffer("_label_to_bits", _LABEL_TO_BITS.clone(), persistent=False)
+        self.register_buffer(
+            "_label_to_bits",
+            _LABEL_TO_BITS.to(device=self.proj.weight.device, copy=True),
+            persistent=False,
+        )
         self.validate_runtime_action = True
 
     def frame_states(self, action: torch.Tensor) -> torch.Tensor:

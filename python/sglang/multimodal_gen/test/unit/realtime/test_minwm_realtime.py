@@ -169,11 +169,16 @@ def test_minwm_action_label_table_is_a_nonpersistent_model_buffer(encoder_cls):
     encoder = encoder_cls(dim=24, embed_dim=8, hidden_dim=16, kernel_size=3)
     assert "_label_to_bits" in dict(encoder.named_buffers())
     assert "_label_to_bits" not in encoder.state_dict()
+    assert encoder._label_to_bits.device == encoder.proj.weight.device
     labels = torch.tensor([[0, 9, 10, 1]])
     torch.testing.assert_close(
         action_labels_to_primitive_bits(labels, label_to_bits=encoder._label_to_bits),
         action_labels_to_primitive_bits(labels),
     )
+
+    with torch.device("meta"):
+        meta_encoder = encoder_cls(dim=24, embed_dim=8, hidden_dim=16, kernel_size=3)
+    assert meta_encoder._label_to_bits.device == meta_encoder.proj.weight.device
 
 
 @pytest.mark.parametrize(
