@@ -102,29 +102,6 @@ class _MinWMCudaGraphRunner:
         self.capture_stream = None
         self.pool = None
         self.replay_count = 0
-        self.capture_forward = None
-        self.verify = os.environ.get("MINWM_CUDA_GRAPH_VERIFY", "0").strip().lower() not in {
-            "",
-            "0",
-            "false",
-            "no",
-            "off",
-        }
-
-    def _log_verification(
-        self, label: str, reference: torch.Tensor
-    ) -> None:
-        torch.cuda.synchronize(reference.device)
-        difference = (self.output.float() - reference.float()).abs()
-        logger.warning(
-            "MinWM CUDA graph verification rank=%d phase=%s mean_abs=%g "
-            "max_abs=%g exact=%s",
-            get_sp_parallel_rank(),
-            label,
-            difference.mean().item(),
-            difference.max().item(),
-            bool(torch.equal(self.output, reference)),
-        )
 
     def _copy_inputs(
         self,
@@ -154,17 +131,7 @@ class _MinWMCudaGraphRunner:
     ) -> torch.Tensor:
         if self.graph is not None:
             self._copy_inputs(latent, prompt, timestep, action)
-            reference = None
-            if self.verify and self.replay_count < 4:
-                reference = self.capture_forward(
-                    self.static_latent,
-                    self.static_prompt,
-                    self.static_timestep,
-                    self.static_action,
-                ).detach().clone()
             self.graph.replay()
-            if reference is not None:
-                self._log_verification(f"replay_{self.replay_count + 1}", reference)
             self.replay_count += 1
             if self.replay_count == 1 or self.replay_count % 100 == 0:
                 logger.info(
@@ -179,7 +146,6 @@ class _MinWMCudaGraphRunner:
         self.static_timestep = _static_cuda_graph_tensor(timestep)
         self.static_action = _static_cuda_graph_tensor(action)
         assert capture_forward is not None
-        self.capture_forward = capture_forward
 
         self.capture_stream = torch.cuda.Stream(device=latent.device)
         current_stream = torch.cuda.current_stream(latent.device)
@@ -205,14 +171,10 @@ class _MinWMCudaGraphRunner:
                 self.static_action,
             )
         current_stream.wait_stream(self.capture_stream)
-        if self.verify:
-            reference = capture_forward(
-                self.static_latent,
-                self.static_prompt,
-                self.static_timestep,
-                self.static_action,
-            ).detach().clone()
-            self._log_verification("capture", reference)
+        # Do not consume the execution performed while stream capture is active.
+        # Materialize the first user-visible result through the same replay path
+        # as every subsequent denoising step.
+        self.graph.replay()
         logger.info(
             "Captured MinWM saturated recompute CUDA graph rank=%d",
             get_sp_parallel_rank(),
