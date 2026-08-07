@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import math
 import statistics
@@ -161,6 +162,7 @@ async def receive_run(args: argparse.Namespace, contract: dict, case: dict) -> d
     stats_by_chunk: dict[int, dict[str, Any]] = {}
     payload_complete_ns: dict[int, int] = {}
     frame_batches_by_chunk: dict[int, dict[str, Any]] = {}
+    measured_payload_sha256 = hashlib.sha256()
     init_started_ns = time.perf_counter_ns()
     async with websockets.connect(
         args.ws_url, max_size=None, ping_interval=None, open_timeout=args.timeout
@@ -203,6 +205,8 @@ async def receive_run(args: argparse.Namespace, contract: dict, case: dict) -> d
             batch_index, num_batches, batch_frames = validate_frame_batch(
                 header, payload, chunk_index=chunk_index
             )
+            if chunk_index >= args.warmup_chunks:
+                measured_payload_sha256.update(payload)
             state = frame_batches_by_chunk.setdefault(
                 chunk_index,
                 {"num_batches": num_batches, "seen": set(), "frames": 0},
@@ -302,6 +306,7 @@ async def receive_run(args: argparse.Namespace, contract: dict, case: dict) -> d
         "warmup_chunks": args.warmup_chunks,
         "measured_chunks": args.measured_chunks,
         "measured_frames": measured_frames,
+        "measured_payload_sha256": measured_payload_sha256.hexdigest(),
         "server": server,
         "client": {
             "init_send_start_to_first_payload_complete_ms": (

@@ -729,6 +729,13 @@ if [[ "${MINWM_BENCHMARK_MODE}" == "cudagraphmatrix" ]]; then
   nvidia-smi -L | tee "${CG_RESULTS}/gpus.txt"
   nvidia-smi topo -m | tee "${CG_RESULTS}/topology.txt"
 
+  python3 -m pytest -q \
+    /workspace/sglang/python/sglang/multimodal_gen/test/unit/realtime/test_minwm_realtime.py \
+    -k 'cuda_graph or cache_plan_is_shared_across_layers_and_reused_for_recompute or accepts_supported_ulysses_sequence_parallelism'
+  python3 -m pytest -q \
+    /workspace/sglang/python/sglang/multimodal_gen/test/unit/test_server_args.py \
+    -k speed_mode_cuda_graph_does_not_enable_torch_compile
+
   python3 - "${MODEL_DIR}/transformer/config.json" "${CG_WINDOW}" <<'PY'
 import json
 import sys
@@ -845,6 +852,12 @@ for degree in (1, 2):
     eager = profiles[eager_name]
     graph = profiles[graph_name]
     comparison = {}
+    comparison["measured_payload_sha256"] = {
+        "eager": eager["measured_payload_sha256"],
+        "cuda_graph": graph["measured_payload_sha256"],
+        "equal": eager["measured_payload_sha256"]
+        == graph["measured_payload_sha256"],
+    }
     for name, getter in {
         "scheduler_fps": lambda item: item["server"]["scheduler_forward_fps_ratio_of_sums"],
         "client_fps": lambda item: item["client"]["steady_received_fps_ratio_of_sums"],

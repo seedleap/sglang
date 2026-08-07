@@ -99,6 +99,8 @@ class _MinWMCudaGraphRunner:
         self.static_prompt = None
         self.static_timestep = None
         self.static_action = None
+        self.capture_stream = None
+        self.pool = None
         self.replay_count = 0
 
     def _copy_inputs(
@@ -145,10 +147,10 @@ class _MinWMCudaGraphRunner:
         self.static_action = _static_cuda_graph_tensor(action)
         assert capture_forward is not None
 
-        capture_stream = torch.cuda.Stream(device=latent.device)
+        self.capture_stream = torch.cuda.Stream(device=latent.device)
         current_stream = torch.cuda.current_stream(latent.device)
-        capture_stream.wait_stream(current_stream)
-        with torch.cuda.stream(capture_stream):
+        self.capture_stream.wait_stream(current_stream)
+        with torch.cuda.stream(self.capture_stream):
             for _ in range(2):
                 capture_forward(
                     self.static_latent,
@@ -156,19 +158,21 @@ class _MinWMCudaGraphRunner:
                     self.static_timestep,
                     self.static_action,
                 )
-        current_stream.wait_stream(capture_stream)
+        current_stream.wait_stream(self.capture_stream)
         torch.cuda.synchronize(latent.device)
 
         self.graph = torch.cuda.CUDAGraph()
-        pool = torch.cuda.graph_pool_handle()
-        with torch.cuda.graph(self.graph, pool=pool, stream=capture_stream):
+        self.pool = torch.cuda.graph_pool_handle()
+        with torch.cuda.graph(
+            self.graph, pool=self.pool, stream=self.capture_stream
+        ):
             self.output = capture_forward(
                 self.static_latent,
                 self.static_prompt,
                 self.static_timestep,
                 self.static_action,
             )
-        current_stream.wait_stream(capture_stream)
+        current_stream.wait_stream(self.capture_stream)
         logger.info(
             "Captured MinWM saturated recompute CUDA graph rank=%d",
             get_sp_parallel_rank(),
