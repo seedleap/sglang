@@ -191,7 +191,7 @@ for lane in 00 10 01 11; do
   mkdir -p "${lane_result_root}"
   {
     echo "sglang_commit=${SGLANG_GIT_REF}"
-    echo "s0_tool_commit=25cc42ef8c58709957e089b6e58f35b3af7ee63a"
+    echo "s0_tool_commit=59aa68a382cb9f481e77f98647644347671561dc"
     echo "lane=${lane}"
     echo "fused_pre_a2a_qk_norm=${MINWM_FUSED_PRE_A2A_QK_NORM}"
     echo "fused_post_a2a_rope_cache=${MINWM_FUSED_POST_A2A_ROPE_CACHE}"
