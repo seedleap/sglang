@@ -66,6 +66,18 @@ class MinWMCausalAttentionKVPlan:
 
 
 @dataclass(slots=True)
+class MinWMCausalPostA2AFastUpdate:
+    """Prepared cache write for the post-A2A RoPE/cache kernel."""
+
+    plan: MinWMCausalAttentionKVPlan
+    cache_k: torch.Tensor
+    cache_v: torch.Tensor
+    rotated_k: torch.Tensor
+    write_start: int
+    rotate_all_keys: bool
+
+
+@dataclass(slots=True)
 class MinWMCausalSelfAttentionKVCache(CausalSelfAttentionKVCache):
     """One MinWM layer's unrotated K/V and position metadata.
 
@@ -503,6 +515,119 @@ class MinWMCausalSelfAttentionKVCache(CausalSelfAttentionKVCache):
     def set_prepared_attention_plan(self, plan: MinWMCausalAttentionKVPlan) -> None:
         self.current_position_ids = plan.current_position_ids
         self.prepared_attention_plan = plan
+
+    def prepare_fused_post_a2a_update(
+        self,
+        *,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        current_chunk_start: int,
+        cache_head_start: int | None = None,
+        position_ids: torch.Tensor | None = None,
+        debug_name: str = "MinWM causal KV cache",
+    ) -> MinWMCausalPostA2AFastUpdate | None:
+        """Prepare a non-repacking cache update without mutating its metadata.
+
+        Returning ``None`` means the caller must use the regular cache path. In
+        particular, eviction and dynamic selection retain their existing gather
+        and metadata implementation.
+        """
+        if key.shape != value.shape:
+            raise ValueError("MinWM attention key/value shapes must match")
+        position_ids = (
+            self.current_position_ids if position_ids is None else position_ids
+        )
+        if position_ids is None:
+            raise ValueError("MinWM cache requires current position_ids")
+        if int(position_ids.shape[0]) != int(key.shape[1]):
+            raise ValueError("MinWM position_ids length must match the current K/V")
+
+        plan = self.prepared_attention_plan
+        if plan is None:
+            plan = self.prepare_attention_plan(
+                current_chunk_start=current_chunk_start,
+                position_ids=position_ids,
+            )
+        elif (
+            plan.current_chunk_start != current_chunk_start
+            or plan.num_new_tokens != int(key.shape[1])
+        ):
+            raise RuntimeError("MinWM prepared cache plan does not match current K/V")
+
+        head_slice = self._cache_head_slice(self.k, key, cache_head_start, debug_name)
+        if head_slice is not None or self.k.requires_grad or self.v.requires_grad:
+            return None
+        if self.global_end_index_int is not None and (
+            self.global_end_index_int != plan.global_end_before
+            or self.local_end_index_int != plan.local_end_before
+        ):
+            raise RuntimeError(f"{debug_name} layer metadata is out of sync")
+
+        if not plan.is_recompute:
+            if (
+                not plan.preserves_all_history
+                or plan.current_local_start != plan.local_end_before
+                or plan.current_local_end != plan.selected_len
+            ):
+                return None
+            if self.allow_growth:
+                self._grow_to_fit(plan.required_tokens)
+            if plan.selected_len > self.cache_size:
+                raise RuntimeError(
+                    f"{debug_name} selected window exceeds cache capacity"
+                )
+
+        rotated_k = self._ensure_rotated_k()
+        return MinWMCausalPostA2AFastUpdate(
+            plan=plan,
+            cache_k=self.k[:, : plan.selected_len],
+            cache_v=self.v[:, : plan.selected_len],
+            rotated_k=rotated_k[:, : plan.selected_len],
+            write_start=plan.current_local_start,
+            rotate_all_keys=not (plan.is_recompute and self.rotated_k_is_valid),
+        )
+
+    def commit_fused_post_a2a_update(
+        self, update: MinWMCausalPostA2AFastUpdate
+    ) -> MinWMCausalAttentionKVView:
+        """Commit metadata after the fused CUDA write has been launched."""
+        plan = update.plan
+        if (
+            self.prepared_attention_plan is not None
+            and self.prepared_attention_plan is not plan
+        ):
+            raise RuntimeError("MinWM prepared cache plan changed during fused update")
+        self.prepared_attention_plan = None
+        self.position_ids = plan.position_ids
+        self.rope_position_ids = plan.rope_position_ids
+        self.token_ids = plan.token_ids
+        self.rope_temporal_offset = plan.rope_temporal_offset
+        self.pinned_token_start = plan.pinned_token_start
+        self.pinned_token_end = plan.pinned_token_end
+        self.prompt_pin_frame = plan.prompt_pin_frame
+        self.pending_prompt_switch = plan.pending_prompt_switch
+        self.pending_scene_cut_pin = plan.pending_scene_cut_pin
+        self._write_indices(
+            global_end_index=plan.current_chunk_end,
+            local_end_index=plan.selected_len,
+        )
+        self.last_attention_plan = plan
+        self.rotated_k_is_valid = True
+        return MinWMCausalAttentionKVView(
+            k=update.cache_k,
+            v=update.cache_v,
+            query_position_ids=plan.query_position_ids,
+            key_position_ids=plan.key_position_ids,
+            rotated_k=update.rotated_k,
+            rotated_k_is_valid=True,
+            current_local_start=plan.current_local_start,
+            current_local_end=plan.current_local_end,
+            is_recompute=plan.is_recompute,
+            query_cos=plan.query_cos,
+            query_sin=plan.query_sin,
+            key_cos=plan.key_cos,
+            key_sin=plan.key_sin,
+        )
 
     @staticmethod
     def _select_kv_with_plan(

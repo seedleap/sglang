@@ -39,6 +39,7 @@ from sglang.multimodal_gen.runtime.models.dits.minwm import (
     _minwm_layer_norm,
     _minwm_packed_attention_backend,
     _minwm_project_output_in_reference_row_bucket,
+    _minwm_qk_norm_head_layout,
     _minwm_qk_norm_op,
     _minwm_qk_norm_rope_op,
     _minwm_should_restore_reference_output_projection,
@@ -395,6 +396,112 @@ def test_minwm_cache_append_does_not_repack_visible_history(monkeypatch):
     assert cache.last_attention_plan.preserves_all_history
     assert cache.token_ids.tolist() == [0, 1, 2, 3]
     assert cache.k[0, :4, 0, 0].tolist() == [0.0, 1.0, 2.0, 3.0]
+
+
+def _simulate_fused_post_a2a_update(cache, update, key, value):
+    write_end = update.write_start + key.shape[1]
+    update.cache_k[:, update.write_start : write_end].copy_(key)
+    update.cache_v[:, update.write_start : write_end].copy_(value)
+    update.rotated_k.copy_(update.cache_k)
+    return cache.commit_fused_post_a2a_update(update)
+
+
+def test_minwm_fused_post_a2a_cache_prepare_commit_and_recompute():
+    cache = _make_minwm_test_cache(cache_size=4, sink_tokens=0)
+    position_ids = torch.tensor([[0, 0, 0], [1, 0, 0]])
+    cache.set_current_position_ids(position_ids)
+    key = torch.tensor([[[[1.0, 2.0]], [[3.0, 4.0]]]])
+    value = -key
+
+    first = cache.prepare_fused_post_a2a_update(
+        key=key,
+        value=value,
+        current_chunk_start=0,
+    )
+    assert first is not None
+    assert first.write_start == 0
+    assert first.rotate_all_keys
+    first_view = _simulate_fused_post_a2a_update(cache, first, key, value)
+    assert cache._read_indices() == (2, 2)
+    assert first_view.rotated_k_is_valid
+    torch.testing.assert_close(first_view.k, key, rtol=0, atol=0)
+    torch.testing.assert_close(first_view.v, value, rtol=0, atol=0)
+
+    replacement = key + 8
+    recompute = cache.prepare_fused_post_a2a_update(
+        key=replacement,
+        value=-replacement,
+        current_chunk_start=0,
+    )
+    assert recompute is not None
+    assert recompute.plan.is_recompute
+    assert recompute.write_start == 0
+    assert not recompute.rotate_all_keys
+    recompute_view = _simulate_fused_post_a2a_update(
+        cache, recompute, replacement, -replacement
+    )
+    assert cache._read_indices() == (2, 2)
+    torch.testing.assert_close(recompute_view.k, replacement, rtol=0, atol=0)
+
+
+def test_minwm_fused_post_a2a_cache_growth_and_eviction_fallback():
+    growing = _make_minwm_test_cache(cache_size=2, sink_tokens=0)
+    growing.allow_growth = True
+    growing.attention_window_size = 4
+    positions = torch.tensor([[0, 0, 0], [1, 0, 0], [2, 0, 0]])
+    growing.set_current_position_ids(positions)
+    values = torch.arange(6, dtype=torch.float32).view(1, 3, 1, 2)
+    update = growing.prepare_fused_post_a2a_update(
+        key=values,
+        value=-values,
+        current_chunk_start=0,
+    )
+    assert update is not None
+    assert growing.cache_size >= 3
+    _simulate_fused_post_a2a_update(growing, update, values, -values)
+
+    bounded = _make_minwm_test_cache(cache_size=2, sink_tokens=0)
+    _append_minwm_test_frames(bounded, [0, 1], token_start=0)
+    next_positions = torch.tensor([[2, 0, 0]])
+    bounded.set_current_position_ids(next_positions)
+    next_value = torch.full((1, 1, 1, 2), 9.0)
+    assert (
+        bounded.prepare_fused_post_a2a_update(
+            key=next_value,
+            value=-next_value,
+            current_chunk_start=2,
+        )
+        is None
+    )
+    fallback = bounded.update_and_get_attention_kv(
+        key=next_value,
+        value=-next_value,
+        current_chunk_start=2,
+    )
+    assert bounded.token_ids.tolist() == [1, 2]
+    torch.testing.assert_close(
+        fallback.k[0, :, 0, 0], torch.tensor([1.0, 9.0]), rtol=0, atol=0
+    )
+
+
+def test_minwm_fused_post_a2a_rejects_mismatched_prepared_metadata():
+    cache = _make_minwm_test_cache(cache_size=4, sink_tokens=0)
+    position_ids = torch.tensor([[0, 0, 0], [1, 0, 0]])
+    cache.set_prepared_attention_plan(
+        cache.prepare_attention_plan(
+            current_chunk_start=0,
+            position_ids=position_ids,
+        )
+    )
+    values = torch.ones(1, 2, 1, 2)
+    with pytest.raises(
+        RuntimeError, match="prepared cache plan does not match current K/V"
+    ):
+        cache.prepare_fused_post_a2a_update(
+            key=values,
+            value=-values,
+            current_chunk_start=1,
+        )
 
 
 def test_minwm_fixed_shape_metadata_is_cached():
@@ -1839,6 +1946,11 @@ def test_minwm_causal_attention_packs_one_ulysses_collective(monkeypatch, seq_sp
         kv_cache=cache,
         current_start=17,
         qk_already_roped=False,
+        pre_a2a_qk_norm=(
+            torch.ones(4 * head_dim),
+            torch.full((4 * head_dim,), 2.0),
+            0.0,
+        ),
     )
 
     assert output.shape == (1, local_seq, 4, head_dim)
@@ -2047,6 +2159,15 @@ def test_minwm_fused_segments_match_main_eager_formulas():
     raw_query, raw_key = _minwm_qk_norm_op(
         query, key, query_weight, key_weight, 1e-6, 2
     )
+    head_query, head_key = _minwm_qk_norm_head_layout(
+        query.view(1, 6, 2, 4),
+        key.view(1, 6, 2, 4),
+        query_weight,
+        key_weight,
+        1e-6,
+    )
+    torch.testing.assert_close(head_query, raw_query, rtol=0, atol=0)
+    torch.testing.assert_close(head_key, raw_key, rtol=0, atol=0)
     separated_query = apply_minwm_rotary_embedding(
         raw_query, rope[..., 0], rope[..., 1]
     )
