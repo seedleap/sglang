@@ -227,10 +227,10 @@ def test_nsys_merge_extracts_counts_buckets_busy_and_gpu_metrics(
         "capture_scope": "entire nsys start/stop capture",
     }
     assert on["cuda_api_count"]["value"]["raw_total"] == 4
-    assert on["cuda_api_count"]["value"]["total_per_stable_chunk"] == 0.4
-    assert on["cuda_api_count"]["value"]["per_rank_per_stable_chunk"][
-        "value"
-    ] == pytest.approx(0.2)
+    assert on["cuda_api_count"]["value"]["total_per_chunk"] == 0.4
+    assert on["cuda_api_count"]["value"]["per_rank_per_chunk"]["value"] == (
+        pytest.approx(0.2)
+    )
     assert on["kernel_launch_api_count"]["value"]["raw_total"] == 2
     buckets = on["short_kernel_buckets"]["value"]
     assert buckets["raw_total"] == {
@@ -278,7 +278,7 @@ def test_nsys_rank_normalization_degrades_without_process_coverage(
     on = record["metrics"]["profiler_on"]
     assert on["capture_coverage"]["status"] == "unavailable"
     assert on["capture_coverage"]["reason"] == "rank_capture_coverage_unconfirmed"
-    per_rank = on["cuda_api_count"]["value"]["per_rank_per_stable_chunk"]
+    per_rank = on["cuda_api_count"]["value"]["per_rank_per_chunk"]
     assert per_rank["status"] == "unavailable"
     assert "columns" in per_rank["evidence"]
 
