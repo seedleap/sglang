@@ -4,7 +4,8 @@
 benchmark 证据中保留负结论。post-A2A 候选已通过 H200 CUDA exact gate，以及 SP2/SP4
 short 与 KV45 eviction 的逐帧 SHA parity；post-only profiler-off A/B 已完成。SP2 headline
 近零；SP4 v06 约 +4.95%，独立 server 的逆序 ABBA 仍为 +3.56%，排除了单纯
-baseline-first/cache 顺序偏差。Nsight 使用 S0 exact-window/GPU-target canonical 后另跑。
+baseline-first/cache 顺序偏差。d5b exact-window/GPU-target Nsight 的四条 SP2/SP4
+baseline/candidate lane 已全部完成并通过窗口、stage trace 与 active-target 覆盖验收。
 
 基线为 `origin/main@9a9dc59cd1`，实现分支为
 `codex/ulysses-pre-post-a2a-fusion`。统一测量契约来自 S0
@@ -85,7 +86,7 @@ prepared metadata 仍抛出原有异常，不以 fallback 隐藏状态错误。
 | v06 post-only E2E | SP2/SP4、short 129 frames、KV45 eviction 241 frames | lane01 对 lane00 四项逐帧 SHA bitwise exact |
 | v06 profiler-off | H200、每 lane 2×(20+200)、KV45 | 四 lane JSON 均通过 b924 schema、count=200 与 CV gate；见下表 |
 | SP4 off-only ABBA | H200、4 个独立 server | A1/B1/B2/A2 均 count=200、CV pass；逆序配对仍复现收益 |
-| Nsight | 等待单独 attempt | b924 capture window 有归一化缺陷；正式采集只允许 d5b |
+| Nsight | H200、d5b exact-window、SP2/SP4 各 `00/01` | 四 lane 均为 20 precondition + 1 discard + exact 10 stable；wall/CUDA、kernel/API/launch、8-target GPU metrics 与 stage trace 全部可用 |
 
 本地系统默认 Python 3.9.6，无法解析仓库的现代 union type；改用已安装的
 `/opt/homebrew/bin/python3.11`。为避免修改仓库或全局环境，测试使用一次性
@@ -148,8 +149,9 @@ repeat1 首 payload 为 baseline `9.831s`、candidate `9.479s`；同 server repe
 快照。
 
 阶段证据显示差异集中在 DiT。SP4 DiT wall/CUDA 均约 `-5.32%`，VAE 约 `+0.02%`；
-SP2 DiT 也约 `-3.31%`，但 scheduler 中未归入 DiT/VAE 的部分增加约 `27.4ms`，抵消
-`24.7ms` DiT 缩短。SP4 未归类部分反而减少约 `10.8ms`。telemetry 与 stage trace
+SP2 DiT 也约 `-3.31%`，但 scheduler 中未归入 DiT/VAE 的部分增加
+`23.980ms`，与 VAE `+0.416ms` 一起几乎抵消 `24.683ms` DiT 缩短，最终
+chunk wall 只降 `0.288ms`。SP4 未归类部分反而减少 `20.171ms`。telemetry 与 stage trace
 无法解释这个 SP 依赖和 baseline-first 顺序效应，故新增并完成 SP4 off-only ABBA：
 candidate A1→baseline B1→baseline B2→candidate A2，每个 position 独立 server、
 20+200/KV45、独立 telemetry/marker/限速快照。Job
@@ -173,23 +175,99 @@ Slowdown、Sync Boost 的 before/after counter 增量均为 0。candidate 功耗
 baseline 降频、热限速或先后顺序解释该收益。A1 的首 payload 较慢但不进入 20+200
 稳态窗口，A2 仍复现相同方向。
 
-Nsight 稳态至少 10 chunks，单独记录 A2A 后 kernel/launch、短 kernel 分桶、NCCL
-SendRecv 时间与次数、两侧 idle gap、GPU kernel busy、SM Active、Tensor Active，以及
-可得时的 DRAM。若 GPU metrics 因权限不可用，按 S0 schema 填 `unavailable`、原因和
-采集证据，不留空。b924 的 raw capture 实际覆盖 1 discarded + 10 stable，却用 10
-归一化，故任何 b924 Nsight 正式结果均无效；v06 与 ABBA runner 物理不含 Nsight
-路径。正式 profiler-on 只允许临时 pin d5b：按 API start-time half-open 归属并分别保留
-API/launch 边界证据，采集 all 8 target 后只汇总 active `pwGpuId`，并要求 exact 10
-ranges、DiT/VAE CUDA、kernel/API/launch、SM/Tensor 与 target coverage 全部通过。
+### d5b Nsight 正式结果
 
-正式 Nsight 使用独立临时 runner `58ed4daf7e4208eedde4f8fc8f0a8c1e20e0007d`，其祖先
-包含 d5b，且产品相关代码逐文件与 `61aa8809e6` 一致。四条 lane 顺序为 SP2 baseline、
-SP2 candidate、SP4 baseline、SP4 candidate；每条均复用 v06 对应 profiler-off source，
-但重新启动独立 server，执行 20 precondition + 1 discarded + exact 10 stable、KV45、
-all-8 GPU metrics capture。每条 lane 在完成后先单独验收 stage wall/CUDA count=10、range
-1..10、active CUDA device 到 `pwGpuId` 映射；失败只在该 lane 写 marker。比较器另报
-post-A2A fused/语义匹配 kernel、所有减少的 kernel name、NCCL SendRecv/AllToAll duration、
-其前后 device-visible gap，以及 profiler-off/on 的 scheduler 未归类余量。
+b924 的旧 raw capture 实际覆盖 1 discarded + 10 stable，却用 10 归一化，
+故旧 Nsight 结果均不进入结论；v06 与 ABBA runner 物理不含 Nsight 路径。
+本次正式 profiler-on 使用独立临时 runner
+`58ed4daf7e4208eedde4f8fc8f0a8c1e20e0007d`，其祖先包含 d5b，产品文件与
+`61aa8809e6` 逐一相同。setup 在 torch 2.11.0+cu130、Nsight 2026.4.1 下通过
+50 项正确性/回归与 7 项 runner/comparator 测试，并留下
+`MINWM_SETUP_ONLY_COMPLETE`。source registration 找到 v06 的 8 个有效 profiler-off
+JSON：SP2/SP4 × baseline/candidate × 2 repeats，全部通过 schema/count/CV gate。Job
+`minwm-s3-post-nsys-h200-20260807-08` 在 S4 释放原
+固定节点后自然调度，四条 lane 全部完成。每条都是 20 precondition + discard
+index 0 + exact stable indices 1..10、KV45、独立 server、`torch.profiler=false`。
+DiT/VAE/Scheduler wall count 都是 10，capture/process 覆盖与 SP degree 一致，四个
+`S3_LANE_COMPLETE` 与总 `S3_POST_NSYS_COMPLETE` 齐全，没有 invalid marker。
+
+Profiler-on wall 含 Nsight 开销，只用于同一 exact window 内的归因；不替代上文
+20+200 profiler-off headline。所有下表 wall/CUDA 单位为 ms/chunk，每格 count=10。
+
+| SP | lane | Scheduler observed wall | DiT wall / CUDA | VAE wall / CUDA | Scheduler unclassified |
+| ---: | --- | ---: | --- | --- | ---: |
+| 2 | `00` baseline | 1326.800 | 760.373 / 759.786 | 445.932 / 445.037 | 120.495 |
+| 2 | `01` post | 1225.000 | 672.895 / 672.469 | 442.804 / 442.228 | 109.301 |
+| 4 | `00` baseline | 1229.100 | 799.952 / 799.479 | 257.284 / 256.614 | 171.865 |
+| 4 | `01` post | 1139.900 | 739.830 / 739.279 | 255.695 / 254.958 | 144.376 |
+
+API 用 call `start_ns` 落在 measured NVTX range union 的 half-open 规则归属，API 与
+launch 分开统计；四 lane 都没有 boundary-spanning call。下表的格式为
+`raw_total / total_per_chunk / per_rank_per_chunk`；kernel 与 launch 在本 workload 计数相同，
+但来源分别为 kernel rows 与 CUDA launch API rows。
+
+| SP | lane | Kernel | CUDA API | Launch API |
+| ---: | --- | --- | --- | --- |
+| 2 | `00` | 346080 / 34608.0 / 17304.0 | 912247 / 91224.7 / 45612.35 | 346080 / 34608.0 / 17304.0 |
+| 2 | `01` | 262080 / 26208.0 / 13104.0 | 735723 / 73572.3 / 36786.15 | 262080 / 26208.0 / 13104.0 |
+| 4 | `00` | 692020 / 69202.0 / 17300.5 | 1851887 / 185188.7 / 46297.175 | 692020 / 69202.0 / 17300.5 |
+| 4 | `01` | 524020 / 52402.0 / 13100.5 | 1499098 / 149909.8 / 37477.45 | 524020 / 52402.0 / 13100.5 |
+
+SP2/SP4 kernel 和 launch 分别减少 `24.272%/24.277%`，CUDA API 减少
+`19.350%/19.050%`。减少主要来自短 kernel；下表是所有 active device 合计的
+`total_per_chunk`。
+
+| SP | lane | `<10us` | `10..<50us` | `50..<100us` | `>=100us` |
+| ---: | --- | ---: | ---: | ---: | ---: |
+| 2 | `00` | 18254.3 | 12244.4 | 1192.4 | 2916.9 |
+| 2 | `01` | 13365.7 | 8846.9 | 1092.1 | 2903.3 |
+| 4 | `00` | 49115.3 | 13368.7 | 1880.2 | 4837.8 |
+| 4 | `01` | 33163.4 | 12602.7 | 1794.0 | 4841.9 |
+
+GPU metrics 采集 all 8 allocated targets，只汇总 stable-window 内有 kernel 且经
+`TARGET_INFO_GPU` 映射的 active `pwGpuId`。SP2 的 CUDA `[0,1]` 对应 pwGpuId
+`[2,3]`，SP4 的 CUDA `[0,1,2,3]` 对应 pwGpuId `[0,1,2,3]`；四 lane 的
+collected target count 都是 8，DRAM 状态都是 `available`。下表均为 active-target
+样本平均百分比。
+
+| SP | lane | Kernel busy | SM Active | Tensor Active | DRAM Read |
+| ---: | --- | ---: | ---: | ---: | ---: |
+| 2 | `00` | 75.792 | 60.217 | 27.580 | 8.082 |
+| 2 | `01` | 76.255 | 61.610 | 29.874 | 7.777 |
+| 4 | `00` | 69.868 | 36.948 | 15.508 | 4.282 |
+| 4 | `01` | 68.614 | 37.054 | 16.387 | 4.146 |
+
+SP2 candidate 的 busy/SM/Tensor 分别变化 `+0.463/+1.393/+2.294` 个百分点，
+SP4 为 `-1.254/+0.106/+0.879` 个百分点；DRAM Read 只降
+`0.304/0.136` 个百分点。因此这不是长 kernel 或 tensor compute 减少，而是大量
+eager pointwise/copy launch 被替换。`>=100us` 分桶也基本不变。
+
+candidate 的 `_fused_rope_cache_update_kernel` 在 SP2/SP4 分别有 raw
+`3000/6000` 次，都是每 active device 每 stable chunk 150 次，时间分别是
+`12.333/6.394ms`；baseline 为 0。NCCL 下表的 count/duration 按 active device 每
+stable chunk 归一，predecessor/successor gap 则是 active devices 合计的 ms/chunk。
+
+| SP | lane | Fused count / ms | NCCL count / ms | predecessor gap | successor gap |
+| ---: | --- | --- | --- | ---: | ---: |
+| 2 | `00` | 0 / 0.000 | 432 / 124.874 | 25.196 | 10.408 |
+| 2 | `01` | 150 / 12.333 | 432 / 98.850 | 26.740 | 15.427 |
+| 4 | `00` | 0 / 0.000 | 432 / 322.018 | 51.117 | 15.291 |
+| 4 | `01` | 150 / 6.394 | 432 / 287.031 | 56.221 | 24.393 |
+
+NCCL `ncclDevKernel_SendRecv` 次数不变：SP2 raw 8640，SP4 raw 17280。duration
+分别下降 `26.024ms/active-device/chunk (-20.840%)` 和
+`34.987ms/active-device/chunk (-10.865%)`。这不代表 payload 或 collective 数量改变；
+post-A2A 工作缩短后会改变后续 block 的 stream 依赖与资源竞争，trace 只能证明
+观测到的 NCCL kernel residence 同向缩短。两侧 gap 反而小幅增加，且它们是同一
+inter-kernel gap 的两个视图，不能相加。
+
+critical path 结论必须以 profiler-off 为准。SP2 在 20+200 中 DiT 减少
+`24.683ms (-3.314%)`，但 scheduler unclassified 增加 `23.980ms`、VAE 增加
+`0.416ms`，因此 chunk wall 只变化 `-0.288ms (-0.022%)`，Client/Scheduler FPS 分别
+`-0.249%/-0.250%`。Nsight 窗口内未归类区间下降不能覆写这个 headline，
+因为它是含 instrumentation 的独立 server 和 10-chunk 窗口。SP4 则在 profiler-off、
+ABBA 和 profiler-on 三组证据中都同向。所以 post 候选有可解释的 launch/DiT 价值，
+但 primary SP2 不可宣称端到端加速，开关继续默认关闭。
 
 正确性另跑两组：短程无淘汰用例覆盖首块、growth、append 与同一 active
 chunk 的 DMD/clean-cache recompute；45-frame 固定窗口用例覆盖稳态淘汰与 fallback
@@ -210,6 +288,9 @@ headline。
    按 bitwise 合同不放宽容差，直接删除产品实现和开关。
 4. post-A2A 最初只有 1 ULP 漂移，显式分离 eager 的 FP32 mul/add/sub 后，v05 CUDA gate
    和四组 E2E 均 exact；这是可修的操作顺序问题，不需要修改数值合同。
+5. Nsight 证明 SP2 kernel/launch 减少 `24.272%`、DiT CUDA 减少 `11.492%`，
+   但 20+200 Client FPS 仍为 `-0.249%`。这不是 kernel 融合失效，而是 headline
+   中 scheduler unclassified `+23.980ms` 抵消 DiT `-24.683ms` 的 critical-path 转移。
 
 ## 证据与决策过程
 
@@ -224,6 +305,9 @@ headline。
   metadata mutation 前返回 fallback。
 - append 先重建 visible rotated K，而不是复用旧历史：这是保守选择，避免在首版里对
   block-relative/reordered position 做未经证明的增量假设。recompute 才复用已验证历史。
+- 保留 post 候选是因为 SP2/SP4 的 bitwise parity、kernel/launch 减少与 DiT CUDA
+  缩短都可复现；继续默认关闭则是因为 primary SP2 的端到端 headline 近零。
+  两个决策使用不同的验收层，不把 SP4 收益外推到 SP2。
 
 ## 尝试后放弃或暂缓的方案
 
@@ -233,8 +317,8 @@ headline。
 - 修改 Q/K/V GEMM 数量或合并 projection：属于 S4，明确不做。
 - 保留 pre fast lane 并放宽 tolerance：真实 decoded frame 已大面积分叉，与 bitwise
   合同冲突，放弃并删除。
-- 默认开启 post fast lane：SP4 ABBA 已确认收益不是单纯顺序偏差，但 SP2 headline 仍近零，
-  且正式 Nsight 还未完成；当前证据不足以改变默认关闭。
+- 默认开启 post fast lane：SP4 ABBA 已确认收益不是单纯顺序偏差，正式 Nsight
+  也证明 launch/DiT 收益；但 primary SP2 headline 仍近零，故不改变默认关闭。
 
 ## 风险、回滚与复现
 
@@ -254,7 +338,7 @@ TORCH_COMPILE_DISABLE=1 TORCHDYNAMO_DISABLE=1 PYTHONPATH=python \
 
 v06 profiler-off 临时叠加 S0 `b9240233b2438829cbd72ee3dfbc1d37ed675560`；其结果仍
 有效。ABBA off-only runner 临时叠加 S0
-`900b5f279b65b2afcfbe6cc9b36cfa4496b41bc3`；后续正式 Nsight 临时叠加
+`900b5f279b65b2afcfbe6cc9b36cfa4496b41bc3`；正式 Nsight runner 临时叠加
 `d5b25227d4487d113e62c86a0fb572a62d6bcc5b`。产物必须通过
 `benchmark/minwm_realtime_parity/measurement_tool.py validate`；正式 PR 不包含 S0
 基础设施。最终 JSON 记录实际 checkout SHA，`gpu.count` 按 active GPUs、
@@ -262,10 +346,10 @@ v06 profiler-off 临时叠加 S0 `b9240233b2438829cbd72ee3dfbc1d37ed675560`；�
 `per_rank_per_chunk`，其中 per-rank 只在 coverage 检查通过时采用；最终 JSON 再用
 该版本的 jsonschema validator 复验。所有 wall/CUDA latency 必须显式带 `count`，且
 自定义 validator 要求它等于 `workload.measured_chunks`；S3 runner 另做一次独立 count
-断言。profiler-off/on 的 DiT/VAE wall 只有在
-`expected_indices=0..N-1` 完整、两者均为 `status=available`，且 profiler-off count=200
-时才保留；否则重跑对应 lane。具体
-Job 名与产物路径在创建后补入，且只清理带本任务唯一前缀的资源。
+断言。profiler-off 的 DiT/VAE wall 只有在 `expected_indices=0..199`完整、
+两者均为 `status=available`且 count=200 时才保留；profiler-on 要求 discard index 0、
+stable indices 1..10 与三个 stage count=10。否则只重跑对应 lane。所有 Job 和
+产物路径已在下文记录，且只清理带本任务唯一前缀的资源。
 
 首次 `minwm-s3-a2a-h200-20260807-01` 在 setup/staging 阶段收到旧 S0 pin 更新，
 尚未进入 kernel/parity/A/B client 即删除该精确 Job，保留本任务 PVC；不保留任何
@@ -335,7 +419,27 @@ Nsight manifest 证据 commit 为 `1b6a91d695`，Job
 S3 PVC，固定 hostname `i-06888dc1ca88547e1`，防止 Karpenter 扩容。提交时目标节点被
 S4 占满，Pod `minwm-s3-post-nsys-h200-20260807-08-swlsq` 自然 Pending；调度事件为目标
 节点 `Insufficient nvidia.com/gpu`、其余四节点不匹配 selector，且没有 preemption
-victim。此状态未分配 GPU、未启动 client，也未创建或清理其他任务对象。
+victim。S4 释放后它在原节点自然调度；Pod 于 `2026-08-07T08:10:41Z`
+启动、`08:33:23Z` Succeeded，Job 于 `08:33:26Z` 完成，exit 0、restart 0。全程
+使用 context `codex-minwm-test-phx2`、region `us-west-2`、zone
+`us-west-2-phx-2a`、NodePool `minwm-test-phx2-p5e-spot`；未修改优先级，未抢占、
+未扩容、未清理其他任务对象。
+
+Nsight 证据根为
+`/results/attempts/minwm-s3-post-nsys-h200-20260807-08-swlsq/minwm-s3-post-nsys-20260807-08/s3-post-nsys`。
+matrix summary SHA256 为
+`18845420a4733da34753930bc2a51a923b65c7296bef95135e4776fab52c9e40`，SP2/SP4
+comparison 分别为
+`9a80a5b5ff92387f73c50984332db0dcb19fac4e9e02443265592b9d8679ec7d` /
+`7149ebc1760fefe4b54e32888eba1997f78b051322448831096d693bf7b6749d`。SP2
+baseline/candidate measurement 分别为
+`0f1a6b5b47b1e55cb5060c3f6c5bab718b9996b2e5752d7283c96b7af9c9abf7` /
+`9c0b607deef3eb4c37704c0105a0a1352e08b0d27b922c7a0e3b5f1d681e26f7`，SP4 为
+`cb6af652f56136b5bab4787d0e1726c314335f04eed735ba43aa79bd2943e85e` /
+`020bd212941b6ca6cd88640a14759d2f6afc9bf59b93e34d70c74ea87235fc2d`。审计用
+0-GPU、100m CPU、read-only PVC reader 初次因 SELinux MCS 不匹配无法读取；只精确
+重建该 reader Pod 并使用卷的 MCS label，未改写 PVC。完成 marker/SHA 审计后已
+精确删除 reader Pod；Job、完成 Pod、200Gi PVC 和所有 `.nsys-rep`/JSON 证据保留。
 
 所有失败、旧契约和 partial attempt 在 PVC 上物理保留：原路径或对应 scope 的
 `invalid/` 下必须有 marker，记录原因、UTC、逐文件路径/大小/SHA256 与可恢复性。
@@ -365,3 +469,6 @@ sibling lane marker 不影响本 JSON。只删除本任务精确命名的 Job/Po
    SendRecv wall、DiT critical path与 VAE负对照，而不是只报 launch 百分比。
 9. **如何一键回滚？** 设置 `MINWM_FUSED_POST_A2A_ROPE_CACHE=false`；默认本来就是关闭，
    pre 开关已从产品代码删除。
+10. **为什么 NCCL predecessor 和 successor gap 不能相加？** 两者是从同一
+    SendRecv kernel 向前/向后观测相邻 kernel，可能描述同一 inter-kernel gap；看
+    d5b comparison JSON 的 `nccl_a2a.*.gap_method`。
