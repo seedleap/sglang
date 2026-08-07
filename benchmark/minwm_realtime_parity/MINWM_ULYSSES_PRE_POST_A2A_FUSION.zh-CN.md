@@ -176,8 +176,14 @@ commit 为 `88d54943f1d77a0919643fcb35e5961931464bef`，第三次 Job
 v03 是真实实现失败：pre-A2A 的 SP2/SP4 kernel shape bitwise exact，post-A2A raw K/V
 写 exact，但 first/append/recompute 的 RoPE 中两项断言失败；因此没有启动 parity 或
 client。v04 使用旧 kernel 加定量断言复现 mismatch count/fraction、max abs、BF16 ULP
-与重复调用确定性；正式测量 runner 已更新到 b924，59aa 下即使存在 client 产物也一律
-无效。
+与重复调用确定性。实测 first rotated K 仅 1/26112 元素不同
+（fraction `0.000038297`、max abs `3.81469727e-06`、max ULP 1），recompute Q
+仅 1/3840 元素不同（fraction `0.000260417`、max abs `1.86264515e-09`、max ULP 1）。
+后者不经过 fresh/cache 选择，证明根因是 Triton 将 eager 的两次 FP32 multiply 与后续
+add/sub 收缩，first Q exact 只是该组值未跨 BF16 舍入边界。修复显式使用逐条
+`mul.rn.f32` 与 `add/sub.rn.f32`，并把 fresh/cache 改为 uniform token 标量分支；v05
+重新跑 exact 与独立重复调用测试。正式测量 runner 已更新到 b924，59aa 下即使存在
+client 产物也一律无效。
 
 所有失败、旧契约和 partial attempt 在 PVC 上物理保留：原路径或 `invalid/` 下必须有
 marker，记录原因、UTC、逐文件路径/大小/SHA256 与可恢复性。聚合器排除含 `invalid`
