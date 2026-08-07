@@ -16,3 +16,13 @@ def test_qkv_quality_runner_uses_emitted_qk_norm_probe_names() -> None:
 
     assert "self_norm_q_output_000.pt" not in runner
     assert "self_norm_k_output_000.pt" not in runner
+
+
+def test_qkv_quality_runner_scopes_existing_tp2_blocker() -> None:
+    runner = QUALITY_RUNNER.read_text()
+
+    assert "run_tp2_existing_blocker tp2-control 0" in runner
+    assert "run_tp2_existing_blocker tp2-candidate 1" in runner
+    assert "MinWMRMSNorm' object has no attribute 'variance_epsilon" in runner
+    assert 'for prefix in ("candidate_compile",):' in runner
+    assert "candidate_tp2.npy" not in runner

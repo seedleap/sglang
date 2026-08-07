@@ -8,6 +8,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 MODEL_DIR="/work/minwm-realtime/${MINWM_RUN_ID}/sglang-model"
 RESULT_ROOT="${MINWM_RESULTS_ROOT%/}/${MINWM_RUN_ID}/s4-qkv-quality"
 CASES="${MINWM_CASES_PATH:-${SCRIPT_DIR}/cases_720p_compile_smoke.json}"
+COMPILE_CASES="${MINWM_COMPILE_CASES_PATH:-${SCRIPT_DIR}/cases_720p_compile_two_chunk.json}"
 CASE_ID="${MINWM_CASE_ID:-00_forward_080_pottery_720p}"
 server_pid=""
 
@@ -56,6 +57,7 @@ run_lane() {
   local label="$1" fused="$2" num_gpus="$3" sp_degree="$4" tp_size="$5"
   local output_prefix="$6" result_dir="$7" dump_dir="$8" compile="$9"
   local quantization="${10:-}"
+  local cases_path="${11:-${CASES}}"
   local log_path="${result_dir}/${output_prefix}-server.log"
   local quantization_args=()
   if [[ -n "${quantization}" ]]; then
@@ -89,7 +91,7 @@ run_lane() {
   wait_for_server "${log_path}"
 
   python3 "${SCRIPT_DIR}/run_sglang_api.py" \
-    --cases "${CASES}" \
+    --cases "${cases_path}" \
     --case "${CASE_ID}" \
     --results "${result_dir}" \
     --output-prefix "${output_prefix}" \
@@ -98,15 +100,106 @@ run_lane() {
   stop_server
 }
 
+run_tp2_existing_blocker() {
+  local label="$1" fused="$2" output_prefix="$3" result_dir="$4"
+  local log_path="${result_dir}/${output_prefix}-server.log"
+  local client_log="${result_dir}/${output_prefix}-client.log"
+  mkdir -p "${result_dir}"
+
+  MINWM_ATTENTION_IMPL=packed \
+  MINWM_PACKED_ATTENTION_DETERMINISTIC=true \
+  MINWM_NATIVE_COMPONENTS=text_encoder,vae \
+  MINWM_VAE_LANE=parallel \
+  MINWM_FUSED_QKV_PROJECTION="${fused}" \
+  sglang serve \
+    --model-path "${MODEL_DIR}" \
+    --pipeline-class-name MinWMCausalDMDPipeline \
+    --vae-config.use-parallel-decode true \
+    --attention-backend fa \
+    --performance-mode speed \
+    --num-gpus 2 \
+    --tp-size 2 \
+    --sp-degree 1 \
+    --ulysses-degree 1 \
+    --ring-degree 1 \
+    --enable-cfg-parallel false \
+    --enable-torch-compile false \
+    --warmup-mode off \
+    --port 30000 > "${log_path}" 2>&1 &
+  server_pid=$!
+  wait_for_server "${log_path}"
+
+  set +e
+  python3 "${SCRIPT_DIR}/run_sglang_api.py" \
+    --cases "${COMPILE_CASES}" \
+    --case "${CASE_ID}" \
+    --results "${result_dir}" \
+    --output-prefix "${output_prefix}" \
+    --engine-name "sglang-minwm-${label}" \
+    --kv-cache-num-frames 45 > >(tee "${client_log}") 2>&1
+  local client_status=$?
+  set -e
+  stop_server
+
+  if (( client_status == 0 )); then
+    echo "TP2 unexpectedly passed; update the acceptance lane instead of hiding it" >&2
+    return 1
+  fi
+  grep -F "'MinWMRMSNorm' object has no attribute 'variance_epsilon'" \
+    "${client_log}"
+  grep -F "MinWM QKV projection mode:" "${log_path}"
+  printf '%s\n' "${client_status}" > "${result_dir}/${output_prefix}-client-exit-status.txt"
+}
+
 SP1_RESULTS="${RESULT_ROOT}/sp1"
 run_lane control 0 1 1 1 baseline "${SP1_RESULTS}" \
   "${RESULT_ROOT}/layer-probes/control" false
 run_lane candidate 1 1 1 1 sglang "${SP1_RESULTS}" \
   "${RESULT_ROOT}/layer-probes/candidate" false
 run_lane candidate-replay 1 1 1 1 candidate_replay "${SP1_RESULTS}" "" false
-run_lane candidate-compile 1 1 1 1 candidate_compile "${SP1_RESULTS}" "" true
-run_lane candidate-tp2 1 2 1 2 candidate_tp2 "${SP1_RESULTS}" "" false
+run_lane candidate-compile 1 1 1 1 candidate_compile "${SP1_RESULTS}" "" true \
+  "" "${COMPILE_CASES}"
+run_tp2_existing_blocker tp2-control 0 tp2_control_blocked "${SP1_RESULTS}"
+run_tp2_existing_blocker tp2-candidate 1 tp2_candidate_blocked "${SP1_RESULTS}"
 run_lane candidate-fp8-fallback 1 1 1 1 candidate_fp8 "${SP1_RESULTS}" "" false fp8
+
+python3 - "${SP1_RESULTS}" "${SGLANG_GIT_REF:-unknown}" <<'PY'
+import json
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+root = Path(sys.argv[1])
+lanes = {}
+for lane in ("tp2_control_blocked", "tp2_candidate_blocked"):
+    lanes[lane] = {
+        "client_exit_status": int(
+            (root / f"{lane}-client-exit-status.txt").read_text().strip()
+        ),
+        "client_log": f"{lane}-client.log",
+        "server_log": f"{lane}-server.log",
+        "expected_error": (
+            "'MinWMRMSNorm' object has no attribute 'variance_epsilon'"
+        ),
+    }
+(root / "tp2-existing-s3-blocker.json").write_text(
+    json.dumps(
+        {
+            "schema": "minwm-s4-tp2-existing-blocker/v1",
+            "runner_commit": sys.argv[2],
+            "recorded_utc": datetime.now(timezone.utc).isoformat(),
+            "scope": (
+                "Full-model TP2 is blocked before QKV comparison by unchanged "
+                "MinWMRMSNorm tensor-parallel code; S4 does not modify S3."
+            ),
+            "lanes": lanes,
+        },
+        indent=2,
+        sort_keys=True,
+    )
+    + "\n"
+)
+PY
 
 grep -F "requested with quantized weights; using the compatible three-projection fallback" \
   "${SP1_RESULTS}/candidate_fp8-server.log"
@@ -169,9 +262,10 @@ for degree in ("sp1", "sp2"):
 
 sp1_case = root / "sp1" / "cases" / case_id
 candidate = np.load(sp1_case / "sglang.npy", allow_pickle=False)
-for prefix in ("candidate_compile", "candidate_tp2"):
+for prefix in ("candidate_compile",):
     value = np.load(sp1_case / f"{prefix}.npy", allow_pickle=False)
-    metrics = metric_block(candidate, value)
+    reference = candidate[: value.shape[0]]
+    metrics = metric_block(reference, value)
     passed, failures = evaluate({"generated_frames": metrics}, fast_lane_profile)
     comparisons[f"sp1_candidate_vs_{prefix}"] = {
         **metrics,
