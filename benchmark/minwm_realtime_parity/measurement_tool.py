@@ -10,7 +10,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from measurement import coefficient_of_variation, validate_measurement
+from measurement import (
+    MeasurementValidationError,
+    coefficient_of_variation,
+    validate_measurement,
+)
 from nsys_metrics import merge_nsys_metrics
 
 
@@ -81,10 +85,21 @@ def _is_invalid_result(path: Path) -> bool:
     if "invalid" in path.parts:
         return True
     measurement_root = next(
-        (parent for parent in path.parents if parent.name == "s0-measurement"),
-        path.parent,
+        (parent for parent in path.parents if parent.name == "s0-measurement"), None
     )
-    return next(measurement_root.glob("invalid-marker*.json"), None) is not None
+    if measurement_root is None:
+        scopes = [path.parent]
+    else:
+        scopes = []
+        scope = path.parent
+        while True:
+            scopes.append(scope)
+            if scope == measurement_root:
+                break
+            scope = scope.parent
+    return any(
+        next(scope.glob("invalid-marker*.json"), None) is not None for scope in scopes
+    )
 
 
 def load_aggregate_records(
@@ -93,6 +108,53 @@ def load_aggregate_records(
     excluded = [path for path in paths if _is_invalid_result(path)]
     accepted = [path for path in paths if path not in excluded]
     return [_read(path) for path in accepted], excluded
+
+
+def require_complete_stable_nsys(result: dict[str, Any]) -> None:
+    validate_measurement(result)
+    if result.get("mode") != "profiler_on":
+        raise MeasurementValidationError(
+            "complete stable Nsight acceptance requires a profiler_on record"
+        )
+    profiler = result["metrics"]["profiler_on"]
+    required = (
+        "stable_window_coverage",
+        "kernel_count",
+        "cuda_api_count",
+        "kernel_launch_api_count",
+        "short_kernel_buckets",
+        "gpu_kernel_busy",
+        "capture_coverage",
+    )
+    unavailable_metrics = {
+        name: {
+            "reason": profiler[name].get("reason"),
+            "evidence": profiler[name].get("evidence"),
+        }
+        for name in required
+        if profiler[name].get("status") != "available"
+    }
+    for name in ("sm_active", "tensor_active"):
+        metric = profiler["gpu_metrics"][name]
+        if metric.get("status") != "available":
+            unavailable_metrics[f"gpu_metrics.{name}"] = {
+                "reason": metric.get("reason"),
+                "evidence": metric.get("evidence"),
+            }
+    dram = profiler["gpu_metrics"]["dram"]
+    if dram.get("status") == "unavailable" and (
+        dram.get("reason") != "metric_not_exposed"
+        or "Nsight exposed GPU metric names:" not in dram.get("evidence", "")
+    ):
+        unavailable_metrics["gpu_metrics.dram"] = {
+            "reason": dram.get("reason"),
+            "evidence": dram.get("evidence"),
+        }
+    if unavailable_metrics:
+        raise MeasurementValidationError(
+            "formal Nsight result lacks complete stable-window metrics: "
+            f"{json.dumps(unavailable_metrics, sort_keys=True)}"
+        )
 
 
 def _off_scalar(record: dict[str, Any], name: str) -> float:
@@ -166,6 +228,7 @@ def parse_args() -> argparse.Namespace:
 
     validate_parser = subparsers.add_parser("validate")
     validate_parser.add_argument("result", type=Path)
+    validate_parser.add_argument("--require-complete-stable-nsys", action="store_true")
 
     merge_parser = subparsers.add_parser("merge-nsys")
     merge_parser.add_argument("--result", required=True, type=Path)
@@ -201,7 +264,10 @@ def main() -> None:
         print(f"invalid attempt marked: {args.marker}")
         return
     if args.command == "validate":
-        validate_measurement(_read(args.result))
+        result = _read(args.result)
+        validate_measurement(result)
+        if args.require_complete_stable_nsys:
+            require_complete_stable_nsys(result)
         print(f"valid: {args.result}")
         return
     if args.command == "merge-nsys":

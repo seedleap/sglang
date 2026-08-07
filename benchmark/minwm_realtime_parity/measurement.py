@@ -166,6 +166,7 @@ def build_measurement(
                 "kernel_launch_api_count": pending_nsys,
                 "short_kernel_buckets": pending_nsys,
                 "gpu_kernel_busy": pending_nsys,
+                "stable_window_coverage": pending_nsys,
                 "capture_coverage": pending_nsys,
                 "gpu_metrics": {
                     "sm_active": pending_nsys,
@@ -301,6 +302,46 @@ def _require_normalized_count(
         errors.append(f"{path}.value missing normalized fields: {missing}")
 
 
+def _require_stable_window(
+    metric: Any, workload: dict[str, Any], errors: list[str]
+) -> None:
+    path = "metrics.profiler_on.stable_window_coverage"
+    _require_availability(metric, path, errors)
+    if not isinstance(metric, dict) or metric.get("status") != "available":
+        return
+    value = metric.get("value")
+    if not isinstance(value, dict):
+        errors.append(f"{path}.value must be a stable window description")
+        return
+    warmup = workload.get("warmup_chunks")
+    measured = workload.get("measured_chunks")
+    precondition = workload.get("precondition_warmup_chunks")
+    if not isinstance(warmup, int) or not isinstance(measured, int):
+        return
+    expected_indices = list(range(warmup, warmup + measured))
+    expected_discard = list(range(warmup))
+    checks = {
+        "expected_stable_chunk_indices": expected_indices,
+        "observed_stable_chunk_indices": expected_indices,
+        "expected_stable_chunk_count": measured,
+        "observed_stable_chunk_count": measured,
+        "excluded_precondition_chunks": precondition,
+        "excluded_warmup_chunk_indices": expected_discard,
+        "observed_discard_chunk_indices": expected_discard,
+        "normalization_denominator": measured,
+    }
+    for field, expected in checks.items():
+        if value.get(field) != expected:
+            errors.append(f"{path}.value.{field} must equal {expected!r}")
+    intervals = value.get("intervals")
+    if not isinstance(intervals, list) or len(intervals) != measured:
+        errors.append(f"{path}.value.intervals must contain {measured} ranges")
+    elif [
+        item.get("chunk_index") for item in intervals if isinstance(item, dict)
+    ] != expected_indices:
+        errors.append(f"{path}.value.intervals must cover indices {expected_indices!r}")
+
+
 def validate_measurement(result: dict[str, Any]) -> None:
     errors: list[str] = []
     if result.get("schema_version") != SCHEMA_VERSION:
@@ -394,6 +435,7 @@ def validate_measurement(result: dict[str, Any]) -> None:
                 _require_availability(
                     on.get(name), f"metrics.profiler_on.{name}", errors
                 )
+            _require_stable_window(on.get("stable_window_coverage"), workload, errors)
             observed_wall = on.get("observed_wall_with_profiler_overhead")
             if not isinstance(observed_wall, dict):
                 errors.append(
@@ -432,6 +474,9 @@ def validate_measurement(result: dict[str, Any]) -> None:
                 "metrics.profiler_on.kernel_count",
                 (
                     "raw_total",
+                    "captured_raw_total",
+                    "excluded_raw_total",
+                    "boundary_overlap_count",
                     "per_stable_chunk",
                     "per_device",
                     "stable_chunk_denominator",
@@ -445,6 +490,9 @@ def validate_measurement(result: dict[str, Any]) -> None:
                     f"metrics.profiler_on.{name}",
                     (
                         "raw_total",
+                        "captured_raw_total",
+                        "excluded_raw_total",
+                        "boundary_overlap_count",
                         "total_per_chunk",
                         "per_rank_per_chunk",
                         "stable_chunk_denominator",
@@ -465,6 +513,9 @@ def validate_measurement(result: dict[str, Any]) -> None:
                 "metrics.profiler_on.short_kernel_buckets",
                 (
                     "raw_total",
+                    "captured_raw_total",
+                    "excluded_raw_total",
+                    "boundary_overlap_count",
                     "per_stable_chunk",
                     "per_device",
                     "stable_chunk_denominator",
@@ -485,6 +536,12 @@ def validate_measurement(result: dict[str, Any]) -> None:
                     required = {
                         "raw_metric_name",
                         "sample_count",
+                        "captured_sample_count",
+                        "excluded_sample_count",
+                        "per_chunk_sample_count",
+                        "per_type_per_chunk_sample_count",
+                        "observed_type_ids",
+                        "type_id_coverage_semantics",
                         "exposed_metric_names",
                     }
                     if not isinstance(metric_value, dict) or not required.issubset(
@@ -495,6 +552,94 @@ def validate_measurement(result: dict[str, Any]) -> None:
                             "retain raw_metric_name, sample_count, and "
                             "exposed_metric_names"
                         )
+                        continue
+                    expected_types = gpu.get("count")
+                    observed_types = metric_value.get("observed_type_ids")
+                    observed_type_values = (
+                        observed_types if isinstance(observed_types, list) else []
+                    )
+                    if (
+                        not isinstance(observed_types, list)
+                        or not all(isinstance(value, int) for value in observed_types)
+                        or len(observed_types) != expected_types
+                        or len(set(observed_type_values)) != len(observed_type_values)
+                    ):
+                        errors.append(
+                            f"metrics.profiler_on.gpu_metrics.{name}.value."
+                            "observed_type_ids must uniquely cover every active GPU"
+                        )
+                    expected_chunk_keys = {
+                        str(index)
+                        for index in range(
+                            (
+                                workload.get("warmup_chunks", 0)
+                                if isinstance(workload.get("warmup_chunks"), int)
+                                else 0
+                            ),
+                            (
+                                workload.get("warmup_chunks", 0)
+                                + workload.get("measured_chunks", 0)
+                                if isinstance(workload.get("warmup_chunks"), int)
+                                and isinstance(workload.get("measured_chunks"), int)
+                                else 0
+                            ),
+                        )
+                    }
+                    coverage = metric_value.get("per_type_per_chunk_sample_count")
+                    if not isinstance(coverage, dict) or {
+                        str(type_id) for type_id in observed_type_values
+                    } != set(coverage):
+                        errors.append(
+                            f"metrics.profiler_on.gpu_metrics.{name}.value."
+                            "per_type_per_chunk_sample_count must cover observed typeIds"
+                        )
+                    elif any(
+                        not isinstance(chunk_counts, dict)
+                        or set(chunk_counts) != expected_chunk_keys
+                        or any(
+                            not isinstance(count, int) or count < 1
+                            for count in chunk_counts.values()
+                        )
+                        for chunk_counts in coverage.values()
+                    ):
+                        errors.append(
+                            f"metrics.profiler_on.gpu_metrics.{name}.value."
+                            "per_type_per_chunk_sample_count must cover every stable chunk"
+                        )
+
+            window = on.get("stable_window_coverage")
+            window_available = (
+                isinstance(window, dict) and window.get("status") == "available"
+            )
+            for name in (
+                "kernel_count",
+                "cuda_api_count",
+                "kernel_launch_api_count",
+                "short_kernel_buckets",
+            ):
+                metric = on.get(name)
+                if not isinstance(metric, dict) or metric.get("status") != "available":
+                    continue
+                value = metric.get("value", {})
+                if not window_available:
+                    errors.append(
+                        f"metrics.profiler_on.{name} cannot be normalized without "
+                        "an available stable_window_coverage"
+                    )
+                if value.get("stable_chunk_denominator") != workload.get(
+                    "measured_chunks"
+                ):
+                    errors.append(
+                        f"metrics.profiler_on.{name}.value.stable_chunk_denominator "
+                        "must equal workload.measured_chunks"
+                    )
+                if value.get("capture_scope") != (
+                    "union of exact measured outer chunk NVTX ranges"
+                ):
+                    errors.append(
+                        f"metrics.profiler_on.{name}.value.capture_scope must use "
+                        "the exact measured NVTX range union"
+                    )
 
     if errors:
         raise MeasurementValidationError("; ".join(errors))

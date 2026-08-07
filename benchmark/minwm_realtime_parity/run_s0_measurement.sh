@@ -24,6 +24,7 @@ KV_CACHE_NUM_FRAMES="${MINWM_S0_KV_CACHE_NUM_FRAMES:-45}"
 NSYS_URL="${MINWM_NSYS_URL:-https://developer.nvidia.com/downloads/assets/tools/secure/nsight-systems/2026_4/NsightSystems-linux-cli-public-2026.4.1.191-3860507.deb}"
 NSYS_ROOT="${WORK_ROOT}/nsight-systems"
 NSYS_DEB="${WORK_ROOT}/nsight-systems-cli.deb"
+RESUME_PROFILER_OFF_ROOT="${MINWM_S0_RESUME_PROFILER_OFF_ROOT:-}"
 
 [[ -f "${MODEL_DIR}/minwm_conversion_manifest.json" ]]
 [[ -f "${CASES}" ]]
@@ -87,6 +88,7 @@ ALLOCATED_GPU_COUNT="${MINWM_ALLOCATED_GPU_COUNT:-$(nvidia-smi -L | wc -l | xarg
   echo "nsys_window=${PROFILE_PRECONDITION_CHUNKS} precondition + ${PROFILE_DISCARD_CHUNKS} discarded + ${PROFILE_MEASURED_CHUNKS} stable"
   echo "kv_cache_num_frames=${KV_CACHE_NUM_FRAMES}"
   echo "torch_profiler_concurrent=false"
+  echo "resume_profiler_off_root=${RESUME_PROFILER_OFF_ROOT:-none}"
   echo "started_utc=$(date --utc +%Y-%m-%dT%H:%M:%SZ)"
 } | tee "${RESULT_ROOT}/contract.txt"
 nvidia-smi -q > "${RESULT_ROOT}/nvidia-smi-q.txt"
@@ -94,6 +96,7 @@ nvidia-smi -q > "${RESULT_ROOT}/nvidia-smi-q.txt"
 server_pid=""
 monitor_pid=""
 nsys_session=""
+failure_scope="${RESULT_ROOT}"
 
 wait_for_server() {
   local pid="$1" log_path="$2"
@@ -136,14 +139,14 @@ cleanup() {
 mark_failed_attempt() {
   local status="$1"
   local timestamp
-  if [[ ! -d "${RESULT_ROOT}" ]]; then
+  if [[ ! -d "${failure_scope}" ]]; then
     return
   fi
   timestamp="$(date --utc +%Y%m%dT%H%M%S%NZ)"
   python3 "${SCRIPT_DIR}/measurement_tool.py" mark-invalid \
-    --root "${RESULT_ROOT}" \
+    --root "${failure_scope}" \
     --reason "runner exited non-zero (status=${status}); artifacts preserved in place" \
-    --marker "${RESULT_ROOT}/invalid-marker-${timestamp}.json" || true
+    --marker "${failure_scope}/invalid-marker-${timestamp}.json" || true
 }
 
 on_exit() {
@@ -302,6 +305,32 @@ PY
   stop_server
 }
 
+resume_profiler_off() {
+  local degree="$1" lane_dir="$2" source_lane="$3"
+  local source_paths=()
+  mapfile -t source_paths < <(
+    find "${source_lane}" -maxdepth 1 -type f \
+      -name 'profiler-off-repeat*.json' -print | sort
+  )
+  if (( ${#source_paths[@]} < 2 )); then
+    echo "Resume source needs at least two profiler-off repeats: ${source_lane}" >&2
+    return 1
+  fi
+  for source in "${source_paths[@]}"; do
+    python3 "${SCRIPT_DIR}/measurement_tool.py" validate "${source}"
+  done
+  aggregate_repeats "${lane_dir}" "${source_paths[@]}"
+  for source in "${source_paths[@]}"; do
+    cp --no-clobber -- "${source}" "${lane_dir}/$(basename "${source}")"
+  done
+  {
+    echo "source_lane=${source_lane}"
+    echo "source_repeat_summary=${source_lane}/repeat-summary.json"
+    echo "resumed_utc=$(date --utc +%Y-%m-%dT%H:%M:%SZ)"
+  } > "${lane_dir}/profiler-off-resume-source.txt"
+  echo "Reused validated profiler-off lane for SP${degree}: ${source_lane}"
+}
+
 run_profiler_on() {
   local degree="$1" lane_dir="$2"
   local profile_dir="${lane_dir}/profiler-on"
@@ -320,6 +349,8 @@ run_profiler_on() {
   MINWM_PACKED_ATTENTION_DETERMINISTIC=true \
   MINWM_NATIVE_COMPONENTS=text_encoder,vae \
   MINWM_VAE_LANE=parallel \
+  SGLANG_REALTIME_NSYS_WARMUP_CHUNKS="${PROFILE_DISCARD_CHUNKS}" \
+  SGLANG_REALTIME_NSYS_MEASURED_CHUNKS="${PROFILE_MEASURED_CHUNKS}" \
   nsys launch \
     --session-new="${session}" \
     --trace=cuda,nvtx \
@@ -386,7 +417,8 @@ run_profiler_on() {
     --status-log "${status_log}" \
     --output "${profile_dir}/measurement.json"
   python3 "${SCRIPT_DIR}/measurement_tool.py" validate \
-    "${profile_dir}/measurement.json"
+    "${profile_dir}/measurement.json" \
+    --require-complete-stable-nsys
 }
 
 install_nsys
@@ -398,10 +430,18 @@ for degree in "${degrees[@]}"; do
   fi
   lane_dir="${RESULT_ROOT}/sp${degree}"
   mkdir -p "${lane_dir}"
-  run_profiler_off "${degree}" "${lane_dir}"
+  failure_scope="${lane_dir}"
+  source_lane="${RESUME_PROFILER_OFF_ROOT%/}/sp${degree}"
+  if [[ -n "${RESUME_PROFILER_OFF_ROOT}" && -d "${source_lane}" ]]; then
+    resume_profiler_off "${degree}" "${lane_dir}" "${source_lane}"
+  else
+    run_profiler_off "${degree}" "${lane_dir}"
+  fi
+  failure_scope="${lane_dir}/profiler-on"
   run_profiler_on "${degree}" "${lane_dir}"
 done
 
+failure_scope="${RESULT_ROOT}"
 python3 - "${RESULT_ROOT}" <<'PY'
 import json
 import sys
