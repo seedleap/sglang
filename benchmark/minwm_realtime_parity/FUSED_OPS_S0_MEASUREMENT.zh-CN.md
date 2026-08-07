@@ -11,7 +11,8 @@
 - 真机 runner 与口径修正起点：`411d9b9ec40b2fca2a7d85e17a05c11a4723750e`
 - latency count canonical：`b9240233b2438829cbd72ee3dfbc1d37ed675560`
 - exact-window / trace-drain canonical：`e4d6d67c76`
-- 真机 Nsight 2026.4 schema canonical：`401e4ec8a1`（后续 A/B 与 `-05` 均固定此 SHA）
+- 真机 Nsight 2026.4 schema canonical：`401e4ec8a1`
+- 跨进程 component CUDA timing relay canonical：`839f312c3b4622c8e04c5c76620d22d6c2497fa0`（`-06` 固定此 SHA）
 - base：`main`。`main` 的 `9a9dc59cd1` 已完整包含 MinWM realtime API、causal Ulysses、Parallel VAE 和历史 benchmark；`codex/minwm-realtime-api` 还叠加了量化与性能实验，不适合作为 S0 的独立 review base。
 
 ## 假设与预期
@@ -128,21 +129,24 @@ torch.profiler 不同时运行。
 ## 实际结果
 
 `-04` 只保留已独立验证的 SP2 profiler-off；其 profiler-on lane 已标 invalid。
-exact-window profiler-on 与 SP4 由 `minwm-s0-fusedops-h200-20260807-05` 补齐。
+`-05` 证明 exact-window outer marker 与 GPU metrics 能启动，但暴露出 worker
+component timing 不能经进程内 sink 到达 API 的结构性缺口，其 SP2 profiler-on lane
+同样只保留 invalid 诊断。修复后的 profiler-on 与 SP4 由
+`minwm-s0-fusedops-h200-20260807-06` 补齐。
 旧 H200/B300 表以及 `-01/-02/-03` 失败诊断只用于背景与异常证据。
 
 ### 运行来源
 
 | 项 | 实际值 |
 | --- | --- |
-| SGLang | SP2 profiler-off source=`b9240233b2`；exact-window runner=`401e4ec8a1` |
+| SGLang | SP2 profiler-off source=`b9240233b2`；exact-window schema=`401e4ec8a1`；component relay runner=`839f312c3b` |
 | MinWM | `2efc6485f65e8fcab506665efde79bc41406385e` |
 | 镜像 | `minwm-training@sha256:bedc07ea...f5f2a` |
 | GPU | NVIDIA H200；`gpu.count` 是 active 2/4 卡；`allocated_count=8` 是整机隔离预留 |
 | kube context | `codex-minwm-test-phx2`；所有命令显式传 `--context`，未切换全局 current-context |
 | region / zone | AWS `us-west-2` / `us-west-2-phx-2a` |
 | NodePool | `minwm-test-phx2-p5e-spot`（共享的既有 NodePool，S0 未创建或删除） |
-| 实例 | `p5e.48xlarge` Spot；`-04` 节点 `i-01a57ab8567279852` |
+| 实例 | `p5e.48xlarge` Spot；`-05` 节点 `i-01a57ab8567279852` |
 | 资源隔离 | Job 请求完整 8 GPU；不与 CUDA Graph 或 S1–S4 Job 共用 GPU 节点 |
 
 ### profiler-off 重复
@@ -179,7 +183,9 @@ exact-window profiler-on 与 SP4 由 `minwm-s0-fusedops-h200-20260807-05` 补齐
 - `-04` profiler-on 的 GPU metrics start 成功并生成 38,106,433-byte report，但服务端 generation-complete close 早于最后 component trace 发出，客户端收到正常 code1000 且无合格 JSON；不得进入正式表。
 - 同一 report 用 Nsight 2026.4 导出得到 397,185,024-byte SQLite：`NVTX_EVENTS` 31,000 行、kernel 394,526 行、runtime 1,036,567 行、GPU metrics 9,176,220 行；outer marker 数为 0，证明旧 report 无法支持 exact-window 归一化。
 - `-04/sp2/profiler-on/invalid-marker-20260807T045715060254120Z.json` 原地保留 7 个文件、40,487,575 bytes 的逐文件 SHA；聚合验证该 marker 只排除 profiler-on，两个 sibling profiler-off run 均保留。
-- SP4 与 exact-window profiler-on 仍待 `-05` 真机结果；完成前 PR 保持 draft。
+- `-05` 的 GPU metrics start 成功，Nsight 2026.4 report 为 37,589,254 bytes；同一正式 trace id 在 server.log 中有 worker DiT/VAE component 各 11 条、API scheduler-result wall 各 11 条，但客户端 component selector 各缺 0–10。原因是 `_notify_realtime_trace_sinks` 只在当前进程有效，并非 256 条队列溢出；该 lane 的 marker 保留 7 个文件及逐文件 SHA。
+- 对 `-05` 产物实测 lane-scoped 审计：profiler-on report 为 invalid，两个 sibling profiler-off JSON 均非 invalid；聚合接受两个 run，`excluded=[]`。
+- SP4 与 exact-window profiler-on 仍待 `-06` 真机结果；完成前 PR 保持 draft。
 
 ## 证据与决策过程
 
@@ -200,12 +206,13 @@ exact-window profiler-on 与 SP4 由 `minwm-s0-fusedops-h200-20260807-05` 补齐
 15. **严格稳定窗口**：静态审计确认 precondition 20 在 `nsys start` 前，capture 内实际为 1 discard + 10 measured。旧解析器仍会把 discard 的 SQLite 行除以 10，约有系统性污染；因此新增 outer marker range union，不能证明 exactly 10 就禁止 `per_stable_chunk`。
 16. **真实 schema 现场校验**：2026.4 的 runtime 只给 `globalTid`，kernel 给 `globalPid`，并有 `PROCESSES` 映射；GPU metrics 有两个 target `typeId`。fixture 改为相同列布局，覆盖 globalTid 掩码、kernel process/device 交叉验证及每 type/chunk 样本矩阵。
 17. **lane 粒度审计与恢复**：marker 从结果文件父目录逐层检查到最近 `s0-measurement`；profiler-on marker 不影响 sibling off。`-05` 从 `-04` source lane 重新校验并复制 SP2 off 到新 attempt，SP4 则正常重测，所有目标路径均拒绝覆盖。
+18. **component timing 跨进程传输**：`-05` server.log 证明 worker 侧 component/CUDA trace 和 API 侧 wall trace 都完整，但前者只通知 worker 进程内 sink。没有放大队列或放宽完整性门；`839f312c3b` 将 `event/component/duration_ms/cuda_ms/chunk/request` 的纯标量记录附在 `RequestMetrics` 上，随 `result.metrics/metrics_list` 序列化返回 API，再以 `source=scheduler_result_component_timing` 重发。相同 identity 的相同记录去重，冲突记录 fail-closed；缺 `cuda_ms` 仍可保留 wall 证据，但正式 CUDA metric 会因 count 不足失败。
 
 ## 风险与回滚
 
 - 风险：Spot reclaim。补救：`backoffLimit=0` 先停住并保留 attempt，核查后用新 Job 名安全重跑；不删除其他任务释放容量。
 - 风险：Nsight GPU metrics 权限不足。补救：保留 `nsys status -e` 和 fallback report，但正式 lane 失败；SM/Tensor 不允许权限降级后通过，DRAM 只允许 `metric_not_exposed`。
-- 风险：realtime trace 队列丢事件。补救：每个 stage metric 必须恰好覆盖 measured chunk 数，否则字段标记 `incomplete_trace_metric`，验收失败。
+- 风险：realtime trace 队列或跨进程 relay 丢事件。补救：每个 stage metric 必须恰好覆盖 measured chunk 数；worker component timing 仅传输 pickle-safe 标量，API 对 metrics/metrics_list 去重并拒绝冲突，缺失或缺 CUDA 时字段标记 `incomplete_trace_metric`，验收失败。
 - 风险：失败重试覆盖审计证据。补救：runner 不删除旧文件；非零退出写逐文件 checksum marker，同路径重跑先移动到 `invalid/`，聚合排除 invalid；只能删除精确 Job/Pod 控制对象止损，不能删除 PVC。
 - 风险：Nsight 开销污染 FPS。补救：schema 从结构上禁止 profiler-on 结果成为 headline。
 - 风险：schema 影响现有 summary。补救：新 JSON 仍保留顶层 `profile_name`、`server`、`client`、`warmup_chunks` 等兼容字段。
@@ -263,7 +270,7 @@ kubectl --context codex-minwm-test-phx2 apply \
 PVC：`minwm-s0-fusedops-h200-results-20260807`。每次尝试的根目录：
 
 ```text
-/results/attempts/<pod-name>/minwm-s0-fusedops-h200-20260807-05/s0-measurement/
+/results/attempts/<pod-name>/minwm-s0-fusedops-h200-20260807-06/s0-measurement/
 ├── baseline-summary.json
 ├── contract.txt
 ├── sp2/
@@ -281,7 +288,7 @@ PVC：`minwm-s0-fusedops-h200-results-20260807`。每次尝试的根目录：
 2. **4 次 DMD 后的第 5 次 DiT forward 在哪里，为什么不能漏算？**
    - 参考：`causal_denoising.py::_denoise_and_update_causal_block` 先 `_denoise_causal_dmd_chunk`，再 `_update_causal_context_cache` 用 clean latent 写 KV。
 3. **DiT wall 和 DiT CUDA 分别从哪条 trace 取，如何证明均值覆盖完整窗口？**
-   - 参考：wall 选择 `source=scheduler_result_metrics`；CUDA 选择 `component=minwm_denoising` 的 `cuda_ms`。看 `stage_trace_values` 调用处；两者的 `value.count` 必须等于 `workload.measured_chunks`，由 schema 和 `validate_measurement` 双重检查。
+   - 参考：wall 选择 `source=scheduler_result_metrics`；CUDA 同时选择 `source=scheduler_result_component_timing`、`component=minwm_denoising` 的 `cuda_ms`。worker 先把纯标量 timing 放入 `RequestMetrics`，API 从 result 重发；两者的 `value.count` 必须等于 `workload.measured_chunks`，由 schema 和 `validate_measurement` 双重检查。
 4. **为什么 profiler-on 的 `observed_wall_with_profiler_overhead` 不能拿去做 headline？**
    - 参考：Nsight 注入 tracing/metrics 开销；`measurement_contract.headline_eligible` 只允许 profiler-off 为真，validator 会检查。
 5. **GPU metrics 表不存在时，脚本如何区分权限问题与普通未采集？**
