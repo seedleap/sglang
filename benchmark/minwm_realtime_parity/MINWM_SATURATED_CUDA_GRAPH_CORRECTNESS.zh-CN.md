@@ -4,7 +4,7 @@
 
 - 负责人：本 Codex task（独立 worktree `/Users/chenshengdong/.codex/worktrees/4b03/sglang`）
 - 当前分支：`codex/minwm-cuda-graph-correctness`
-- 当前结论：**第一阶段 GO（SP1 Graph-only H200 逐 block/forward bitwise 已恢复）；整体验收仍 NO-GO，默认开关继续关闭，等待 1248x704 SP2/SP4 correctness。**
+- 当前结论：**Graph correctness GO（SP1、1248x704 SP2/SP4 均逐 block/forward 与端到端 bitwise）；默认开启仍 NO-GO，开关继续默认关闭，等待正式性能、200-chunk 稳定性与完整 fallback 矩阵。**
 - 工作负载合同：MinWM 5B step-3200、BF16、每 chunk 4 次 DMD forward + 1 次 clean-cache commit forward、固定 45 latent-frame rolling KV。
 - 第一阶段：Graph-only H200 单卡 bitwise；只做 block/forward 首差定位和修复。
 - 后续门槛：只有单卡 bitwise 恢复后，才允许 1248x704 SP2 主验收与 SP4 复验。
@@ -48,7 +48,7 @@
 
 代码以 `current_timestep == 0` 作为 eager fallback 条件。DMD 循环从 0 编号，因此每个 chunk 的第一个 DMD forward 被跳过；clean-cache commit forward 也传 `current_timestep=0`，因此同样被跳过。现有编号没有区分“DMD step 0”和“clean commit”，所以当前实现不是只排除 clean commit。
 
-原始动机是 graph 仅覆盖 saturated recompute：第一个 DMD step负责先建立/刷新本 chunk 的 attention plan，clean commit 会写入并推进 rolling KV；二者都不是同一只读 cache/plan 状态下的纯 replay。只有中间 DMD recompute steps 满足固定 shape、固定地址、固定 saturated plan 的候选合同。后续诊断必须证明这一点，不能把编号复用当作充分理由。
+原始动机是 graph 仅覆盖 saturated recompute：第一个 DMD step 负责先建立/刷新本 chunk 的 attention plan，clean commit 会写入并推进 rolling KV；二者都不是同一只读 cache/plan 状态下的纯 replay。只有中间 DMD recompute steps 满足固定 shape、固定地址、固定 saturated plan 的候选合同。后续诊断必须证明这一点，不能把编号复用当作充分理由。
 
 ## 已有 H200 作业与结果审计
 
@@ -99,6 +99,14 @@
 21. 完成后以只读 reader 重挂结果 PVC。reader 第一次 grep 只包含旧 verification 关键字，漏掉新 `block verification` 行；修复 reader 正则并只重建该 reader。最终取得 chunk 10-13、step 1-3 共 12 次证据：每次 31 个边界（30 blocks + forward）均 `exact=True`，无 first-difference。读取完删除 reader；不再占 CPU，Job pod 已 Completed、不占 GPU。
 22. SP1 通过后检查 H200 Spot nodepool：两台 8-GPU 节点中，`i-06888dc1ca88547e1` 当时有一个 Running 4-GPU 作业，另有 4 GPU 可用；未删除或抢占其他任务。以已提交 SP1 Job 为不可变模板，`kubectl get job -o json | jq ... | kubectl create --dry-run=server -f -` 只修改 run/name、case 文件、case id、SP degrees 与 GPU request/limit；server dry-run 确认 1248x704 case、SP `2 4`、4 GPU、16+4、verify=12、KV/window=45、代码 `60672ea51f` 和固定 image。随后用相同 jq 变换创建 `minwm-cg-correct-sp24-704p-h200-20260807-01`；立即调度到同一 H200 节点，未发生 Pending 或资源争用。
 23. Job 启动后复核 `aws_b200_entrypoint.sh` 发现 harness schema 缺口：`CG_DEGREES` 可配置，但合法值正则和 Python summary 循环只硬编码 SP1/SP2。因此该 Job 会先产出有效 SP2 eager/graph，再在 SP4 前以 `unsupported CUDA graph SP degree: 4` 明确失败；这不是模型 correctness 失败，也不能记成 SP4 结果。保留该 Job 取得 SP2 证据，不中途删除；本分支只把 harness allowlist/summary 扩到 SP4，待提交新 SHA 后单独复验 SP4。
+24. 目标镜像前置 pytest 再次为 `14 passed, 113 deselected` 与 `1 passed, 117 deselected`。SP2 在 chunk 10-13 的 step 1-3 共 12 次 replay 上，30 blocks + forward 共 31 个边界全部 `exact=True`；外层 eager/graph measured payload SHA 均为 `7913b3cdf498ae6eda44e72e060974d62aee9497bdb0d277cee264bc1fc6f477`。短测 Client FPS 9.3632 / 9.6028，Scheduler FPS 9.3952 / 9.6473；仍不是 headline。
+25. 组合 Job 最终状态 Failed，唯一末尾错误与预审一致：`unsupported CUDA graph SP degree: 4`；SP4 server 未启动、无 SP4 结果。完成 pod 内尝试用 `jq` 读 SP2 throughput，因镜像没有 jq 而失败；改用 Python 成功读取。随后增强只读 reader 同时输出无 summary 的逐 profile throughput，复核两个完整 payload hash 相同并取得 12 条内部 bitwise 日志；reader 读取后删除。
+26. SP4 harness 修复通过 `bash -n` 与 `git diff --check`，提交并推送 `a67b2c9e76ecb2f16ccadc57e7e045eec57ba564`。以 server dry-run 确认该 SHA、SP4、4 GPU、1248x704、16+4、verify=12、KV/window=45 后，创建 `minwm-cg-correct-sp4-704p-h200-20260807-02`。首次调度事件为两节点 GPU 不足，随后 nominated 并启动新 Spot node `i-06678115fccf0b8d7`；未抢占其他任务。
+27. 新节点首次 S3 PVC mount 报 `driver name s3.csi.aws.com not found`，当时节点上的 S3 CSI DaemonSet 尚未注册；driver pod 进入 3/3 Running 后 kubelet 自动重试成功，无需绕过存储。一次 `custom-columns=...conditions[-1]...` 状态查询被本地 zsh 当作 glob 而失败；改用 `-o json | jq`，无集群改动。pod 在创建约 3 分 11 秒后 Running，日志确认 checkout 精确 SHA `a67b2c9e76...`。
+28. SP4 harness 实际启动 `--sp-degree 4 --ulysses-degree 4` 的 eager/graph 服务，不再被 allowlist 阻断。目标 pytest 仍为 `14 passed, 113 deselected` 与 `1 passed, 117 deselected`。graph lane 在 chunk 10-13、step 1-3 的 12 次 replay 上，每次 31 个 block/forward 边界均 `exact=True`；四 rank 无 first-difference、异常退出或 hang。
+29. SP4 Job 于 `2026-08-07T10:12:50Z` Succeeded。eager/graph measured payload SHA 均为 `7913b3cdf498ae6eda44e72e060974d62aee9497bdb0d277cee264bc1fc6f477`；16,384 samples exact fraction 1、MAE/RMSE/max abs 均 0。短测 Client FPS 9.7776 / 10.4449，Scheduler FPS 9.7353 / 10.3226，DiT p50 817.339 / 745.4865 ms；只有一次 16+4，不能用于 headline/CV。
+30. 最后一次只读 reader 复核 SP4 summary、逐 profile hash 与 12 条内部 bitwise 日志后删除。最终资源检查：本任务 SP1/SP4 pod Succeeded，组合 pod 仅因已知旧 harness 缺口 Failed；没有 Running/Pending 的本任务 reader 或 GPU pod。
+31. 最终本地静态检查：相关 Python 文件 `ruff check`、`ruff format --check`、`compileall` 通过；benchmark harness `bash -n` 通过；`git diff --check` 通过。Linux/H200 目标 pytest 结果以三次作业日志中的 14+1 passed 为准。
 
 ## 当前 H200 Graph-only 复现
 
@@ -117,10 +125,10 @@
 
 ## 待执行验证
 
-- 第一阶段已完成：旧 PVC 审计、opt-in block/forward 首差诊断、目标镜像 unit、H200 SP1 逐层 bitwise。
-- 下一步仅扩到既有 1248x704 SP2/SP4 Graph correctness；继续保持 45-frame KV，并要求所有 rank 同步通过或一致 fallback。
-- 本任务当前只处理 correctness，不在本阶段跑 20+200 paired x2、Nsight 或 headline 性能；这些必须等 SP2/SP4 bitwise 后另行执行。
-- growing KV、clean graph family、multi-bucket/LRU graph pool 仍禁止；graph pool 仍无容量上限/session 清理设计。
+- 本 correctness 阶段已完成：旧 PVC 审计、opt-in block/forward 首差诊断、目标镜像 unit、H200 SP1/SP2/SP4 逐层与端到端 bitwise。
+- 尚未执行 20 warmup + 200 measured、同机 paired x2、CV、独立 Nsight、峰值显存、冷启动统计和至少 200 chunks 地址/显存/rank-hang 长跑；因此本文短测 FPS 不作 headline。
+- 尚未覆盖完整 growing、prompt switch、scene cut、非均匀 shard、cache eviction、all-rank unsupported hit/miss/fallback 矩阵；当前代码只对 bounded saturated contract 给出实机 correctness 结论。
+- growing KV、clean graph family、multi-bucket/LRU graph pool 仍禁止；graph pool 仍无容量上限/session 清理设计。unsupported shape/dtype/backend 的完整 eager 回退验收未完成前不得默认开启。
 
 ## 当前 1248x704 SP2/SP4 correctness 复验
 
@@ -129,8 +137,20 @@
 - 代码/image/checkpoint 与 SP1 相同；4x H200，顺序运行 SP2 eager/graph 与 SP4 eager/graph。
 - 请求：1248x704 BF16、step-3200、固定 45-frame rolling KV、16+4、每个 SP graph lane 前 12 次 replay 做 31-boundary matched-eager bitwise。
 - 产物：`/results/minwm-cg-correct-sp24-704p-h200-20260807-01/cuda-graph-matrix/`。
-- 当前状态：Running；SP2 尚无 correctness 结果。已确认旧 harness 会在 SP2 完成后、SP4 启动前明确失败，故此 Job 不会产生 SP4 结果；修复后将以新 SHA 单独重跑 SP4。
+- 最终状态：Failed，原因仅为旧 harness 在 SP2 成功后拒绝 SP4。SP2 外层 payload SHA equal，内部 12/12 x 31 boundaries exact；SP4 未启动、没有结果。
+
+## 当前 SP4 独立复验
+
+- Job：`minwm-cg-correct-sp4-704p-h200-20260807-02`
+- 代码：`a67b2c9e76ecb2f16ccadc57e7e045eec57ba564`；仅比 graph runtime SHA 多 harness/文档变更。
+- 请求：4x H200、SP4、1248x704、16+4、KV45、block verify=12；其余 image/checkpoint 合同不变。
+- 产物：`/results/minwm-cg-correct-sp4-704p-h200-20260807-02/cuda-graph-matrix/`。
+- Pod/node：`minwm-cg-correct-sp4-704p-h200-20260807-02-6pjmf` / `i-06678115fccf0b8d7`。
+- 最终状态：Succeeded，完成时间 `2026-08-07T10:12:50Z`；pod 不再占 GPU。
+- 外层 correctness：eager/graph payload SHA equal；sample count 16,384、exact fraction 1、MAE/RMSE/max abs 均 0。
+- 内层 correctness：12/12 replay x 31 boundaries exact；四 rank 无 first-difference、异常退出或 hang。
+- 短测观测（**不是 headline 性能验收**）：Client FPS 9.7776 / 10.4449；Scheduler FPS 9.7353 / 10.3226；DiT p50 817.339 / 745.4865 ms。
 
 ## 最终 go/no-go
 
-当前：**第一阶段 SP1 correctness GO；整体验收 NO-GO**。默认开关保持关闭，不得用本次 16+4 短测宣称 headline 性能收益。只有 1248x704 SP2/SP4 bitwise 也通过后，才可进入正式性能与长跑验收。
+当前：**固定 45-frame saturated Graph correctness GO；默认开启 NO-GO**。SP1、1248x704 SP2/SP4 已越过 correctness 门槛，可以进入正式性能与长跑验收；但在 20+200 paired x2、CV、Nsight、峰值显存、200-chunk 稳定性和完整 fallback 场景完成前，开关必须默认关闭，不得用本文 16+4 短测宣称 headline 性能收益，也不得讨论 graph pool 扩展。

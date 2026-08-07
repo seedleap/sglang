@@ -44,6 +44,23 @@ spec:
                   continue
               row = {"run": run, "comparisons": data.get("comparisons", {})}
               print(json.dumps(row, sort_keys=True))
+          for path in sorted(root.glob("*/cuda-graph-matrix/*/throughput.json")):
+              run = path.parents[2].name
+              profile = path.parent.name
+              try:
+                  data = json.loads(path.read_text())
+              except Exception as exc:
+                  print(json.dumps({"run": run, "profile": profile, "read_error": repr(exc)}))
+                  continue
+              print(json.dumps({
+                  "run": run,
+                  "profile": profile,
+                  "payload_sha256": data.get("measured_payload_sha256"),
+                  "warmup_chunks": data.get("warmup_chunks"),
+                  "measured_chunks": data.get("measured_chunks"),
+                  "client_fps": data.get("client", {}).get("steady_received_fps_ratio_of_sums"),
+                  "scheduler_fps": data.get("server", {}).get("scheduler_forward_fps_ratio_of_sums"),
+              }, sort_keys=True))
           PY
           echo VERIFICATION_LOGS
           find /results -path '*/cuda-graph-matrix/*/server.log' -type f -print0 \
