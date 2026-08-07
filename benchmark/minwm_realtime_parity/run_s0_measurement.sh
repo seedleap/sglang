@@ -10,10 +10,11 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 WORK_ROOT="/work/minwm-realtime/${MINWM_RUN_ID}"
 MODEL_DIR="${WORK_ROOT}/sglang-model"
-RESULT_ROOT="${MINWM_RESULTS_ROOT%/}/${MINWM_RUN_ID}/s0-measurement"
+RESULT_ROOT="${MINWM_RESULTS_ROOT%/}/${MINWM_RUN_ID}/s4-qkv-measurement"
 CASES="${MINWM_CASES_PATH:-${SCRIPT_DIR}/cases_720p_compile_smoke.json}"
 CASE_ID="${MINWM_CASE_ID:-00_forward_080_pottery_720p}"
 SP_DEGREES="${MINWM_S0_SP_DEGREES:-2 4}"
+QKV_LANES="${MINWM_S4_QKV_LANES:-control candidate}"
 OFF_WARMUP_CHUNKS="${MINWM_S0_OFF_WARMUP_CHUNKS:-20}"
 OFF_MEASURED_CHUNKS="${MINWM_S0_OFF_MEASURED_CHUNKS:-200}"
 PROFILE_PRECONDITION_CHUNKS="${MINWM_S0_PROFILE_PRECONDITION_CHUNKS:-20}"
@@ -63,6 +64,9 @@ ALLOCATED_GPU_COUNT="${MINWM_ALLOCATED_GPU_COUNT:-$(nvidia-smi -L | wc -l | xarg
   echo "gpu_model=${GPU_MODEL}"
   echo "allocated_gpu_count=${ALLOCATED_GPU_COUNT}"
   echo "sp_degrees=${SP_DEGREES}"
+  echo "qkv_lanes=${QKV_LANES}"
+  echo "qkv_control=MINWM_FUSED_QKV_PROJECTION=0"
+  echo "qkv_candidate=MINWM_FUSED_QKV_PROJECTION=1"
   echo "off_window=${OFF_WARMUP_CHUNKS}+${OFF_MEASURED_CHUNKS}"
   echo "nsys_window=${PROFILE_PRECONDITION_CHUNKS} precondition + ${PROFILE_DISCARD_CHUNKS} discarded + ${PROFILE_MEASURED_CHUNKS} stable"
   echo "kv_cache_num_frames=${KV_CACHE_NUM_FRAMES}"
@@ -74,6 +78,8 @@ nvidia-smi -q > "${RESULT_ROOT}/nvidia-smi-q.txt"
 server_pid=""
 monitor_pid=""
 nsys_session=""
+qkv_lane=""
+qkv_fused_flag=""
 
 wait_for_server() {
   local pid="$1" log_path="$2"
@@ -146,6 +152,7 @@ start_server() {
   MINWM_PACKED_ATTENTION_DETERMINISTIC=true \
   MINWM_NATIVE_COMPONENTS=text_encoder,vae \
   MINWM_VAE_LANE=parallel \
+  MINWM_FUSED_QKV_PROJECTION="${qkv_fused_flag}" \
     "${SERVER_ARGS[@]}" > "${log_path}" 2>&1 &
   server_pid=$!
   wait_for_server "${server_pid}" "${log_path}"
@@ -224,8 +231,8 @@ run_profiler_off() {
   for repeat in 1 2; do
     local output="${lane_dir}/profiler-off-repeat${repeat}.json"
     run_client \
-      "${degree}" "${output}" "bf16-fast-sp${degree}" \
-      "${MINWM_RUN_ID}-sp${degree}-off-r${repeat}" \
+      "${degree}" "${output}" "bf16-${qkv_lane}-sp${degree}" \
+      "${MINWM_RUN_ID}-${qkv_lane}-sp${degree}-off-r${repeat}" \
       --measurement-mode profiler_off \
       --warmup-chunks "${OFF_WARMUP_CHUNKS}" \
       --measured-chunks "${OFF_MEASURED_CHUNKS}"
@@ -240,8 +247,8 @@ PY
     echo "CV target missed after two repeats; collecting an automatic third repeat"
     local output="${lane_dir}/profiler-off-repeat3.json"
     run_client \
-      "${degree}" "${output}" "bf16-fast-sp${degree}" \
-      "${MINWM_RUN_ID}-sp${degree}-off-r3" \
+      "${degree}" "${output}" "bf16-${qkv_lane}-sp${degree}" \
+      "${MINWM_RUN_ID}-${qkv_lane}-sp${degree}-off-r3" \
       --measurement-mode profiler_off \
       --warmup-chunks "${OFF_WARMUP_CHUNKS}" \
       --measured-chunks "${OFF_MEASURED_CHUNKS}"
@@ -258,18 +265,20 @@ PY
 run_profiler_on() {
   local degree="$1" lane_dir="$2"
   local profile_dir="${lane_dir}/profiler-on"
-  local session="minwm-s0-${MINWM_RUN_ID}-sp${degree}"
+  local session="minwm-s4-${MINWM_RUN_ID}-${qkv_lane}-sp${degree}"
   local report="${profile_dir}/sp${degree}.nsys-rep"
   local sqlite="${profile_dir}/sp${degree}.sqlite"
   local status_log="${profile_dir}/nsys-capture-status.log"
   mkdir -p "${profile_dir}"
   read_server_args "${degree}"
+  SERVER_ARGS+=(--enable-layerwise-nvtx-marker)
   rm -f "${report}" "${sqlite}"
 
   MINWM_ATTENTION_IMPL=packed \
   MINWM_PACKED_ATTENTION_DETERMINISTIC=true \
   MINWM_NATIVE_COMPONENTS=text_encoder,vae \
   MINWM_VAE_LANE=parallel \
+  MINWM_FUSED_QKV_PROJECTION="${qkv_fused_flag}" \
   nsys launch \
     --session-new="${session}" \
     --trace=cuda,nvtx \
@@ -281,8 +290,8 @@ run_profiler_on() {
 
   run_client \
     "${degree}" "${profile_dir}/precondition-warmup.json" \
-    "bf16-fast-sp${degree}-precondition" \
-    "${MINWM_RUN_ID}-sp${degree}-precondition" \
+    "bf16-${qkv_lane}-sp${degree}-precondition" \
+    "${MINWM_RUN_ID}-${qkv_lane}-sp${degree}-precondition" \
     --measurement-mode profiler_off \
     --warmup-chunks "$((PROFILE_PRECONDITION_CHUNKS - 1))" \
     --measured-chunks 1
@@ -313,8 +322,8 @@ run_profiler_on() {
 
   run_client \
     "${degree}" "${profile_dir}/client.json" \
-    "bf16-fast-sp${degree}-nsys" \
-    "${MINWM_RUN_ID}-sp${degree}-nsys" \
+    "bf16-${qkv_lane}-sp${degree}-nsys" \
+    "${MINWM_RUN_ID}-${qkv_lane}-sp${degree}-nsys" \
     --measurement-mode profiler_on \
     --precondition-warmup-chunks "${PROFILE_PRECONDITION_CHUNKS}" \
     --warmup-chunks "${PROFILE_DISCARD_CHUNKS}" \
@@ -342,15 +351,31 @@ run_profiler_on() {
 
 install_nsys
 read -r -a degrees <<< "${SP_DEGREES}"
+read -r -a qkv_lanes <<< "${QKV_LANES}"
 for degree in "${degrees[@]}"; do
   if ! [[ "${degree}" =~ ^(2|4)$ ]]; then
     echo "S0 accepts SP degree 2 or 4, got ${degree}" >&2
     exit 2
   fi
-  lane_dir="${RESULT_ROOT}/sp${degree}"
-  mkdir -p "${lane_dir}"
-  run_profiler_off "${degree}" "${lane_dir}"
-  run_profiler_on "${degree}" "${lane_dir}"
+  for qkv_lane in "${qkv_lanes[@]}"; do
+    case "${qkv_lane}" in
+      control) qkv_fused_flag=0 ;;
+      candidate) qkv_fused_flag=1 ;;
+      *)
+        echo "S4 accepts QKV lane control or candidate, got ${qkv_lane}" >&2
+        exit 2
+        ;;
+    esac
+    lane_dir="${RESULT_ROOT}/${qkv_lane}/sp${degree}"
+    mkdir -p "${lane_dir}"
+    {
+      echo "qkv_lane=${qkv_lane}"
+      echo "MINWM_FUSED_QKV_PROJECTION=${qkv_fused_flag}"
+      echo "sp_degree=${degree}"
+    } > "${lane_dir}/qkv-contract.txt"
+    run_profiler_off "${degree}" "${lane_dir}"
+    run_profiler_on "${degree}" "${lane_dir}"
+  done
 done
 
 python3 - "${RESULT_ROOT}" <<'PY'
@@ -360,33 +385,39 @@ from pathlib import Path
 
 root = Path(sys.argv[1])
 lanes = {}
-for lane_dir in sorted(root.glob("sp*")):
-    if not lane_dir.is_dir():
+for qkv_dir in sorted(root.iterdir()):
+    if not qkv_dir.is_dir():
         continue
-    repeat = json.loads((lane_dir / "repeat-summary.json").read_text())
-    profile = json.loads((lane_dir / "profiler-on/measurement.json").read_text())
-    lanes[lane_dir.name] = {
-        "profiler_off": repeat,
-        "profiler_on": profile,
-    }
+    degrees = {}
+    for lane_dir in sorted(qkv_dir.glob("sp*")):
+        repeat = json.loads((lane_dir / "repeat-summary.json").read_text())
+        profile = json.loads((lane_dir / "profiler-on/measurement.json").read_text())
+        degrees[lane_dir.name] = {
+            "profiler_off": repeat,
+            "profiler_on": profile,
+        }
+    lanes[qkv_dir.name] = degrees
 summary = {
-    "schema_version": "minwm-realtime-s0-baseline/v1",
+    "schema_version": "minwm-realtime-s4-qkv-ab/v1",
     "lanes": lanes,
 }
-(root / "baseline-summary.json").write_text(
+(root / "s4-qkv-summary.json").write_text(
     json.dumps(summary, indent=2, sort_keys=True) + "\n"
 )
 print(json.dumps({
-    lane: {
-        "off_cv_pass": value["profiler_off"]["acceptance"]["passes_cv_target"],
-        "gpu_metrics": {
-            name: metric["status"]
-            for name, metric in value["profiler_on"]["metrics"]["profiler_on"]["gpu_metrics"].items()
-        },
+    qkv_lane: {
+        degree: {
+            "off_cv_pass": value["profiler_off"]["acceptance"]["passes_cv_target"],
+            "gpu_metrics": {
+                name: metric["status"]
+                for name, metric in value["profiler_on"]["metrics"]["profiler_on"]["gpu_metrics"].items()
+            },
+        }
+        for degree, value in degrees.items()
     }
-    for lane, value in lanes.items()
+    for qkv_lane, degrees in lanes.items()
 }, indent=2, sort_keys=True))
 PY
 
 date --utc +%Y-%m-%dT%H:%M:%SZ | tee "${RESULT_ROOT}/complete.txt"
-echo "MINWM_S0_MEASUREMENT_COMPLETE results=${RESULT_ROOT}"
+echo "MINWM_S4_QKV_MEASUREMENT_COMPLETE results=${RESULT_ROOT}"
