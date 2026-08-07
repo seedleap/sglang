@@ -1,0 +1,160 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: minwm-async-a2a-perf-preflight-ipc-h200-20260807-01
+  namespace: default
+  labels:
+    app.kubernetes.io/name: minwm-async-a2a-perf-preflight-ipc-h200-20260807-01
+    seedleap.ai/owner: chenshengdong
+    seedleap.ai/run-id: minwm-async-a2a-perf-preflight-ipc-h200-20260807-01
+    seedleap.ai/task: minwm-async-a2a
+  annotations:
+    seedleap.ai/branch: codex/minwm-async-a2a-overlap
+    seedleap.ai/fixed-node: i-06888dc1ca88547e1
+    seedleap.ai/hardware-role: H200-profiler-off-IPC-diagnostic-only
+    seedleap.ai/kube-context: codex-minwm-test-phx2
+    seedleap.ai/minwm-git-ref: 2efc6485f65e8fcab506665efde79bc41406385e
+    seedleap.ai/repo: seedleap/sglang
+    seedleap.ai/sglang-git-ref: 028fe3f7b7fb55c389e51b9eaa9042cefb51eadc
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 21600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: minwm-async-a2a-perf-preflight-ipc-h200-20260807-01
+        seedleap.ai/owner: chenshengdong
+        seedleap.ai/run-id: minwm-async-a2a-perf-preflight-ipc-h200-20260807-01
+        seedleap.ai/task: minwm-async-a2a
+    spec:
+      restartPolicy: Never
+      terminationGracePeriodSeconds: 60
+      nodeSelector:
+        kubernetes.io/hostname: i-06888dc1ca88547e1
+      tolerations:
+        - key: seedleap.ai/capacity-pool
+          operator: Equal
+          value: minwm-test-phx2-karpenter
+          effect: NoSchedule
+      containers:
+        - name: benchmark
+          image: 829115578968.dkr.ecr.us-east-2.amazonaws.com/leap-world/minwm-training@sha256:bedc07ea3ba55059a8c1c569c3b177c4d00d41f37d4fa9105375531534ef5f2a
+          imagePullPolicy: IfNotPresent
+          workingDir: /workspace
+          env:
+            - name: GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: github-token
+                  key: token
+            - name: SGLANG_GIT_REF
+              value: 028fe3f7b7fb55c389e51b9eaa9042cefb51eadc
+            - name: MINWM_GIT_REF
+              value: 2efc6485f65e8fcab506665efde79bc41406385e
+            - name: MINWM_CONTAINER_IMAGE
+              value: 829115578968.dkr.ecr.us-east-2.amazonaws.com/leap-world/minwm-training@sha256:bedc07ea3ba55059a8c1c569c3b177c4d00d41f37d4fa9105375531534ef5f2a
+            - name: MINWM_BENCHMARK_MODE
+              value: setup_only
+            - name: MINWM_RUN_ID
+              value: minwm-async-a2a-perf-preflight-ipc-h200-20260807-01
+            - name: MINWM_ALLOCATED_GPU_COUNT
+              value: "2"
+            - name: MINWM_ASYNC_A2A_SP_DEGREES
+              value: "2"
+            - name: MINWM_ASYNC_A2A_SEQUENCE
+              value: candidate baseline baseline candidate
+            - name: MINWM_ASYNC_A2A_MIN_LANE_SAMPLES
+              value: "2"
+            - name: MINWM_S0_OFF_WARMUP_CHUNKS
+              value: "5"
+            - name: MINWM_S0_OFF_MEASURED_CHUNKS
+              value: "20"
+            - name: MINWM_ASYNC_A2A_BENCH_BACKEND
+              value: ipc
+            - name: MINWM_STAGE_FROM_MOUNT
+              value: "1"
+            - name: MINWM_CHECKPOINT_MOUNT_PATH
+              value: /s3/world-model/evals/minwm/checkpoint-staging/wan22-5B-stage3-dmd-8-0721-6a531f0e067/global_step_003200/ema_student/model.pt
+            - name: MINWM_PRETRAINED_MOUNT_PATH
+              value: /s3/world-model/checkpoints/minWM/Wan2.2-TI2V-5B-from-diffusers
+            - name: MINWM_CHECKPOINT_S3_EAST
+              value: s3://leap-world-us-east-2/world-model/evals/minwm/checkpoint-staging/wan22-5B-stage3-dmd-8-0721-6a531f0e067/global_step_003200/ema_student/model.pt
+            - name: MINWM_CHECKPOINT_VERSION_EAST
+              value: wduScksw2f3yPErnG9lBioOuE2AToyAP
+            - name: MINWM_CHECKPOINT_SOURCE_URI
+              value: s3://leap-world-us-west-2/world-model/minwm/checkpoints/run-archive/rolling/Wan21/Action2V/dmd/wan22-5B-stage3-dmd-8-0721-6a531f0e067/global_step_003200/ema_student/model.pt
+            - name: MINWM_CHECKPOINT_SOURCE_VERSION
+              value: x.2zYaRRNzyqngI7O_cYSrsK3NvgPKKt
+            - name: MINWM_CHECKPOINT_SOURCE_ETAG
+              value: 5c29d614972e06fd0df859abfd1d6f4d-191
+            - name: MINWM_CHECKPOINT_BYTES
+              value: "10007171771"
+            - name: MINWM_CHECKPOINT_CRC64
+              value: I0IQ+p0pREI=
+            - name: MINWM_PRETRAINED_S3
+              value: s3://leap-world-us-east-2/world-model/checkpoints/minWM/Wan2.2-TI2V-5B-from-diffusers
+            - name: MINWM_RESULTS_ROOT
+              value: /results/attempts
+          command:
+            - /bin/bash
+            - -lc
+            - |
+              set -euo pipefail
+              export MINWM_RESULTS_ROOT="/results/attempts/${HOSTNAME}"
+              mkdir -p "${MINWM_RESULTS_ROOT}"
+              record_exit() {
+                local status=$?
+                {
+                  echo "exit_status=${status}"
+                  echo "finished_utc=$(date --utc +%Y-%m-%dT%H:%M:%SZ)"
+                  df -h /work /results || true
+                  nvidia-smi || true
+                } > "${MINWM_RESULTS_ROOT}/pod-exit-diagnostic.txt"
+              }
+              trap record_exit EXIT
+              clone_at() {
+                local repository="$1" destination="$2" revision="$3"
+                git clone --no-checkout \
+                  "https://x-access-token:${GITHUB_TOKEN}@github.com/seedleap/${repository}.git" \
+                  "${destination}"
+                git -C "${destination}" checkout --detach "${revision}"
+                [[ "$(git -C "${destination}" rev-parse HEAD)" == "${revision}" ]]
+              }
+              clone_at minWM /workspace/minWM "${MINWM_GIT_REF}"
+              clone_at sglang /workspace/sglang "${SGLANG_GIT_REF}"
+              git -C /workspace/sglang rev-parse HEAD \
+                | tee "${MINWM_RESULTS_ROOT}/sglang-commit.txt"
+              bash /workspace/sglang/benchmark/minwm_realtime_parity/aws_b200_entrypoint.sh
+              bash /workspace/sglang/benchmark/minwm_realtime_parity/run_async_a2a_measurement.sh
+          resources:
+            requests:
+              cpu: "48"
+              memory: 300Gi
+              nvidia.com/gpu: "2"
+            limits:
+              cpu: "96"
+              memory: 600Gi
+              nvidia.com/gpu: "2"
+          volumeMounts:
+            - name: s3
+              mountPath: /s3
+              readOnly: true
+            - name: work
+              mountPath: /work
+            - name: results
+              mountPath: /results
+            - name: shm
+              mountPath: /dev/shm
+      volumes:
+        - name: s3
+          persistentVolumeClaim:
+            claimName: s3-claim
+        - name: work
+          emptyDir: {}
+        - name: results
+          persistentVolumeClaim:
+            claimName: minwm-async-a2a-perf-results-20260807
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 256Gi

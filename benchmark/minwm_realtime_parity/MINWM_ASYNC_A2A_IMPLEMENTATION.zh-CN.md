@@ -316,9 +316,13 @@ time、与 compute kernel 的区间交集及 buffer slot/generation。
   SP4 也只能先满足正确性、不能宣称同机制性能通过。
 - 修改/正确性：GPU 合同新增 SP2 连续 12 轮 split IPC input/output、双 slot 复用，以及预热后
   IPC CUDA Graph capture + 3 次 replay；每轮和同步 packed-QKV/output 做 bitwise 比较。本地
-  `py_compile` 已通过，真 GPU 合同尚待运行；合同通过前不启动整模型 A/B。
-- wall/FPS、Nsight、结论：尚未运行，候选 2 **未验收**。下一顺序为 H200 小合同 → 同节点
-  profiler-off 四位置预检；只有 Client FPS/DiT/chunk wall 同向且接近门槛，才采精确 Nsight。
+  `py_compile` 通过（无 CUDA 的本机 pytest 正确 skip）。H200 Job
+  `minwm-async-a2a-contract-ipc-h200-20260807-01` 使用提交 `028fe3f7b7`、2×H200、PyTorch
+  `2.12.1+cu130`、NCCL `2.29.7`，结果 `MINWM_ASYNC_A2A_SP2 PASS`、`1 passed`；artifact 在
+  PVC `minwm-async-a2a-contract-results-20260807` 的
+  `/results/minwm-async-a2a-contract-ipc-h200-20260807-01`。
+- wall/FPS、Nsight、结论：尚未运行，候选 2 **未验收**。下一步为同节点 profiler-off
+  四位置预检；只有 Client FPS/DiT/chunk wall 同向且接近门槛，才采精确 Nsight。
 
 ### 2026-08-07：候选 1——QK A2A 与 V projection 重叠
 
