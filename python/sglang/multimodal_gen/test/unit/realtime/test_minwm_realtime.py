@@ -37,6 +37,7 @@ from sglang.multimodal_gen.runtime.models.dits.minwm import (
     _minwm_apply_qk_op,
     _minwm_frame_indices,
     _minwm_layer_norm,
+    _minwm_materialize_timestep_modulation,
     _minwm_packed_attention_backend,
     _minwm_project_output_in_reference_row_bucket,
     _minwm_qk_norm_op,
@@ -407,6 +408,140 @@ def test_minwm_fixed_shape_metadata_is_cached():
     frame_indices = _minwm_uniform_frame_indices(6, 3, torch.device("cpu"))
     assert frame_indices.tolist() == [0, 0, 1, 1, 2, 2]
     assert _minwm_uniform_frame_indices(6, 3, torch.device("cpu")) is frame_indices
+
+
+def test_minwm_hoisted_timestep_modulation_matches_per_block_materialization(
+    monkeypatch,
+):
+    import sglang.multimodal_gen.runtime.models.dits.minwm as minwm_module
+
+    monkeypatch.setattr(
+        minwm_module,
+        "get_forward_context",
+        lambda: SimpleNamespace(forward_batch=None),
+    )
+    hidden_states = torch.zeros(2, 6, 4, dtype=torch.bfloat16)
+    timestep_proj = torch.arange(2 * 3 * 6 * 4, dtype=torch.float32).reshape(2, 3, 6, 4)
+    frame_index = torch.tensor([0, 0, 1, 1, 2, 2])
+    legacy_per_block = [timestep_proj[:, frame_index] for _ in range(3)]
+
+    hoisted = _minwm_materialize_timestep_modulation(hidden_states, timestep_proj)
+
+    for legacy in legacy_per_block:
+        torch.testing.assert_close(hoisted, legacy, rtol=0, atol=0)
+        assert hoisted.stride() == legacy.stride()
+        for modulation_index in range(6):
+            assert (
+                hoisted.select(-2, modulation_index).stride()
+                == legacy.select(-2, modulation_index).stride()
+            )
+    assert hoisted.dtype == timestep_proj.dtype
+    assert hoisted.device == timestep_proj.device
+
+
+def test_minwm_hoisted_timestep_modulation_uses_nonuniform_sp_metadata(monkeypatch):
+    import sglang.multimodal_gen.runtime.models.dits.minwm as minwm_module
+
+    frame_index = torch.tensor([0, 1, 1, 3, 3])
+    forward_batch = SimpleNamespace(
+        enable_sequence_shard=True,
+        sequence_shard_frame_indices=frame_index,
+    )
+    monkeypatch.setattr(
+        minwm_module,
+        "get_forward_context",
+        lambda: SimpleNamespace(forward_batch=forward_batch),
+    )
+    monkeypatch.setattr(minwm_module, "get_ulysses_parallel_world_size", lambda: 4)
+    hidden_states = torch.zeros(1, 5, 3)
+    timestep_proj = torch.arange(1 * 4 * 6 * 3).reshape(1, 4, 6, 3)
+
+    actual = _minwm_materialize_timestep_modulation(hidden_states, timestep_proj)
+
+    expected = timestep_proj[:, frame_index]
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    assert actual.shape == (1, 5, 6, 3)
+
+
+def test_minwm_timestep_modulation_is_pass_local_for_clean_cache_and_recompute(
+    monkeypatch,
+):
+    import sglang.multimodal_gen.runtime.models.dits.minwm as minwm_module
+
+    monkeypatch.setattr(
+        minwm_module,
+        "get_forward_context",
+        lambda: SimpleNamespace(forward_batch=None),
+    )
+    dmd_hidden_states = torch.zeros(1, 8, 2)
+    dmd_timestep_proj = torch.arange(1 * 4 * 6 * 2).reshape(1, 4, 6, 2)
+    first_dmd = _minwm_materialize_timestep_modulation(
+        dmd_hidden_states, dmd_timestep_proj
+    )
+    recompute = _minwm_materialize_timestep_modulation(
+        dmd_hidden_states, dmd_timestep_proj
+    )
+    clean_cache = _minwm_materialize_timestep_modulation(
+        torch.zeros(1, 2, 2),
+        torch.full((1, 1, 6, 2), 17),
+    )
+
+    torch.testing.assert_close(recompute, first_dmd, rtol=0, atol=0)
+    assert recompute.data_ptr() != first_dmd.data_ptr()
+    assert clean_cache.shape == (1, 2, 6, 2)
+    assert torch.count_nonzero(clean_cache != 17).item() == 0
+
+
+def test_minwm_timestep_modulation_legacy_fallback_defers_materialization(
+    monkeypatch,
+):
+    import sglang.multimodal_gen.runtime.models.dits.minwm as minwm_module
+
+    monkeypatch.setattr(
+        minwm_module,
+        "get_forward_context",
+        lambda: SimpleNamespace(forward_batch=None),
+    )
+    model = MinWMCausalTransformer3DModel.__new__(MinWMCausalTransformer3DModel)
+    hidden_states = torch.zeros(1, 4, 2)
+    timestep_proj = torch.arange(1 * 2 * 6 * 2).reshape(1, 2, 6, 2)
+
+    monkeypatch.setattr(minwm_module, "_MINWM_HOIST_TIMESTEP_MODULATION", False)
+    assert model._prepare_transformer_block_temb(hidden_states, timestep_proj) is (
+        timestep_proj
+    )
+
+    monkeypatch.setattr(minwm_module, "_MINWM_HOIST_TIMESTEP_MODULATION", True)
+    hoisted = model._prepare_transformer_block_temb(hidden_states, timestep_proj)
+    torch.testing.assert_close(
+        hoisted,
+        timestep_proj[:, torch.tensor([0, 0, 1, 1])],
+        rtol=0,
+        atol=0,
+    )
+
+
+@pytest.mark.parametrize(
+    ("hidden_states", "timestep_proj", "message"),
+    [
+        (torch.zeros(1, 2, 3, 4), torch.zeros(1, 2, 6, 4), r"\[B, S, D\]"),
+        (torch.zeros(1, 2, 4), torch.zeros(1, 2, 5, 4), r"\[B, F, 6, D\]"),
+        (torch.zeros(1, 2, 4), torch.zeros(2, 2, 6, 4), "batch does not match"),
+        (torch.zeros(1, 2, 4), torch.zeros(1, 2, 6, 3), "width does not match"),
+    ],
+)
+def test_minwm_timestep_modulation_validates_shape_contract(
+    monkeypatch, hidden_states, timestep_proj, message
+):
+    import sglang.multimodal_gen.runtime.models.dits.minwm as minwm_module
+
+    monkeypatch.setattr(
+        minwm_module,
+        "get_forward_context",
+        lambda: SimpleNamespace(forward_batch=None),
+    )
+    with pytest.raises(ValueError, match=message):
+        _minwm_materialize_timestep_modulation(hidden_states, timestep_proj)
 
 
 def test_minwm_block_relative_rope_clamps_visible_frame_gaps():
