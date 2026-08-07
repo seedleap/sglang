@@ -29,10 +29,10 @@ from measurement_tool import aggregate  # noqa: E402
 from nsys_metrics import merge_nsys_metrics  # noqa: E402
 
 
-def _latency(value: float) -> dict:
+def _latency(value: float, count: int) -> dict:
     return available(
         {
-            "count": 10,
+            "count": count,
             "mean": value,
             "p50": value,
             "p95": value,
@@ -45,12 +45,13 @@ def _latency(value: float) -> dict:
 
 
 def _record(mode: str = "profiler_off", run_id: str = "run-1") -> dict:
+    measured_chunks = 200 if mode == "profiler_off" else 10
     off_metrics = {
         "client_fps": available(16.0, "frames_per_second", "test fixture"),
         "scheduler_fps": available(16.1, "frames_per_second", "test fixture"),
-        "scheduler_chunk_wall_ms": _latency(1000.0),
-        "dit_wall_ms": _latency(600.0),
-        "vae_wall_ms": _latency(250.0),
+        "scheduler_chunk_wall_ms": _latency(1000.0, measured_chunks),
+        "dit_wall_ms": _latency(600.0, measured_chunks),
+        "vae_wall_ms": _latency(250.0, measured_chunks),
     }
     return build_measurement(
         mode=mode,
@@ -69,15 +70,15 @@ def _record(mode: str = "profiler_off", run_id: str = "run-1") -> dict:
         width=1248,
         height=704,
         warmup_chunks=20,
-        measured_chunks=200 if mode == "profiler_off" else 10,
+        measured_chunks=measured_chunks,
         precondition_warmup_chunks=0 if mode == "profiler_off" else 20,
         precision="bf16",
         fast_lane=True,
         comparison_contract={"case": "00_forward_pottery"},
         profiler_off_metrics=off_metrics,
         profiler_on_cuda_metrics={
-            "dit_cuda_ms": _latency(590.0),
-            "vae_cuda_ms": _latency(240.0),
+            "dit_cuda_ms": _latency(590.0, measured_chunks),
+            "vae_cuda_ms": _latency(240.0, measured_chunks),
         },
         artifacts={"client_result": "/results/client.json"},
     )
@@ -125,6 +126,31 @@ def test_schema_rejects_missing_metric_and_implicit_unavailable_value() -> None:
         "reason": "permission_denied",
     }
     with pytest.raises(MeasurementValidationError, match="evidence"):
+        validate_measurement(record)
+
+
+@pytest.mark.parametrize("mode", ["profiler_off", "profiler_on"])
+def test_latency_metric_requires_count_equal_to_measured_chunks(mode: str) -> None:
+    record = _record(mode)
+    if mode == "profiler_off":
+        metric = record["metrics"]["profiler_off"]["dit_wall_ms"]
+    else:
+        metric = record["metrics"]["profiler_on"]["dit_cuda_ms"]
+
+    del metric["value"]["count"]
+    with pytest.raises(MeasurementValidationError, match=r"value\.count"):
+        validate_measurement(record)
+    assert list(_machine_schema_validator().iter_errors(record))
+
+    record = _record(mode)
+    if mode == "profiler_off":
+        metric = record["metrics"]["profiler_off"]["dit_wall_ms"]
+    else:
+        metric = record["metrics"]["profiler_on"]["dit_cuda_ms"]
+    metric["value"]["count"] = record["workload"]["measured_chunks"] - 1
+    with pytest.raises(
+        MeasurementValidationError, match=r"must equal workload\.measured_chunks"
+    ):
         validate_measurement(record)
 
 
