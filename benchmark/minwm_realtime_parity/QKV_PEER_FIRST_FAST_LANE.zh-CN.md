@@ -4,7 +4,7 @@
 
 任务：S4 / 点子 6
 
-状态：**6a 已完成实现和本地 CPU 语义回归，H200 兼容性、质量与性能验收待执行；6b 尚未实现。**
+状态：**6a 已完成实现和本地 CPU 语义回归；H200 v01/v02 均在 client 前失败并判 invalid，v03 正在执行 CUDA/source gate、质量与 profiler-off-only；Nsight 等 exact-window 工具，6b 尚未实现。**
 
 ## 结论与开关
 
@@ -121,6 +121,18 @@ Inductor/Triton typing 错误。CPU 回归使用 `/tmp/codex-minwm-s4-cpu-site` 
 跨开关严格 load、保存后反向加载、dtype move、量化 fallback。GPU 侧还需覆盖 BF16
 layer probe、Triton kernel 是否命中、不同 head/sequence shape 和真实 compile。
 
+第一次 H200 attempt `minwm-s4-qkv-h200-20260807-01` 没有进入任何测试函数、模型 client
+或 A/B。镜像中 editable wheel 没有暴露源码树的 `sglang.test.ci`，导致 registered test 在
+pytest collection 时 `ModuleNotFoundError`。这条结果只证明 runner 启动环境缺口，不是
+CUDA/QKV 实现失败。后续所有 H200 attempt 在模型转换和 client 前显式设置：
+
+```bash
+export PYTHONPATH="/workspace/sglang/python${PYTHONPATH:+:${PYTHONPATH}}"
+python3 -c 'import sglang.test.ci.ci_register'
+```
+
+预检失败必须立即止损，不能把 registered/unit test 的收集失败记成实现或质量结果。
+
 ## H200 验收矩阵
 
 统一 workload：MinWM 5B step-3200，1248x704，BF16，4 DMD + 1 clean-cache，
@@ -176,8 +188,15 @@ latency summary JSON 漏写了 `value.count`，所以其 client 结果不能作�
 的显式 count；机器 schema 要求 count 存在，自定义 validator 还要求每个 available latency
 的 `value.count == workload.measured_chunks`。旧工具产生的 raw `.sqlite` 可以重新 merge，
 但任何 `59aa68a382` client 结果均无效；正式 profiler-off 的 DiT/VAE wall 必须都是
-`status=available,count=200`，Nsight latency count 必须等于 10。所有最终 JSON 必须通过
+`status=available,count=200`。所有最终 JSON 必须通过
 `b9240233b2438829cbd72ee3dfbc1d37ed675560` 的 validator，并记录实际 checkout SHA。
+
+2026-08-07 真机审计进一步确认：b924 的 Nsight capture 虽含 1 个 discarded chunk + 10 个
+stable chunks，`merge-nsys` 却把 raw 全表按 10 归一化，不能证明 kernel/API/launch 和 GPU
+metric 只覆盖 exact stable window。因此 b924 **只用于 profiler-off**；S4 v03 runner 已物理
+移除 `nsys launch`/`nsys start`，只跑 SP2/SP4 的 20+200。任何 b924 profiler-on 结果均不得
+作为正式证据。Nsight 必须等 S0 发布 exact-window canonical 后，以新 Job/attempt 单独执行，
+再要求 latency count=10 和对应 raw/normalized 指标同时通过。
 
 每个 JSON 必须记录实际 SGLang SHA、minWM SHA、镜像、GPU、SP、精度和 UTC 时间。
 `provenance.gpu.count` 是 active GPU（SP2=2、SP4=4），整机隔离的 8 卡写入
@@ -225,13 +244,24 @@ peer-first Triton kernel 和 NCCL A2A 按 kernel/API 名归因。NVTX 只用于 
 | SP4 control | — | — | — | — | — | — | — | — | — | — | — | — | — |
 | SP4 candidate | — | — | — | — | — | — | — | — | — | — | — | — | — |
 
+本表当前全部为“延后”，不是 0：b924 exact-window 缺口关闭前禁止采集正式 Nsight。
+
 空值表示尚未测量，不表示 0。若 SM/Tensor/DRAM 指标不可得，必须保留 S0 的
 `unavailable + reason + evidence`，不能用 nvidia-smi utilization 冒充。
 
 ## 与预期不符处
 
-当前只有一个本地环境偏差：macOS torch 2.13.0 的仓库导入会在 compile decorator
+本地环境偏差：macOS torch 2.13.0 的仓库导入会在 compile decorator
 初始化时失败，因此本地 compile 被明确跳过并转移到 H200；这不是实现失败。
+
+H200 v01 暴露了另一个 runner 偏差：仓库源码 checkout 存在
+`python/sglang/test/ci/ci_register.py`，但安装后的 editable package 没把它放进有效导入
+路径。pytest 在收集 `test_ulysses_qkv_pack.py` 时退出 2。该 attempt 使用
+`backoffLimit=0`，全局前置失败 marker 保留 setup/test 日志、文件大小与 SHA256；没有
+profiler-off/on JSON，不能纳入 A/B。v02 增加 source-tree import machine-check，并使用新
+Job、Pod 和 attempt 目录，但把 import 放在依赖安装前，因镜像当时还没有 `orjson` 而
+exit 1；它已成功验证 v01 marker，同样没有进入模型 client。v03 把 import gate 移到 setup
+依赖安装后、pytest/质量/client 前，并机器验证 v01/v02 marker 后才继续。
 
 性能与数值是否符合预期尚无真机数据。完成 A/B 后，本节必须逐项解释：
 
@@ -250,6 +280,11 @@ peer-first Triton kernel 和 NCCL A2A 按 kernel/API 名归因。NVTX 只用于 
    的收益/代价可单独归因。
 5. 只有 6a 后 pack + V copy 仍占显著 steady kernel/wall，并且可维护实现有正收益时，
    才进入 6b。若收益落入噪声、A2A 主导或实现需要侵入 GEMM backend，6b 结论就是“不做”。
+6. v01 证明“源码 checkout 存在”不等于 registered tests 可导入；v02 将显式 PYTHONPATH 和
+   `import sglang.test.ci.ci_register` 引入为门，但放在依赖安装前又暴露 `orjson` 缺失；v03
+   将它放在 setup 后、pytest/质量/client 前，既验证源码路径又不误判尚未安装的运行依赖。
+7. b924 Nsight 的 raw 表含 discarded chunk 却按 stable=10 归一化，无法做 exact-window
+   归因；保留 profiler-off 口径，物理移除当前 runner 的 Nsight 路径，等新 canonical 后另跑。
 
 ## 尝试后放弃或暂缓的方案
 
@@ -278,10 +313,26 @@ H200 Job 必须设置 `backoffLimit: 0`，并把结果写入按 Pod/attempt 隔�
 不得自动重跑后覆盖或混合 provenance。runner 拒绝复用已存在的结果目录，也不得删除或
 覆盖旧 `.nsys-rep`、`.sqlite`、JSON、日志或质量产物。
 
-任何失败、旧契约或 partial attempt 都必须物理保留。失败时在该 attempt 的 `invalid/`
-写 marker，至少记录失败原因、UTC 时间、每个已有文件的相对路径、大小、SHA256 和
-可恢复性。聚合器只读取完成 marker 齐全且没有 `invalid/` 的 attempt；旧数据可原地保留，
-或在不丢 provenance 的前提下移动到同一 attempt 的 `invalid/`，不能删除后伪装成 clean run。
+任何失败、旧契约或 partial attempt 都必须物理保留。marker 至少记录失败原因、UTC
+时间、每个已有文件的相对路径、大小、SHA256 和可恢复性；旧数据可原地保留，或在不丢
+provenance 的前提下移动到同一 attempt 的 `invalid/`，不能删除后伪装成 clean run。
+
+marker 的作用域必须与失败范围一致：setup、质量、parity 或 source-tree import 等全局
+前置失败写 attempt-root marker；某个 profiler-off lane 失败，写该 lane 的
+`invalid-marker*.json`；profiler-off 已完整验证后，后续 Nsight 失败只在
+`profiler-on/` 写 marker，不得作废已合格 headline，也不得影响 sibling SP/lane。聚合器从
+当前 JSON 的 parent 向最近 measurement root 检查 marker；路径本身位于 `invalid/` 时直接
+排除，sibling marker 不传播。Job EXIT trap 若已发现 runner 的 scoped marker，只写 marker
+路径和 SHA256 引用，不再补 attempt-root marker；只有 runner 尚未初始化、没有 scoped
+marker 时才把失败提升为全局。
+
+v01 是 pytest collection 全局前置失败，root marker 合法；PVC
+`minwm-s4-qkv-h200-results-20260807` 继续保留。两个最初的只读 evidence-reader 因 EBS
+卷的 Pod 安全上下文无法穿过 `/results/attempts`，也没有修改证据。v02 以正常读写 mount
+验证 v01 marker 后自身在全局 import 前置失败；v03 已同时验证 v01/v02 marker 的 reason、
+recoverability、artifact count 和 marker SHA256，再写自己的独立目录。两份 marker SHA256
+分别为 `d3edfa8b8fb9afabb238c61b8d3b613f8f1cefbd42885f0c7fb8564a2e57c91f` 和
+`267bc5c51d9271ea7e436a2f7a99f12dd3399147b4a50b3e6780b7bc37df54ae`。
 
 若需要集群止损，只允许删除名称精确匹配本任务 `minwm-s4-qkv-*` 的 Job/Pod 控制对象；
 PVC 和其中的诊断证据必须保留。所有 `kubectl` 读取、dry-run、apply、logs 和 delete 都显式
@@ -298,9 +349,11 @@ dict 都有反向加载路径。若 fast lane 启动日志没有出现 `single-g
 当前验收状态：
 
 - 6a 实现/CPU 语义/静态检查：通过；
+- H200 v01 pytest collection、v02 setup 前 import：均失败并判 invalid，均未运行实现；
+- H200 v03 CUDA/source gate、质量、SP2/SP4 profiler-off-only：执行中；
 - H200 BF16、TP/SP、compile、量化 fallback：待执行；
 - layer/latent/video/determinism：待执行；
-- profiler-off / Nsight A/B：待执行；
+- profiler-off A/B：v03 执行中；Nsight：等待 exact-window canonical；
 - 6b：等待 6a 证据；
 - 默认开关：保持关闭。
 
