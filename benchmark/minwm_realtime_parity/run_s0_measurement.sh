@@ -55,11 +55,13 @@ export PYTHONHASHSEED=0
 unset SGLANG_DIFFUSION_TORCH_PROFILER_DIR
 
 GPU_MODEL="$(nvidia-smi --query-gpu=name --format=csv,noheader | head -1 | xargs)"
+ALLOCATED_GPU_COUNT="${MINWM_ALLOCATED_GPU_COUNT:-$(nvidia-smi -L | wc -l | xargs)}"
 {
   echo "sglang_commit=${SGLANG_GIT_REF}"
   echo "minwm_commit=${MINWM_GIT_REF}"
   echo "container_image=${MINWM_CONTAINER_IMAGE}"
   echo "gpu_model=${GPU_MODEL}"
+  echo "allocated_gpu_count=${ALLOCATED_GPU_COUNT}"
   echo "sp_degrees=${SP_DEGREES}"
   echo "off_window=${OFF_WARMUP_CHUNKS}+${OFF_MEASURED_CHUNKS}"
   echo "nsys_window=${PROFILE_PRECONDITION_CHUNKS} precondition + ${PROFILE_DISCARD_CHUNKS} discarded + ${PROFILE_MEASURED_CHUNKS} stable"
@@ -170,7 +172,7 @@ client_common_args() {
     --minwm-commit "${MINWM_GIT_REF}" \
     --container-image "${MINWM_CONTAINER_IMAGE}" \
     --gpu-model "${GPU_MODEL}" \
-    --gpu-count "${degree}" \
+    --gpu-count "${ALLOCATED_GPU_COUNT}" \
     --sp-degree "${degree}" \
     --precision bf16 \
     --fast-lane \
