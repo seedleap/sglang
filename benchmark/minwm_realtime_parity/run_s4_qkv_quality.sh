@@ -12,6 +12,10 @@ CASE_ID="${MINWM_CASE_ID:-00_forward_080_pottery_720p}"
 server_pid=""
 
 [[ -f "${MODEL_DIR}/minwm_conversion_manifest.json" ]]
+if [[ -e "${RESULT_ROOT}" ]]; then
+  echo "Refusing to overwrite existing S4 quality attempt: ${RESULT_ROOT}" >&2
+  exit 2
+fi
 mkdir -p "${RESULT_ROOT}"
 
 export MINWM_PARITY_DETERMINISTIC=1
