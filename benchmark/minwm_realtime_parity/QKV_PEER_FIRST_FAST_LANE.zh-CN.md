@@ -155,25 +155,29 @@ steady-state contract。首块、短程 append/recompute、cache growth 和尚�
 H200 临时测量分支只允许临时引入：
 
 - S0 branch：`origin/codex/minwm-fused-ops-s0`
-- S0 canonical commit：`59aa68a382`（包含 `25cc42ef8c`、`e75e9e24b5` 与
-  `411d9b9ec4`）
+- S0 canonical commit：`b9240233b2438829cbd72ee3dfbc1d37ed675560`（包含
+  `59aa68a382`、`25cc42ef8c`、`e75e9e24b5` 与 `411d9b9ec4`）
 - draft PR：#19
 
 旧的 `30cb16708f` / `8e06ab2fc3` / `411d9b9ec4` / `e75e9e24b5` /
-`25cc42ef8c` 不再作为新 clean runner 的最终 pin。S0 未合并前，临时测量分支从
-`59aa68a382` checkout 后叠加 S4
+`25cc42ef8c` / `59aa68a382` 不再作为新 clean runner 的最终 pin。S0 未合并前，临时
+测量分支从
+`b9240233b2438829cbd72ee3dfbc1d37ed675560` checkout 后叠加 S4
 实现 commit；S4 PR 对 main 的最终 diff 必须移除 S0 基础设施。
 入口使用 `benchmark/minwm_realtime_parity/run_s0_measurement.sh`，结果再经同一 commit 的
 `measurement_tool.py` validate/merge-nsys/aggregate。
 
-`59aa68a382` 不改变 profiler 字段或 JSON Schema，但修复了 client 在最后 payload/stats
-到达后过早退出、遗漏最后一条 DiT/VAE stage trace 的竞态。正式 client 必须传
+`59aa68a382` 修复了 client 在最后 payload/stats 到达后过早退出、遗漏最后一条 DiT/VAE
+stage trace 的竞态。正式 client 必须传
 `--require-complete-stage-trace`，按 `expected_indices = 0..N-1` 等待全部合法 index；超时
-诊断必须列出各 selector 的 missing/unexpected 以及 stats/payload 缺失。旧工具产生的 raw
-`.sqlite` 可以重新 merge，但已有 profiler-off 结果只有在 DiT wall 和 VAE wall 都为
-`status=available` 且 `count=200` 时才可保留，否则必须重跑对应 lane。所有最终 JSON 必须
-通过 `59aa68a382` 的 jsonschema validator，并记录实际 checkout SHA，不能沿用未验证的
-旧 JSON。
+诊断必须列出各 selector 的 missing/unexpected 以及 stats/payload 缺失。但该版本的实际
+latency summary JSON 漏写了 `value.count`，所以其 client 结果不能作为最终 A/B。
+`b9240233b2438829cbd72ee3dfbc1d37ed675560` 保持 schema v1，补齐所有 wall/CUDA latency
+的显式 count；机器 schema 要求 count 存在，自定义 validator 还要求每个 available latency
+的 `value.count == workload.measured_chunks`。旧工具产生的 raw `.sqlite` 可以重新 merge，
+但任何 `59aa68a382` client 结果均无效；正式 profiler-off 的 DiT/VAE wall 必须都是
+`status=available,count=200`，Nsight latency count 必须等于 10。所有最终 JSON 必须通过
+`b9240233b2438829cbd72ee3dfbc1d37ed675560` 的 validator，并记录实际 checkout SHA。
 
 每个 JSON 必须记录实际 SGLang SHA、minWM SHA、镜像、GPU、SP、精度和 UTC 时间。
 `provenance.gpu.count` 是 active GPU（SP2=2、SP4=4），整机隔离的 8 卡写入
