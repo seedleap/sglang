@@ -12,7 +12,8 @@
 - latency count canonical：`b9240233b2438829cbd72ee3dfbc1d37ed675560`
 - exact-window / trace-drain canonical：`e4d6d67c76`
 - 真机 Nsight 2026.4 schema canonical：`401e4ec8a1`
-- 跨进程 component CUDA timing relay canonical：`839f312c3b4622c8e04c5c76620d22d6c2497fa0`（`-06` 固定此 SHA）
+- 跨进程 component CUDA timing relay canonical：`839f312c3b4622c8e04c5c76620d22d6c2497fa0`
+- Nsight SQLite export/stats 顺序 canonical：`f1b047942d86715297ca79a9a3c5e7fae1e4a306`（`-07` 固定此 SHA）
 - base：`main`。`main` 的 `9a9dc59cd1` 已完整包含 MinWM realtime API、causal Ulysses、Parallel VAE 和历史 benchmark；`codex/minwm-realtime-api` 还叠加了量化与性能实验，不适合作为 S0 的独立 review base。
 
 ## 假设与预期
@@ -131,22 +132,23 @@ torch.profiler 不同时运行。
 `-04` 只保留已独立验证的 SP2 profiler-off；其 profiler-on lane 已标 invalid。
 `-05` 证明 exact-window outer marker 与 GPU metrics 能启动，但暴露出 worker
 component timing 不能经进程内 sink 到达 API 的结构性缺口，其 SP2 profiler-on lane
-同样只保留 invalid 诊断。修复后的 profiler-on 与 SP4 由
-`minwm-s0-fusedops-h200-20260807-06` 补齐。
+同样只保留 invalid 诊断。`-06` 验证跨进程 relay 生效，但在导出后处理阶段发现
+`nsys stats` 会隐式创建 SQLite；该 lane 仍只保留 invalid 诊断。修复后的
+profiler-on 与 SP4 由 `minwm-s0-fusedops-h200-20260807-07` 补齐。
 旧 H200/B300 表以及 `-01/-02/-03` 失败诊断只用于背景与异常证据。
 
 ### 运行来源
 
 | 项 | 实际值 |
 | --- | --- |
-| SGLang | SP2 profiler-off source=`b9240233b2`；exact-window schema=`401e4ec8a1`；component relay runner=`839f312c3b` |
+| SGLang | SP2 profiler-off source=`b9240233b2`；exact-window schema=`401e4ec8a1`；component relay=`839f312c3b`；runner=`f1b047942d` |
 | MinWM | `2efc6485f65e8fcab506665efde79bc41406385e` |
 | 镜像 | `minwm-training@sha256:bedc07ea...f5f2a` |
 | GPU | NVIDIA H200；`gpu.count` 是 active 2/4 卡；`allocated_count=8` 是整机隔离预留 |
 | kube context | `codex-minwm-test-phx2`；所有命令显式传 `--context`，未切换全局 current-context |
 | region / zone | AWS `us-west-2` / `us-west-2-phx-2a` |
 | NodePool | `minwm-test-phx2-p5e-spot`（共享的既有 NodePool，S0 未创建或删除） |
-| 实例 | `p5e.48xlarge` Spot；`-05` 节点 `i-01a57ab8567279852` |
+| 实例 | `p5e.48xlarge` Spot；`-05` 节点 `i-01a57ab8567279852`；`-06` 节点 `i-06888dc1ca88547e1` |
 | 资源隔离 | Job 请求完整 8 GPU；不与 CUDA Graph 或 S1–S4 Job 共用 GPU 节点 |
 
 ### profiler-off 重复
@@ -185,7 +187,8 @@ component timing 不能经进程内 sink 到达 API 的结构性缺口，其 SP2
 - `-04/sp2/profiler-on/invalid-marker-20260807T045715060254120Z.json` 原地保留 7 个文件、40,487,575 bytes 的逐文件 SHA；聚合验证该 marker 只排除 profiler-on，两个 sibling profiler-off run 均保留。
 - `-05` 的 GPU metrics start 成功，Nsight 2026.4 report 为 37,589,254 bytes；同一正式 trace id 在 server.log 中有 worker DiT/VAE component 各 11 条、API scheduler-result wall 各 11 条，但客户端 component selector 各缺 0–10。原因是 `_notify_realtime_trace_sinks` 只在当前进程有效，并非 256 条队列溢出；该 lane 的 marker 保留 7 个文件及逐文件 SHA。
 - 对 `-05` 产物实测 lane-scoped 审计：profiler-on report 为 invalid，两个 sibling profiler-off JSON 均非 invalid；聚合接受两个 run，`excluded=[]`。
-- SP4 与 exact-window profiler-on 仍待 `-06` 真机结果；完成前 PR 保持 draft。
+- `-06` 客户端首次完整收到 profiler-on 的 1 discard + 10 measured payload/stats/wall/component trace，生成 9,695-byte `client.json`、38,148,535-byte report 和 205,168,640-byte SQLite；GPU metrics start 成功。随后显式 `nsys export` 发现同名 SQLite 已被前置 `nsys stats` 隐式创建而拒绝覆盖，strict merge 尚未执行；runner 已对该 lane 写 marker，不能把现有 SQLite 绕过 marker 用作正式结果。
+- SP4 与 exact-window profiler-on 仍待 `-07` 真机结果；完成前 PR 保持 draft。
 
 ## 证据与决策过程
 
@@ -207,6 +210,7 @@ component timing 不能经进程内 sink 到达 API 的结构性缺口，其 SP2
 16. **真实 schema 现场校验**：2026.4 的 runtime 只给 `globalTid`，kernel 给 `globalPid`，并有 `PROCESSES` 映射；GPU metrics 有两个 target `typeId`。fixture 改为相同列布局，覆盖 globalTid 掩码、kernel process/device 交叉验证及每 type/chunk 样本矩阵。
 17. **lane 粒度审计与恢复**：marker 从结果文件父目录逐层检查到最近 `s0-measurement`；profiler-on marker 不影响 sibling off。`-05` 从 `-04` source lane 重新校验并复制 SP2 off 到新 attempt，SP4 则正常重测，所有目标路径均拒绝覆盖。
 18. **component timing 跨进程传输**：`-05` server.log 证明 worker 侧 component/CUDA trace 和 API 侧 wall trace 都完整，但前者只通知 worker 进程内 sink。没有放大队列或放宽完整性门；`839f312c3b` 将 `event/component/duration_ms/cuda_ms/chunk/request` 的纯标量记录附在 `RequestMetrics` 上，随 `result.metrics/metrics_list` 序列化返回 API，再以 `source=scheduler_result_component_timing` 重发。相同 identity 的相同记录去重，冲突记录 fail-closed；缺 `cuda_ms` 仍可保留 wall 证据，但正式 CUDA metric 会因 count 不足失败。
+19. **SQLite 不覆盖**：`-06` 证明 2026.4 的 `nsys stats REPORT` 会在 report 同目录隐式生成 SQLite，导致后续显式 export 与“不覆盖已有 Nsight 产物”冲突。没有加 `--force-overwrite`；`f1b047942d` 改为先显式 export 到确认不存在的目标，再运行 stats 复用该 SQLite，并加静态回归测试锁定顺序。
 
 ## 风险与回滚
 
@@ -270,7 +274,7 @@ kubectl --context codex-minwm-test-phx2 apply \
 PVC：`minwm-s0-fusedops-h200-results-20260807`。每次尝试的根目录：
 
 ```text
-/results/attempts/<pod-name>/minwm-s0-fusedops-h200-20260807-06/s0-measurement/
+/results/attempts/<pod-name>/minwm-s0-fusedops-h200-20260807-07/s0-measurement/
 ├── baseline-summary.json
 ├── contract.txt
 ├── sp2/
