@@ -80,6 +80,21 @@ python3 -m pip install \
   --index-url https://flashinfer.ai/whl/cu130 \
   "flashinfer-jit-cache==0.6.15.post1+cu130" \
   --root-user-action=ignore
+# flashinfer-python 0.6.15 no longer publishes a matching standalone cubin
+# package. The old image's 0.6.14 module takes precedence over the aligned JIT
+# cache, so remove that obsolete optional package and verify the supported path.
+python3 -m pip uninstall -y flashinfer-cubin
+python3 - <<'PY'
+import importlib.util
+from importlib.metadata import version
+
+assert importlib.util.find_spec("flashinfer_cubin") is None
+assert version("flashinfer-python") == "0.6.15.post1"
+assert version("flashinfer-jit-cache").startswith("0.6.15.post1")
+import flashinfer  # noqa: E402, F401
+
+print("FLASHINFER_RUNTIME_CHECK=ok")
+PY
 python3 -m pip freeze --all > "${result_dir}/python-environment.txt"
 
 if [[ "${phase}" == "attention-probe" ]]; then
