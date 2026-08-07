@@ -179,6 +179,13 @@ for degree in (2, 4):
 print(json.dumps(summary, indent=2, sort_keys=True))
 PY
 
+if [[ -e "${RUN_ROOT}/STOP_BEFORE_FORMAL_AB" ]]; then
+  date --utc +%Y-%m-%dT%H:%M:%SZ \
+    | tee "${RUN_ROOT}/stopped-before-formal-ab.txt"
+  echo "MINWM_S3_STOPPED_BEFORE_FORMAL_AB results=${RUN_ROOT}"
+  exit 0
+fi
+
 measurement_root="${RUN_ROOT}/measurements"
 mkdir -p "${measurement_root}"
 for lane in 00 10 01 11; do
