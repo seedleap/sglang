@@ -33,6 +33,11 @@ from sglang.multimodal_gen.runtime.distributed.sp_shard_utils import (
 )
 from sglang.multimodal_gen.runtime.layers.attention import LocalAttention
 from sglang.multimodal_gen.runtime.layers.layernorm import tensor_parallel_rms_norm
+from sglang.multimodal_gen.runtime.layers.linear import (
+    ColumnParallelLinear,
+    MergedColumnParallelLinear,
+    ReplicatedLinear,
+)
 from sglang.multimodal_gen.runtime.layers.rotary_embedding import NDRotaryEmbedding
 from sglang.multimodal_gen.runtime.layers.usp import (
     _usp_input_all_to_all_qkv,
@@ -81,7 +86,63 @@ _MINWM_SEGMENT_COMPILE = _env_flag("MINWM_SEGMENT_COMPILE", True)
 _MINWM_CACHE_ROTATED_K = _env_flag("MINWM_CACHE_ROTATED_K", True)
 _MINWM_PRECOMPUTE_CACHE_ROPE = _env_flag("MINWM_PRECOMPUTE_CACHE_ROPE", True)
 _MINWM_CACHE_PACKED_METADATA = _env_flag("MINWM_CACHE_PACKED_METADATA", True)
+_MINWM_FUSED_QKV_PROJECTION = _env_flag("MINWM_FUSED_QKV_PROJECTION", False)
 _MINWM_ANNOUNCED_ATTENTION_BACKENDS: set[tuple[str, str]] = set()
+
+
+def _minwm_should_use_fused_qkv_projection(quant_config) -> bool:
+    # Quantized Q/K/V modules may carry independent scales and packed formats.
+    # Keep every such checkpoint on its existing, format-aware implementation.
+    return _MINWM_FUSED_QKV_PROJECTION and quant_config is None
+
+
+def _minwm_fused_qkv_param_names_mapping() -> dict:
+    """Map legacy self-attention Q/K/V checkpoint tensors into one parameter."""
+    mapping = dict(MinWMVideoConfig().param_names_mapping)
+    for shard_index, shard_name in enumerate(("q", "k", "v")):
+        # Native minWM keys first pass through the existing self_attn.* -> to_*
+        # rule and then this rule. Saved SGLang to_* keys match it directly.
+        mapping[rf"^blocks\.(\d+)\.to_{shard_name}\.(.*)$"] = (
+            r"blocks.\1.to_qkv.\2",
+            shard_index,
+            3,
+        )
+    return mapping
+
+
+def _minwm_qkv_load_state_dict_pre_hook(
+    module,
+    state_dict,
+    prefix,
+    _local_metadata,
+    _strict,
+    _missing_keys,
+    _unexpected_keys,
+    _error_msgs,
+) -> None:
+    """Make ordinary ``load_state_dict`` work across the fast-lane toggle."""
+    packed_prefix = f"{prefix}to_qkv."
+    split_prefixes = [f"{prefix}to_{name}." for name in ("q", "k", "v")]
+    for suffix in ("weight", "bias"):
+        packed_key = f"{packed_prefix}{suffix}"
+        split_keys = [f"{split_prefix}{suffix}" for split_prefix in split_prefixes]
+        if module.use_fused_qkv_projection:
+            if packed_key not in state_dict and all(
+                key in state_dict for key in split_keys
+            ):
+                state_dict[packed_key] = torch.cat(
+                    [state_dict.pop(key) for key in split_keys], dim=0
+                )
+        elif packed_key in state_dict and not any(
+            key in state_dict for key in split_keys
+        ):
+            packed = state_dict.pop(packed_key)
+            if packed.shape[0] % 3 != 0:
+                raise ValueError(
+                    f"Cannot split {packed_key} with shape {tuple(packed.shape)}"
+                )
+            for key, shard in zip(split_keys, packed.chunk(3, dim=0)):
+                state_dict[key] = shard
 
 
 class _MinWMUlyssesWorkspace:
@@ -799,6 +860,90 @@ class MinWMCausalTransformerBlock(CausalWanTransformerBlock):
     self_attention_cls = MinWMCausalSelfAttention
     cross_attention_cls = MinWMPackedCrossAttention
 
+    def __init__(
+        self,
+        dim: int,
+        ffn_dim: int,
+        num_heads: int,
+        local_attn_size: int = -1,
+        sink_size: int = 0,
+        qk_norm: str = "rms_norm_across_heads",
+        cross_attn_norm: bool = False,
+        eps: float = 1e-6,
+        added_kv_proj_dim: int | None = None,
+        supported_attention_backends=None,
+        prefix: str = "",
+        quant_config=None,
+    ) -> None:
+        super().__init__(
+            dim,
+            ffn_dim,
+            num_heads,
+            local_attn_size,
+            sink_size,
+            qk_norm,
+            cross_attn_norm,
+            eps,
+            added_kv_proj_dim,
+            supported_attention_backends,
+            prefix=prefix,
+            quant_config=quant_config,
+        )
+        self.use_fused_qkv_projection = False
+        if _minwm_should_use_fused_qkv_projection(quant_config):
+            projections = (self.to_q, self.to_k, self.to_v)
+            has_bias = all(projection.bias is not None for projection in projections)
+            no_bias = all(projection.bias is None for projection in projections)
+            qkv_prefix = f"{prefix}.to_qkv" if prefix else "to_qkv"
+            if (has_bias or no_bias) and all(
+                type(projection) is ReplicatedLinear for projection in projections
+            ):
+                self.to_qkv = ReplicatedLinear(
+                    dim,
+                    3 * dim,
+                    bias=has_bias,
+                    params_dtype=self.to_q.params_dtype,
+                    output_sizes=[dim, dim, dim],
+                    prefix=qkv_prefix,
+                )
+                self.use_fused_qkv_projection = has_bias or no_bias
+            elif (
+                (has_bias or no_bias)
+                and all(
+                    type(projection) is ColumnParallelLinear
+                    for projection in projections
+                )
+                and all(not projection.gather_output for projection in projections)
+            ):
+                self.to_qkv = MergedColumnParallelLinear(
+                    dim,
+                    [dim, dim, dim],
+                    bias=has_bias,
+                    gather_output=self.to_q.gather_output,
+                    params_dtype=self.to_q.params_dtype,
+                    prefix=qkv_prefix,
+                    tp_group=self.to_q.tp_group,
+                )
+                self.use_fused_qkv_projection = has_bias or no_bias
+
+            if self.use_fused_qkv_projection:
+                del self.to_q
+                del self.to_k
+                del self.to_v
+
+        self.register_load_state_dict_pre_hook(_minwm_qkv_load_state_dict_pre_hook)
+
+    def _project_qkv(
+        self, hidden_states: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if self.use_fused_qkv_projection:
+            qkv, _ = self.to_qkv(hidden_states)
+            return qkv.chunk(3, dim=-1)
+        query, _ = self.to_q(hidden_states)
+        key, _ = self.to_k(hidden_states)
+        value, _ = self.to_v(hidden_states)
+        return query, key, value
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -831,9 +976,7 @@ class MinWMCausalTransformerBlock(CausalWanTransformerBlock):
             self.norm1.eps,
         )
 
-        query, _ = self.to_q(norm_hidden_states)
-        key, _ = self.to_k(norm_hidden_states)
-        value, _ = self.to_v(norm_hidden_states)
+        query, key, value = self._project_qkv(norm_hidden_states)
         if self.tp_rmsnorm:
             query = tensor_parallel_rms_norm(query, self.norm_q)
             key = tensor_parallel_rms_norm(key, self.norm_k)
@@ -862,6 +1005,19 @@ class MinWMCausalTransformerBlock(CausalWanTransformerBlock):
             )
             qk_already_roped = kv_cache is None
         value = value.squeeze(1).unflatten(2, (self.local_num_heads, self.dim_head))
+        forward_batch = get_forward_context().forward_batch
+        if (
+            self.use_fused_qkv_projection
+            and forward_batch is not None
+            and getattr(forward_batch, "enable_sequence_shard", False)
+            and get_ulysses_parallel_world_size() > 1
+        ):
+            # A QKV GEMM produces three last-dimension views. Q/K normalization
+            # materializes contiguous outputs, while V needs this one explicit
+            # copy to keep the existing peer-first Triton pack on its fast path.
+            # Removing this copy is deliberately left to the separately measured
+            # 6b output-layout experiment.
+            value = value.contiguous()
         attn_output = self.attn1(
             query,
             key,
@@ -949,18 +1105,45 @@ class MinWMCausalTransformer3DModel(CausalWanTransformer3DModel):
         logger.info(
             "MinWM execution profile: attention_impl=%s "
             "packed_deterministic=%s segment_compile=%s cache_rotated_k=%s "
-            "precompute_cache_rope=%s cache_packed_metadata=%s",
+            "precompute_cache_rope=%s cache_packed_metadata=%s "
+            "fused_qkv_requested=%s",
             _MINWM_ATTENTION_IMPL,
             _MINWM_PACKED_ATTENTION_DETERMINISTIC,
             _MINWM_SEGMENT_COMPILE,
             _MINWM_CACHE_ROTATED_K,
             _MINWM_PRECOMPUTE_CACHE_ROPE,
             _MINWM_CACHE_PACKED_METADATA,
+            _MINWM_FUSED_QKV_PROJECTION,
         )
         deterministic = os.environ.get("MINWM_PARITY_DETERMINISTIC", "0")
         if deterministic.strip().lower() not in {"", "0", "false", "no", "off"}:
             torch.use_deterministic_algorithms(True)
         super().__init__(config, hf_config, quant_config)
+        fused_qkv_blocks = [block.use_fused_qkv_projection for block in self.blocks]
+        if any(fused_qkv_blocks) and not all(fused_qkv_blocks):
+            raise RuntimeError(
+                "MinWM QKV projection mode must be uniform across blocks"
+            )
+        self.use_fused_qkv_projection = bool(fused_qkv_blocks) and all(fused_qkv_blocks)
+        if self.use_fused_qkv_projection:
+            self.param_names_mapping = _minwm_fused_qkv_param_names_mapping()
+        elif _MINWM_FUSED_QKV_PROJECTION:
+            reason = (
+                "quantized weights"
+                if quant_config is not None
+                else "an unsupported projection module or gather layout"
+            )
+            logger.warning(
+                "MINWM_FUSED_QKV_PROJECTION requested with %s; using the "
+                "compatible three-projection fallback",
+                reason,
+            )
+        logger.info(
+            "MinWM QKV projection mode: %s",
+            "single-gemm-fast-lane"
+            if self.use_fused_qkv_projection
+            else "three-gemm-parity-fallback",
+        )
         self.sp_size = get_sp_world_size()
         ulysses_workspace = _MinWMUlyssesWorkspace() if self.sp_size > 1 else None
         d = self.hidden_size // self.num_attention_heads
@@ -1007,6 +1190,27 @@ class MinWMCausalTransformer3DModel(CausalWanTransformer3DModel):
                 f"2 * (action_kernel_size - 1) = {expected_history}"
             )
         self._install_parity_debug_hooks()
+
+    def preprocess_loaded_state_dict(self, weights):
+        """Accept saved fast-lane state dicts when loading the fallback model."""
+        if isinstance(weights, dict):
+            weights = weights.items()
+        if self.use_fused_qkv_projection:
+            yield from weights
+            return
+
+        for name, tensor in weights:
+            if name.endswith((".to_qkv.weight", ".to_qkv.bias")):
+                if tensor.shape[0] % 3 != 0:
+                    raise ValueError(
+                        f"Cannot split saved MinWM QKV tensor {name} with "
+                        f"shape {tuple(tensor.shape)}"
+                    )
+                stem, suffix = name.rsplit(".to_qkv.", 1)
+                for shard_name, shard in zip(("q", "k", "v"), tensor.chunk(3, dim=0)):
+                    yield f"{stem}.to_{shard_name}.{suffix}", shard
+                continue
+            yield name, tensor
 
     @lru_cache(maxsize=16)
     def _compute_sequence_shard_rope(
@@ -1359,6 +1563,30 @@ class MinWMCausalTransformer3DModel(CausalWanTransformer3DModel):
 
             module.register_forward_hook(hook)
 
+        def register_fused_qkv_detail(module: nn.Module) -> None:
+            for name in ("self_q", "self_k", "self_v"):
+                counters[name] = 0
+
+            def hook(_module, hook_args, output):
+                qkv = output[0] if isinstance(output, tuple) else output
+                outputs = qkv.chunk(3, dim=-1)
+                index = counters["self_q"]
+                if index < 2:
+                    torch.save(
+                        hook_args[0].detach().cpu(),
+                        dump_dir / f"self_q_input_{index:03d}.pt",
+                    )
+                if index == 0:
+                    q_weight = _module.weight.detach().chunk(3, dim=0)[0]
+                    torch.save(q_weight.cpu(), dump_dir / "self_q_weight.pt")
+                    if _module.bias is not None:
+                        q_bias = _module.bias.detach().chunk(3, dim=0)[0]
+                        torch.save(q_bias.cpu(), dump_dir / "self_q_bias.pt")
+                for name, tensor in zip(("self_q", "self_k", "self_v"), outputs):
+                    dump(name, tensor)
+
+            module.register_forward_hook(hook)
+
         block0 = self.blocks[0]
         block0._minwm_parity_dump_dir = dump_dir
         block0._minwm_parity_forward_index = 0
@@ -1368,9 +1596,6 @@ class MinWMCausalTransformer3DModel(CausalWanTransformer3DModel):
             "time_embed": self.condition_embedder.time_embedder,
             "time_projection": self.condition_embedder.time_modulation,
             "text_embed": self.condition_embedder.text_embedder,
-            "self_q": block0.to_q,
-            "self_k": block0.to_k,
-            "self_v": block0.to_v,
             "self_norm_q": block0.norm_q,
             "self_norm_k": block0.norm_k,
             "self_out": block0.to_out,
@@ -1383,6 +1608,16 @@ class MinWMCausalTransformer3DModel(CausalWanTransformer3DModel):
             "ffn": block0.ffn,
             "output_proj": self.proj_out,
         }
+        if block0.use_fused_qkv_projection:
+            register_fused_qkv_detail(block0.to_qkv)
+        else:
+            detail_modules.update(
+                {
+                    "self_q": block0.to_q,
+                    "self_k": block0.to_k,
+                    "self_v": block0.to_v,
+                }
+            )
         for detail_name, module in detail_modules.items():
             register_detail(detail_name, module)
 
