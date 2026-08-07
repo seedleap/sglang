@@ -67,6 +67,8 @@ from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.m
     MinWMCausalUniPCDenoisingStage,
     MinWMCausalVaeDecodingStage,
     MinWMChunkLatentPreparationStage,
+    _cuda_graph_block_verify_limit,
+    _first_cuda_graph_tensor_difference,
 )
 from sglang.multimodal_gen.runtime.pipelines_core.stages.realtime.vae import (
     CausalVaeDecodingStage,
@@ -2208,6 +2210,44 @@ def test_minwm_cuda_graph_disables_segment_compile(monkeypatch):
 
     assert minwm_module._MinWMSegmentCompile.get(operation, True) is operation
     assert minwm_module._MinWMSegmentCompile._compiled == {}
+
+
+@pytest.mark.parametrize(("raw_value", "expected"), [(None, 0), ("", 0), ("3", 3)])
+def test_minwm_cuda_graph_block_verify_limit(monkeypatch, raw_value, expected):
+    if raw_value is None:
+        monkeypatch.delenv("MINWM_CUDA_GRAPH_VERIFY_BLOCKS", raising=False)
+    else:
+        monkeypatch.setenv("MINWM_CUDA_GRAPH_VERIFY_BLOCKS", raw_value)
+
+    assert _cuda_graph_block_verify_limit() == expected
+
+
+@pytest.mark.parametrize("raw_value", ["-1", "true"])
+def test_minwm_cuda_graph_block_verify_limit_rejects_invalid_values(
+    monkeypatch, raw_value
+):
+    monkeypatch.setenv("MINWM_CUDA_GRAPH_VERIFY_BLOCKS", raw_value)
+
+    with pytest.raises(ValueError, match="non-negative integer"):
+        _cuda_graph_block_verify_limit()
+
+
+def test_minwm_cuda_graph_first_tensor_difference_reports_first_boundary():
+    graph_outputs = {
+        "block_00": torch.tensor([1.0, 2.0]),
+        "block_01": torch.tensor([3.0, 4.0]),
+        "forward": torch.tensor([5.0]),
+    }
+    eager_outputs = {
+        "block_00": torch.tensor([1.0, 2.0]),
+        "block_01": torch.tensor([3.0, 6.0]),
+        "forward": torch.tensor([9.0]),
+    }
+
+    difference = _first_cuda_graph_tensor_difference(graph_outputs, eager_outputs)
+
+    assert difference == {"name": "block_01", "mean_abs": 1.0, "max_abs": 2.0}
+    assert _first_cuda_graph_tensor_difference(graph_outputs, graph_outputs) is None
 
 
 def test_minwm_rotary_embedding_matches_main_explicit_formula():

@@ -91,6 +91,56 @@ def _cuda_graph_tensor_signature(value: torch.Tensor) -> tuple:
     return (value.shape, value.stride(), value.dtype, value.device)
 
 
+def _cuda_graph_block_verify_limit() -> int:
+    raw_value = os.environ.get("MINWM_CUDA_GRAPH_VERIFY_BLOCKS", "0").strip()
+    if not raw_value:
+        return 0
+    try:
+        value = int(raw_value)
+    except ValueError as exc:
+        raise ValueError(
+            "MINWM_CUDA_GRAPH_VERIFY_BLOCKS must be a non-negative integer"
+        ) from exc
+    if value < 0:
+        raise ValueError(
+            "MINWM_CUDA_GRAPH_VERIFY_BLOCKS must be a non-negative integer"
+        )
+    return value
+
+
+def _first_cuda_graph_tensor_difference(
+    graph_outputs: dict[str, torch.Tensor],
+    eager_outputs: dict[str, torch.Tensor],
+) -> dict[str, Any] | None:
+    if tuple(graph_outputs) != tuple(eager_outputs):
+        return {
+            "name": "output_structure",
+            "graph_names": tuple(graph_outputs),
+            "eager_names": tuple(eager_outputs),
+        }
+    for name, graph_output in graph_outputs.items():
+        eager_output = eager_outputs[name]
+        if (
+            graph_output.shape != eager_output.shape
+            or graph_output.dtype != eager_output.dtype
+            or graph_output.device != eager_output.device
+        ):
+            return {
+                "name": name,
+                "graph_signature": _cuda_graph_tensor_signature(graph_output),
+                "eager_signature": _cuda_graph_tensor_signature(eager_output),
+            }
+        if torch.equal(graph_output, eager_output):
+            continue
+        difference = (graph_output.float() - eager_output.float()).abs()
+        return {
+            "name": name,
+            "mean_abs": difference.mean().item(),
+            "max_abs": difference.max().item(),
+        }
+    return None
+
+
 class _MinWMCudaGraphRunner:
     """One full-DiT graph bound to a saturated MinWM session cache."""
 
@@ -105,7 +155,14 @@ class _MinWMCudaGraphRunner:
         self.capture_stream = None
         self.pool = None
         self.capture_dependencies = None
+        self.block_outputs = {}
+        self.block_verify_limit = _cuda_graph_block_verify_limit()
+        self.block_verify_count = 0
         self.replay_count = 0
+
+    @property
+    def should_verify_blocks(self) -> bool:
+        return self.block_verify_count < self.block_verify_limit
 
     def _copy_inputs(
         self,
@@ -847,6 +904,23 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
         self._parity_forward_index = index + 1
         return output
 
+    def _register_cuda_graph_block_hooks(
+        self, outputs: dict[str, torch.Tensor]
+    ) -> list:
+        handles = []
+        for block_index, block in enumerate(self.transformer.blocks):
+
+            def save_output(_module, _args, output, *, name=f"block_{block_index:02d}"):
+                outputs[name] = output.detach().clone()
+
+            handles.append(block.register_forward_hook(save_output))
+        return handles
+
+    @staticmethod
+    def _remove_cuda_graph_block_hooks(handles: list) -> None:
+        for handle in handles:
+            handle.remove()
+
     def _minwm_cuda_graph_key(
         self,
         *,
@@ -988,6 +1062,7 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
                 self._minwm_cuda_graph_runner = _MinWMCudaGraphRunner(graph_key)
             runner = self._minwm_cuda_graph_runner
             action = pos_cond_kwargs["action"]
+            verify_blocks = runner.should_verify_blocks
 
             if runner.graph is None:
                 # Non-checkpoint action buffers start on CPU so meta-device model
@@ -1027,21 +1102,89 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
             else:
                 # Replay does not execute Python, so this callable is unused.
                 capture_forward = None
+                if verify_blocks:
+                    attention_plan = self.transformer.prepare_causal_attention_plan(
+                        latent_model_input,
+                        kv_cache=kv_cache,
+                        current_start=current_start_tokens,
+                        start_frame=start_frame,
+                    )
 
             validate_runtime_action = self.transformer.action_in.validate_runtime_action
             self.transformer.action_in.validate_runtime_action = False
             try:
-                graph_output = runner.run(
-                    latent=latent_model_input,
-                    prompt=prompt_embeds,
-                    timestep=timestep,
-                    action=action,
-                    capture_forward=capture_forward,
-                )
+                capture_handles = []
+                if runner.graph is None and runner.block_verify_limit:
+                    capture_handles = self._register_cuda_graph_block_hooks(
+                        runner.block_outputs
+                    )
+                try:
+                    graph_output = runner.run(
+                        latent=latent_model_input,
+                        prompt=prompt_embeds,
+                        timestep=timestep,
+                        action=action,
+                        capture_forward=capture_forward,
+                    )
+                finally:
+                    self._remove_cuda_graph_block_hooks(capture_handles)
                 # The captured graph owns a single static output allocation.
                 # Downstream scheduler work can still consume it when the next
                 # denoising replay starts, so hand out an independent snapshot.
-                return graph_output.clone()
+                graph_output = graph_output.clone()
+                if not verify_blocks:
+                    return graph_output
+
+                eager_block_outputs = {}
+                eager_handles = self._register_cuda_graph_block_hooks(
+                    eager_block_outputs
+                )
+                try:
+                    eager_output = self.transformer(
+                        latent_model_input,
+                        prompt_embeds,
+                        timestep,
+                        kv_cache=kv_cache,
+                        crossattn_cache=crossattn_cache,
+                        current_start=current_start_tokens,
+                        start_frame=start_frame,
+                        action=action,
+                        precomputed_attention_plan=attention_plan,
+                    )
+                finally:
+                    self._remove_cuda_graph_block_hooks(eager_handles)
+                graph_block_outputs = dict(runner.block_outputs)
+                graph_block_outputs["forward"] = graph_output
+                eager_block_outputs["forward"] = eager_output
+                difference = _first_cuda_graph_tensor_difference(
+                    graph_block_outputs, eager_block_outputs
+                )
+                runner.block_verify_count += 1
+                if difference is not None:
+                    logger.error(
+                        "MinWM CUDA graph first difference rank=%d chunk=%d "
+                        "step=%d replay=%d detail=%s",
+                        get_sp_parallel_rank(),
+                        int(batch.block_idx),
+                        current_timestep,
+                        runner.replay_count,
+                        difference,
+                    )
+                    raise AssertionError(
+                        f"MinWM CUDA graph block verification failed: {difference}"
+                    )
+                logger.warning(
+                    "MinWM CUDA graph block verification rank=%d chunk=%d "
+                    "step=%d replay=%d exact=True boundaries=%d check=%d/%d",
+                    get_sp_parallel_rank(),
+                    int(batch.block_idx),
+                    current_timestep,
+                    runner.replay_count,
+                    len(graph_block_outputs),
+                    runner.block_verify_count,
+                    runner.block_verify_limit,
+                )
+                return graph_output
             finally:
                 self.transformer.action_in.validate_runtime_action = (
                     validate_runtime_action
