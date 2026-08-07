@@ -387,6 +387,15 @@ time、与 compute kernel 的区间交集及 buffer slot/generation。
   `/results/minwm-async-a2a-contract-tiled-h200-20260807-03/`（PVC
   `minwm-async-a2a-contract-results-20260807`）。transport/lifetime 门禁通过，但完整模型 parity、
   wall/FPS 与 Nsight 尚未验收。
+- 完整模型小正确性：提交 `2aa64b6fb2` 让 quality runner 按实验类型显式设置 input/output
+  开关。job `minwm-async-a2a-quality-tiled-smoke-h200-20260807-01` 在同节点 2×H200、
+  checkpoint `global_step_003200/ema_student/model.pt`、1248×704、5 秒、SP2、seed 42 下各跑
+  1 个 baseline/candidate 请求；candidate 合同为 input async=0、output async=1、IPC、tiles=4。
+  两边均生成 129 帧，视频 bitwise exact，rank0/rank1 各 69 个 baseline tensor probe 全部
+  bitwise exact（max abs/RMSE 均 0）。结果：
+  `/results/attempts/minwm-async-a2a-quality-tiled-smoke-h200-20260807-01-6jb8x/`
+  `minwm-async-a2a-quality-tiled-smoke-h200-20260807-01/async-a2a-quality/`。小正确性门通过；
+  SP4、连续 10 请求与 CUDA Graph 完整模型仍留待性能预检达到继续门槛后执行。
 
 ### 2026-08-07：候选 1——QK A2A 与 V projection 重叠
 
