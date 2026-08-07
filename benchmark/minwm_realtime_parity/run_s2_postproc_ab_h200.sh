@@ -24,6 +24,10 @@ KV_CACHE_NUM_FRAMES="${MINWM_S0_KV_CACHE_NUM_FRAMES:-45}"
 }
 [[ -f "${MODEL_DIR}/minwm_conversion_manifest.json" ]]
 [[ -f "${CASES}" ]]
+[[ ! -e "${MINWM_RESULTS_ROOT%/}/invalid" ]] || {
+  echo "Refusing to aggregate or overwrite an invalidated attempt" >&2
+  exit 2
+}
 grep -q -- '--require-complete-stage-trace' "${SCRIPT_DIR}/run_s0_measurement.sh"
 
 mkdir -p "${QUALITY_ROOT}"
