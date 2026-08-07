@@ -34,6 +34,42 @@ def _reference_rope(x, cos, sin):
     )
 
 
+def _assert_bitwise_exact(actual, expected, name):
+    assert actual.shape == expected.shape, name
+    assert actual.dtype == expected.dtype, name
+    assert actual.dtype in {torch.bfloat16, torch.float16}, name
+    actual_bits = actual.view(torch.int16).to(torch.int32) & 0xFFFF
+    expected_bits = expected.view(torch.int16).to(torch.int32) & 0xFFFF
+    mismatch = actual_bits != expected_bits
+    mismatch_count = int(mismatch.sum().item())
+    if mismatch_count == 0:
+        return
+
+    def ordered(bits):
+        magnitude = bits & 0x7FFF
+        return torch.where(bits & 0x8000 != 0, 0x8000 - magnitude, 0x8000 + magnitude)
+
+    ulp = (ordered(actual_bits) - ordered(expected_bits)).abs()
+    absolute = (actual.float() - expected.float()).abs()
+    first_flat = int(mismatch.flatten().nonzero()[0].item())
+    first_index = []
+    remaining = first_flat
+    for size in reversed(actual.shape):
+        first_index.append(remaining % size)
+        remaining //= size
+    first_index.reverse()
+    raise AssertionError(
+        f"{name}: mismatch_count={mismatch_count}, "
+        f"mismatch_fraction={mismatch_count / actual.numel():.9f}, "
+        f"max_abs={absolute[mismatch].max().item():.9g}, "
+        f"max_ulp={ulp[mismatch].max().item()}, "
+        f"first_index={tuple(first_index)}, "
+        f"first_actual={actual.flatten()[first_flat].item():.9g}, "
+        f"first_expected={expected.flatten()[first_flat].item():.9g}, "
+        f"first_ulp={ulp.flatten()[first_flat].item()}"
+    )
+
+
 @pytest.mark.parametrize(
     ("shape", "world_size"),
     [
@@ -80,7 +116,7 @@ def test_fused_qk_rmsnorm_pack_peer_first_is_bit_exact(shape, world_size):
         local_heads,
         3 * head_dim,
     )
-    assert torch.equal(output, expected)
+    _assert_bitwise_exact(output, expected, "pre_qkv")
 
 
 @pytest.mark.parametrize(
@@ -127,10 +163,10 @@ def test_fused_rope_cache_update_first_block_is_bit_exact(
         rotate_all_keys=True,
     )
 
-    assert torch.equal(output, expected_query)
-    assert torch.equal(cache_k, key)
-    assert torch.equal(cache_v, value)
-    assert torch.equal(rotated_k, expected_key)
+    _assert_bitwise_exact(output, expected_query, "first_query")
+    _assert_bitwise_exact(cache_k, key, "first_raw_key")
+    _assert_bitwise_exact(cache_v, value, "first_raw_value")
+    _assert_bitwise_exact(rotated_k, expected_key, "first_rotated_key")
 
 
 def test_fused_rope_cache_update_append_and_recompute_are_bit_exact():
@@ -183,10 +219,10 @@ def test_fused_rope_cache_update_append_and_recompute_are_bit_exact():
         old_tokens,
         rotate_all_keys=True,
     )
-    assert torch.equal(output, expected_query)
-    assert torch.equal(cache_k, expected_cache_k)
-    assert torch.equal(cache_v, expected_cache_v)
-    assert torch.equal(rotated_k, expected_rotated)
+    _assert_bitwise_exact(output, expected_query, "append_query")
+    _assert_bitwise_exact(cache_k, expected_cache_k, "append_raw_key")
+    _assert_bitwise_exact(cache_v, expected_cache_v, "append_raw_value")
+    _assert_bitwise_exact(rotated_k, expected_rotated, "append_rotated_key")
 
     replacement_qkv = torch.randn_like(qkv)
     replacement_query, replacement_key, replacement_value = replacement_qkv.chunk(
@@ -197,6 +233,9 @@ def test_fused_rope_cache_update_append_and_recompute_are_bit_exact():
     expected_rotated[:, old_tokens:] = _reference_rope(
         replacement_key, query_cos, query_sin
     )
+    cache_k_before_recompute = cache_k.clone()
+    cache_v_before_recompute = cache_v.clone()
+    rotated_k_before_recompute = rotated_k.clone()
     recompute_output = fused_rope_cache_update(
         replacement_query,
         replacement_key,
@@ -211,10 +250,32 @@ def test_fused_rope_cache_update_append_and_recompute_are_bit_exact():
         old_tokens,
         rotate_all_keys=False,
     )
-    assert torch.equal(
+    _assert_bitwise_exact(
         recompute_output,
         _reference_rope(replacement_query, query_cos, query_sin),
+        "recompute_query",
     )
-    assert torch.equal(cache_k, expected_cache_k)
-    assert torch.equal(cache_v, expected_cache_v)
-    assert torch.equal(rotated_k, expected_rotated)
+    _assert_bitwise_exact(cache_k, expected_cache_k, "recompute_raw_key")
+    _assert_bitwise_exact(cache_v, expected_cache_v, "recompute_raw_value")
+    _assert_bitwise_exact(rotated_k, expected_rotated, "recompute_rotated_key")
+
+    repeat_output = fused_rope_cache_update(
+        replacement_query,
+        replacement_key,
+        replacement_value,
+        cache_k_before_recompute,
+        cache_v_before_recompute,
+        rotated_k_before_recompute,
+        query_cos,
+        query_sin,
+        key_cos,
+        key_sin,
+        old_tokens,
+        rotate_all_keys=False,
+    )
+    _assert_bitwise_exact(repeat_output, recompute_output, "recompute_query_repeat")
+    _assert_bitwise_exact(cache_k_before_recompute, cache_k, "recompute_key_repeat")
+    _assert_bitwise_exact(cache_v_before_recompute, cache_v, "recompute_value_repeat")
+    _assert_bitwise_exact(
+        rotated_k_before_recompute, rotated_k, "recompute_rotated_repeat"
+    )
