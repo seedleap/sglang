@@ -21,6 +21,12 @@ from measurement import (  # noqa: E402
 )
 from measurement_tool import aggregate  # noqa: E402
 from nsys_metrics import merge_nsys_metrics  # noqa: E402
+from benchmark_realtime_throughput import (  # noqa: E402
+    missing_required_stage_trace,
+    record_required_stage_trace,
+    required_stage_trace_is_complete,
+    required_stage_trace_chunks,
+)
 
 
 def _latency(value: float) -> dict:
@@ -172,6 +178,51 @@ def test_stage_trace_values_selects_source_and_chunk_window() -> None:
         measured_indices={20},
         component="minwm_denoising",
     ) == [589.0]
+
+
+def test_required_stage_trace_waits_for_wall_and_profiler_on_cuda() -> None:
+    required = required_stage_trace_chunks("profiler_on")
+    assert len(required) == 4
+    traces = [
+        {
+            "event": "server.model_denoise_complete",
+            "source": "scheduler_result_metrics",
+            "chunk_index": 9,
+        },
+        {
+            "event": "server.model_denoise_complete",
+            "component": "minwm_denoising",
+            "chunk_index": 9,
+        },
+        {
+            "event": "server.vae_decode_complete",
+            "source": "scheduler_result_metrics",
+            "chunk_index": 9,
+        },
+        {
+            "event": "server.vae_decode_complete",
+            "component": "vae_decoder",
+            "chunk_index": 9,
+        },
+    ]
+    for trace in traces:
+        record_required_stage_trace(required, trace)
+    assert all(indices == {9} for indices in required.values())
+
+    profiler_off = required_stage_trace_chunks("profiler_off")
+    assert len(profiler_off) == 2
+
+
+def test_required_stage_trace_rejects_equal_length_with_out_of_range_index() -> None:
+    required = required_stage_trace_chunks("profiler_off")
+    expected = {0, 1}
+    for observed in required.values():
+        observed.update({0, 2})
+    assert required_stage_trace_is_complete(required, expected) is False
+    diagnostic = missing_required_stage_trace(required, expected)
+    assert len(diagnostic) == 2
+    for detail in diagnostic.values():
+        assert detail == {"missing": [1], "unexpected": [2]}
 
 
 def _create_nsys_fixture(

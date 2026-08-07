@@ -179,7 +179,8 @@ client_common_args() {
     --fast-lane \
     --checkpoint-id global_step_003200/ema_student/model.pt \
     --checkpoint-step 3200 \
-    --kv-cache-num-frames "${KV_CACHE_NUM_FRAMES}"
+    --kv-cache-num-frames "${KV_CACHE_NUM_FRAMES}" \
+    --require-complete-stage-trace
 }
 
 run_client() {
