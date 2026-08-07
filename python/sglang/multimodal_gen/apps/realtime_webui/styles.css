@@ -274,6 +274,7 @@ button:focus-visible {
 .stage {
   position: relative;
   display: grid;
+  container-type: inline-size;
   grid-template-rows: auto auto auto auto auto;
   align-self: start;
   justify-self: center;
@@ -516,6 +517,21 @@ button:focus-visible {
 #stageLatencyText { min-width: 120px; }
 
 @media (max-width: 1180px) {
+  .topbar {
+    flex-wrap: wrap;
+    height: auto;
+    min-height: 44px;
+    padding: 8px 14px;
+    row-gap: 7px;
+  }
+  .topbar-spacer { display: none; }
+  .preview-scale-control { flex-basis: 170px; min-width: 170px; }
+  #outputSizeText { min-width: 156px; }
+  #theoreticalFpsText { min-width: 100px; }
+  #stageLatencyText { min-width: 108px; }
+}
+
+@container (max-width: 1180px) {
   .topbar {
     flex-wrap: wrap;
     height: auto;
