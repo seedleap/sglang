@@ -34,13 +34,19 @@ def test_wrapper_keeps_post_validation_failure_lane_scoped() -> None:
     validate = "--require-complete-stable-nsys"
     clear = 'CURRENT_LANE_DIR=""'
     start = text.index(scoped)
-    mkdir = 'mkdir -p "${CURRENT_LANE_DIR}"'
-    assert start < text.index(mkdir, start) < text.index(run, start)
-    assert text.index(run, start) < text.index(validate, start)
+    run_position = text.index(run, start)
+    assert start < run_position
+    assert 'mkdir -p "${CURRENT_LANE_DIR}"' not in text[start:run_position]
+    assert run_position < text.index(validate, start)
     assert text.index(validate, start) < text.index(clear, start)
+    preflight = 'CURRENT_LANE_DIR="${preflight_dir}"'
+    assert text.index(preflight) < text.index(scoped)
+    assert text.index(preflight) < text.index(
+        'mkdir -p "${CURRENT_LANE_DIR}"', text.index(preflight)
+    )
     assert 'CURRENT_LANE_DIR="${RESULT_ROOT}/nsys-comparison"' in text
     comparison = text.index('CURRENT_LANE_DIR="${RESULT_ROOT}/nsys-comparison"')
-    assert comparison < text.index(mkdir, comparison)
+    assert comparison < text.index('mkdir -p "${CURRENT_LANE_DIR}"', comparison)
 
 
 def test_profiler_on_marker_excludes_only_failed_variant(tmp_path: Path) -> None:

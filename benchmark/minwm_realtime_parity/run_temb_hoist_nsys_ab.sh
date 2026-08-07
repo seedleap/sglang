@@ -150,8 +150,9 @@ run_variant() {
   local variant_work_root="/work/minwm-realtime/${variant_run_id}"
   local variant_result_root="${MINWM_RESULTS_ROOT%/}/${variant_run_id}/s0-measurement"
   local profile_dir="${variant_result_root}/sp2/profiler-on"
+  local preflight_dir="${RESULT_ROOT}/${variant}-preflight"
 
-  CURRENT_LANE_DIR="${profile_dir}"
+  CURRENT_LANE_DIR="${preflight_dir}"
   mkdir -p "${CURRENT_LANE_DIR}"
   mkdir -p "${variant_work_root}"
   if [[ -e "${variant_work_root}/sglang-model" ]]; then
@@ -163,6 +164,9 @@ run_variant() {
   export MINWM_RUN_ID="${variant_run_id}"
   export MINWM_S0_RESUME_PROFILER_OFF_ROOT="${source_root}"
   export MINWM_HOIST_TIMESTEP_MODULATION="${hoist}"
+  # S0 owns creation and failure markers under its canonical result root. Do not
+  # pre-create profile_dir: prepare_result_root treats any content as a stale run.
+  CURRENT_LANE_DIR="${profile_dir}"
   bash "${SCRIPT_DIR}/run_s0_measurement.sh"
   python3 "${SCRIPT_DIR}/measurement_tool.py" validate \
     "${profile_dir}/measurement.json" \
