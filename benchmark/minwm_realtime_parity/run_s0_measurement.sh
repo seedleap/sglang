@@ -405,12 +405,12 @@ run_profiler_on() {
   stop_server
 
   [[ -f "${report}" ]]
-  nsys stats --report cuda_api_sum,cuda_gpu_kern_sum "${report}" \
-    > "${profile_dir}/nsys-stats.txt"
   nsys export \
     --type=sqlite \
     --output="${sqlite}" \
     "${report}"
+  nsys stats --report cuda_api_sum,cuda_gpu_kern_sum "${report}" \
+    > "${profile_dir}/nsys-stats.txt"
   python3 "${SCRIPT_DIR}/measurement_tool.py" merge-nsys \
     --result "${profile_dir}/client.json" \
     --sqlite "${sqlite}" \

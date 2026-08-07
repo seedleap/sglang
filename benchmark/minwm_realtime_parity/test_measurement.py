@@ -752,3 +752,13 @@ def test_lane_marker_does_not_invalidate_sibling_lane(tmp_path: Path) -> None:
 
     (root.parent / "invalid-marker-root.json").write_text("{}", encoding="utf-8")
     assert _is_invalid_result(valid_off) is True
+
+
+def test_runner_exports_sqlite_before_nsys_stats() -> None:
+    runner = (
+        Path(__file__).with_name("run_s0_measurement.sh").read_text(encoding="utf-8")
+    )
+    export_offset = runner.index("  nsys export ")
+    stats_offset = runner.index("  nsys stats ")
+    assert export_offset < stats_offset
+    assert "--force-overwrite" not in runner
