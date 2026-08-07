@@ -396,6 +396,17 @@ time、与 compute kernel 的区间交集及 buffer slot/generation。
   `/results/attempts/minwm-async-a2a-quality-tiled-smoke-h200-20260807-01-6jb8x/`
   `minwm-async-a2a-quality-tiled-smoke-h200-20260807-01/async-a2a-quality/`。小正确性门通过；
   SP4、连续 10 请求与 CUDA Graph 完整模型仍留待性能预检达到继续门槛后执行。
+- profiler-off tiles=4 预检：job
+  `minwm-async-a2a-perf-preflight-tiled-h200-20260807-01` 在同节点按
+  `candidate→baseline→baseline→candidate`，每位置 warmup 5、测量 20 chunk。两 lane 所有
+  核心指标 CV 均低于 `1.43%`。baseline/candidate Client FPS median
+  `12.985736→10.319042`（`-20.536%`），DiT wall `712.969→1021.229 ms`（性能
+  `-43.236%`），chunk wall `1266.475→1602.825 ms`（性能 `-26.558%`），scheduler FPS
+  `13.003228→10.344259`（`-20.449%`）。结果：
+  `/results/attempts/minwm-async-a2a-perf-preflight-tiled-h200-20260807-01-6l2hk/`
+  `minwm-async-a2a-perf-preflight-tiled-h200-20260807-01/async-a2a-abba/`。三项主指标
+  稳定同向恶化，tiles=4 **FAIL/淘汰**；按预声明门禁不采 Nsight。最后只评估 tiles=2 的
+  额外 FA 调用下界；若仍低于 baseline，则当前单请求 query tiling 设计族整体结束。
 
 ### 2026-08-07：候选 1——QK A2A 与 V projection 重叠
 
@@ -435,6 +446,23 @@ time、与 compute kernel 的区间交集及 buffer slot/generation。
 - 结论：未验收；下一步绘制精确调用依赖并测出真正可用的 GPU overlap 窗口。
 
 ## 偏离原认知
+
+### 2026-08-07：query 独立性成立，但把 FA4 拆成四次远大于可隐藏的 output A2A
+
+- 原认知：非 causal attention 的 query 行数学独立，拆成 4 个 query tile 后可把前 3 个
+  reverse A2A 隐藏在后续 attention 中；理想只暴露末 tile，可能抵消 collective 增量。
+- 实际证据：完整模型视频与 138 个 rank/probe tensor bitwise exact，说明依赖和布局判断正确；
+  但 profiler-off 四位置中 Client FPS `-20.536%`、DiT `-43.236%`、chunk wall
+  `-26.558%`，且两 lane CV 均通过。候选 1 的精确 trace 已给出 baseline output IPC+依赖边界
+  约 `56.998 ms/chunk`，而 tiles=4 的 DiT 增量约 `308.260 ms/chunk`，即使把旧 output
+  A2A 全部隐藏也不可能回本。
+- 根因：FA4 的 query tiling改变 kernel 形状，并把每层一次 attention launch/调度拆为四次；
+  30 blocks×每 chunk 多次 DMD forward 的额外 kernel/低效形状远超可隐藏通信预算。数学可分不
+  等于实现成本可忽略。
+- 决策：tiles=4 淘汰且不采 Nsight，不把“launch→wait 中有 attention”当性能通过。只再测
+  最小 tiles=2 边界；若仍失败，公开 FA API 下的 query-tiling 族结束，下一可执行方向必须是
+  单次 attention kernel 内的分段 epilogue/peer publish，或 scheduler/cache 隔离后的跨请求
+  wavefront，而不是继续增加 FA 调用数。
 
 ### 2026-08-07：同一 comm stream 和本 rank 在途限制都不能保护 peer staging 消费
 
