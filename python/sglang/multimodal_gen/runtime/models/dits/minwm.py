@@ -81,6 +81,11 @@ def _env_flag(name: str, default: bool) -> bool:
     return value.strip().lower() not in {"", "0", "false", "no", "off"}
 
 
+def _env_int(name: str, default: int) -> int:
+    value = os.environ.get(name)
+    return default if value is None else int(value)
+
+
 _MINWM_ATTENTION_IMPL = os.environ.get("MINWM_ATTENTION_IMPL", "packed").strip().lower()
 _MINWM_PACKED_ATTENTION_DETERMINISTIC = _env_flag(
     "MINWM_PACKED_ATTENTION_DETERMINISTIC", True
@@ -92,6 +97,7 @@ _MINWM_CACHE_PACKED_METADATA = _env_flag("MINWM_CACHE_PACKED_METADATA", True)
 _MINWM_FUSED_POST_A2A_ROPE_CACHE = _env_flag("MINWM_FUSED_POST_A2A_ROPE_CACHE", False)
 _MINWM_ASYNC_A2A = _env_flag("MINWM_ASYNC_A2A", False)
 _MINWM_ASYNC_A2A_OUTPUT = _env_flag("MINWM_ASYNC_A2A_OUTPUT", False)
+_MINWM_ASYNC_A2A_OUTPUT_TILES = _env_int("MINWM_ASYNC_A2A_OUTPUT_TILES", 1)
 _MINWM_ASYNC_A2A_BACKEND = (
     os.environ.get("MINWM_ASYNC_A2A_BACKEND", "auto").strip().lower()
 )
@@ -666,6 +672,75 @@ def _minwm_packed_varlen_attention(
     return output.reshape(batch_size, query_length, num_heads, head_dim)
 
 
+def _minwm_output_attention_query_tile(
+    query: torch.Tensor,
+    *,
+    world_size: int,
+    tile_count: int,
+    tile_index: int,
+) -> torch.Tensor:
+    """Pack the same local subsequence from every Ulysses destination.
+
+    Input A2A orders query rows destination-major. Keeping that ordering inside
+    each tile preserves the equal-split contract of reverse A2A.
+    """
+    if query.ndim != 4 or world_size <= 1 or tile_count <= 1:
+        raise ValueError("invalid MinWM output attention tile geometry")
+    if tile_index < 0 or tile_index >= tile_count:
+        raise ValueError("MinWM output attention tile index is out of range")
+    if query.shape[1] % world_size:
+        raise ValueError("MinWM output attention query is not destination-uniform")
+    local_sequence = query.shape[1] // world_size
+    if local_sequence % tile_count:
+        raise ValueError("MinWM local sequence is not divisible by output tiles")
+    tile_sequence = local_sequence // tile_count
+    tile_start = tile_index * tile_sequence
+    return torch.cat(
+        [
+            query[
+                :,
+                destination * local_sequence + tile_start : destination * local_sequence
+                + tile_start
+                + tile_sequence,
+            ]
+            for destination in range(world_size)
+        ],
+        dim=1,
+    ).contiguous()
+
+
+def _minwm_restore_output_attention_order(
+    tile_outputs: list[torch.Tensor],
+    *,
+    world_size: int,
+) -> torch.Tensor:
+    """Undo tile-major packing for parity/debug output only."""
+    if not tile_outputs or world_size <= 1:
+        raise ValueError("invalid MinWM output attention tile outputs")
+    tile_global_sequence = tile_outputs[0].shape[1]
+    if tile_global_sequence % world_size:
+        raise ValueError("MinWM output tile is not destination-uniform")
+    tile_sequence = tile_global_sequence // world_size
+    if any(output.shape != tile_outputs[0].shape for output in tile_outputs[1:]):
+        raise ValueError("MinWM output attention tiles must have equal shapes")
+    return torch.cat(
+        [
+            torch.cat(
+                [
+                    output[
+                        :,
+                        destination * tile_sequence : (destination + 1) * tile_sequence,
+                    ]
+                    for output in tile_outputs
+                ],
+                dim=1,
+            )
+            for destination in range(world_size)
+        ],
+        dim=1,
+    )
+
+
 @lru_cache(maxsize=128)
 def _minwm_uniform_cu_seqlens(
     batch_size: int,
@@ -778,6 +853,120 @@ class MinWMCausalSelfAttention(CausalWanSelfAttention):
             backend=_MINWM_ASYNC_A2A_BACKEND,
             release=release,
         )
+
+    @torch.compiler.disable
+    def _tiled_attention_output_a2a(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        *,
+        workspace: _MinWMUlyssesWorkspace,
+        tile_count: int,
+        keep_attention_output: bool,
+    ) -> tuple[torch.Tensor, torch.Tensor | None] | None:
+        """Pipeline query-tiled attention with reverse output A2A.
+
+        All leases are acquired before the first collective. This makes an
+        unavailable capture buffer a safe fallback. After a collective is
+        posted, every launched handle is retired before an error escapes.
+        """
+        world_size = get_ulysses_parallel_world_size()
+        if (
+            tile_count <= 1
+            or world_size <= 1
+            or query.shape[1] % world_size
+            or (query.shape[1] // world_size) % tile_count
+        ):
+            return None
+        capturing = torch.cuda.is_current_stream_capturing()
+        if not _usp_async_backend_available(
+            _MINWM_ASYNC_A2A_BACKEND, capturing=capturing
+        ):
+            return None
+
+        tile_numel = query.numel() // tile_count
+        leases = []
+        for tile_index in range(tile_count):
+            lease = workspace.acquire(f"output_tile_{tile_index}", query, tile_numel)
+            if lease is None:
+                for *_, release in leases:
+                    release()
+                return None
+            leases.append(lease)
+
+        handles: list[_UlyssesA2AHandle] = []
+        attention_tiles: list[torch.Tensor] = []
+
+        def retire_launched() -> None:
+            for handle in handles:
+                if handle.consumed:
+                    continue
+                try:
+                    _usp_wait_all_to_all(handle)
+                except Exception:
+                    logger.exception("Failed to retire MinWM output tile A2A")
+
+        for tile_index, lease in enumerate(leases):
+            send, recv, comm_stream, events, release = lease
+            try:
+                tile_query = _minwm_output_attention_query_tile(
+                    query,
+                    world_size=world_size,
+                    tile_count=tile_count,
+                    tile_index=tile_index,
+                )
+                with _minwm_nvtx_range(
+                    f"attention_output_tile_{tile_index}", tile_query
+                ):
+                    tile_output = _minwm_packed_varlen_attention(tile_query, key, value)
+            except Exception:
+                release()
+                for *_, unused_release in leases[tile_index + 1 :]:
+                    unused_release()
+                retire_launched()
+                raise
+            attention_tiles.append(tile_output)
+            try:
+                with _minwm_nvtx_range(
+                    f"output_a2a_tile_launch_{tile_index}", tile_output
+                ):
+                    handle = _usp_begin_output_all_to_all(
+                        tile_output,
+                        head_dim=2,
+                        input_buffer=send,
+                        output_buffer=recv,
+                        comm_stream=comm_stream,
+                        events=events,
+                        backend=_MINWM_ASYNC_A2A_BACKEND,
+                        release=release,
+                    )
+            except Exception:
+                for *_, unused_release in leases[tile_index + 1 :]:
+                    unused_release()
+                retire_launched()
+                raise
+            handles.append(handle)
+
+        local_tiles = []
+        for tile_index, handle in enumerate(handles):
+            try:
+                with _minwm_nvtx_range(
+                    f"output_a2a_tile_wait_{tile_index}", handle.output
+                ):
+                    local_tiles.append(_usp_wait_all_to_all(handle))
+            except Exception:
+                retire_launched()
+                raise
+        local_output = torch.cat(local_tiles, dim=1)
+        attention_output = (
+            _minwm_restore_output_attention_order(
+                attention_tiles, world_size=world_size
+            )
+            if keep_attention_output
+            else None
+        )
+        return local_output, attention_output
 
     def forward(
         self,
@@ -966,29 +1155,62 @@ class MinWMCausalSelfAttention(CausalWanSelfAttention):
                 attention_key.detach().cpu(),
                 parity_dump_dir / f"self_k_roped_{parity_index:03d}.pt",
             )
-        with _minwm_nvtx_range("attention", roped_query):
-            if _MINWM_ATTENTION_IMPL == "dense":
-                output = (self.ulysses_attn if sequence_shard_enabled else self.attn)(
-                    roped_query, attention_key, attention_value
+        workspace = getattr(self, "ulysses_workspace", None)
+        output_is_sequence_sharded = False
+        attention_debug_output = None
+        tiled_output = None
+        use_tiled_output = (
+            sequence_shard_enabled
+            and uniform_seq_splits
+            and _MINWM_ATTENTION_IMPL == "packed"
+            and _MINWM_ASYNC_A2A_OUTPUT
+            and _MINWM_ASYNC_A2A_OUTPUT_TILES > 1
+            and roped_query.is_cuda
+            and workspace is not None
+        )
+        if use_tiled_output:
+            with _minwm_nvtx_range("attention_output_tiled", roped_query):
+                tiled_output = self._tiled_attention_output_a2a(
+                    roped_query,
+                    attention_key,
+                    attention_value,
+                    workspace=workspace,
+                    tile_count=_MINWM_ASYNC_A2A_OUTPUT_TILES,
+                    keep_attention_output=(
+                        parity_dump_dir is not None and parity_index < 2
+                    ),
                 )
-            else:
-                output = _minwm_packed_varlen_attention(
-                    roped_query, attention_key, attention_value
-                )
+        if tiled_output is not None:
+            output, attention_debug_output = tiled_output
+            output_is_sequence_sharded = True
+        else:
+            with _minwm_nvtx_range("attention", roped_query):
+                if _MINWM_ATTENTION_IMPL == "dense":
+                    output = (
+                        self.ulysses_attn if sequence_shard_enabled else self.attn
+                    )(roped_query, attention_key, attention_value)
+                else:
+                    output = _minwm_packed_varlen_attention(
+                        roped_query, attention_key, attention_value
+                    )
         if parity_dump_dir is not None:
             if parity_index < 2:
                 torch.save(
-                    output.detach().cpu(),
+                    (
+                        attention_debug_output
+                        if attention_debug_output is not None
+                        else output
+                    )
+                    .detach()
+                    .cpu(),
                     parity_dump_dir / f"self_attention_output_{parity_index:03d}.pt",
                 )
             self._minwm_parity_forward_index = parity_index + 1
-        if sequence_shard_enabled:
+        if sequence_shard_enabled and not output_is_sequence_sharded:
             assert seq_splits is not None
             if uniform_seq_splits:
-                workspace = getattr(self, "ulysses_workspace", None)
                 use_async_output = (
-                    _MINWM_ASYNC_A2A
-                    and _MINWM_ASYNC_A2A_OUTPUT
+                    _MINWM_ASYNC_A2A_OUTPUT
                     and output.is_cuda
                     and workspace is not None
                     and _usp_async_backend_available(
@@ -1297,12 +1519,15 @@ class MinWMCausalTransformer3DModel(CausalWanTransformer3DModel):
                 "MINWM_ASYNC_A2A_BACKEND must be auto, process_group, "
                 f"pynccl, or ipc; got {_MINWM_ASYNC_A2A_BACKEND!r}"
             )
+        if _MINWM_ASYNC_A2A_OUTPUT_TILES < 1:
+            raise ValueError("MINWM_ASYNC_A2A_OUTPUT_TILES must be positive")
         logger.info(
             "MinWM execution profile: attention_impl=%s "
             "packed_deterministic=%s segment_compile=%s cache_rotated_k=%s "
             "precompute_cache_rope=%s cache_packed_metadata=%s "
             "fused_post_a2a_rope_cache=%s async_a2a=%s "
-            "async_a2a_output=%s async_a2a_backend=%s",
+            "async_a2a_output=%s async_a2a_output_tiles=%s "
+            "async_a2a_backend=%s",
             _MINWM_ATTENTION_IMPL,
             _MINWM_PACKED_ATTENTION_DETERMINISTIC,
             _MINWM_SEGMENT_COMPILE,
@@ -1312,6 +1537,7 @@ class MinWMCausalTransformer3DModel(CausalWanTransformer3DModel):
             _MINWM_FUSED_POST_A2A_ROPE_CACHE,
             _MINWM_ASYNC_A2A,
             _MINWM_ASYNC_A2A_OUTPUT,
+            _MINWM_ASYNC_A2A_OUTPUT_TILES,
             _MINWM_ASYNC_A2A_BACKEND,
         )
         deterministic = os.environ.get("MINWM_PARITY_DETERMINISTIC", "0")
@@ -1511,9 +1737,7 @@ class MinWMCausalTransformer3DModel(CausalWanTransformer3DModel):
             )
 
         if hidden_states.is_cuda:
-            torch.cuda.nvtx.mark(
-                f"minwm_forward_start_current_{int(current_start)}"
-            )
+            torch.cuda.nvtx.mark(f"minwm_forward_start_current_{int(current_start)}")
         orig_dtype = hidden_states.dtype
         if not isinstance(encoder_hidden_states, torch.Tensor):
             encoder_hidden_states = encoder_hidden_states[0]

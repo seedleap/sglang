@@ -17,8 +17,11 @@ def test_async_a2a_measurement_enforces_alternating_abba_and_sample_floor() -> N
     assert "MINWM_ASYNC_A2A_MIN_LANE_SAMPLES:-5" in runner
     assert "baseline_count < MIN_LANE_SAMPLES" in runner
     assert "candidate_count < MIN_LANE_SAMPLES" in runner
-    assert 'MINWM_ASYNC_A2A="${async_a2a_flag}"' in runner
-    assert "MINWM_ASYNC_A2A_OUTPUT=0" in runner
+    assert 'MINWM_ASYNC_A2A="${input_a2a_flag}"' in runner
+    assert 'MINWM_ASYNC_A2A_OUTPUT="${output_a2a_flag}"' in runner
+    assert 'MINWM_ASYNC_A2A_OUTPUT_TILES="${OUTPUT_TILES}"' in runner
+    assert "MINWM_ASYNC_A2A_EXPERIMENT:-input_split" in runner
+    assert 'A2A_EXPERIMENT}" == "output_tiled"' in runner
     assert 'MINWM_ASYNC_A2A_BACKEND="${A2A_BACKEND}"' in runner
     assert "SGLANG_REALTIME_TRACE_SYNC_CUDA=0" in runner
 

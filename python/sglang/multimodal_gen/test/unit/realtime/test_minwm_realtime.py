@@ -1875,6 +1875,52 @@ def test_minwm_split_qk_v_pack_matches_sync_qkv_exactly(world_size):
     assert split_value.data_ptr() == value_buffer.data_ptr()
 
 
+@pytest.mark.parametrize("world_size", [2, 4])
+def test_minwm_output_attention_tiles_preserve_destination_order(world_size):
+    import sglang.multimodal_gen.runtime.models.dits.minwm as minwm_module
+
+    tile_count = 4
+    local_sequence = 8
+    query = torch.arange(world_size * local_sequence).reshape(
+        1, world_size * local_sequence, 1, 1
+    )
+    tiles = [
+        minwm_module._minwm_output_attention_query_tile(
+            query,
+            world_size=world_size,
+            tile_count=tile_count,
+            tile_index=tile_index,
+        )
+        for tile_index in range(tile_count)
+    ]
+
+    tile_sequence = local_sequence // tile_count
+    for tile_index, tile in enumerate(tiles):
+        expected = []
+        for destination in range(world_size):
+            start = destination * local_sequence + tile_index * tile_sequence
+            expected.extend(range(start, start + tile_sequence))
+        assert tile.flatten().tolist() == expected
+
+    restored = minwm_module._minwm_restore_output_attention_order(
+        tiles, world_size=world_size
+    )
+    assert torch.equal(restored, query)
+
+
+def test_minwm_output_attention_tiles_reject_non_divisible_sequence():
+    import sglang.multimodal_gen.runtime.models.dits.minwm as minwm_module
+
+    query = torch.zeros(1, 10, 1, 1)
+    with pytest.raises(ValueError, match="not divisible"):
+        minwm_module._minwm_output_attention_query_tile(
+            query,
+            world_size=2,
+            tile_count=4,
+            tile_index=0,
+        )
+
+
 def test_minwm_async_a2a_process_group_capture_falls_back(monkeypatch):
     import sglang.multimodal_gen.runtime.layers.usp as usp_module
 

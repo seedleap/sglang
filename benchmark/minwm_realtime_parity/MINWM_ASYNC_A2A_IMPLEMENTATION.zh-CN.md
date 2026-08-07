@@ -306,7 +306,7 @@ time、与 compute kernel 的区间交集及 buffer slot/generation。
 - 决策 A：不做只增加 host queue 的“跨 chunk 双缓冲”。真正的跨请求方案必须同时增加
   WebSocket admission、每 session 独立 cache/workspace、scheduler in-flight capacity，并把
   whole-DiT 原子 forward 重构成按 block 交错的两请求 wavefront；只做 request batching 会把
-  payload 合进同一 collective，仍不会产生 compute/communication overlap。该方案作为候选 3
+  payload 合进同一 collective，仍不会产生 compute/communication overlap。该方案作为候选 4
   的可执行设计保留，但在验证更小的 transport 候选前不直接扩大改动面。
 - 假设 B（split IPC）：SP2 的 IPC 协议用 peer staging copy、单 CTA `spin_wait_kernel` 和
   GPU-side sequence counter，可能比两次 ProcessGroupNCCL 更少占用 SM/固定开销，使 QK IPC
@@ -321,8 +321,40 @@ time、与 compute kernel 的区间交集及 buffer slot/generation。
   `2.12.1+cu130`、NCCL `2.29.7`，结果 `MINWM_ASYNC_A2A_SP2 PASS`、`1 passed`；artifact 在
   PVC `minwm-async-a2a-contract-results-20260807` 的
   `/results/minwm-async-a2a-contract-ipc-h200-20260807-01`。
-- wall/FPS、Nsight、结论：尚未运行，候选 2 **未验收**。下一步为同节点 profiler-off
-  四位置预检；只有 Client FPS/DiT/chunk wall 同向且接近门槛，才采精确 Nsight。
+- wall/FPS：H200 Job `minwm-async-a2a-perf-preflight-ipc-h200-20260807-01` 在相同节点、
+  相同 2-rank 进程配置下执行 candidate→baseline→baseline→candidate；每位置独立重启，
+  5 chunk 预热 + 20 chunk 有效样本。结果根目录为 PVC
+  `minwm-async-a2a-perf-results-20260807` 上的
+  `/results/attempts/minwm-async-a2a-perf-preflight-ipc-h200-20260807-01-wkkmb/minwm-async-a2a-perf-preflight-ipc-h200-20260807-01/async-a2a-abba`。
+  baseline/candidate Client FPS median 为 `13.0592/12.8720`（`-1.433%`）；DiT wall
+  `711.056/740.639 ms`（性能 `-4.160%`）；scheduler chunk wall
+  `1256.775/1268.325 ms`（性能 `-0.919%`）；scheduler FPS 也为 `-1.451%`。两 lane 所有
+  required metric CV 都低于 `3%`，20/20 样本完整。
+- Nsight、结论：profiler-off 三个主 wall 指标一致不利且 Client FPS 远低于 `+3%` 门槛；按
+  预先实验合同不采候选 2 的昂贵 Nsight，也不把“IPC non_blocking copy”当 overlap 证据。
+  候选 2 **FAIL/淘汰**，默认开关不变。后续若继续，必须进入能保留单 packed collective 的
+  新 overlap 形态，而不是在 QK/V split 上继续更换 backend。
+
+### 2026-08-07：候选 3——query tiled attention / reverse A2A pipeline
+
+- 假设：input packed A2A 前没有单请求工作，但非 causal attention 的每个 query row 相互
+  独立。把每个 rank 所属 sequence shard 再等分成 `T` 个 tile；第 `t` 次 FA 调用同时计算
+  所有 destination 的第 `t` 个 query tile，随后立即对这个 tile 启动一次正常等分 reverse
+  A2A。计算 tile `t+1` 时，comm stream 可传输 tile `t`，两个 rank 都在最后只消费自己的
+  sequence tile。这样不跨 cache、residual 或 head ownership 边界，并保留单次 packed input
+  collective；理想情况下只暴露最后 `1/T` 的 output A2A。
+- 数值/布局合同：query 在 input A2A 后按 `[dest0 full sequence, dest1 full sequence, ...]`
+  排列。每个 tile 输入按 destination 顺序拼接，因此 `_usp_begin_output_all_to_all` 仍按原有
+  equal split 把对应片段发给正确 rank；wait 后按 tile 次序拼回本 rank 的 local sequence。
+  K/V 与 softmax reduction 完全不分片，`causal=False`，理论数学结果不变；但 FA kernel 的
+  query 长度改变，仍必须以 tensor/video parity 实测决定是否可保留。
+- 实现边界：新增独立默认关闭的 output-tile 数量开关；input async 必须保持关闭，避免混入已
+  淘汰的 QK/V split。复用明确 comm stream/event/record_stream 与按 tile 独立 workspace role；
+  任一 collective 发出后禁止 fallback，异常路径先 retire 已发出的 handles。先支持 uniform
+  Ulysses split，其他形状回同步路径。NVTX 要区分每个 attention tile 和 output launch/wait。
+- 通过顺序：CPU layout/order/fallback → H200 SP2/SP4 transport 与 IPC/PyNCCL graph replay →
+  720p 小规模 parity → profiler-off 四位置预检；只有 FPS/DiT/chunk wall 同向并达到继续价值，
+  才采 Nsight 量化最后 tile exposed time。当前仅完成设计，**尚未验收**。
 
 ### 2026-08-07：候选 1——QK A2A 与 V projection 重叠
 

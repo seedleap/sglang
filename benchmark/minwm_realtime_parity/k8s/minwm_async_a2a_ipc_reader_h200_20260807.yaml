@@ -1,0 +1,70 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: minwm-async-a2a-ipc-reader-20260807-01
+  namespace: default
+  labels:
+    app.kubernetes.io/name: minwm-async-a2a-ipc-reader-20260807-01
+    seedleap.ai/owner: chenshengdong
+    seedleap.ai/task: minwm-async-a2a
+  annotations:
+    seedleap.ai/purpose: read-only-IPC-preflight-verification
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: minwm-async-a2a-ipc-reader-20260807-01
+        seedleap.ai/owner: chenshengdong
+        seedleap.ai/task: minwm-async-a2a
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        kubernetes.io/hostname: i-06888dc1ca88547e1
+      tolerations:
+        - key: seedleap.ai/capacity-pool
+          operator: Equal
+          value: minwm-test-phx2-karpenter
+          effect: NoSchedule
+      containers:
+        - name: reader
+          image: 829115578968.dkr.ecr.us-east-2.amazonaws.com/leap-world/minwm-training@sha256:bedc07ea3ba55059a8c1c569c3b177c4d00d41f37d4fa9105375531534ef5f2a
+          command:
+            - /bin/bash
+            - -lc
+            - |
+              set -euo pipefail
+              root=/results/attempts/minwm-async-a2a-perf-preflight-ipc-h200-20260807-01-wkkmb/minwm-async-a2a-perf-preflight-ipc-h200-20260807-01/async-a2a-abba
+              test -d "${root}"
+              echo "RESULT_ROOT=${root}"
+              find "${root}" -maxdepth 4 -type f -printf '%p\n' | sort
+              echo IPC_SELECTION_EVIDENCE
+              grep -R -n -E \
+                'async_a2a_backend|IPC all-to-all|IPC A2A|async_a2a=' \
+                "${root}" \
+                --include='*.log' --include='*.txt' || true
+              echo COMPARISON
+              python3 - "${root}/comparison.json" <<'PY'
+              import json
+              import sys
+
+              with open(sys.argv[1], encoding="utf-8") as handle:
+                  report = json.load(handle)
+              print(json.dumps(report, indent=2, sort_keys=True))
+              PY
+          resources:
+            requests:
+              cpu: "1"
+              memory: 2Gi
+            limits:
+              cpu: "2"
+              memory: 4Gi
+          volumeMounts:
+            - name: results
+              mountPath: /results
+              readOnly: true
+      volumes:
+        - name: results
+          persistentVolumeClaim:
+            claimName: minwm-async-a2a-perf-results-20260807

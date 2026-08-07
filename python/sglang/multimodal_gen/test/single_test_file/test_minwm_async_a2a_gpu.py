@@ -108,6 +108,51 @@ def _worker() -> int:
         )
         return _usp_wait_all_to_all(handle)
 
+    def tiled_output(x, backend: str, tile_count: int = 4):
+        world_size = _WORLD
+        local_seq = x.shape[1] // world_size
+        assert x.shape[1] % world_size == 0
+        assert local_seq % tile_count == 0
+        tile_seq = local_seq // tile_count
+        handles = []
+        independent = None
+        for tile_index in range(tile_count):
+            offset = tile_index * tile_seq
+            tile = torch.cat(
+                [
+                    x[
+                        :,
+                        destination * local_seq + offset : destination * local_seq
+                        + offset
+                        + tile_seq,
+                    ]
+                    for destination in range(world_size)
+                ],
+                dim=1,
+            ).contiguous()
+            # For tile_index > 0 this compute is enqueued after the previous
+            # reverse A2A launch and before its wait.
+            independent = tile.square().sum(dim=-1)
+            lease = workspace.acquire(f"output_tile_{tile_index}", tile, tile.numel())
+            assert lease is not None
+            send, recv, stream, events, release = lease
+            handles.append(
+                _usp_begin_output_all_to_all(
+                    tile,
+                    head_dim=2,
+                    input_buffer=send,
+                    output_buffer=recv,
+                    comm_stream=stream,
+                    events=events,
+                    backend=backend,
+                    release=release,
+                )
+            )
+        return (
+            torch.cat([_usp_wait_all_to_all(handle) for handle in handles], dim=1),
+            independent,
+        )
+
     # Long enough to wrap both persistent slots repeatedly and expose stale
     # receive data or an early slot release.
     for iteration in range(12):
@@ -125,6 +170,12 @@ def _worker() -> int:
         torch.cuda.synchronize()
         if not torch.equal(got_output, expected_output):
             failures.append(f"process-group output iteration {iteration}")
+        got_tiled_output, tiled_independent = tiled_output(got_q, "process_group")
+        torch.cuda.synchronize()
+        if not torch.equal(got_tiled_output, expected_output):
+            failures.append(f"process-group tiled output iteration {iteration}")
+        if tiled_independent is None:
+            failures.append("process-group tiled output missed independent compute")
     if workspace._busy:
         failures.append(f"workspace retained busy leases: {workspace._busy}")
 
@@ -148,17 +199,22 @@ def _worker() -> int:
             torch.cuda.synchronize()
             if not torch.equal(got_output, expected_output):
                 failures.append(f"IPC output iteration {iteration}")
+            got_tiled_output, tiled_independent = tiled_output(got_q, "ipc")
+            torch.cuda.synchronize()
+            if not torch.equal(got_tiled_output, expected_output):
+                failures.append(f"IPC tiled output iteration {iteration}")
+            if tiled_independent is None:
+                failures.append("IPC tiled output missed independent compute")
         if workspace._busy:
-            failures.append(
-                f"workspace retained IPC busy leases: {workspace._busy}"
-            )
+            failures.append(f"workspace retained IPC busy leases: {workspace._busy}")
 
         # Warm every workspace/staging shape, then prove the split IPC path is
         # capture-safe and that replay advances its device-side sequence number
         # without reusing stale receive data.
         for seed in (600, 601):
             q, k, v = inputs(seed)
-            split_input(q, k, v, "ipc")
+            warm_q, _, _, _ = split_input(q, k, v, "ipc")
+            tiled_output(warm_q, "ipc")
         torch.cuda.synchronize()
 
         static_q, static_k, static_v = inputs(602)
@@ -167,11 +223,14 @@ def _worker() -> int:
             graph_q, graph_k, graph_v, graph_independent = split_input(
                 static_q, static_k, static_v, "ipc"
             )
+            graph_output, graph_tile_independent = tiled_output(graph_q, "ipc")
         torch.cuda.synchronize()
 
         for replay, seed in enumerate((700, 701, 702)):
             q, k, v = inputs(seed)
             expected = _usp_input_all_to_all_qkv(q, k, v)
+            expected_q = expected.chunk(3, dim=-1)[0]
+            expected_output = _usp_output_all_to_all(expected_q, head_dim=2)
             static_q.copy_(q)
             static_k.copy_(k)
             static_v.copy_(v)
@@ -182,6 +241,10 @@ def _worker() -> int:
                 failures.append(f"IPC graph replay {replay}")
             if graph_independent.shape != q.shape[:-1]:
                 failures.append("captured IPC independent kernel returned wrong shape")
+            if not torch.equal(graph_output, expected_output):
+                failures.append(f"IPC tiled output graph replay {replay}")
+            if graph_tile_independent is None:
+                failures.append("captured IPC tiled output missed independent compute")
 
     # Capture and replay the same split API. ProcessGroupNCCL intentionally
     # falls back in capture; this arm proves the raw PyNCCL selection instead.

@@ -15,6 +15,8 @@ CASE_ID="${MINWM_CASE_ID:-00_forward_080_pottery_720p}"
 SP_DEGREES="${MINWM_ASYNC_A2A_SP_DEGREES:-2 4}"
 A2A_SEQUENCE="${MINWM_ASYNC_A2A_SEQUENCE:-candidate baseline baseline candidate baseline candidate candidate baseline candidate baseline baseline candidate}"
 A2A_BACKEND="${MINWM_ASYNC_A2A_BENCH_BACKEND:-process_group}"
+A2A_EXPERIMENT="${MINWM_ASYNC_A2A_EXPERIMENT:-input_split}"
+OUTPUT_TILES="${MINWM_ASYNC_A2A_OUTPUT_TILES:-1}"
 MIN_LANE_SAMPLES="${MINWM_ASYNC_A2A_MIN_LANE_SAMPLES:-5}"
 OFF_WARMUP_CHUNKS="${MINWM_S0_OFF_WARMUP_CHUNKS:-20}"
 OFF_MEASURED_CHUNKS="${MINWM_S0_OFF_MEASURED_CHUNKS:-200}"
@@ -27,8 +29,18 @@ RESULT_ROOT="${MINWM_RESULTS_ROOT%/}/${MINWM_RUN_ID}/${RESULT_KIND}"
 [[ "$(git -C /workspace/sglang rev-parse HEAD)" == "${SGLANG_GIT_REF}" ]]
 if ! [[ "${OFF_WARMUP_CHUNKS}" =~ ^[1-9][0-9]*$ \
   && "${OFF_MEASURED_CHUNKS}" =~ ^[1-9][0-9]*$ \
-  && "${MIN_LANE_SAMPLES}" =~ ^[1-9][0-9]*$ ]]; then
+  && "${MIN_LANE_SAMPLES}" =~ ^[1-9][0-9]*$ \
+  && "${OUTPUT_TILES}" =~ ^[1-9][0-9]*$ ]]; then
   echo "Profiler-off warmup/measurement chunk counts must be positive integers" >&2
+  exit 2
+fi
+if [[ "${A2A_EXPERIMENT}" != "input_split" \
+  && "${A2A_EXPERIMENT}" != "output_tiled" ]]; then
+  echo "MINWM_ASYNC_A2A_EXPERIMENT must be input_split or output_tiled" >&2
+  exit 2
+fi
+if [[ "${A2A_EXPERIMENT}" == "output_tiled" && "${OUTPUT_TILES}" == "1" ]]; then
+  echo "output_tiled experiment requires MINWM_ASYNC_A2A_OUTPUT_TILES > 1" >&2
   exit 2
 fi
 if [[ -n "${SGLANG_DIFFUSION_TORCH_PROFILER_DIR:-}" ]]; then
@@ -61,11 +73,12 @@ ALLOCATED_GPU_COUNT="${MINWM_ALLOCATED_GPU_COUNT:-$(nvidia-smi -L | wc -l | xarg
   echo "sp_degrees=${SP_DEGREES}"
   echo "a2a_sequence=${A2A_SEQUENCE}"
   echo "a2a_backend=${A2A_BACKEND}"
+  echo "a2a_experiment=${A2A_EXPERIMENT}"
+  echo "output_tiles=${OUTPUT_TILES}"
   echo "minimum_lane_samples=${MIN_LANE_SAMPLES}"
   echo "server_restart_per_position=true"
-  echo "a2a_baseline=MINWM_ASYNC_A2A=0"
-  echo "a2a_candidate=MINWM_ASYNC_A2A=1"
-  echo "output_a2a=MINWM_ASYNC_A2A_OUTPUT=0"
+  echo "a2a_baseline=input=0,output=0"
+  echo "a2a_candidate=${A2A_EXPERIMENT}"
   echo "measurement_mode=profiler_off_only"
   echo "trace_sync_cuda=0"
   echo "off_window=${OFF_WARMUP_CHUNKS}+${OFF_MEASURED_CHUNKS}"
@@ -81,7 +94,22 @@ server_pid=""
 monitor_pid=""
 a2a_lane=""
 async_a2a_flag=""
+input_a2a_flag=""
+output_a2a_flag=""
 invalid_scope="${RESULT_ROOT}"
+
+configure_a2a_flags() {
+  input_a2a_flag=0
+  output_a2a_flag=0
+  if [[ "${async_a2a_flag}" != "1" ]]; then
+    return
+  fi
+  if [[ "${A2A_EXPERIMENT}" == "input_split" ]]; then
+    input_a2a_flag=1
+  else
+    output_a2a_flag=1
+  fi
+}
 
 wait_for_server() {
   local pid="$1" log_path="$2"
@@ -205,8 +233,9 @@ start_server() {
   MINWM_PACKED_ATTENTION_DETERMINISTIC=true \
   MINWM_NATIVE_COMPONENTS=text_encoder,vae \
   MINWM_VAE_LANE=parallel \
-  MINWM_ASYNC_A2A="${async_a2a_flag}" \
-  MINWM_ASYNC_A2A_OUTPUT=0 \
+  MINWM_ASYNC_A2A="${input_a2a_flag}" \
+  MINWM_ASYNC_A2A_OUTPUT="${output_a2a_flag}" \
+  MINWM_ASYNC_A2A_OUTPUT_TILES="${OUTPUT_TILES}" \
   MINWM_ASYNC_A2A_BACKEND="${A2A_BACKEND}" \
     "${SERVER_ARGS[@]}" > "${log_path}" 2>&1 &
   server_pid=$!
@@ -400,14 +429,16 @@ run_profiler_off_position() {
       exit 2
       ;;
   esac
+  configure_a2a_flags
   a2a_lane="${lane}"
   invalid_scope="${position_dir}"
   mkdir -p "${position_dir}"
   {
     echo "position=${position}"
     echo "a2a_lane=${lane}"
-    echo "MINWM_ASYNC_A2A=${async_a2a_flag}"
-    echo "MINWM_ASYNC_A2A_OUTPUT=0"
+    echo "MINWM_ASYNC_A2A=${input_a2a_flag}"
+    echo "MINWM_ASYNC_A2A_OUTPUT=${output_a2a_flag}"
+    echo "MINWM_ASYNC_A2A_OUTPUT_TILES=${OUTPUT_TILES}"
     echo "MINWM_ASYNC_A2A_BACKEND=${A2A_BACKEND}"
     echo "sp_degree=${degree}"
     echo "server_restart_boundary=before_and_after_this_position"
