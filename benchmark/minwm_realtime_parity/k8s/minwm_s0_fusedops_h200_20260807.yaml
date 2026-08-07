@@ -29,12 +29,12 @@ metadata:
     seedleap.ai/capacity-type: spot
     seedleap.ai/repo: seedleap/sglang
     seedleap.ai/branch: codex/minwm-fused-ops-s0
-    seedleap.ai/sglang-git-ref: "a559378f701ead3e3cb432b54c0707328d230999"
+    seedleap.ai/sglang-git-ref: "59aa68a382cb9f481e77f98647644347671561dc"
     seedleap.ai/minwm-git-ref: "2efc6485f65e8fcab506665efde79bc41406385e"
     seedleap.ai/checkpoint-version-id: "wduScksw2f3yPErnG9lBioOuE2AToyAP"
     seedleap.ai/resource-isolation: full 8-GPU H200 node request
 spec:
-  backoffLimit: 2
+  backoffLimit: 0
   activeDeadlineSeconds: 14400
   template:
     metadata:
@@ -47,7 +47,7 @@ spec:
       annotations:
         seedleap.ai/repo: seedleap/sglang
         seedleap.ai/branch: codex/minwm-fused-ops-s0
-        seedleap.ai/sglang-git-ref: "a559378f701ead3e3cb432b54c0707328d230999"
+        seedleap.ai/sglang-git-ref: "59aa68a382cb9f481e77f98647644347671561dc"
     spec:
       restartPolicy: Never
       terminationGracePeriodSeconds: 60
@@ -78,7 +78,7 @@ spec:
                   name: github-token
                   key: token
             - name: SGLANG_GIT_REF
-              value: "a559378f701ead3e3cb432b54c0707328d230999"
+              value: "59aa68a382cb9f481e77f98647644347671561dc"
             - name: MINWM_GIT_REF
               value: "2efc6485f65e8fcab506665efde79bc41406385e"
             - name: MINWM_CONTAINER_IMAGE

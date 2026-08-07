@@ -266,6 +266,26 @@ def _require_availability(value: Any, path: str, errors: list[str]) -> None:
         errors.append(f"{path}.status must be available or unavailable")
 
 
+def _require_latency_metric(
+    metric: Any, path: str, measured_chunks: Any, errors: list[str]
+) -> None:
+    _require_availability(metric, path, errors)
+    if not isinstance(metric, dict) or metric.get("status") != "available":
+        return
+    value = metric.get("value")
+    if not isinstance(value, dict):
+        errors.append(f"{path}.value must be a latency summary")
+        return
+    count = value.get("count")
+    if not isinstance(count, int):
+        errors.append(f"{path}.value.count must be an integer")
+    elif count != measured_chunks:
+        errors.append(
+            f"{path}.value.count must equal workload.measured_chunks "
+            f"({measured_chunks}); got {count}"
+        )
+
+
 def _require_normalized_count(
     metric: Any, path: str, fields: tuple[str, ...], errors: list[str]
 ) -> None:
@@ -350,15 +370,16 @@ def validate_measurement(result: dict[str, Any]) -> None:
         if not isinstance(off, dict):
             errors.append("profiler_off record requires profiler_off metrics")
         else:
-            for name in (
-                "client_fps",
-                "scheduler_fps",
-                "scheduler_chunk_wall_ms",
-                "dit_wall_ms",
-                "vae_wall_ms",
-            ):
+            for name in ("client_fps", "scheduler_fps"):
                 _require_availability(
                     off.get(name), f"metrics.profiler_off.{name}", errors
+                )
+            for name in ("scheduler_chunk_wall_ms", "dit_wall_ms", "vae_wall_ms"):
+                _require_latency_metric(
+                    off.get(name),
+                    f"metrics.profiler_off.{name}",
+                    workload.get("measured_chunks"),
+                    errors,
                 )
     elif result.get("mode") == "profiler_on":
         if metrics.get("profiler_off") is not None:
@@ -369,14 +390,42 @@ def validate_measurement(result: dict[str, Any]) -> None:
         if not isinstance(on, dict):
             errors.append("profiler_on record requires profiler_on metrics")
         else:
-            for name in (
-                "dit_cuda_ms",
-                "vae_cuda_ms",
-                "gpu_kernel_busy",
-                "capture_coverage",
-            ):
+            for name in ("gpu_kernel_busy", "capture_coverage"):
                 _require_availability(
                     on.get(name), f"metrics.profiler_on.{name}", errors
+                )
+            observed_wall = on.get("observed_wall_with_profiler_overhead")
+            if not isinstance(observed_wall, dict):
+                errors.append(
+                    "metrics.profiler_on.observed_wall_with_profiler_overhead "
+                    "must be an object"
+                )
+            else:
+                for name in ("client_fps", "scheduler_fps"):
+                    _require_availability(
+                        observed_wall.get(name),
+                        "metrics.profiler_on."
+                        f"observed_wall_with_profiler_overhead.{name}",
+                        errors,
+                    )
+                for name in (
+                    "scheduler_chunk_wall_ms",
+                    "dit_wall_ms",
+                    "vae_wall_ms",
+                ):
+                    _require_latency_metric(
+                        observed_wall.get(name),
+                        "metrics.profiler_on."
+                        f"observed_wall_with_profiler_overhead.{name}",
+                        workload.get("measured_chunks"),
+                        errors,
+                    )
+            for name in ("dit_cuda_ms", "vae_cuda_ms"):
+                _require_latency_metric(
+                    on.get(name),
+                    f"metrics.profiler_on.{name}",
+                    workload.get("measured_chunks"),
+                    errors,
                 )
             _require_normalized_count(
                 on.get("kernel_count"),

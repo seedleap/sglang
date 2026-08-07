@@ -11,6 +11,12 @@ from jsonschema import Draft202012Validator
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from benchmark_realtime_throughput import (  # noqa: E402
+    missing_required_stage_trace,
+    record_required_stage_trace,
+    required_stage_trace_chunks,
+    required_stage_trace_is_complete,
+)
 from measurement import (  # noqa: E402
     MeasurementValidationError,
     available,
@@ -21,18 +27,12 @@ from measurement import (  # noqa: E402
 )
 from measurement_tool import aggregate  # noqa: E402
 from nsys_metrics import merge_nsys_metrics  # noqa: E402
-from benchmark_realtime_throughput import (  # noqa: E402
-    missing_required_stage_trace,
-    record_required_stage_trace,
-    required_stage_trace_is_complete,
-    required_stage_trace_chunks,
-)
 
 
-def _latency(value: float) -> dict:
+def _latency(value: float, count: int) -> dict:
     return available(
         {
-            "count": 10,
+            "count": count,
             "mean": value,
             "p50": value,
             "p95": value,
@@ -45,12 +45,13 @@ def _latency(value: float) -> dict:
 
 
 def _record(mode: str = "profiler_off", run_id: str = "run-1") -> dict:
+    measured_chunks = 200 if mode == "profiler_off" else 10
     off_metrics = {
         "client_fps": available(16.0, "frames_per_second", "test fixture"),
         "scheduler_fps": available(16.1, "frames_per_second", "test fixture"),
-        "scheduler_chunk_wall_ms": _latency(1000.0),
-        "dit_wall_ms": _latency(600.0),
-        "vae_wall_ms": _latency(250.0),
+        "scheduler_chunk_wall_ms": _latency(1000.0, measured_chunks),
+        "dit_wall_ms": _latency(600.0, measured_chunks),
+        "vae_wall_ms": _latency(250.0, measured_chunks),
     }
     return build_measurement(
         mode=mode,
@@ -69,15 +70,15 @@ def _record(mode: str = "profiler_off", run_id: str = "run-1") -> dict:
         width=1248,
         height=704,
         warmup_chunks=20,
-        measured_chunks=200 if mode == "profiler_off" else 10,
+        measured_chunks=measured_chunks,
         precondition_warmup_chunks=0 if mode == "profiler_off" else 20,
         precision="bf16",
         fast_lane=True,
         comparison_contract={"case": "00_forward_pottery"},
         profiler_off_metrics=off_metrics,
         profiler_on_cuda_metrics={
-            "dit_cuda_ms": _latency(590.0),
-            "vae_cuda_ms": _latency(240.0),
+            "dit_cuda_ms": _latency(590.0, measured_chunks),
+            "vae_cuda_ms": _latency(240.0, measured_chunks),
         },
         artifacts={"client_result": "/results/client.json"},
     )
@@ -125,6 +126,31 @@ def test_schema_rejects_missing_metric_and_implicit_unavailable_value() -> None:
         "reason": "permission_denied",
     }
     with pytest.raises(MeasurementValidationError, match="evidence"):
+        validate_measurement(record)
+
+
+@pytest.mark.parametrize("mode", ["profiler_off", "profiler_on"])
+def test_latency_metric_requires_count_equal_to_measured_chunks(mode: str) -> None:
+    record = _record(mode)
+    if mode == "profiler_off":
+        metric = record["metrics"]["profiler_off"]["dit_wall_ms"]
+    else:
+        metric = record["metrics"]["profiler_on"]["dit_cuda_ms"]
+
+    del metric["value"]["count"]
+    with pytest.raises(MeasurementValidationError, match=r"value\.count"):
+        validate_measurement(record)
+    assert list(_machine_schema_validator().iter_errors(record))
+
+    record = _record(mode)
+    if mode == "profiler_off":
+        metric = record["metrics"]["profiler_off"]["dit_wall_ms"]
+    else:
+        metric = record["metrics"]["profiler_on"]["dit_cuda_ms"]
+    metric["value"]["count"] = record["workload"]["measured_chunks"] - 1
+    with pytest.raises(
+        MeasurementValidationError, match=r"must equal workload\.measured_chunks"
+    ):
         validate_measurement(record)
 
 
@@ -241,8 +267,7 @@ def _create_nsys_fixture(
             "INSERT INTO CUPTI_ACTIVITY_KIND_RUNTIME VALUES (2, 2, 3);"
         )
     )
-    connection.executescript(
-        f"""
+    connection.executescript(f"""
         CREATE TABLE StringIds (id INTEGER PRIMARY KEY, value TEXT);
         CREATE TABLE CUPTI_ACTIVITY_KIND_RUNTIME (nameId INTEGER, start INTEGER, end INTEGER{process_column});
         CREATE TABLE CUPTI_ACTIVITY_KIND_KERNEL (deviceId INTEGER, start INTEGER, end INTEGER);
@@ -255,11 +280,9 @@ def _create_nsys_fixture(
         INSERT INTO CUPTI_ACTIVITY_KIND_KERNEL VALUES (1, 0, 5000);
         INSERT INTO CUPTI_ACTIVITY_KIND_KERNEL VALUES (1, 10000, 30000);
         INSERT INTO CUPTI_ACTIVITY_KIND_KERNEL VALUES (1, 25000, 100000);
-        """
-    )
+        """)
     if include_gpu_metrics:
-        connection.executescript(
-            """
+        connection.executescript("""
             CREATE TABLE TARGET_INFO_GPU_METRICS (metricId INTEGER, metricName TEXT);
             CREATE TABLE GPU_METRICS (typeId INTEGER, metricId INTEGER, value REAL);
             INSERT INTO TARGET_INFO_GPU_METRICS VALUES (3, 'SM Active');
@@ -269,8 +292,7 @@ def _create_nsys_fixture(
             INSERT INTO GPU_METRICS VALUES (0, 3, 82.0);
             INSERT INTO GPU_METRICS VALUES (0, 5, 55.0);
             INSERT INTO GPU_METRICS VALUES (0, 18, 40.0);
-            """
-        )
+            """)
     connection.commit()
     connection.close()
 
