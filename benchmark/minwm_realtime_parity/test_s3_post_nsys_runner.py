@@ -11,6 +11,7 @@ WRAPPER = ROOT / "run_s3_post_nsys_matrix.sh"
 S0_RUNNER = ROOT / "run_s0_measurement.sh"
 MEASUREMENT = ROOT / "measurement.py"
 NSYS_METRICS = ROOT / "nsys_metrics.py"
+MANIFEST = ROOT / "k8s" / "minwm_s3_post_nsys_h200_20260807.yaml"
 
 
 def _shell_function(path: Path, name: str) -> str:
@@ -153,3 +154,19 @@ def test_canonical_runner_collects_all_targets_and_fails_closed() -> None:
     assert "_discrete_event_start_attribution" in metrics
     assert "boundary_event_examples" in metrics
     assert "streaming selected metricId rows" in metrics
+
+
+def test_manifest_is_immutable_backoff_zero_and_cannot_expand_pool() -> None:
+    text = MANIFEST.read_text()
+    assert "backoffLimit: 0" in text
+    assert "kubernetes.io/hostname: i-06888dc1ca88547e1" in text
+    assert 'value: "58ed4daf7e4208eedde4f8fc8f0a8c1e20e0007d"' in text
+    assert 'value: "d5b25227d4487d113e62c86a0fb572a62d6bcc5b"' in text
+    assert 'value: "20"' in text
+    assert 'value: "1"' in text
+    assert 'value: "10"' in text
+    assert 'value: "45"' in text
+    assert 'nvidia.com/gpu: "8"' in text
+    assert "- SYS_ADMIN" in text
+    assert "SGLANG_DIFFUSION_TORCH_PROFILER_DIR" not in text
+    assert "minwm-s3-a2a-h200-results-20260807-01" in text
