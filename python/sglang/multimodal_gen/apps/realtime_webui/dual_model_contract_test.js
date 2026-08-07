@@ -29,8 +29,8 @@ assert.match(css, /grid-template-columns:\s*repeat\(2,/);
 assert.match(css, /@media[^}]*max-width[\s\S]*\.model-player-grid\s*\{[\s\S]*grid-template-columns:\s*1fr/);
 assert.match(css, /\.stage\s*\{[\s\S]*container-type:\s*inline-size/);
 assert.match(css, /@container[^}]*max-width:\s*1180px[\s\S]*\.topbar\s*\{[\s\S]*flex-wrap:\s*wrap/);
-assert.match(html, /model_session\.js\?v=dual-model-v1/);
-assert.match(html, /dual_model_controller\.js\?v=dual-model-v1/);
+assert.match(html, /model_session\.js\?v=dual-model-v2/);
+assert.match(html, /dual_model_controller\.js\?v=dual-model-v2/);
 
 const app = fs.readFileSync(path.join(root, "app.js"), "utf8");
 const server = fs.readFileSync(path.join(root, "server.py"), "utf8");
