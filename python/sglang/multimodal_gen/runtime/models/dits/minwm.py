@@ -81,6 +81,7 @@ _MINWM_SEGMENT_COMPILE = _env_flag("MINWM_SEGMENT_COMPILE", True)
 _MINWM_CACHE_ROTATED_K = _env_flag("MINWM_CACHE_ROTATED_K", True)
 _MINWM_PRECOMPUTE_CACHE_ROPE = _env_flag("MINWM_PRECOMPUTE_CACHE_ROPE", True)
 _MINWM_CACHE_PACKED_METADATA = _env_flag("MINWM_CACHE_PACKED_METADATA", True)
+_MINWM_HOIST_TIMESTEP_MODULATION = _env_flag("MINWM_HOIST_TIMESTEP_MODULATION", True)
 _MINWM_ANNOUNCED_ATTENTION_BACKENDS: set[tuple[str, str]] = set()
 
 
@@ -340,6 +341,53 @@ def _minwm_frame_indices(hidden_states: torch.Tensor, num_frames: int) -> torch.
     return _minwm_uniform_frame_indices(
         hidden_states.shape[1], num_frames, hidden_states.device
     )
+
+
+def _minwm_materialize_timestep_modulation(
+    hidden_states: torch.Tensor,
+    timestep_proj: torch.Tensor,
+) -> torch.Tensor:
+    """Expand per-frame modulation once for one transformer pass.
+
+    The returned ``[B, local_sequence, 6, D]`` tensor intentionally preserves
+    the advanced-indexing layout used by minWM's exact path. It is pass-local:
+    callers reuse it across blocks but never across DMD or clean-cache forwards.
+    """
+    if hidden_states.dim() != 3:
+        raise ValueError(
+            "MinWM timestep modulation requires hidden states shaped [B, S, D], "
+            f"got {tuple(hidden_states.shape)}."
+        )
+    if timestep_proj.dim() != 4 or timestep_proj.shape[2] != 6:
+        raise ValueError(
+            "MinWM timestep projection must be shaped [B, F, 6, D], "
+            f"got {tuple(timestep_proj.shape)}."
+        )
+    if timestep_proj.shape[0] != hidden_states.shape[0]:
+        raise ValueError(
+            "MinWM timestep projection batch does not match hidden states: "
+            f"{timestep_proj.shape[0]} vs {hidden_states.shape[0]}."
+        )
+    if timestep_proj.shape[3] != hidden_states.shape[2]:
+        raise ValueError(
+            "MinWM timestep projection width does not match hidden states: "
+            f"{timestep_proj.shape[3]} vs {hidden_states.shape[2]}."
+        )
+    if timestep_proj.device != hidden_states.device:
+        raise ValueError(
+            "MinWM timestep projection and hidden states must share a device: "
+            f"{timestep_proj.device} vs {hidden_states.device}."
+        )
+    num_frames = timestep_proj.shape[1]
+    if num_frames == 0:
+        raise ValueError("MinWM timestep projection must contain at least one frame.")
+    frame_index = _minwm_frame_indices(hidden_states, num_frames)
+    if frame_index.dtype != torch.long or frame_index.device != timestep_proj.device:
+        raise ValueError(
+            "MinWM frame indices must be int64 on the timestep projection device, "
+            f"got dtype={frame_index.dtype}, device={frame_index.device}."
+        )
+    return timestep_proj[:, frame_index]
 
 
 @lru_cache(maxsize=32)
@@ -803,7 +851,7 @@ class MinWMCausalTransformerBlock(CausalWanTransformerBlock):
         self,
         hidden_states: torch.Tensor,
         encoder_hidden_states: torch.Tensor,
-        temb: torch.Tensor,
+        timestep_modulation: torch.Tensor,
         freqs_cis: tuple[torch.Tensor, torch.Tensor],
         block_mask,
         kv_cache=None,
@@ -813,14 +861,12 @@ class MinWMCausalTransformerBlock(CausalWanTransformerBlock):
     ) -> torch.Tensor:
         if hidden_states.dim() == 4:
             hidden_states = hidden_states.squeeze(1)
-        num_frames = temb.shape[1]
+        if not _MINWM_HOIST_TIMESTEP_MODULATION:
+            timestep_modulation = _minwm_materialize_timestep_modulation(
+                hidden_states, timestep_modulation
+            )
         orig_dtype = hidden_states.dtype
         modulation = self.scale_shift_table.to(orig_dtype)
-        frame_index = _minwm_frame_indices(hidden_states, num_frames)
-        # minWM main first expands the full [B, F, 6, D] tensor with advanced
-        # indexing, then selects a modulation slice. Besides equal values, this
-        # preserves its non-contiguous 6*D token stride for the compiled AdaLN.
-        timestep_modulation = temb[:, frame_index]
 
         _, norm_hidden_states = _minwm_adaln(
             hidden_states,
@@ -949,13 +995,15 @@ class MinWMCausalTransformer3DModel(CausalWanTransformer3DModel):
         logger.info(
             "MinWM execution profile: attention_impl=%s "
             "packed_deterministic=%s segment_compile=%s cache_rotated_k=%s "
-            "precompute_cache_rope=%s cache_packed_metadata=%s",
+            "precompute_cache_rope=%s cache_packed_metadata=%s "
+            "hoist_timestep_modulation=%s",
             _MINWM_ATTENTION_IMPL,
             _MINWM_PACKED_ATTENTION_DETERMINISTIC,
             _MINWM_SEGMENT_COMPILE,
             _MINWM_CACHE_ROTATED_K,
             _MINWM_PRECOMPUTE_CACHE_ROPE,
             _MINWM_CACHE_PACKED_METADATA,
+            _MINWM_HOIST_TIMESTEP_MODULATION,
         )
         deterministic = os.environ.get("MINWM_PARITY_DETERMINISTIC", "0")
         if deterministic.strip().lower() not in {"", "0", "false", "no", "off"}:
@@ -1232,11 +1280,14 @@ class MinWMCausalTransformer3DModel(CausalWanTransformer3DModel):
                 "MinWM encoder hidden-state dtype must match the latent dtype."
             )
 
+        timestep_modulation = self._prepare_transformer_block_temb(
+            hidden_states, timestep_proj
+        )
         for block_index, block in enumerate(self.blocks):
             hidden_states = block(
                 hidden_states,
                 encoder_hidden_states,
-                timestep_proj,
+                timestep_modulation,
                 freqs_cis,
                 block_mask=self.block_mask,
                 kv_cache=kv_cache[block_index],
@@ -1244,6 +1295,7 @@ class MinWMCausalTransformer3DModel(CausalWanTransformer3DModel):
                 current_start=current_start,
                 cache_start=cache_start,
             )
+        del timestep_modulation
 
         hidden_states = self._apply_output_head(
             hidden_states,
@@ -1269,6 +1321,15 @@ class MinWMCausalTransformer3DModel(CausalWanTransformer3DModel):
         )
         hidden_states = hidden_states.permute(0, 7, 1, 4, 2, 5, 3, 6)
         return hidden_states.flatten(6, 7).flatten(4, 5).flatten(2, 3)
+
+    def _prepare_transformer_block_temb(
+        self,
+        hidden_states: torch.Tensor,
+        timestep_proj: torch.Tensor,
+    ) -> torch.Tensor:
+        if not _MINWM_HOIST_TIMESTEP_MODULATION:
+            return timestep_proj
+        return _minwm_materialize_timestep_modulation(hidden_states, timestep_proj)
 
     def _install_parity_debug_hooks(self) -> None:
         dump_root = os.environ.get("MINWM_PARITY_DUMP_DIR")
