@@ -54,6 +54,7 @@ def _record(mode: str = "profiler_off", run_id: str = "run-1") -> dict:
         container_image=available("image@sha256:123", "image_reference", "fixture"),
         gpu_model=available("NVIDIA H200", "model_name", "fixture"),
         gpu_count=2,
+        allocated_gpu_count=8,
         sp_degree=2,
         checkpoint_id="global_step_003200/ema_student/model.pt",
         checkpoint_step=3200,
@@ -81,6 +82,8 @@ def test_profiler_off_schema_keeps_timing_domains_separate() -> None:
     assert record["metrics"]["profiler_on"] is None
     assert record["workload"]["dmd_forwards_per_chunk"] == 4
     assert record["workload"]["clean_cache_forwards_per_chunk"] == 1
+    assert record["provenance"]["gpu"]["count"] == 2
+    assert record["provenance"]["gpu"]["allocated_count"] == 8
     assert set(record["measurement_contract"]["timing_domains"]) == {
         "client",
         "scheduler",
@@ -108,6 +111,13 @@ def test_profiler_on_requires_ten_stable_chunks() -> None:
     record = _record("profiler_on")
     record["workload"]["measured_chunks"] = 9
     with pytest.raises(MeasurementValidationError, match="at least 10"):
+        validate_measurement(record)
+
+
+def test_schema_rejects_allocation_smaller_than_active_gpu_count() -> None:
+    record = _record()
+    record["provenance"]["gpu"]["allocated_count"] = 1
+    with pytest.raises(MeasurementValidationError, match="allocated_count"):
         validate_measurement(record)
 
 
@@ -149,20 +159,36 @@ def test_stage_trace_values_selects_source_and_chunk_window() -> None:
     ) == [589.0]
 
 
-def _create_nsys_fixture(path: Path, include_gpu_metrics: bool) -> None:
+def _create_nsys_fixture(
+    path: Path, include_gpu_metrics: bool, include_process_ids: bool = True
+) -> None:
     connection = sqlite3.connect(path)
+    process_column = ", processId INTEGER" if include_process_ids else ""
+    runtime_rows = (
+        "INSERT INTO CUPTI_ACTIVITY_KIND_RUNTIME VALUES (1, 0, 1, 100);\n"
+        "INSERT INTO CUPTI_ACTIVITY_KIND_RUNTIME VALUES (2, 2, 3, 100);\n"
+        "INSERT INTO CUPTI_ACTIVITY_KIND_RUNTIME VALUES (1, 4, 5, 200);\n"
+        "INSERT INTO CUPTI_ACTIVITY_KIND_RUNTIME VALUES (2, 6, 7, 200);"
+        if include_process_ids
+        else (
+            "INSERT INTO CUPTI_ACTIVITY_KIND_RUNTIME VALUES (1, 0, 1);\n"
+            "INSERT INTO CUPTI_ACTIVITY_KIND_RUNTIME VALUES (2, 2, 3);"
+        )
+    )
     connection.executescript(
-        """
+        f"""
         CREATE TABLE StringIds (id INTEGER PRIMARY KEY, value TEXT);
-        CREATE TABLE CUPTI_ACTIVITY_KIND_RUNTIME (nameId INTEGER, start INTEGER, end INTEGER);
+        CREATE TABLE CUPTI_ACTIVITY_KIND_RUNTIME (nameId INTEGER, start INTEGER, end INTEGER{process_column});
         CREATE TABLE CUPTI_ACTIVITY_KIND_KERNEL (deviceId INTEGER, start INTEGER, end INTEGER);
         INSERT INTO StringIds VALUES (1, 'cudaLaunchKernel_v7000');
         INSERT INTO StringIds VALUES (2, 'cudaMemcpyAsync_v3020');
-        INSERT INTO CUPTI_ACTIVITY_KIND_RUNTIME VALUES (1, 0, 1);
-        INSERT INTO CUPTI_ACTIVITY_KIND_RUNTIME VALUES (2, 2, 3);
+        {runtime_rows}
         INSERT INTO CUPTI_ACTIVITY_KIND_KERNEL VALUES (0, 0, 5000);
         INSERT INTO CUPTI_ACTIVITY_KIND_KERNEL VALUES (0, 10000, 30000);
         INSERT INTO CUPTI_ACTIVITY_KIND_KERNEL VALUES (0, 25000, 100000);
+        INSERT INTO CUPTI_ACTIVITY_KIND_KERNEL VALUES (1, 0, 5000);
+        INSERT INTO CUPTI_ACTIVITY_KIND_KERNEL VALUES (1, 10000, 30000);
+        INSERT INTO CUPTI_ACTIVITY_KIND_KERNEL VALUES (1, 25000, 100000);
         """
     )
     if include_gpu_metrics:
@@ -190,17 +216,39 @@ def test_nsys_merge_extracts_counts_buckets_busy_and_gpu_metrics(
     _create_nsys_fixture(sqlite_path, include_gpu_metrics=True)
     record = merge_nsys_metrics(_record("profiler_on"), sqlite_path)
     on = record["metrics"]["profiler_on"]
-    assert on["kernel_count"]["value"] == 3
-    assert on["cuda_api_count"]["value"] == 2
-    assert on["kernel_launch_api_count"]["value"] == 1
-    assert on["short_kernel_buckets"]["value"] == {
-        "lt_10_us": 1,
-        "10_to_lt_50_us": 1,
-        "50_to_lt_100_us": 1,
+    assert on["kernel_count"]["value"] == {
+        "raw_total": 6,
+        "per_stable_chunk": 0.6,
+        "per_device": {
+            "0": {"raw_total": 3, "per_stable_chunk": 0.3},
+            "1": {"raw_total": 3, "per_stable_chunk": 0.3},
+        },
+        "stable_chunk_denominator": 10,
+        "capture_scope": "entire nsys start/stop capture",
+    }
+    assert on["cuda_api_count"]["value"]["raw_total"] == 4
+    assert on["cuda_api_count"]["value"]["total_per_stable_chunk"] == 0.4
+    assert on["cuda_api_count"]["value"]["per_rank_per_stable_chunk"][
+        "value"
+    ] == pytest.approx(0.2)
+    assert on["kernel_launch_api_count"]["value"]["raw_total"] == 2
+    buckets = on["short_kernel_buckets"]["value"]
+    assert buckets["raw_total"] == {
+        "lt_10_us": 2,
+        "10_to_lt_50_us": 2,
+        "50_to_lt_100_us": 2,
         "gte_100_us": 0,
     }
+    assert buckets["per_device"]["0"]["raw_total"]["lt_10_us"] == 1
+    assert on["capture_coverage"]["status"] == "available"
     assert on["gpu_kernel_busy"]["value"]["mean_pct"] == pytest.approx(95.0)
     assert on["gpu_metrics"]["sm_active"]["value"]["mean"] == 81.0
+    assert on["gpu_metrics"]["sm_active"]["value"]["raw_metric_name"] == ("SM Active")
+    assert on["gpu_metrics"]["sm_active"]["value"]["sample_count"] == 2
+    assert (
+        "Tensor Active"
+        in on["gpu_metrics"]["sm_active"]["value"]["exposed_metric_names"]
+    )
     assert on["gpu_metrics"]["tensor_active"]["status"] == "available"
     assert on["gpu_metrics"]["dram"]["status"] == "available"
 
@@ -217,6 +265,22 @@ def test_nsys_gpu_permission_degradation_is_explicit(tmp_path: Path) -> None:
         assert metric["status"] == "unavailable"
         assert metric["reason"] == "permission_denied"
         assert "permission denied" in metric["evidence"].lower()
+
+
+def test_nsys_rank_normalization_degrades_without_process_coverage(
+    tmp_path: Path,
+) -> None:
+    sqlite_path = tmp_path / "profile.sqlite"
+    _create_nsys_fixture(
+        sqlite_path, include_gpu_metrics=False, include_process_ids=False
+    )
+    record = merge_nsys_metrics(_record("profiler_on"), sqlite_path)
+    on = record["metrics"]["profiler_on"]
+    assert on["capture_coverage"]["status"] == "unavailable"
+    assert on["capture_coverage"]["reason"] == "rank_capture_coverage_unconfirmed"
+    per_rank = on["cuda_api_count"]["value"]["per_rank_per_stable_chunk"]
+    assert per_rank["status"] == "unavailable"
+    assert "columns" in per_rank["evidence"]
 
 
 def test_repeat_summary_uses_sample_cv_and_flags_variance() -> None:

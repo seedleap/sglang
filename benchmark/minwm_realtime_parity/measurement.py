@@ -124,6 +124,7 @@ def build_measurement(
     container_image: dict[str, Any],
     gpu_model: dict[str, Any],
     gpu_count: int,
+    allocated_gpu_count: int,
     sp_degree: int,
     checkpoint_id: str,
     checkpoint_step: int,
@@ -141,8 +142,10 @@ def build_measurement(
 ) -> dict[str, Any]:
     if mode not in {"profiler_off", "profiler_on"}:
         raise ValueError(f"unsupported measurement mode: {mode}")
-    if gpu_count < 1 or sp_degree < 1:
-        raise ValueError("gpu_count and sp_degree must be positive")
+    if gpu_count < 1 or allocated_gpu_count < 1 or sp_degree < 1:
+        raise ValueError("GPU counts and sp_degree must be positive")
+    if allocated_gpu_count < gpu_count:
+        raise ValueError("allocated_gpu_count cannot be smaller than active gpu_count")
 
     pending_nsys = unavailable(
         "nsys_result_not_merged",
@@ -163,6 +166,7 @@ def build_measurement(
                 "kernel_launch_api_count": pending_nsys,
                 "short_kernel_buckets": pending_nsys,
                 "gpu_kernel_busy": pending_nsys,
+                "capture_coverage": pending_nsys,
                 "gpu_metrics": {
                     "sm_active": pending_nsys,
                     "tensor_active": pending_nsys,
@@ -182,7 +186,11 @@ def build_measurement(
             "sglang_commit": sglang_commit,
             "minwm_commit": minwm_commit,
             "container_image": container_image,
-            "gpu": {"model": gpu_model, "count": gpu_count},
+            "gpu": {
+                "model": gpu_model,
+                "count": gpu_count,
+                "allocated_count": allocated_gpu_count,
+            },
         },
         "workload": {
             "model": "MinWM 5B",
@@ -206,6 +214,12 @@ def build_measurement(
                 "Profiler-on wall/FPS values include Nsight overhead."
             ),
             "timing_domains": TIMING_DOMAINS,
+            "gpu_count_semantics": {
+                "provenance.gpu.count": "active GPUs used by the workload",
+                "provenance.gpu.allocated_count": (
+                    "GPUs reserved by the job, including idle isolation capacity"
+                ),
+            },
             "profiler_on": {
                 "tool": "nsys launch/start/stop",
                 "trace": ["cuda", "nvtx"],
@@ -252,6 +266,21 @@ def _require_availability(value: Any, path: str, errors: list[str]) -> None:
         errors.append(f"{path}.status must be available or unavailable")
 
 
+def _require_normalized_count(
+    metric: Any, path: str, fields: tuple[str, ...], errors: list[str]
+) -> None:
+    _require_availability(metric, path, errors)
+    if not isinstance(metric, dict) or metric.get("status") != "available":
+        return
+    value = metric.get("value")
+    if not isinstance(value, dict):
+        errors.append(f"{path}.value must contain raw and normalized counts")
+        return
+    missing = [field for field in fields if field not in value]
+    if missing:
+        errors.append(f"{path}.value missing normalized fields: {missing}")
+
+
 def validate_measurement(result: dict[str, Any]) -> None:
     errors: list[str] = []
     if result.get("schema_version") != SCHEMA_VERSION:
@@ -277,6 +306,13 @@ def validate_measurement(result: dict[str, Any]) -> None:
     _require_availability(gpu.get("model"), "provenance.gpu.model", errors)
     if not isinstance(gpu.get("count"), int) or gpu.get("count", 0) < 1:
         errors.append("provenance.gpu.count must be a positive integer")
+    if (
+        not isinstance(gpu.get("allocated_count"), int)
+        or gpu.get("allocated_count", 0) < 1
+    ):
+        errors.append("provenance.gpu.allocated_count must be a positive integer")
+    elif isinstance(gpu.get("count"), int) and gpu["allocated_count"] < gpu["count"]:
+        errors.append("provenance.gpu.allocated_count must be >= active count")
 
     workload = result.get("workload", {})
     required_workload = {
@@ -289,6 +325,11 @@ def validate_measurement(result: dict[str, Any]) -> None:
     for key, expected_type in required_workload.items():
         if not isinstance(workload.get(key), expected_type):
             errors.append(f"workload.{key} must be {expected_type.__name__}")
+    if isinstance(gpu.get("count"), int) and isinstance(workload.get("sp_degree"), int):
+        if gpu["count"] != workload["sp_degree"]:
+            errors.append(
+                "provenance.gpu.count must equal workload.sp_degree for this S0 lane"
+            )
     if workload.get("dmd_forwards_per_chunk") != 4:
         errors.append("workload.dmd_forwards_per_chunk must be 4")
     if workload.get("clean_cache_forwards_per_chunk") != 1:
@@ -331,15 +372,57 @@ def validate_measurement(result: dict[str, Any]) -> None:
             for name in (
                 "dit_cuda_ms",
                 "vae_cuda_ms",
-                "kernel_count",
-                "cuda_api_count",
-                "kernel_launch_api_count",
-                "short_kernel_buckets",
                 "gpu_kernel_busy",
+                "capture_coverage",
             ):
                 _require_availability(
                     on.get(name), f"metrics.profiler_on.{name}", errors
                 )
+            _require_normalized_count(
+                on.get("kernel_count"),
+                "metrics.profiler_on.kernel_count",
+                (
+                    "raw_total",
+                    "per_stable_chunk",
+                    "per_device",
+                    "stable_chunk_denominator",
+                    "capture_scope",
+                ),
+                errors,
+            )
+            for name in ("cuda_api_count", "kernel_launch_api_count"):
+                _require_normalized_count(
+                    on.get(name),
+                    f"metrics.profiler_on.{name}",
+                    (
+                        "raw_total",
+                        "total_per_stable_chunk",
+                        "per_rank_per_stable_chunk",
+                        "stable_chunk_denominator",
+                        "capture_scope",
+                    ),
+                    errors,
+                )
+                metric = on.get(name)
+                if isinstance(metric, dict) and metric.get("status") == "available":
+                    nested = metric.get("value", {}).get("per_rank_per_stable_chunk")
+                    _require_availability(
+                        nested,
+                        f"metrics.profiler_on.{name}.value.per_rank_per_stable_chunk",
+                        errors,
+                    )
+            _require_normalized_count(
+                on.get("short_kernel_buckets"),
+                "metrics.profiler_on.short_kernel_buckets",
+                (
+                    "raw_total",
+                    "per_stable_chunk",
+                    "per_device",
+                    "stable_chunk_denominator",
+                    "capture_scope",
+                ),
+                errors,
+            )
             gpu_metrics = on.get("gpu_metrics", {})
             for name in ("sm_active", "tensor_active", "dram"):
                 _require_availability(
@@ -347,6 +430,22 @@ def validate_measurement(result: dict[str, Any]) -> None:
                     f"metrics.profiler_on.gpu_metrics.{name}",
                     errors,
                 )
+                metric = gpu_metrics.get(name)
+                if isinstance(metric, dict) and metric.get("status") == "available":
+                    metric_value = metric.get("value")
+                    required = {
+                        "raw_metric_name",
+                        "sample_count",
+                        "exposed_metric_names",
+                    }
+                    if not isinstance(metric_value, dict) or not required.issubset(
+                        metric_value
+                    ):
+                        errors.append(
+                            f"metrics.profiler_on.gpu_metrics.{name}.value must "
+                            "retain raw_metric_name, sample_count, and "
+                            "exposed_metric_names"
+                        )
 
     if errors:
         raise MeasurementValidationError("; ".join(errors))
