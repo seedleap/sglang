@@ -11,6 +11,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 WORK_ROOT="/work/minwm-realtime/${MINWM_RUN_ID}"
 MODEL_DIR="${WORK_ROOT}/sglang-model"
 RESULT_ROOT="${MINWM_RESULTS_ROOT%/}/${MINWM_RUN_ID}/s0-measurement"
+RESULT_PARENT="${MINWM_RESULTS_ROOT%/}/${MINWM_RUN_ID}"
 CASES="${MINWM_CASES_PATH:-${SCRIPT_DIR}/cases_720p_compile_smoke.json}"
 CASE_ID="${MINWM_CASE_ID:-00_forward_080_pottery_720p}"
 SP_DEGREES="${MINWM_S0_SP_DEGREES:-2 4}"
@@ -23,6 +24,7 @@ KV_CACHE_NUM_FRAMES="${MINWM_S0_KV_CACHE_NUM_FRAMES:-45}"
 NSYS_URL="${MINWM_NSYS_URL:-https://developer.nvidia.com/downloads/assets/tools/secure/nsight-systems/2026_4/NsightSystems-linux-cli-public-2026.4.1.191-3860507.deb}"
 NSYS_ROOT="${WORK_ROOT}/nsight-systems"
 NSYS_DEB="${WORK_ROOT}/nsight-systems-cli.deb"
+RESUME_PROFILER_OFF_ROOT="${MINWM_S0_RESUME_PROFILER_OFF_ROOT:-}"
 
 [[ -f "${MODEL_DIR}/minwm_conversion_manifest.json" ]]
 [[ -f "${CASES}" ]]
@@ -43,6 +45,25 @@ if [[ -n "${SGLANG_DIFFUSION_TORCH_PROFILER_DIR:-}" ]]; then
   echo "SGLANG_DIFFUSION_TORCH_PROFILER_DIR must be unset during Nsight capture" >&2
   exit 2
 fi
+
+archive_preexisting_results() {
+  if [[ ! -d "${RESULT_ROOT}" ]] \
+    || [[ -z "$(find "${RESULT_ROOT}" -mindepth 1 -print -quit)" ]]; then
+    return
+  fi
+  local timestamp archive_root
+  timestamp="$(date --utc +%Y%m%dT%H%M%S%NZ)"
+  archive_root="${RESULT_PARENT}/invalid/preexisting-${timestamp}/s0-measurement"
+  python3 "${SCRIPT_DIR}/measurement_tool.py" mark-invalid \
+    --root "${RESULT_ROOT}" \
+    --reason "runner refused to overwrite a pre-existing result root" \
+    --marker "${RESULT_ROOT}/invalid-marker-${timestamp}.json" \
+    --preserved-root "${archive_root}"
+  mkdir -p "$(dirname "${archive_root}")"
+  mv -- "${RESULT_ROOT}" "${archive_root}"
+}
+
+archive_preexisting_results
 mkdir -p "${RESULT_ROOT}"
 
 export MINWM_PARITY_DETERMINISTIC=1
@@ -65,8 +86,10 @@ ALLOCATED_GPU_COUNT="${MINWM_ALLOCATED_GPU_COUNT:-$(nvidia-smi -L | wc -l | xarg
   echo "sp_degrees=${SP_DEGREES}"
   echo "off_window=${OFF_WARMUP_CHUNKS}+${OFF_MEASURED_CHUNKS}"
   echo "nsys_window=${PROFILE_PRECONDITION_CHUNKS} precondition + ${PROFILE_DISCARD_CHUNKS} discarded + ${PROFILE_MEASURED_CHUNKS} stable"
+  echo "nsys_gpu_metrics_devices=all; parser maps stable-window CUDA deviceId through TARGET_INFO_GPU cuDevice->pwGpuId"
   echo "kv_cache_num_frames=${KV_CACHE_NUM_FRAMES}"
   echo "torch_profiler_concurrent=false"
+  echo "resume_profiler_off_root=${RESUME_PROFILER_OFF_ROOT:-none}"
   echo "started_utc=$(date --utc +%Y-%m-%dT%H:%M:%SZ)"
 } | tee "${RESULT_ROOT}/contract.txt"
 nvidia-smi -q > "${RESULT_ROOT}/nvidia-smi-q.txt"
@@ -74,6 +97,7 @@ nvidia-smi -q > "${RESULT_ROOT}/nvidia-smi-q.txt"
 server_pid=""
 monitor_pid=""
 nsys_session=""
+failure_scope="${RESULT_ROOT}"
 
 wait_for_server() {
   local pid="$1" log_path="$2"
@@ -112,7 +136,33 @@ cleanup() {
   fi
   stop_server
 }
-trap cleanup EXIT INT TERM
+
+mark_failed_attempt() {
+  local status="$1"
+  local timestamp
+  if [[ ! -d "${failure_scope}" ]]; then
+    return
+  fi
+  timestamp="$(date --utc +%Y%m%dT%H%M%S%NZ)"
+  python3 "${SCRIPT_DIR}/measurement_tool.py" mark-invalid \
+    --root "${failure_scope}" \
+    --reason "runner exited non-zero (status=${status}); artifacts preserved in place" \
+    --marker "${failure_scope}/invalid-marker-${timestamp}.json" || true
+}
+
+on_exit() {
+  local status="$?"
+  trap - EXIT INT TERM
+  cleanup
+  if (( status != 0 )); then
+    mark_failed_attempt "${status}"
+  fi
+  exit "${status}"
+}
+
+trap on_exit EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 server_args() {
   local degree="$1"
@@ -213,6 +263,8 @@ install_nsys() {
   fi
   nsys --version | tee "${RESULT_ROOT}/nsys-version.txt"
   nsys status -e 2>&1 | tee "${RESULT_ROOT}/nsys-status.txt" || true
+  nsys profile --gpu-metrics-devices=help 2>&1 \
+    | tee "${RESULT_ROOT}/nsys-gpu-metrics-devices.txt" || true
 }
 
 run_profiler_off() {
@@ -256,6 +308,32 @@ PY
   stop_server
 }
 
+resume_profiler_off() {
+  local degree="$1" lane_dir="$2" source_lane="$3"
+  local source_paths=()
+  mapfile -t source_paths < <(
+    find "${source_lane}" -maxdepth 1 -type f \
+      -name 'profiler-off-repeat*.json' -print | sort
+  )
+  if (( ${#source_paths[@]} < 2 )); then
+    echo "Resume source needs at least two profiler-off repeats: ${source_lane}" >&2
+    return 1
+  fi
+  for source in "${source_paths[@]}"; do
+    python3 "${SCRIPT_DIR}/measurement_tool.py" validate "${source}"
+  done
+  aggregate_repeats "${lane_dir}" "${source_paths[@]}"
+  for source in "${source_paths[@]}"; do
+    cp --no-clobber -- "${source}" "${lane_dir}/$(basename "${source}")"
+  done
+  {
+    echo "source_lane=${source_lane}"
+    echo "source_repeat_summary=${source_lane}/repeat-summary.json"
+    echo "resumed_utc=$(date --utc +%Y-%m-%dT%H:%M:%SZ)"
+  } > "${lane_dir}/profiler-off-resume-source.txt"
+  echo "Reused validated profiler-off lane for SP${degree}: ${source_lane}"
+}
+
 run_profiler_on() {
   local degree="$1" lane_dir="$2"
   local profile_dir="${lane_dir}/profiler-on"
@@ -265,12 +343,17 @@ run_profiler_on() {
   local status_log="${profile_dir}/nsys-capture-status.log"
   mkdir -p "${profile_dir}"
   read_server_args "${degree}"
-  rm -f "${report}" "${sqlite}"
+  if [[ -e "${report}" || -e "${sqlite}" ]]; then
+    echo "Refusing to overwrite pre-existing Nsight artifacts in ${profile_dir}" >&2
+    return 1
+  fi
 
   MINWM_ATTENTION_IMPL=packed \
   MINWM_PACKED_ATTENTION_DETERMINISTIC=true \
   MINWM_NATIVE_COMPONENTS=text_encoder,vae \
   MINWM_VAE_LANE=parallel \
+  SGLANG_REALTIME_NSYS_WARMUP_CHUNKS="${PROFILE_DISCARD_CHUNKS}" \
+  SGLANG_REALTIME_NSYS_MEASURED_CHUNKS="${PROFILE_MEASURED_CHUNKS}" \
   nsys launch \
     --session-new="${session}" \
     --trace=cuda,nvtx \
@@ -288,18 +371,11 @@ run_profiler_on() {
     --warmup-chunks "$((PROFILE_PRECONDITION_CHUNKS - 1))" \
     --measured-chunks 1
 
-  local gpu_devices
-  gpu_devices="$(
-    nvidia-smi --query-gpu=index --format=csv,noheader,nounits \
-      | awk -v count="${degree}" 'NR <= count' \
-      | paste -sd, -
-  )"
-  [[ -n "${gpu_devices}" ]]
   nsys_session="${session}"
   if nsys start \
     --session="${session}" \
     --output="${profile_dir}/sp${degree}" \
-    --gpu-metrics-devices="${gpu_devices}" \
+    --gpu-metrics-devices=all \
     --gpu-metrics-frequency=10000 \
     --sample=none > >(tee "${status_log}") 2>&1; then
     echo "gpu_metrics_start=success" | tee -a "${status_log}"
@@ -325,20 +401,20 @@ run_profiler_on() {
   stop_server
 
   [[ -f "${report}" ]]
-  nsys stats --report cuda_api_sum,cuda_gpu_kern_sum "${report}" \
-    > "${profile_dir}/nsys-stats.txt"
   nsys export \
     --type=sqlite \
     --output="${sqlite}" \
-    --force-overwrite=true \
     "${report}"
+  nsys stats --report cuda_api_sum,cuda_gpu_kern_sum "${report}" \
+    > "${profile_dir}/nsys-stats.txt"
   python3 "${SCRIPT_DIR}/measurement_tool.py" merge-nsys \
     --result "${profile_dir}/client.json" \
     --sqlite "${sqlite}" \
     --status-log "${status_log}" \
     --output "${profile_dir}/measurement.json"
   python3 "${SCRIPT_DIR}/measurement_tool.py" validate \
-    "${profile_dir}/measurement.json"
+    "${profile_dir}/measurement.json" \
+    --require-complete-stable-nsys
 }
 
 install_nsys
@@ -350,10 +426,18 @@ for degree in "${degrees[@]}"; do
   fi
   lane_dir="${RESULT_ROOT}/sp${degree}"
   mkdir -p "${lane_dir}"
-  run_profiler_off "${degree}" "${lane_dir}"
+  failure_scope="${lane_dir}"
+  source_lane="${RESUME_PROFILER_OFF_ROOT%/}/sp${degree}"
+  if [[ -n "${RESUME_PROFILER_OFF_ROOT}" && -d "${source_lane}" ]]; then
+    resume_profiler_off "${degree}" "${lane_dir}" "${source_lane}"
+  else
+    run_profiler_off "${degree}" "${lane_dir}"
+  fi
+  failure_scope="${lane_dir}/profiler-on"
   run_profiler_on "${degree}" "${lane_dir}"
 done
 
+failure_scope="${RESULT_ROOT}"
 python3 - "${RESULT_ROOT}" <<'PY'
 import json
 import sys

@@ -146,6 +146,7 @@
             "kernel_launch_api_count",
             "short_kernel_buckets",
             "gpu_kernel_busy",
+            "stable_window_coverage",
             "capture_coverage",
             "gpu_metrics"
           ],
@@ -174,6 +175,7 @@
             "kernel_launch_api_count": {"$ref": "#/$defs/normalized_api_count"},
             "short_kernel_buckets": {"$ref": "#/$defs/normalized_kernel_buckets"},
             "gpu_kernel_busy": {"$ref": "#/$defs/availability"},
+            "stable_window_coverage": {"$ref": "#/$defs/stable_window_coverage"},
             "capture_coverage": {"$ref": "#/$defs/availability"},
             "gpu_metrics": {
               "type": "object",
@@ -188,6 +190,69 @@
         }
       }
     },
+    "stable_window_coverage": {
+      "oneOf": [
+        {"$ref": "#/$defs/unavailable"},
+        {
+          "allOf": [
+            {"$ref": "#/$defs/available"},
+            {
+              "properties": {
+                "value": {
+                  "type": "object",
+                  "required": [
+                    "window_source",
+                    "marker_prefix",
+                    "trace_id",
+                    "clock_domain",
+                    "expected_stable_chunk_indices",
+                    "observed_stable_chunk_indices",
+                    "expected_stable_chunk_count",
+                    "observed_stable_chunk_count",
+                    "excluded_precondition_chunks",
+                    "excluded_warmup_chunk_indices",
+                    "observed_discard_chunk_indices",
+                    "normalization_denominator",
+                    "attribution_policy",
+                    "intervals"
+                  ],
+                  "properties": {
+                    "window_source": {"type": "string", "minLength": 1},
+                    "marker_prefix": {"const": "sglang.realtime.chunk"},
+                    "trace_id": {"type": "string", "minLength": 1},
+                    "clock_domain": {"type": "string", "minLength": 1},
+                    "expected_stable_chunk_indices": {"type": "array", "items": {"type": "integer"}},
+                    "observed_stable_chunk_indices": {"type": "array", "items": {"type": "integer"}},
+                    "expected_stable_chunk_count": {"type": "integer", "minimum": 10},
+                    "observed_stable_chunk_count": {"type": "integer", "minimum": 10},
+                    "excluded_precondition_chunks": {"type": "integer", "minimum": 0},
+                    "excluded_warmup_chunk_indices": {"type": "array", "items": {"type": "integer"}},
+                    "observed_discard_chunk_indices": {"type": "array", "items": {"type": "integer"}},
+                    "normalization_denominator": {"type": "integer", "minimum": 10},
+                    "attribution_policy": {"type": "string", "minLength": 1},
+                    "intervals": {
+                      "type": "array",
+                      "minItems": 10,
+                      "items": {
+                        "type": "object",
+                        "required": ["chunk_index", "request_id", "role", "start_ns", "end_ns"],
+                        "properties": {
+                          "chunk_index": {"type": "integer"},
+                          "request_id": {"type": "string", "minLength": 1},
+                          "role": {"const": "measured"},
+                          "start_ns": {"type": "integer", "minimum": 0},
+                          "end_ns": {"type": "integer", "minimum": 1}
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          ]
+        }
+      ]
+    },
     "normalized_kernel_count": {
       "oneOf": [
         {"$ref": "#/$defs/unavailable"},
@@ -198,9 +263,12 @@
               "properties": {
                 "value": {
                   "type": "object",
-                  "required": ["raw_total", "per_stable_chunk", "per_device", "stable_chunk_denominator", "capture_scope"],
+                  "required": ["raw_total", "captured_raw_total", "excluded_raw_total", "boundary_overlap_count", "per_stable_chunk", "per_device", "stable_chunk_denominator", "capture_scope"],
                   "properties": {
                     "raw_total": {"type": "integer", "minimum": 0},
+                    "captured_raw_total": {"type": "integer", "minimum": 0},
+                    "excluded_raw_total": {"type": "integer", "minimum": 0},
+                    "boundary_overlap_count": {"const": 0},
                     "per_stable_chunk": {"type": "number", "minimum": 0},
                     "per_device": {"type": "object"},
                     "stable_chunk_denominator": {"type": "integer", "minimum": 10},
@@ -223,9 +291,12 @@
               "properties": {
                 "value": {
                   "type": "object",
-                  "required": ["raw_total", "total_per_chunk", "per_rank_per_chunk", "stable_chunk_denominator", "capture_scope"],
+                  "required": ["raw_total", "captured_raw_total", "excluded_raw_total", "boundary_overlap_count", "total_per_chunk", "per_rank_per_chunk", "stable_chunk_denominator", "capture_scope"],
                   "properties": {
                     "raw_total": {"type": "integer", "minimum": 0},
+                    "captured_raw_total": {"type": "integer", "minimum": 0},
+                    "excluded_raw_total": {"type": "integer", "minimum": 0},
+                    "boundary_overlap_count": {"const": 0},
                     "total_per_chunk": {"type": "number", "minimum": 0},
                     "per_rank_per_chunk": {"$ref": "#/$defs/availability"},
                     "stable_chunk_denominator": {"type": "integer", "minimum": 10},
@@ -248,9 +319,12 @@
               "properties": {
                 "value": {
                   "type": "object",
-                  "required": ["raw_total", "per_stable_chunk", "per_device", "stable_chunk_denominator", "capture_scope"],
+                  "required": ["raw_total", "captured_raw_total", "excluded_raw_total", "boundary_overlap_count", "per_stable_chunk", "per_device", "stable_chunk_denominator", "capture_scope"],
                   "properties": {
                     "raw_total": {"$ref": "#/$defs/kernel_bucket_counts"},
+                    "captured_raw_total": {"type": "integer", "minimum": 0},
+                    "excluded_raw_total": {"type": "integer", "minimum": 0},
+                    "boundary_overlap_count": {"const": 0},
                     "per_stable_chunk": {"$ref": "#/$defs/kernel_bucket_rates"},
                     "per_device": {"type": "object"},
                     "stable_chunk_denominator": {"type": "integer", "minimum": 10},
@@ -295,10 +369,70 @@
               "properties": {
                 "value": {
                   "type": "object",
-                  "required": ["raw_metric_name", "sample_count", "exposed_metric_names"],
+                  "required": ["raw_metric_name", "mean", "min", "p50", "max", "nonzero_sample_count", "sample_count", "captured_sample_count", "excluded_sample_count", "all_collected_sample_count", "excluded_inactive_target_sample_count", "per_chunk_sample_count", "per_type_per_chunk_sample_count", "per_device_per_chunk_sample_count", "observed_type_ids", "active_cuda_device_ids", "active_pw_gpu_ids", "collected_type_ids", "collected_target_count", "active_target_count", "allocated_target_count", "target_mapping", "gpu_id_extraction", "type_id_coverage_semantics", "exposed_metric_names", "capture_scope", "timestamp_column"],
                   "properties": {
                     "raw_metric_name": {"type": "string", "minLength": 1},
+                    "mean": {"type": "number"},
+                    "min": {"type": "number"},
+                    "p50": {"type": "number"},
+                    "max": {"type": "number"},
+                    "nonzero_sample_count": {"type": "integer", "minimum": 0},
                     "sample_count": {"type": "integer", "minimum": 1},
+                    "captured_sample_count": {"type": "integer", "minimum": 1},
+                    "excluded_sample_count": {"type": "integer", "minimum": 0},
+                    "all_collected_sample_count": {"type": "integer", "minimum": 1},
+                    "excluded_inactive_target_sample_count": {"type": "integer", "minimum": 0},
+                    "per_chunk_sample_count": {
+                      "type": "object",
+                      "minProperties": 10,
+                      "additionalProperties": {"type": "integer", "minimum": 1}
+                    },
+                    "per_type_per_chunk_sample_count": {
+                      "type": "object",
+                      "minProperties": 1,
+                      "additionalProperties": {
+                        "type": "object",
+                        "minProperties": 10,
+                        "additionalProperties": {"type": "integer", "minimum": 1}
+                      }
+                    },
+                    "per_device_per_chunk_sample_count": {
+                      "type": "object",
+                      "minProperties": 1,
+                      "additionalProperties": {
+                        "type": "object",
+                        "minProperties": 10,
+                        "additionalProperties": {"type": "integer", "minimum": 1}
+                      }
+                    },
+                    "observed_type_ids": {"type": "array", "items": {"type": "integer"}},
+                    "active_cuda_device_ids": {"type": "array", "items": {"type": "integer", "minimum": 0}},
+                    "active_pw_gpu_ids": {"type": "array", "items": {"type": "integer", "minimum": 0}},
+                    "collected_type_ids": {"type": "array", "items": {"type": "integer"}},
+                    "collected_target_count": {"type": "integer", "minimum": 1},
+                    "active_target_count": {"type": "integer", "minimum": 1},
+                    "allocated_target_count": {"type": "integer", "minimum": 1},
+                    "target_mapping": {
+                      "type": "array",
+                      "minItems": 1,
+                      "items": {
+                        "type": "object",
+                        "required": ["type_id", "pw_gpu_id", "cuda_device_id", "bus_location", "uuid", "gpu_name", "active"],
+                        "properties": {
+                          "type_id": {"type": "integer"},
+                          "pw_gpu_id": {"type": "integer", "minimum": 0},
+                          "cuda_device_id": {"type": "integer", "minimum": 0},
+                          "bus_location": {"type": "string"},
+                          "uuid": {"type": "string"},
+                          "gpu_name": {"type": "string"},
+                          "active": {"type": "boolean"}
+                        }
+                      }
+                    },
+                    "gpu_id_extraction": {"type": "string", "minLength": 1},
+                    "type_id_coverage_semantics": {"type": "string", "minLength": 1},
+                    "capture_scope": {"const": "union of exact measured outer chunk NVTX ranges"},
+                    "timestamp_column": {"type": "string", "minLength": 1},
                     "exposed_metric_names": {
                       "type": "array",
                       "items": {"type": "string"}

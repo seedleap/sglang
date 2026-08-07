@@ -1,11 +1,11 @@
 apiVersion: v1
 kind: Pod
 metadata:
-  name: minwm-s0-fusedops-artifact-reader-20260807
+  name: minwm-s0-fusedops-artifact-marker-20260807
   namespace: default
   labels:
     seedleap.ai/owner: chenshengdong
-    seedleap.ai/purpose: minwm-s0-fusedops-artifact-readback
+    seedleap.ai/purpose: minwm-s0-fusedops-artifact-marking
     seedleap.ai/task: minwm-fusedops-s0
 spec:
   restartPolicy: Never
@@ -22,13 +22,13 @@ spec:
       value: minwm-test-phx2-karpenter
       effect: NoSchedule
   containers:
-    - name: reader
+    - name: marker
       image: 829115578968.dkr.ecr.us-east-2.amazonaws.com/leap-world/minwm-training@sha256:bedc07ea3ba55059a8c1c569c3b177c4d00d41f37d4fa9105375531534ef5f2a
       imagePullPolicy: IfNotPresent
       command:
         - /bin/bash
         - -lc
-        - sleep 7200
+        - sleep 900
       resources:
         requests:
           cpu: 100m
@@ -39,7 +39,6 @@ spec:
       volumeMounts:
         - name: results
           mountPath: /results
-          readOnly: true
   volumes:
     - name: results
       persistentVolumeClaim:
