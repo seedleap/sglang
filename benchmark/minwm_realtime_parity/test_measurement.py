@@ -13,12 +13,14 @@ from jsonschema import Draft202012Validator
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from benchmark_realtime_throughput import (  # noqa: E402
+    frame_batch_payload_digest,
     incomplete_measurement_diagnostic,
     missing_required_stage_trace,
     record_required_stage_trace,
     required_stage_trace_chunks,
     required_stage_trace_is_complete,
 )
+from compare_trace_sync_abba import build_trace_sync_summary  # noqa: E402
 from measurement import (  # noqa: E402
     MeasurementValidationError,
     available,
@@ -55,6 +57,16 @@ def _latency(value: float, count: int) -> dict:
         "ms_per_chunk",
         "test fixture",
     )
+
+
+def test_frame_batch_payload_digest_is_ordered_and_complete() -> None:
+    first = hashlib.sha256(b"first").hexdigest()
+    second = hashlib.sha256(b"second").hexdigest()
+    forward = frame_batch_payload_digest({0: first, 1: second}, 2)
+    reverse_input = frame_batch_payload_digest({1: second, 0: first}, 2)
+    assert forward == reverse_input
+    with pytest.raises(ValueError, match="incomplete"):
+        frame_batch_payload_digest({0: first}, 2)
 
 
 @pytest.mark.parametrize(
@@ -105,7 +117,10 @@ def _record(
         precondition_warmup_chunks=0 if mode == "profiler_off" else 20,
         precision="bf16",
         fast_lane=True,
-        comparison_contract={"case": "00_forward_pottery"},
+        comparison_contract={
+            "case": "00_forward_pottery",
+            "kv_cache_num_frames": 45,
+        },
         profiler_off_metrics=off_metrics,
         profiler_on_cuda_metrics={
             "dit_cuda_ms": _latency(590.0, measured_chunks),
@@ -113,6 +128,67 @@ def _record(
         },
         artifacts={"client_result": "/results/client.json"},
     )
+
+
+def _trace_sync_record(
+    *,
+    run_id: str,
+    gpu_count: int,
+    client_fps: float,
+    scheduler_fps: float,
+    trace_sync_cuda: int,
+) -> dict:
+    record = _record(run_id=run_id, gpu_count=gpu_count)
+    record["metrics"]["profiler_off"]["client_fps"]["value"] = client_fps
+    record["metrics"]["profiler_off"]["scheduler_fps"]["value"] = scheduler_fps
+    record["client"] = {
+        "payload_sha256_by_chunk": {
+            str(index): hashlib.sha256(f"chunk-{index}".encode()).hexdigest()
+            for index in range(220)
+        }
+    }
+    record["artifacts"]["server_trace_sync_cuda"] = trace_sync_cuda
+    return record
+
+
+def test_trace_sync_abba_summary_requires_bitwise_and_no_fps_regression() -> None:
+    records = {}
+    for degree in (2, 4):
+        records[degree] = {
+            "control": [
+                _trace_sync_record(
+                    run_id=f"sp{degree}-control-{repeat}",
+                    gpu_count=degree,
+                    client_fps=16.0,
+                    scheduler_fps=16.1,
+                    trace_sync_cuda=1,
+                )
+                for repeat in (1, 2)
+            ],
+            "candidate": [
+                _trace_sync_record(
+                    run_id=f"sp{degree}-candidate-{repeat}",
+                    gpu_count=degree,
+                    client_fps=16.2,
+                    scheduler_fps=16.3,
+                    trace_sync_cuda=0,
+                )
+                for repeat in (1, 2)
+            ],
+        }
+
+    summary = build_trace_sync_summary(records)
+    assert summary["acceptance"]["go"] is True
+    assert summary["lanes"]["sp2"]["payload_bitwise"] == {
+        "passes": True,
+        "chunk_count": 220,
+        "algorithm": "sha256(batch_index || sha256(raw_rgb_batch))",
+    }
+
+    records[4]["candidate"][1]["client"]["payload_sha256_by_chunk"]["219"] = "0" * 64
+    summary = build_trace_sync_summary(records)
+    assert summary["acceptance"]["go"] is False
+    assert summary["lanes"]["sp4"]["payload_bitwise"]["passes"] is False
 
 
 def _machine_schema_validator() -> Draft202012Validator:
@@ -332,7 +408,8 @@ def _create_nsys_fixture(
     connection = sqlite3.connect(path)
     runtime_process_column = ", globalTid INTEGER" if include_process_ids else ""
     kernel_process_column = ", globalPid INTEGER" if include_process_ids else ""
-    connection.executescript(f"""
+    connection.executescript(
+        f"""
         CREATE TABLE StringIds (id INTEGER PRIMARY KEY, value TEXT);
         CREATE TABLE CUPTI_ACTIVITY_KIND_RUNTIME (nameId INTEGER, start INTEGER, end INTEGER{runtime_process_column});
         CREATE TABLE CUPTI_ACTIVITY_KIND_KERNEL (deviceId INTEGER, start INTEGER, end INTEGER{kernel_process_column});
@@ -340,7 +417,8 @@ def _create_nsys_fixture(
         INSERT INTO StringIds VALUES (1, 'cudaLaunchKernel_v7000');
         INSERT INTO StringIds VALUES (2, 'cudaMemcpyAsync_v3020');
         INSERT INTO StringIds VALUES (3, 'cudaEventQuery_v3020');
-        """)
+        """
+    )
     if include_process_ids:
         connection.execute(
             "CREATE TABLE PROCESSES (globalPid INTEGER, pid INTEGER, name TEXT)"
@@ -466,7 +544,8 @@ def _create_nsys_fixture(
             [row[:3] for row in kernel_rows],
         )
     if include_gpu_metrics:
-        connection.executescript("""
+        connection.executescript(
+            """
             CREATE TABLE TARGET_INFO_GPU (
                 pwGpuId INTEGER,
                 cuDevice INTEGER,
@@ -482,7 +561,8 @@ def _create_nsys_fixture(
                 metricName TEXT
             );
             CREATE TABLE GPU_METRICS (typeId INTEGER, metricId INTEGER, value REAL, timestamp INTEGER);
-            """)
+            """
+        )
         gpu_metric_type_base = 0x1000100000000
         pw_to_cuda = pw_to_cuda or {
             0: 2,

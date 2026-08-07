@@ -1,0 +1,225 @@
+# MinWM P0：默认 realtime trace CUDA host 同步清理
+
+## 状态、目标与非目标
+
+- 状态：实现与 CPU/fake-CUDA 单测完成；704p SP2/SP4 ABBA 和独立 Nsight 尚未提交，当前结论为 **no-go（真机证据未完成）**。
+- 本任务分支：`codex/minwm-trace-sync-cleanup`。
+- 安全复用来源：从 S0 冻结分支 `codex/minwm-fused-ops-s0` 的 `6c79fdfa63263814dc4e698b7bd808c6313b655c` 创建，没有从其他 worktree 复制文件或直接修改其他 worktree。
+- 目标：默认 realtime trace 只保留 host wall，可选 CUDA event timing 改为显式 opt-in；默认 span 结束不等待 CUDA；保留 worker→API 的 wall/CUDA 状态可观测性；提供 bitwise 与同机 paired A/B 工具。
+- 非目标：删除 realtime tracing、修改 MinWM/TAEHV/VAE 数学、实现其他 kernel/Graph/A2A 优化，或移除传输正确性所需的 event/stream barrier。
+
+统一来源总账为飞书文档 `TFm8dG8nuoDTioxO4HFcuEBInRb` revision 8。本次使用
+`--profile kejun --as bot` 重读了“统一验收合同”“当前不符合预期的地方”和“记录要求”。
+冻结口径为 MinWM 5B step-3200、1248×704、BF16、每 chunk 4 DMD + 1 clean-cache
+forward、KV45，SP2 主验收、SP4 复验；headline 为 profiler-off 20 warmup + 至少
+200 measured，每个 control/candidate 至少两次同机 paired run。
+
+## 基线与已有实现痕迹审计
+
+### Git 与负责人
+
+初始 worktree 在 detached `3654740347`，工作区干净；这个本地 `main` 不含 MinWM
+realtime API。`origin/main=9a9dc59cd1` 才包含 API，而冻结 S0 已在其上叠加测量修复。
+因此本任务没有在错误的本地 `main` 上重新实现，而是安全建分支：
+
+```bash
+git switch -c codex/minwm-trace-sync-cleanup codex/minwm-fused-ops-s0
+```
+
+S0 冻结提交 `6c79fdfa63` 的 author/committer 为 Jack47；只读检查
+`/Users/chenshengdong/.codex/worktrees/b8ad/sglang` 显示 branch 与
+`origin/codex/minwm-fused-ops-s0` 为 `+0/-0`，没有 tracked/untracked 修改。
+
+本任务直接依赖的既有实现是 `839f312c3b4622c8e04c5c76620d22d6c2497fa0`
+（`fix(minwm): relay worker CUDA timings to realtime clients`，author Jack47）。它把
+worker 的纯标量 component timing 经 `RequestMetrics` 送回 API。`78af9cf8ed` /
+`52a3a45051` 是 async-VAE trace 的两条历史线索，不是 P0 已完成实现，也没有直接
+cherry-pick。
+
+### S0 Job、运行状态与产物
+
+所有现场读取都显式使用 `--context codex-minwm-test-phx2`。桌面全局 current context
+实际为 `codex-seed-leap-use1`，验证了不能依赖默认 context。
+
+| 项 | 只读核对结果 |
+| --- | --- |
+| Job | `minwm-s0-fusedops-h200-20260807-09`，1/1 Succeeded，非运行中 |
+| 时间 | `2026-08-07T06:47:27Z` 开始，`07:07:25Z` 完成 |
+| owner | `chenshengdong` |
+| Pod / node | `minwm-s0-fusedops-h200-20260807-09-s9cc4` / `i-01a57ab8567279852` |
+| source | `d5b25227d4487d113e62c86a0fb572a62d6bcc5b` |
+| image | `minwm-training@sha256:bedc07ea…f5f2a` |
+| PVC | `minwm-s0-fusedops-h200-results-20260807`，Bound 100 GiB |
+| reader | `minwm-s0-fusedops-artifact-reader-20260807`，Succeeded |
+| 正式产物根 | `/results/attempts/minwm-s0-fusedops-h200-20260807-09-s9cc4/minwm-s0-fusedops-h200-20260807-09/s0-measurement/` |
+
+reader 和 Job 的 `kubectl logs --tail` 本轮返回空 stdout，因此没有把“空日志”当作
+成功产物证据；正式 JSON/SQLite 的路径、字节数和 SHA-256 以 S0 冻结文档中的独立
+streaming 校验为准。失败的 `-04/-05/-06/-08` Pod 仍保留，未删除或覆盖。
+
+## 代码与数据布局合同
+
+### 默认与 opt-in
+
+| 条件 | host 行为 | trace 字段 | 回退 |
+| --- | --- | --- | --- |
+| 环境变量未设置 | 不创建/等待 CUDA event | `duration_ms`、`wall_timing_source=perf_counter`、`cuda_timing_status=disabled` | wall-only |
+| `SGLANG_REALTIME_TRACE_SYNC_CUDA=1/true/yes/on` | 创建 start/end event；span 结束显式等待 | 上述字段 + `cuda_ms`、`cuda_timing_status=available` | 只用于显式 profiling |
+| 显式 opt-in 但无 CUDA/不支持 event/计时失败 | 不伪造 0 | wall + `cuda_timing_status=unavailable`，无 `cuda_ms` | 安全 wall-only |
+| 未知环境变量值 | fail closed，不同步 | `cuda_timing_status=disabled` | wall-only |
+| 调用点 `measure_cuda=False` | 始终不同步 | wall-only | 用于 load/post-decode CPU span |
+| 调用点 `measure_cuda=True` | 显式 opt-in，覆盖环境变量 | CUDA timing 或显式 unavailable | 测试/定向 profiling |
+
+`GenerateSession.__init__` 仍用 session UUID 设置默认 `trace_id`；没有通过“让 trace id
+为空”规避同步。trace log、sink、WebSocket 事件、component wall 和跨进程 relay 都保留。
+新增 `cuda_timing_status` 让消费者可区分 disabled/unavailable/available，不把缺失值
+静默解释成 0。
+
+### bitwise 与 ABBA 产物
+
+`benchmark_realtime_throughput.py` 不保留大帧 payload，但为每个 raw-RGB batch 计算
+SHA-256，再按 batch index 生成 chunk digest；20+200 的 220 个 chunk 全部写入
+`client.payload_sha256_by_chunk`。`compare_trace_sync_abba.py` 要求 control1、candidate1、
+candidate2、control2 四次 digest map 完全相同，同时校验 BF16、20+>=200、CV<=3%、
+Client/Scheduler FPS 不回退。
+
+正式结果布局：
+
+```text
+/results/attempts/<pod>/<run-id>/trace-sync-abba/
+├── contract.txt
+├── comparison-summary.json
+├── sp2/
+│   ├── control-repeat{1,2}.json
+│   ├── candidate-repeat{1,2}.json
+│   ├── *-server.log
+│   ├── *-gpu-telemetry.csv
+│   └── *-telemetry-summary.json
+└── sp4/...
+```
+
+每次 server health 后开始逐秒采 active GPU 显存，sidecar 报 aggregate peak，以及后
+20 samples 相对中段 20 samples 的显存变化；不把未采集的地址稳定性或显存增长写成 0。
+
+## 默认生产路径同步点清单
+
+| 位置 | 默认实时路径 | 当前处理 | 原因 |
+| --- | --- | --- | --- |
+| `RealtimeTraceSpan.__exit__ -> cuda_end.synchronize()` | 是；默认 trace id 总存在，覆盖 MinWM denoise、VAE encode/decode | 默认关闭，显式 opt-in 保留 | 本任务主同步点 |
+| VAE decoder load / post-decode span | 是 | 原本已 `measure_cuda=False`，保留 | CPU/host wall span |
+| `StageProfiler` 的 device synchronize | 仅 `SGLANG_DIFFUSION_SYNC_STAGE_PROFILING=1` | 不改；默认 0 | 已是显式 profiler |
+| `GPUWorker` frame materialize synchronize | 同上 | 不改；默认 0 | 已是显式 profiler |
+| disaggregation `stage_event.synchronize()` | 非本轮默认单体 MinWM 路径 | 不改 | buffer 发送前的正确性 barrier，不是 trace timing |
+| disaggregation/transport stream synchronize | 非本轮默认路径 | 不改 | 传输所有权/生命周期 barrier |
+| benchmark 脚本内 `torch.cuda.synchronize()` | 否 | 不改 | 离线 benchmark 计时 |
+| profiler utility 内 synchronize | 否 | 不改 | 显式 profiler |
+
+本轮没有发现第二个由默认 realtime trace 引入的 stream-wide/device-wide host sync。
+
+## 实际命令、测试与不符合预期
+
+### 仓库与 S0 审计
+
+```bash
+pwd
+rg --files -g 'AGENTS.md'
+git status --short --branch
+git worktree list --porcelain
+git log --all --oneline --grep='trace.*sync\|sync.*trace\|RealtimeTraceSpan\|REALTIME_TRACE' -i
+git grep -n 'SGLANG_REALTIME_TRACE_SYNC_CUDA\|RealtimeTraceSpan' origin/main
+git show --format=fuller --stat 839f312c3b
+git -C /Users/chenshengdong/.codex/worktrees/b8ad/sglang status --porcelain=v2 --branch --untracked-files=all
+```
+
+### 飞书冻结口径
+
+```bash
+LARKSUITE_CLI_NO_UPDATE_NOTIFIER=1 LARKSUITE_CLI_NO_SKILLS_NOTIFIER=1 \
+  lark-cli docs +fetch --profile kejun --as bot \
+  --doc 'https://icnimsatr0zz.feishu.cn/docx/TFm8dG8nuoDTioxO4HFcuEBInRb' \
+  --scope keyword --keyword 'S0|SGLANG_REALTIME_TRACE_SYNC_CUDA|RealtimeTraceSpan|CUDA event|host 同步|trace sync' \
+  --detail with-ids --format json
+```
+
+随后以相同 profile/identity 读取 outline，并按 block id 局部读取“统一验收合同”“当前
+不符合预期的地方”“记录要求”；返回 revision 均为 8。
+
+### Kubernetes 只读核对
+
+```bash
+kubectl config current-context
+kubectl --context codex-minwm-test-phx2 -n default get job \
+  minwm-s0-fusedops-h200-20260807-09
+kubectl --context codex-minwm-test-phx2 -n default get pods \
+  -l job-name=minwm-s0-fusedops-h200-20260807-09 -o wide
+kubectl --context codex-minwm-test-phx2 -n default get pvc \
+  minwm-s0-fusedops-h200-results-20260807
+kubectl --context codex-minwm-test-phx2 -n default logs \
+  pod/minwm-s0-fusedops-artifact-reader-20260807 --tail=220
+```
+
+最后一条返回空 stdout；未据此声称日志内容完整。没有执行 apply/delete/kill。
+
+### 测试
+
+先写失败合同测试：
+
+```bash
+TORCHDYNAMO_DISABLE=1 PYTHONPATH=python python3.11 -m pytest -q \
+  python/sglang/multimodal_gen/test/unit/realtime/test_realtime_trace.py
+```
+
+实际：`4 failed`，分别证明旧代码默认启用 CUDA、缺 status、unsupported 无显式降级、
+未知 env 值会错误开启；这是预期红灯。
+
+实现后：
+
+```bash
+TORCHDYNAMO_DISABLE=1 PYTHONPATH=python python3.11 -m pytest -q \
+  python/sglang/multimodal_gen/test/unit/realtime/test_realtime_trace.py \
+  python/sglang/multimodal_gen/test/unit/realtime/test_realtime_runtime.py
+```
+
+实际：`51 passed`。
+
+第一次测量工具回归：
+
+```bash
+python3 -m pytest -q \
+  benchmark/minwm_realtime_parity/test_measurement.py \
+  benchmark/minwm_realtime_parity/test_common.py
+```
+
+实际：`46 passed, 1 failed`。原因不是算法，而是本机默认 Python 的 `zip()` 不支持
+`strict=True`。前置已严格验证两臂各两次，因此移除该关键字以兼容 runner 镜像；复验
+为 `47 passed`。同时执行 `bash -n run_trace_sync_abba.sh` 与 Python `py_compile`，通过。
+
+尝试运行仓库 hook：
+
+```bash
+pre-commit run --files <本任务文件>
+```
+
+实际失败为 `zsh: command not found: pre-commit`，本机与 worktree 都没有该可执行文件。
+没有把缺依赖写成 hook 通过；改用已安装的 `black --check`、`ruff check`、`bash -n`。
+Black 首次指出 comparator 与 measurement test 需格式化；运行 Black 后复查：7 个 Python
+文件均 unchanged，Ruff all checks passed，shell syntax 通过。格式化后再次执行两组测试，
+仍为 `47 passed` 和 `51 passed`，`git diff --check` 通过。
+
+首次暂存后的 `git diff --cached --check` 又定位到本文第 35 行一个行尾空格；同一 shell
+没有 `set -e`，所以后续 commit 仍被执行。该 commit 尚未 push；立即删除空格、重新
+执行 cached diff check，并 amend 后才允许作为 Job source。这条失败没有从记录中省略。
+
+## 待执行真机矩阵与当前门禁
+
+1. 提交安全代码 commit 并 push；Job 只能 checkout immutable SHA。
+2. 对独立 manifest 做 client/server dry-run，核对 image、SHA、checkpoint、PVC、
+   H200 `p5e.48xlarge`、8 GPU 整机隔离、SP2/SP4、20+200、KV45、ABBA。
+3. profiler-off 同 Pod/同 node 执行 control1,candidate1,candidate2,control2；报告 Client/
+   Scheduler FPS、chunk/DiT/VAE wall、peak VRAM、CV、220-chunk bitwise。
+4. 独立 Nsight，不与 torch.profiler 并用；报告 DiT CUDA、kernel/launch、短 kernel、
+   A2A、GPU busy、SM/Tensor Active、DRAM。Nsight FPS 不作 headline。
+5. 832×480 只作 prompt switch/scene cut/eviction 回归；不替代 704p。
+
+当前没有正式 P0 Job、没有 P0 真机 JSON/SQLite，因此相关栏位是“未测”，不是 0。
+在 bitwise、两次同机 paired A/B、CV、SP4 复验与 Nsight 归因完成前保持 **no-go**。

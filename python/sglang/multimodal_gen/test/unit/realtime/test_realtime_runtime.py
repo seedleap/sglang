@@ -678,6 +678,8 @@ def test_result_component_timing_relay_covers_metrics_list_and_deduplicates(
         "event": "server.vae_decode_complete",
         "component": "vae_decoder",
         "duration_ms": 180.0,
+        "wall_timing_source": "perf_counter",
+        "cuda_timing_status": "disabled",
         "chunk_index": 4,
         "request_id": "request-4",
     }

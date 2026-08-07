@@ -16,6 +16,7 @@ TRACE_LOG_PREFIX = "realtime_trace"
 CLIENT_TRACE_EVENT_KIND = "client_trace"
 MAX_TRACE_ID_LENGTH = 128
 MAX_CLIENT_TRACE_EVENTS = 32
+REALTIME_TRACE_SYNC_CUDA_ENV = "SGLANG_REALTIME_TRACE_SYNC_CUDA"
 
 _TRACE_ID_RE = re.compile(r"[^A-Za-z0-9_.:-]")
 _HOSTNAME = socket.gethostname()
@@ -201,10 +202,16 @@ class RealtimeTraceSpan:
                 _batch_elapsed_ms(self.batch, end_time), 3
             ),
             "duration_ms": round(duration_ms, 3),
+            "wall_timing_source": "perf_counter",
         }
         cuda_ms = _finish_cuda_timing(self.cuda_start, self.cuda_end)
         if cuda_ms is not None:
             fields["cuda_ms"] = round(cuda_ms, 3)
+            fields["cuda_timing_status"] = "available"
+        elif self.measure_cuda:
+            fields["cuda_timing_status"] = "unavailable"
+        else:
+            fields["cuda_timing_status"] = "disabled"
         if exc_val is not None:
             fields["error"] = str(exc_val).splitlines()[0]
         metrics = getattr(self.batch, "metrics", None)
@@ -214,6 +221,8 @@ class RealtimeTraceSpan:
                 "event": self.event,
                 "component": fields["component"],
                 "duration_ms": fields["duration_ms"],
+                "wall_timing_source": fields["wall_timing_source"],
+                "cuda_timing_status": fields["cuda_timing_status"],
                 "chunk_index": fields.get(
                     "chunk_index", getattr(self.batch, "block_idx", None)
                 ),
@@ -284,11 +293,11 @@ def _batch_elapsed_ms(batch, now: float) -> float:
 def _should_measure_cuda(measure_cuda: bool | None) -> bool:
     if measure_cuda is not None:
         return measure_cuda
-    return os.environ.get("SGLANG_REALTIME_TRACE_SYNC_CUDA", "1").lower() not in {
-        "0",
-        "false",
-        "no",
-        "off",
+    return os.environ.get(REALTIME_TRACE_SYNC_CUDA_ENV, "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
     }
 
 

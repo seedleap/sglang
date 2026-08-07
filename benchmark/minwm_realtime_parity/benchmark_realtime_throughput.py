@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import os
 import subprocess
@@ -137,6 +138,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--warmup-chunks", type=int, default=20)
     parser.add_argument("--measured-chunks", type=int, default=200)
     parser.add_argument("--kv-cache-num-frames", type=int)
+    parser.add_argument("--server-trace-sync-cuda", choices=(0, 1), type=int)
     parser.add_argument(
         "--require-complete-stage-trace",
         action="store_true",
@@ -215,6 +217,22 @@ def validate_frame_batch(
     return batch_index, num_batches, batch_frames
 
 
+def frame_batch_payload_digest(
+    payload_sha256_by_batch: dict[int, str], num_batches: int
+) -> str:
+    expected = set(range(num_batches))
+    if set(payload_sha256_by_batch) != expected:
+        raise ValueError(
+            "frame batch payload hashes are incomplete: "
+            f"observed={sorted(payload_sha256_by_batch)} expected={sorted(expected)}"
+        )
+    digest = hashlib.sha256()
+    for batch_index in range(num_batches):
+        digest.update(batch_index.to_bytes(4, "big"))
+        digest.update(bytes.fromhex(payload_sha256_by_batch[batch_index]))
+    return digest.hexdigest()
+
+
 async def receive_run(args: argparse.Namespace, contract: dict, case: dict) -> dict:
     import websockets
 
@@ -258,6 +276,7 @@ async def receive_run(args: argparse.Namespace, contract: dict, case: dict) -> d
     stats_by_chunk: dict[int, dict[str, Any]] = {}
     payload_complete_ns: dict[int, int] = {}
     frame_batches_by_chunk: dict[int, dict[str, Any]] = {}
+    payload_sha256_by_chunk: dict[int, str] = {}
     trace_events: list[dict[str, Any]] = []
     required_trace_chunks = (
         required_stage_trace_chunks(args.measurement_mode)
@@ -344,7 +363,12 @@ async def receive_run(args: argparse.Namespace, contract: dict, case: dict) -> d
             )
             state = frame_batches_by_chunk.setdefault(
                 chunk_index,
-                {"num_batches": num_batches, "seen": set(), "frames": 0},
+                {
+                    "num_batches": num_batches,
+                    "seen": set(),
+                    "frames": 0,
+                    "payload_sha256_by_batch": {},
+                },
             )
             if state["num_batches"] != num_batches:
                 raise AssertionError(
@@ -357,6 +381,9 @@ async def receive_run(args: argparse.Namespace, contract: dict, case: dict) -> d
                 )
             state["seen"].add(batch_index)
             state["frames"] += batch_frames
+            state["payload_sha256_by_batch"][batch_index] = hashlib.sha256(
+                payload
+            ).hexdigest()
             if batch_index == num_batches - 1:
                 expected_batch_indices = set(range(num_batches))
                 if state["seen"] != expected_batch_indices:
@@ -370,6 +397,9 @@ async def receive_run(args: argparse.Namespace, contract: dict, case: dict) -> d
                         f"chunk {chunk_index} produced {state['frames']} frames, "
                         f"expected {expected_frames}"
                     )
+                payload_sha256_by_chunk[chunk_index] = frame_batch_payload_digest(
+                    state["payload_sha256_by_batch"], num_batches
+                )
                 payload_complete_ns[chunk_index] = time.perf_counter_ns()
 
     expected_indices = list(range(total_chunks))
@@ -377,6 +407,8 @@ async def receive_run(args: argparse.Namespace, contract: dict, case: dict) -> d
         raise AssertionError("chunk_stats indices are not contiguous")
     if sorted(payload_complete_ns) != expected_indices:
         raise AssertionError("frame payload indices are not contiguous")
+    if sorted(payload_sha256_by_chunk) != expected_indices:
+        raise AssertionError("frame payload hash indices are not contiguous")
 
     measured_indices = list(range(args.warmup_chunks, total_chunks))
     measured_stats = [stats_by_chunk[index] for index in measured_indices]
@@ -447,6 +479,9 @@ async def receive_run(args: argparse.Namespace, contract: dict, case: dict) -> d
         "steady_payload_interarrival_ms": latency_summary(interarrival_ms),
         "steady_received_fps_ratio_of_sums": measured_frames / client_window_s,
         "steady_window_seconds": client_window_s,
+        "payload_sha256_by_chunk": {
+            str(index): payload_sha256_by_chunk[index] for index in expected_indices
+        },
     }
 
     measured_index_set = set(measured_indices)
@@ -546,6 +581,9 @@ async def receive_run(args: argparse.Namespace, contract: dict, case: dict) -> d
         "model_name",
         "--gpu-model or nvidia-smi",
     )
+    artifacts = {"client_result": str(Path(args.output).resolve())}
+    if args.server_trace_sync_cuda is not None:
+        artifacts["server_trace_sync_cuda"] = args.server_trace_sync_cuda
     result = build_measurement(
         mode=args.measurement_mode,
         run_id=run_id,
@@ -572,7 +610,7 @@ async def receive_run(args: argparse.Namespace, contract: dict, case: dict) -> d
         comparison_contract=comparison_contract,
         profiler_off_metrics=wall_metrics,
         profiler_on_cuda_metrics=cuda_metrics,
-        artifacts={"client_result": str(Path(args.output).resolve())},
+        artifacts=artifacts,
     )
     # Compatibility fields remain during migration of the existing throughput
     # summary scripts. New consumers should read metrics.* and timing_domains.

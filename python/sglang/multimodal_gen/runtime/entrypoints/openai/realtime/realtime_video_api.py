@@ -383,6 +383,12 @@ def _iter_realtime_result_component_timings(result: Any):
                 "duration_ms": duration_ms,
                 "chunk_index": chunk_index,
             }
+            wall_timing_source = timing.get("wall_timing_source")
+            if wall_timing_source is not None:
+                normalized["wall_timing_source"] = str(wall_timing_source)
+            cuda_timing_status = timing.get("cuda_timing_status")
+            if cuda_timing_status is not None:
+                normalized["cuda_timing_status"] = str(cuda_timing_status)
             if request_id is not None:
                 normalized["request_id"] = request_id
             if timing.get("cuda_ms") is not None:
