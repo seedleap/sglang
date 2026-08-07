@@ -220,6 +220,28 @@ def test_trace_sync_abba_summary_rejects_chunk_wall_cv_above_three_percent() -> 
     assert summary["lanes"]["sp2"]["acceptance"]["cv_le_3_percent"] is False
 
 
+def test_trace_sync_abba_summary_accepts_more_than_two_repeats() -> None:
+    records = {
+        2: {
+            arm: [
+                _trace_sync_record(
+                    run_id=f"sp2-{arm}-{repeat}",
+                    gpu_count=2,
+                    client_fps=16.0 + (0.1 if arm == "candidate" else 0.0),
+                    scheduler_fps=16.1 + (0.1 if arm == "candidate" else 0.0),
+                    trace_sync_cuda=1 if arm == "control" else 0,
+                )
+                for repeat in (1, 2, 3, 4)
+            ]
+            for arm in ("control", "candidate")
+        }
+    }
+
+    summary = build_trace_sync_summary(records)
+    assert summary["acceptance"]["go"] is True
+    assert summary["lanes"]["sp2"]["workload"]["repeat_count"] == 4
+
+
 def _machine_schema_validator() -> Draft202012Validator:
     schema_path = Path(__file__).with_name("measurement_schema.json")
     schema = json.loads(schema_path.read_text(encoding="utf-8"))

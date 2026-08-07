@@ -12,7 +12,8 @@ from typing import Any
 from measurement import coefficient_of_variation, validate_measurement
 
 ARMS = ("control", "candidate")
-REPEATS = (1, 2)
+DEFAULT_REPEATS = (1, 2)
+DEFAULT_SP_DEGREES = (2, 4)
 METRICS = (
     "client_fps",
     "scheduler_fps",
@@ -84,9 +85,12 @@ def build_trace_sync_summary(
     for degree, arms in sorted(records_by_sp.items()):
         if set(arms) != set(ARMS):
             raise ValueError(f"SP{degree} must contain control and candidate records")
+        repeat_count = len(arms["control"])
+        if repeat_count < 2 or len(arms["candidate"]) != repeat_count:
+            raise ValueError(
+                f"SP{degree} must contain the same >=2 repeats for both arms"
+            )
         for arm in ARMS:
-            if len(arms[arm]) != len(REPEATS):
-                raise ValueError(f"SP{degree} {arm} must contain two repeats")
             for record in arms[arm]:
                 validate_measurement(record)
                 workload = record["workload"]
@@ -164,6 +168,7 @@ def build_trace_sync_summary(
                 "sp_degree": degree,
                 "warmup_chunks": control[0]["workload"]["warmup_chunks"],
                 "measured_chunks": control[0]["workload"]["measured_chunks"],
+                "repeat_count": repeat_count,
                 "precision": control[0]["workload"]["precision"],
                 "kv_cache_num_frames": control[0]
                 .get("comparison_contract", {})
@@ -208,22 +213,31 @@ def _load_inputs(root: Path) -> tuple[
     dict[int, dict[str, list[dict[str, Any]]]],
     dict[int, dict[str, list[dict[str, Any]]]],
 ]:
+    return _load_selected_inputs(root, DEFAULT_SP_DEGREES, DEFAULT_REPEATS)
+
+
+def _load_selected_inputs(
+    root: Path, degrees: tuple[int, ...], repeats: tuple[int, ...]
+) -> tuple[
+    dict[int, dict[str, list[dict[str, Any]]]],
+    dict[int, dict[str, list[dict[str, Any]]]],
+]:
     records: dict[int, dict[str, list[dict[str, Any]]]] = {}
     telemetry: dict[int, dict[str, list[dict[str, Any]]]] = {}
-    for degree in (2, 4):
+    for degree in degrees:
         lane = root / f"sp{degree}"
         records[degree] = {}
         telemetry[degree] = {}
         for arm in ARMS:
             records[degree][arm] = [
                 json.loads((lane / f"{arm}-repeat{repeat}.json").read_text())
-                for repeat in REPEATS
+                for repeat in repeats
             ]
             telemetry[degree][arm] = [
                 json.loads(
                     (lane / f"{arm}-repeat{repeat}-telemetry-summary.json").read_text()
                 )
-                for repeat in REPEATS
+                for repeat in repeats
             ]
     return records, telemetry
 
@@ -232,8 +246,18 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--sp-degrees", type=int, nargs="+", default=list(DEFAULT_SP_DEGREES)
+    )
+    parser.add_argument("--repeats", type=int, nargs="+", default=list(DEFAULT_REPEATS))
     args = parser.parse_args()
-    records, telemetry = _load_inputs(args.root)
+    degrees = tuple(args.sp_degrees)
+    repeats = tuple(args.repeats)
+    if not degrees or any(degree not in DEFAULT_SP_DEGREES for degree in degrees):
+        parser.error("--sp-degrees must contain SP2 and/or SP4")
+    if len(repeats) < 2 or len(set(repeats)) != len(repeats):
+        parser.error("--repeats requires at least two distinct repeat numbers")
+    records, telemetry = _load_selected_inputs(args.root, degrees, repeats)
     summary = build_trace_sync_summary(records, telemetry)
     args.output.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
     print(json.dumps(summary["acceptance"], sort_keys=True))

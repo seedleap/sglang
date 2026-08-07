@@ -14,9 +14,20 @@ RESULT_ROOT="${MINWM_RESULTS_ROOT%/}/${MINWM_RUN_ID}/trace-sync-abba"
 CASES="${MINWM_CASES_PATH:-${SCRIPT_DIR}/cases_720p_compile_smoke.json}"
 CASE_ID="${MINWM_CASE_ID:-00_forward_080_pottery_720p}"
 SP_DEGREES="${MINWM_TRACE_SYNC_SP_DEGREES:-2 4}"
+REPEAT_NUMBERS="${MINWM_TRACE_SYNC_REPEATS:-1 2}"
 WARMUP_CHUNKS="${MINWM_TRACE_SYNC_WARMUP_CHUNKS:-20}"
 MEASURED_CHUNKS="${MINWM_TRACE_SYNC_MEASURED_CHUNKS:-200}"
 KV_CACHE_NUM_FRAMES="${MINWM_TRACE_SYNC_KV_CACHE_NUM_FRAMES:-45}"
+
+read -r -a degrees <<< "${SP_DEGREES}"
+read -r -a repeats <<< "${REPEAT_NUMBERS}"
+if (( ${#repeats[@]} != 2 )) \
+  || ! [[ "${repeats[0]}" =~ ^[1-9][0-9]*$ ]] \
+  || ! [[ "${repeats[1]}" =~ ^[1-9][0-9]*$ ]] \
+  || [[ "${repeats[0]}" == "${repeats[1]}" ]]; then
+  echo "MINWM_TRACE_SYNC_REPEATS requires two distinct positive integers" >&2
+  exit 2
+fi
 
 [[ -f "${MODEL_DIR}/minwm_conversion_manifest.json" ]]
 [[ -f "${CASES}" ]]
@@ -53,9 +64,10 @@ ALLOCATED_GPU_COUNT="${MINWM_ALLOCATED_GPU_COUNT:-$(nvidia-smi -L | wc -l | xarg
   echo "gpu_model=${GPU_MODEL}"
   echo "allocated_gpu_count=${ALLOCATED_GPU_COUNT}"
   echo "sp_degrees=${SP_DEGREES}"
+  echo "repeats=${REPEAT_NUMBERS}"
   echo "window=${WARMUP_CHUNKS}+${MEASURED_CHUNKS}"
   echo "kv_cache_num_frames=${KV_CACHE_NUM_FRAMES}"
-  echo "order=control1,candidate1,candidate2,control2"
+  echo "order=control${repeats[0]},candidate${repeats[0]},candidate${repeats[1]},control${repeats[1]}"
   echo "control=SGLANG_REALTIME_TRACE_SYNC_CUDA=1"
   echo "candidate=SGLANG_REALTIME_TRACE_SYNC_CUDA=0"
   echo "torch_profiler_concurrent=false"
@@ -273,29 +285,30 @@ run_one() {
     | tee "${prefix}-trace-status.txt"
 }
 
-read -r -a degrees <<< "${SP_DEGREES}"
 for degree in "${degrees[@]}"; do
   if ! [[ "${degree}" =~ ^(2|4)$ ]]; then
     echo "Trace-sync A/B accepts SP degree 2 or 4, got ${degree}" >&2
     exit 2
   fi
-  run_one "${degree}" control 1
-  run_one "${degree}" candidate 1
-  run_one "${degree}" candidate 2
-  run_one "${degree}" control 2
+  run_one "${degree}" control "${repeats[0]}"
+  run_one "${degree}" candidate "${repeats[0]}"
+  run_one "${degree}" candidate "${repeats[1]}"
+  run_one "${degree}" control "${repeats[1]}"
   python3 "${SCRIPT_DIR}/measurement_tool.py" aggregate \
-    "${RESULT_ROOT}/sp${degree}/control-repeat1.json" \
-    "${RESULT_ROOT}/sp${degree}/control-repeat2.json" \
+    "${RESULT_ROOT}/sp${degree}/control-repeat${repeats[0]}.json" \
+    "${RESULT_ROOT}/sp${degree}/control-repeat${repeats[1]}.json" \
     --output "${RESULT_ROOT}/sp${degree}/control-summary.json"
   python3 "${SCRIPT_DIR}/measurement_tool.py" aggregate \
-    "${RESULT_ROOT}/sp${degree}/candidate-repeat1.json" \
-    "${RESULT_ROOT}/sp${degree}/candidate-repeat2.json" \
+    "${RESULT_ROOT}/sp${degree}/candidate-repeat${repeats[0]}.json" \
+    "${RESULT_ROOT}/sp${degree}/candidate-repeat${repeats[1]}.json" \
     --output "${RESULT_ROOT}/sp${degree}/candidate-summary.json"
 done
 
 failure_scope="${RESULT_ROOT}"
 python3 "${SCRIPT_DIR}/compare_trace_sync_abba.py" \
   --root "${RESULT_ROOT}" \
+  --sp-degrees "${degrees[@]}" \
+  --repeats "${repeats[@]}" \
   --output "${RESULT_ROOT}/comparison-summary.json"
 date --utc +%Y-%m-%dT%H:%M:%SZ | tee "${RESULT_ROOT}/complete.txt"
 echo "MINWM_TRACE_SYNC_ABBA_COMPLETE results=${RESULT_ROOT}"
