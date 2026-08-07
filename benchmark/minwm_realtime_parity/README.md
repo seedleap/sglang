@@ -14,6 +14,10 @@ Kubernetes template. Generated run manifests belong under the ignored
 For an architecture-first review of the implementation, numerical-parity
 decisions, sequence-parallel status, and the required comprehension quiz, read
 [`CHANGE_GUIDE.zh-CN.md`](CHANGE_GUIDE.zh-CN.md).
+The opt-in single-GEMM self-attention QKV fast lane, checkpoint/state-dict
+contract, H200 A/B matrix, 6b decision gate, and task-specific review quiz are
+tracked in
+[`QKV_PEER_FIRST_FAST_LANE.zh-CN.md`](QKV_PEER_FIRST_FAST_LANE.zh-CN.md).
 The 0724 same-session prompt-switch bitwise run, boundary semantics, event-id
 evidence, and one-time cutover cost are recorded in
 [`PROMPT_SWITCH_PARITY_5S.zh-CN.md`](PROMPT_SWITCH_PARITY_5S.zh-CN.md).
