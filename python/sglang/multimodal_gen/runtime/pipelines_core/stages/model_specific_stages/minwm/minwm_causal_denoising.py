@@ -104,6 +104,7 @@ class _MinWMCudaGraphRunner:
         self.static_action = None
         self.capture_stream = None
         self.pool = None
+        self.capture_dependencies = None
         self.replay_count = 0
 
     def _copy_inputs(
@@ -999,6 +1000,11 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
                     current_start=current_start_tokens,
                     start_frame=start_frame,
                 )
+                # CUDA Graph records raw addresses for tensors created before
+                # capture. Retain the plan (including its RoPE tables) so the
+                # caching allocator cannot recycle those addresses on a later
+                # realtime chunk.
+                runner.capture_dependencies = attention_plan
 
                 def capture_forward(
                     static_latent: torch.Tensor,
