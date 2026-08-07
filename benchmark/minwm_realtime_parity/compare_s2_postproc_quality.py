@@ -10,7 +10,6 @@ from pathlib import Path
 
 import numpy as np
 import torch
-
 from compare_results import evaluate, metric_block
 
 
