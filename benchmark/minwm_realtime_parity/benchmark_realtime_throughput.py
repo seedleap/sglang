@@ -38,6 +38,59 @@ from measurement import (
 )
 
 
+TraceSelector = tuple[str, str, str]
+
+
+def required_stage_trace_chunks(mode: str) -> dict[TraceSelector, set[int]]:
+    required = {
+        ("server.model_denoise_complete", "source", "scheduler_result_metrics"): set(),
+        ("server.vae_decode_complete", "source", "scheduler_result_metrics"): set(),
+    }
+    if mode == "profiler_on":
+        required.update(
+            {
+                (
+                    "server.model_denoise_complete",
+                    "component",
+                    "minwm_denoising",
+                ): set(),
+                ("server.vae_decode_complete", "component", "vae_decoder"): set(),
+            }
+        )
+    return required
+
+
+def record_required_stage_trace(
+    required: dict[TraceSelector, set[int]], trace: dict[str, Any]
+) -> None:
+    for (event, selector, value), chunk_indices in required.items():
+        if trace.get("event") != event or trace.get(selector) != value:
+            continue
+        try:
+            chunk_indices.add(int(trace["chunk_index"]))
+        except (KeyError, TypeError, ValueError):
+            pass
+
+
+def missing_required_stage_trace(
+    required: dict[TraceSelector, set[int]], expected_indices: set[int]
+) -> dict[str, dict[str, list[int]]]:
+    return {
+        "/".join(selector): {
+            "missing": sorted(expected_indices - observed),
+            "unexpected": sorted(observed - expected_indices),
+        }
+        for selector, observed in required.items()
+        if not expected_indices.issubset(observed)
+    }
+
+
+def required_stage_trace_is_complete(
+    required: dict[TraceSelector, set[int]], expected_indices: set[int]
+) -> bool:
+    return all(expected_indices.issubset(observed) for observed in required.values())
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cases", default=Path(__file__).with_name("cases.json"))
@@ -72,6 +125,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--warmup-chunks", type=int, default=20)
     parser.add_argument("--measured-chunks", type=int, default=200)
     parser.add_argument("--kv-cache-num-frames", type=int)
+    parser.add_argument(
+        "--require-complete-stage-trace",
+        action="store_true",
+        help="wait for every measured DiT/VAE wall (and profiler-on CUDA) trace",
+    )
     parser.add_argument("--timeout", type=float, default=1800.0)
     return parser.parse_args()
 
@@ -206,6 +264,18 @@ async def receive_run(args: argparse.Namespace, contract: dict, case: dict) -> d
     payload_complete_ns: dict[int, int] = {}
     frame_batches_by_chunk: dict[int, dict[str, Any]] = {}
     trace_events: list[dict[str, Any]] = []
+    required_trace_chunks = (
+        required_stage_trace_chunks(args.measurement_mode)
+        if args.require_complete_stage_trace
+        else {}
+    )
+    expected_trace_indices = set(range(total_chunks))
+
+    def stage_trace_is_complete() -> bool:
+        return required_stage_trace_is_complete(
+            required_trace_chunks, expected_trace_indices
+        )
+
     init_started_ns = time.perf_counter_ns()
     async with websockets.connect(
         args.ws_url, max_size=None, ping_interval=None, open_timeout=args.timeout
@@ -215,8 +285,24 @@ async def receive_run(args: argparse.Namespace, contract: dict, case: dict) -> d
         while (
             len(stats_by_chunk) < total_chunks
             or len(payload_complete_ns) < total_chunks
+            or not stage_trace_is_complete()
         ):
-            packed = await asyncio.wait_for(websocket.recv(), timeout=args.timeout)
+            try:
+                packed = await asyncio.wait_for(websocket.recv(), timeout=args.timeout)
+            except TimeoutError as exc:
+                trace_diagnostic = missing_required_stage_trace(
+                    required_trace_chunks, expected_trace_indices
+                )
+                missing_stats = sorted(expected_trace_indices - set(stats_by_chunk))
+                missing_payloads = sorted(
+                    expected_trace_indices - set(payload_complete_ns)
+                )
+                raise TimeoutError(
+                    "timed out waiting for complete realtime measurement: "
+                    f"missing_stats={missing_stats}; "
+                    f"missing_payloads={missing_payloads}; "
+                    f"stage_trace={json.dumps(trace_diagnostic, sort_keys=True)}"
+                ) from exc
             if not isinstance(packed, bytes):
                 raise TypeError(
                     f"expected binary MessagePack, got {type(packed).__name__}"
@@ -227,6 +313,7 @@ async def receive_run(args: argparse.Namespace, contract: dict, case: dict) -> d
                 trace = header.get("trace")
                 if isinstance(trace, dict):
                     trace_events.append(trace)
+                    record_required_stage_trace(required_trace_chunks, trace)
                 continue
             if message_type == "error":
                 raise RuntimeError(header.get("content", "unknown realtime error"))
