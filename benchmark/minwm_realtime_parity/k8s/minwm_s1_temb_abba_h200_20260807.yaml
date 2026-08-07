@@ -29,9 +29,10 @@ metadata:
     seedleap.ai/capacity-type: spot
     seedleap.ai/repo: seedleap/sglang
     seedleap.ai/branch: codex/minwm-s1-temb-measure-e75-20260807
-    seedleap.ai/runner-git-ref: "f2267c46277f2c40a27785e075d2043e63afc821"
+    seedleap.ai/runner-git-ref: "8b826029c6469cb0a8c8557ef75e0e1d53b34e09"
     seedleap.ai/sglang-git-ref: "5f92d276c08086db638f05536a46fa5434ecb169"
     seedleap.ai/s0-tool-ref: "b9240233b2438829cbd72ee3dfbc1d37ed675560"
+    seedleap.ai/s0-audit-ref: "b178572f84"
     seedleap.ai/minwm-git-ref: "2efc6485f65e8fcab506665efde79bc41406385e"
     seedleap.ai/checkpoint-version-id: "wduScksw2f3yPErnG9lBioOuE2AToyAP"
     seedleap.ai/resource-isolation: full 8-GPU H200 node request
@@ -50,9 +51,10 @@ spec:
       annotations:
         seedleap.ai/repo: seedleap/sglang
         seedleap.ai/branch: codex/minwm-s1-temb-measure-e75-20260807
-        seedleap.ai/runner-git-ref: "f2267c46277f2c40a27785e075d2043e63afc821"
+        seedleap.ai/runner-git-ref: "8b826029c6469cb0a8c8557ef75e0e1d53b34e09"
         seedleap.ai/sglang-git-ref: "5f92d276c08086db638f05536a46fa5434ecb169"
         seedleap.ai/s0-tool-ref: "b9240233b2438829cbd72ee3dfbc1d37ed675560"
+        seedleap.ai/s0-audit-ref: "b178572f84"
     spec:
       restartPolicy: Never
       terminationGracePeriodSeconds: 60
@@ -82,9 +84,11 @@ spec:
             - name: SGLANG_GIT_REF
               value: "5f92d276c08086db638f05536a46fa5434ecb169"
             - name: S1_RUNNER_REF
-              value: "f2267c46277f2c40a27785e075d2043e63afc821"
+              value: "8b826029c6469cb0a8c8557ef75e0e1d53b34e09"
             - name: MINWM_S0_TOOL_REF
               value: "b9240233b2438829cbd72ee3dfbc1d37ed675560"
+            - name: MINWM_S0_AUDIT_REF
+              value: "b178572f84"
             - name: MINWM_GIT_REF
               value: "2efc6485f65e8fcab506665efde79bc41406385e"
             - name: MINWM_CONTAINER_IMAGE
@@ -195,6 +199,7 @@ spec:
                 echo "sglang_commit=$(git -C /workspace/sglang rev-parse HEAD)"
                 echo "s1_runner_ref=${S1_RUNNER_REF}"
                 echo "s0_tool_ref=${MINWM_S0_TOOL_REF}"
+                echo "s0_audit_ref=${MINWM_S0_AUDIT_REF}"
                 echo "kube_context=codex-minwm-test-phx2"
                 echo "aws_region=us-west-2"
                 echo "nodepool=minwm-test-phx2-p5e-spot"
