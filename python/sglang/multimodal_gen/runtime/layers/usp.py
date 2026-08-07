@@ -138,30 +138,12 @@ def _usp_input_all_to_all_qkv(
         packed_shape
     )
 
-    return _usp_input_all_to_all_packed_qkv(packed, output_buffer=output_buffer)
-
-
-def _usp_input_all_to_all_packed_qkv(
-    packed: torch.Tensor,
-    *,
-    output_buffer: torch.Tensor | None = None,
-) -> torch.Tensor:
-    """Exchange an existing peer-first ``[P,B,S,H/P,3D]`` QKV buffer."""
-    world_size = get_ulysses_parallel_world_size()
-    if world_size <= 1:
-        raise ValueError("packed peer-first QKV exchange requires world_size > 1")
-    if packed.ndim != 5 or packed.shape[0] != world_size:
-        raise ValueError("packed QKV must have shape [P, B, S, H/P, 3D]")
-    if packed.shape[-1] % 3 != 0 or not packed.is_contiguous():
-        raise ValueError("packed QKV must be contiguous with a 3D trailing dimension")
-
     exchanged = _usp_all_to_all_single(packed, output_buffer=output_buffer)
-    _, batch, local_sequence, local_heads, qkv_dim = packed.shape
     # Keep each destination's head shard sequence-major in the collective.
     # For MinWM realtime's batch=1 this permutation is contiguous, so reshape
     # aliases the receive buffer instead of launching a full QKV layout copy.
     return exchanged.permute(1, 0, 2, 3, 4).reshape(
-        batch, local_sequence * world_size, local_heads, qkv_dim
+        b, s_local * world_size, h_local, 3 * d
     )
 
 
