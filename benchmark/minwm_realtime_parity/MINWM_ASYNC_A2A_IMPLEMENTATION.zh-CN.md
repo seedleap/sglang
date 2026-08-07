@@ -91,11 +91,16 @@ begin/consume 观测接口，默认关闭且立即 consume，因为层内没有�
 
 ## NVTX 与统计合同
 
-至少区分：`qkv_projection`、`qk_norm`、`qkv_pack`、`input_a2a_launch`、
-`input_a2a_wait`、`post_input_a2a_cache_rope`、`attention`、`output_a2a_launch`、
-`output_a2a_wait`、`output_projection`、`ffn`。每个 handle 记录 launch、wait-enter、
-complete/consume event；统计 input/output A2A 的 launch→wait 距离、wait exposed time、
-与 compute kernel 的区间交集及 buffer slot/generation。
+至少区分：`qkv_projection`、`qk_norm`、`qk_pack`、`v_pack`、
+`input_a2a_launch_qk`、`input_a2a_launch_v`、`input_a2a_wait_qk`、
+`input_a2a_wait_v`、`input_a2a_overlap_v_projection`、
+`post_input_a2a_cache_rope`、`attention`、`output_a2a_launch`、
+`output_a2a_wait`、`output_projection`、`ffn`。每次 sequence-sharded model forward 另发出
+`minwm_forward_start_current_<current_start>` 与
+`minwm_forward_end_current_<current_start>` NVTX mark，使 SQLite 分析可按 chunk 的
+`current_start` 边界聚合，而不以服务器 wall log 猜测 trace 窗口。每个 handle 记录 launch、
+wait-enter、complete/consume event；统计 input/output A2A 的 launch→wait 距离、wait exposed
+time、与 compute kernel 的区间交集及 buffer slot/generation。
 
 ## 验收合同
 

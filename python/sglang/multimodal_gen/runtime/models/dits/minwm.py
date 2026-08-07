@@ -1510,6 +1510,10 @@ class MinWMCausalTransformer3DModel(CausalWanTransformer3DModel):
                 "cross-attention KV caches."
             )
 
+        if hidden_states.is_cuda:
+            torch.cuda.nvtx.mark(
+                f"minwm_forward_start_current_{int(current_start)}"
+            )
         orig_dtype = hidden_states.dtype
         if not isinstance(encoder_hidden_states, torch.Tensor):
             encoder_hidden_states = encoder_hidden_states[0]
@@ -1625,7 +1629,10 @@ class MinWMCausalTransformer3DModel(CausalWanTransformer3DModel):
             -1,
         )
         hidden_states = hidden_states.permute(0, 7, 1, 4, 2, 5, 3, 6)
-        return hidden_states.flatten(6, 7).flatten(4, 5).flatten(2, 3)
+        hidden_states = hidden_states.flatten(6, 7).flatten(4, 5).flatten(2, 3)
+        if hidden_states.is_cuda:
+            torch.cuda.nvtx.mark(f"minwm_forward_end_current_{int(current_start)}")
+        return hidden_states
 
     def _install_parity_debug_hooks(self) -> None:
         dump_root = os.environ.get("MINWM_PARITY_DUMP_DIR")
