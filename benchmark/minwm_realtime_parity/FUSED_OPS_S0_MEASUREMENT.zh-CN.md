@@ -170,49 +170,73 @@ component CUDA trace，但旧严格 containment 门因一条跨 marker 边界的
 `cudaEventQuery_v3020` 正确拒绝该 lane；原产物继续标 invalid。`d5b25227d4`
 已在该 invalid SQLite 上离线严格通过，正式 profiler-on 与 SP4 改由新名
 `minwm-s0-fusedops-h200-20260807-09` 补齐。
+`-09` 已以 `d5b25227d4` 在 H200 整机隔离节点成功完成 SP2/SP4：六条正式
+measurement record 均重新通过当前 validator，其中两条 profiler-on 使用
+`--require-complete-stable-nsys` 严格校验；attempt 内没有 invalid marker。
 旧 H200/B300 表以及 `-01/-02/-03` 失败诊断只用于背景与异常证据。
 
 ### 运行来源
 
 | 项 | 实际值 |
 | --- | --- |
-| SGLang | SP2 profiler-off source=`b9240233b2`；exact-window schema=`401e4ec8a1`；component relay=`839f312c3b`；active GPU metrics mapping=`900b5f279b`；API start attribution / bounded GPU parser=`d5b25227d4` |
+| SGLang | SP2 profiler-off source=`b9240233b2`；正式 profiler-on/SP4 runner=`d5b25227d4487d113e62c86a0fb572a62d6bcc5b`；exact-window schema=`401e4ec8a1`；component relay=`839f312c3b`；active GPU metrics mapping=`900b5f279b` |
 | MinWM | `2efc6485f65e8fcab506665efde79bc41406385e` |
 | 镜像 | `minwm-training@sha256:bedc07ea...f5f2a` |
 | GPU | NVIDIA H200；`gpu.count` 是 active 2/4 卡；`allocated_count=8` 是整机隔离预留 |
 | kube context | `codex-minwm-test-phx2`；所有命令显式传 `--context`，未切换全局 current-context |
 | region / zone | AWS `us-west-2` / `us-west-2-phx-2a` |
 | NodePool | `minwm-test-phx2-p5e-spot`（共享的既有 NodePool，S0 未创建或删除） |
-| 实例 | `p5e.48xlarge` Spot；`-05` 节点 `i-01a57ab8567279852`；`-06/-08` 节点 `i-06888dc1ca88547e1` |
+| 实例 | `p5e.48xlarge` Spot；正式 `-09` 节点 `i-01a57ab8567279852`；`-06/-08` 节点 `i-06888dc1ca88547e1` |
 | 资源隔离 | Job 请求完整 8 GPU；不与 CUDA Graph 或 S1–S4 Job 共用 GPU 节点 |
+| 正式 attempt | Job `minwm-s0-fusedops-h200-20260807-09`；Pod `minwm-s0-fusedops-h200-20260807-09-s9cc4`；`backoffLimit=0`；1/1 Complete |
 
 ### profiler-off 重复
 
-采集完成后填写；所有 FPS 均来自 profiler-off。
+所有 FPS 均来自 profiler-off；profiler-on 观测 FPS 不进入本表。
 
 | SP | 重复 | Client FPS | Scheduler FPS | scheduler chunk wall mean | DiT wall mean | VAE wall mean |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | 2 | 1 | 12.904769 | 12.917758 | 1264.635 ms | 747.187 ms | 419.249 ms |
 | 2 | 2 | 12.884662 | 12.896310 | 1272.865 ms | 745.509 ms | 419.569 ms |
-| 4 | 1 | 采集中 | 采集中 | 采集中 | 采集中 | 采集中 |
-| 4 | 2 | 采集中 | 采集中 | 采集中 | 采集中 | 采集中 |
+| 4 | 1 | 14.706324 | 14.723746 | 1170.100 ms | 737.319 ms | 231.422 ms |
+| 4 | 2 | 15.187021 | 15.204717 | 1080.520 ms | 733.717 ms | 231.370 ms |
 
 | SP | Client CV | Scheduler CV | DiT wall CV | VAE wall CV | 验收 |
 | ---: | ---: | ---: | ---: | ---: | --- |
 | 2 | 0.110% | 0.118% | 0.159% | 0.054% | 通过（均 <3%） |
-| 4 | 采集中 | 采集中 | 采集中 | 采集中 | 采集中 |
+| 4 | 2.274% | 2.273% | 0.346% | 0.016% | 通过（四个主验收指标均 <3%） |
+
+SP4 的非 headline `scheduler chunk wall` CV 为 5.629%（1170.100 vs
+1080.520 ms），但 Client/Scheduler FPS 同时只波动约 2.27%，DiT/VAE wall 分别
+为 0.346%/0.016%。因此主验收通过，同时保留该 CPU/排队口径噪声，不把它隐藏或
+替换成 profiler-on 数据。
 
 ### profiler-on 稳态窗口
 
-| SP | DiT CUDA mean | VAE CUDA mean | kernels | CUDA APIs | launch APIs | <10 us | 10–<50 us | 50–<100 us | >=100 us | kernel busy |
-| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 2 | 采集中 | 采集中 | 采集中 | 采集中 | 采集中 | 采集中 | 采集中 | 采集中 | 采集中 | 采集中 |
-| 4 | 采集中 | 采集中 | 采集中 | 采集中 | 采集中 | 采集中 | 采集中 | 采集中 | 采集中 | 采集中 |
+每个 SP 均恰好观察 discard index 0，并只用 measured indices 1–10 做归一化。
+下表 wall 是 Nsight 下的诊断 wall，不能作为 headline；wall/CUDA 的 count 均为 10。
+
+| SP | DiT wall / CUDA mean | VAE wall / CUDA mean | count |
+| ---: | ---: | ---: | ---: |
+| 2 | 732.160 / 731.669 ms | 441.010 / 440.307 ms | wall=10，CUDA=10 |
+| 4 | 777.803 / 777.318 ms | 254.349 / 253.737 ms | wall=10，CUDA=10 |
+
+计数是 exact 10-range union 内的稳定窗口总数；括号内为每 stable chunk。
+
+| SP | kernels | CUDA APIs | launch APIs | <10 us | 10–<50 us | 50–<100 us | >=100 us | kernel busy |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 2 | 346,080（34,608.0） | 910,753（91,075.3） | 346,080（34,608.0） | 184,276 | 121,169 | 11,946 | 28,689 | 76.539% |
+| 4 | 692,020（69,202.0） | 1,849,328（184,932.8） | 692,020（69,202.0） | 495,006 | 130,280 | 18,742 | 47,992 | 68.271% |
 
 | SP | SM Active | Tensor Active | DRAM | 权限/采集证据 |
 | ---: | --- | --- | --- | --- |
-| 2 | 采集中 | 采集中 | 采集中 | 采集中 |
-| 4 | 采集中 | 采集中 | 采集中 | 采集中 |
+| 2 | 61.973%（251,754 samples） | 28.607%（251,754） | 8.344%（251,754） | 8 targets collected；active CUDA 0/1 → pwGpuId 2/3；active=2、allocated=8；每 target×10 chunks 完整 |
+| 4 | 37.935%（447,617 samples） | 16.074%（447,617） | 4.430%（447,617） | 8 targets collected；active CUDA 0–3 → pwGpuId 0–3；active=4、allocated=8；每 target×10 chunks 完整 |
+
+原始名称分别是 `SMs Active [Throughput %]`、
+`Tensor Active [Throughput %]`、`DRAM Read Bandwidth [Throughput %]`。
+SP2/SP4 的 kernel、launch、CUDA API `boundary_spanning_count` 均为 0，kernel
+`boundary_overlap_count` 也为 0；因此本轮正式计数没有依赖边界归属例外。
 
 下表是 `-08/sp2/profiler-on` 的 **invalid capture 离线诊断**，只用于证明
 `d5b25227d4` 的解析/闸门，不是正式 baseline，也不解除 lane marker：
@@ -226,9 +250,67 @@ CUDA API capture 总数为 1,035,461，按 start 纳入 910,469、排除 124,992
 end=`9599602724`，起点在全部 measured ranges 外，尾部进入 chunk 7，故明确
 排除；launch boundary count=0，launch count 与 kernel count 同为 346,080。
 
+### SP2 stage trace 完整性与 S1 -07 只读对照
+
+正式 S0 SP2 的 client contract 需要 1 discard + 10 measured，即每个 selector
+的唯一 chunk indices 必须恰好为 0–10。`-09` server.log 的 source-specific 结果：
+
+| selector | S0 `-09` | S1 `-07` 只读证据 |
+| --- | --- | --- |
+| DiT wall：`scheduler_result_metrics` | 11/11，indices 0–10，11 request IDs | 11/11 |
+| VAE wall：`scheduler_result_metrics` | 11/11，indices 0–10，11 request IDs | 11/11 |
+| DiT component：`minwm_denoising` | worker raw 11/11；API relay `scheduler_result_component_timing` 11/11，均带 CUDA | worker raw 11/11；API relay 0/11；client 报 missing 0–10 |
+| VAE component：`vae_decoder` | worker raw 11/11；API relay `scheduler_result_component_timing` 11/11，均带 CUDA | worker raw 11/11；API relay 0/11；client 报 missing 0–10 |
+
+S0 的 server、runner、client 都来自 `d5b25227d4`：runner 以 `nsys launch`
+启动 `sglang serve`，在独立 20-chunk precondition 后执行 `nsys start`，再由同一
+checkout 的 `benchmark_realtime_throughput.py` 发送 1+10 chunks。S1 `-07` 则先从
+`S1_RUNNER_REF=952af69455c7cdb0f411631def90944f13579ca0` 复制 runner（其中
+`MINWM_S0_TOOL_REF=d5b25227d4`），随后把实际 server checkout 切到
+`SGLANG_GIT_REF=5f92d276c08086db638f05536a46fa5434ecb169`，再使用同样的
+launch/start/client 结构。跨进程 relay commit `839f312c3b` 是 `d5b25227d4` 的祖先，
+但不是 `5f92d276` 的祖先。因此 S1 的 payload/stats/wall 完整、worker component
+完整而 API component 0/11，最小解释是 server implementation checkout 没有 relay，
+不是 Nsight 参数或 trace queue 容量差异。这里只读检查 S1 Job/日志，没有改动 S1
+代码、Job、Pod、PVC 或 marker。
+
+### 正式产物与 SHA-256
+
+正式根目录：
+
+```text
+/results/attempts/minwm-s0-fusedops-h200-20260807-09-s9cc4/
+  minwm-s0-fusedops-h200-20260807-09/s0-measurement/
+```
+
+只读 reader 使用 4 MiB streaming chunks 逐文件计算 SHA；SP2 1.476 GB SQLite
+耗时 24.070 s，SP4 1.421 GB SQLite 耗时 25.297 s，未超时或 OOM。
+
+| 相对路径 | bytes | SHA-256 |
+| --- | ---: | --- |
+| `baseline-summary.json` | 119,480 | `3d7dcc8f39f7ac027452577f4ed1fba699ffcd53761b121b84b2bf60de95006c` |
+| `sp2/profiler-off-repeat1.json` | 6,730 | `528961ebbe5eedcfe1be4690da1999d46cd11fa0dc51a7414bf012a53e10f570` |
+| `sp2/profiler-off-repeat2.json` | 6,730 | `8e846ca5d096d6d08b116cfe99b465d6cf37631236754a6d2043ba91b3abdb28` |
+| `sp2/repeat-summary.json` | 1,656 | `0a8eb88c7a23dab6a8877d6000ce090c7eb423d4db6851b533bdafc6618f9c36` |
+| `sp2/profiler-on/client.json` | 9,671 | `3f4e7c6db85ba4dfd3295ab5145d2a870d50e3c4cc393d29ab6345b6a354fa34` |
+| `sp2/profiler-on/measurement.json` | 45,898 | `bd14c5f171edbc57dba715305d6557e49d5b627fe7a469feead64954b262063d` |
+| `sp2/profiler-on/server.log` | 570,055 | `dc66697396377d72d55ff7e58ab2912ed0239640957717eb15dac2ee535d28cf` |
+| `sp2/profiler-on/nsys-stats.txt` | 37,982 | `7c4c4403f1ae8fc1339ec67424e2a339caa88d982cec958b4fe07b84992b3f17` |
+| `sp2/profiler-on/sp2.nsys-rep` | 55,121,489 | `de8b5c0e380c6310cc009210f8b44bbb372af673ab210b54d58f382528dd425f` |
+| `sp2/profiler-on/sp2.sqlite` | 1,476,804,608 | `6ea3a325d2715ed9944b30870b117c8bd34c6e5fe6854d0e0e9f9b6d282131e3` |
+| `sp4/profiler-off-repeat1.json` | 6,712 | `75d19895145565f270f25f2196a41c1f3bfa6d4c40e60483fe0da5ad0d66e0ab` |
+| `sp4/profiler-off-repeat2.json` | 6,723 | `82226b770ecb581aff7a4c9ad906e0613aaf8bd5fba9faeea3397107683ed826` |
+| `sp4/repeat-summary.json` | 1,635 | `775d2edabe517b7e430b269ea670a3e13381cec1c5520c04fce17f79cc7e01bf` |
+| `sp4/profiler-on/client.json` | 9,707 | `efc7f73b8996444b7ea987547edc13becb6746702e298d6d09edb17ec6747ec1` |
+| `sp4/profiler-on/measurement.json` | 52,834 | `39c8d6b8c4922ebc0b7bc9d5a5d88a0955ffbe1cf4e6df10ed0c00b4d2499292` |
+| `sp4/profiler-on/server.log` | 571,939 | `b9dff2e02042e6839c650cd447db55f5743b62017565e468d3d42093689df2d5` |
+| `sp4/profiler-on/nsys-stats.txt` | 38,420 | `c01cb36692e0e406cdfecd468cafc9cffb8d0af86a1fe03f4276e51a4e2a2407` |
+| `sp4/profiler-on/sp4.nsys-rep` | 91,842,432 | `22edc35043490919b9aa3cfcbcc47a8b2b0ac39e3d23d2685cd8d49dbe873178` |
+| `sp4/profiler-on/sp4.sqlite` | 1,421,049,856 | `2c58f556f31a24b8473f3877fa31c6888ba97424e7ac72f29254286e29cbc8ed` |
+
 ## 与预期不符合的地方
 
-- SP2 profiler-off 两次重复的四个验收 CV 均小于 0.16%，优于默认 3% 门槛。
+- SP2 profiler-off 两次重复的四个验收 CV 均小于 0.16%，优于默认 3% 门槛。SP4 四个主验收 CV 也均通过，但 Client/Scheduler FPS 接近 2.27%，明显高于 SP2；非 headline scheduler chunk wall CV 为 5.629%。当前两次重复的 GPU stage wall 很稳定，且 FPS 仍在 3% 门内，因此按契约保留并解释为 CPU/排队环境噪声，不用 Nsight FPS 替换或挑选更好重复。
 - `-04` profiler-on 的 GPU metrics start 成功并生成 38,106,433-byte report，但服务端 generation-complete close 早于最后 component trace 发出，客户端收到正常 code1000 且无合格 JSON；不得进入正式表。
 - 同一 report 用 Nsight 2026.4 导出得到 397,185,024-byte SQLite：`NVTX_EVENTS` 31,000 行、kernel 394,526 行、runtime 1,036,567 行、GPU metrics 9,176,220 行；outer marker 数为 0，证明旧 report 无法支持 exact-window 归一化。
 - `-04/sp2/profiler-on/invalid-marker-20260807T045715060254120Z.json` 原地保留 7 个文件、40,487,575 bytes 的逐文件 SHA；聚合验证该 marker 只排除 profiler-on，两个 sibling profiler-off run 均保留。
@@ -240,7 +322,7 @@ end=`9599602724`，起点在全部 measured ranges 外，尾部进入 chunk 7，
 - `-08` 的 55,231,110-byte report 与 1,473,888,256-byte SQLite 覆盖 8 个 GPU metrics target；SM/Tensor/DRAM 对 active PerfWorks 2/3 均为 available，typeId×10 chunks 完整。正式 merge 只因一条 2,910 ns `cudaEventQuery_v3020` 从 measured range 外进入 chunk 7 而失败，runner 在 `sp2/profiler-on` 原地写 lane marker，sibling SP2 profiler-off 仍有效。
 - canonical `d5b25227d4` 的离线诊断保存在 `.../-08/.../sp2/profiler-on/diagnostic-20260807T070200Z-canonical-d5b25227d4/`：严格 validator exit=0，measurement 与上一版逐字节相同；解析耗时 17.662 s、峰值 RSS 326,196 KiB、SQLite 1,473,888,256 bytes。旧全量 list 解析现场峰值约 8,909,528 KiB，故流式方案将最低诊断 Pod 内存需求降到远低于当前 16 GiB limit。
 - 等价证据在同 lane 的 `diagnostic-20260807T065300Z-boundary-bounded-v4/equivalence-report-v2.json`：除有意更新的 attribution-policy 文案外，window、DiT/VAE CUDA、kernel/bucket/busy、capture coverage 及三项 GPU 的旧字段全相等；p95/每 chunk count 与 raw SQLite 独立重算全相等。原始 v1 false 报告和两次计时失败日志也保留，未覆盖。
-- SP4 与正式 exact-window profiler-on 仍待 `-09` 真机结果；完成前 PR 保持 draft。
+- `-09` 正式 SP2/SP4 均完成 exact 10-range、active rank/process/device、DiT/VAE wall+CUDA count、kernel/API/launch、SM/Tensor/DRAM 全部门槛；六个 JSON 的独立 validator 重试全部通过。正式产物继续保留在 PVC，completed Job 未删除。
 
 ## 证据与决策过程
 
@@ -277,7 +359,7 @@ end=`9599602724`，起点在全部 measured ranges 外，尾部进入 chunk 7，
 - 风险：失败重试覆盖审计证据。补救：runner 不删除旧文件；非零退出写逐文件 checksum marker，同路径重跑先移动到 `invalid/`，聚合排除 invalid；只能删除精确 Job/Pod 控制对象止损，不能删除 PVC。
 - 风险：Nsight 开销污染 FPS。补救：schema 从结构上禁止 profiler-on 结果成为 headline。
 - 风险：schema 影响现有 summary。补救：新 JSON 仍保留顶层 `profile_name`、`server`、`client`、`warmup_chunks` 等兼容字段。
-- 风险：8-target GPU_METRICS 导出很大，离线解析 OOM。补救：流式 selected-metric 聚合；真实 1.47 GB SQLite 的峰值约 318 MiB，reader/diagnostic 仍保留至少 8 GiB request / 16 GiB limit，并把 elapsed/RSS/size 写入诊断证据。
+- 风险：8-target GPU_METRICS 导出很大，离线解析 OOM。补救：流式 selected-metric 聚合；真实 1.47 GB SQLite 的峰值约 318 MiB。执行完整 merge 的 diagnostic Pod 保留 8 GiB request / 16 GiB limit；只读查看 JSON/日志和 streaming SHA 的 reader 为 100m CPU / 256 MiB，不能用来重跑 merge。elapsed/RSS/size 都写入诊断证据。
 - 回滚：删除本 PR 新增的 benchmark/schema/doc 文件，并恢复 `benchmark_realtime_throughput.py`；没有模型实现或 checkpoint 格式迁移需要回滚。
 
 ## 复现命令与产物路径
@@ -288,7 +370,13 @@ end=`9599602724`，起点在全部 measured ranges 外，尾部进入 chunk 7，
 python3 -m pytest -q \
   benchmark/minwm_realtime_parity/test_measurement.py \
   benchmark/minwm_realtime_parity/test_common.py
+
+TORCHDYNAMO_DISABLE=1 PYTHONPATH=python python3.11 -m pytest -q \
+  python/sglang/multimodal_gen/test/unit/realtime/test_realtime_runtime.py
 ```
+
+`d5b25227d4` 加最终文档的复验结果：measurement/common `45 passed`，realtime
+runtime `47 passed`；两组都不依赖 GPU。最终文档文件的 pre-commit hooks 也全部通过。
 
 ### 校验与汇总
 
