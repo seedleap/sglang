@@ -34,7 +34,7 @@ mark_failed_lane() {
   if compgen -G "${lane_root}/invalid-marker*.json" >/dev/null; then
     return
   fi
-  timestamp="$(date --utc +%Y%m%dT%H%M%S%NZ)"
+  timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
   marker="${lane_root}/invalid-marker-${timestamp}.json"
   python3 - "${lane_root}" "${marker}" "${status}" <<'PY'
 import hashlib
@@ -88,6 +88,7 @@ on_exit() {
   exit "${status}"
 }
 
+main() {
 trap on_exit EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
@@ -128,7 +129,7 @@ run_position() {
   local label="$1" hoist="$2"
   export MINWM_S0_RUN_LABEL="${label}"
   export MINWM_HOIST_TIMESTEP_MODULATION="${hoist}"
-  CURRENT_LANE_DIR=""
+  CURRENT_LANE_DIR="${RESULT_ROOT}/${label}/sp4"
   assert_no_nsys
   bash "${SCRIPT_DIR}/run_s0_measurement.sh"
   assert_no_nsys
@@ -136,6 +137,7 @@ run_position() {
     "${RESULT_ROOT}/${label}/sp4/profiler-off-repeat1.json"
   python3 "${SCRIPT_DIR}/assert_latency_counts.py" \
     "${RESULT_ROOT}/${label}/sp4/profiler-off-repeat1.json"
+  CURRENT_LANE_DIR=""
 }
 
 run_position temb-hoist-abba-a1-candidate 1
@@ -369,3 +371,8 @@ PY
 assert_no_nsys
 CURRENT_LANE_DIR=""
 date --utc +%Y-%m-%dT%H:%M:%SZ | tee "${RESULT_ROOT}/temb-hoist-sp4-abba-complete.txt"
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi

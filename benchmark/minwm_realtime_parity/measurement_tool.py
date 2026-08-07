@@ -23,6 +23,24 @@ def _write(path: Path, value: dict[str, Any]) -> None:
     )
 
 
+def _is_invalid_result(path: Path) -> bool:
+    if "invalid" in path.parts:
+        return True
+    measurement_root = next(
+        (parent for parent in path.parents if parent.name == "s0-measurement"),
+        path.parent,
+    )
+    return next(measurement_root.glob("invalid-marker*.json"), None) is not None
+
+
+def load_aggregate_records(
+    paths: list[Path],
+) -> tuple[list[dict[str, Any]], list[Path]]:
+    excluded = [path for path in paths if _is_invalid_result(path)]
+    accepted = [path for path in paths if path not in excluded]
+    return [_read(path) for path in accepted], excluded
+
+
 def _off_scalar(record: dict[str, Any], name: str) -> float:
     metric = record["metrics"]["profiler_off"][name]
     if metric["status"] != "available":
@@ -125,7 +143,10 @@ def main() -> None:
             result["artifacts"]["nsys_status_log"] = str(args.status_log)
         _write(args.output, result)
         return
-    summary = aggregate([_read(path) for path in args.results], args.noise_explanation)
+    records, excluded = load_aggregate_records(args.results)
+    for path in excluded:
+        print(f"excluded invalid result: {path}")
+    summary = aggregate(records, args.noise_explanation)
     _write(args.output, summary)
 
 
