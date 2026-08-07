@@ -200,6 +200,7 @@ run_client() {
   python3 "${SCRIPT_DIR}/benchmark_realtime_throughput.py" \
     "${CLIENT_ARGS[@]}" "$@" | tee "${output%.json}.log"
   python3 "${SCRIPT_DIR}/measurement_tool.py" validate "${output}"
+  python3 "${SCRIPT_DIR}/assert_latency_counts.py" "${output}"
 }
 
 aggregate_repeats() {
