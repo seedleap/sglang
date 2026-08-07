@@ -66,6 +66,9 @@ def test_qkv_quality_runner_scopes_existing_tp2_blocker() -> None:
     assert "compile-four-corner-summary.json" in runner
     assert "s4-qkv-quality-summary.json" in runner
     assert "compile gate requires 33 frames" in runner
+    assert runner.index('mkdir -p "${SP1_RESULTS}"') < runner.index(
+        'python3 - "${COMPILE_CASES}" "${CASE_ID}" "${SP1_RESULTS}"'
+    )
     assert runner.index("compile four-corner gate failed") < runner.index(
         "run_lane control 0 1 1 1 baseline"
     )

@@ -152,6 +152,7 @@ run_tp2_existing_blocker() {
 }
 
 SP1_RESULTS="${RESULT_ROOT}/sp1"
+mkdir -p "${SP1_RESULTS}"
 python3 - "${COMPILE_CASES}" "${CASE_ID}" "${SP1_RESULTS}" <<'PY'
 import hashlib
 import json
