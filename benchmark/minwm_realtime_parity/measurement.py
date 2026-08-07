@@ -535,12 +535,28 @@ def validate_measurement(result: dict[str, Any]) -> None:
                     metric_value = metric.get("value")
                     required = {
                         "raw_metric_name",
+                        "mean",
+                        "min",
+                        "p50",
+                        "max",
+                        "nonzero_sample_count",
                         "sample_count",
                         "captured_sample_count",
                         "excluded_sample_count",
+                        "all_collected_sample_count",
+                        "excluded_inactive_target_sample_count",
                         "per_chunk_sample_count",
                         "per_type_per_chunk_sample_count",
+                        "per_device_per_chunk_sample_count",
                         "observed_type_ids",
+                        "active_cuda_device_ids",
+                        "active_pw_gpu_ids",
+                        "collected_type_ids",
+                        "collected_target_count",
+                        "active_target_count",
+                        "allocated_target_count",
+                        "target_mapping",
+                        "gpu_id_extraction",
                         "type_id_coverage_semantics",
                         "exposed_metric_names",
                     }
@@ -554,6 +570,7 @@ def validate_measurement(result: dict[str, Any]) -> None:
                         )
                         continue
                     expected_types = gpu.get("count")
+                    allocated_types = gpu.get("allocated_count")
                     observed_types = metric_value.get("observed_type_ids")
                     observed_type_values = (
                         observed_types if isinstance(observed_types, list) else []
@@ -567,6 +584,98 @@ def validate_measurement(result: dict[str, Any]) -> None:
                         errors.append(
                             f"metrics.profiler_on.gpu_metrics.{name}.value."
                             "observed_type_ids must uniquely cover every active GPU"
+                        )
+                    active_cuda_device_ids = metric_value.get("active_cuda_device_ids")
+                    active_pw_gpu_ids = metric_value.get("active_pw_gpu_ids")
+                    collected_type_ids = metric_value.get("collected_type_ids")
+                    if (
+                        not isinstance(active_cuda_device_ids, list)
+                        or not all(
+                            isinstance(value, int) for value in active_cuda_device_ids
+                        )
+                        or len(set(active_cuda_device_ids)) != expected_types
+                    ):
+                        errors.append(
+                            f"metrics.profiler_on.gpu_metrics.{name}.value."
+                            "active_cuda_device_ids must uniquely cover every active GPU"
+                        )
+                    if (
+                        not isinstance(active_pw_gpu_ids, list)
+                        or not all(
+                            isinstance(value, int) for value in active_pw_gpu_ids
+                        )
+                        or len(set(active_pw_gpu_ids)) != expected_types
+                    ):
+                        errors.append(
+                            f"metrics.profiler_on.gpu_metrics.{name}.value."
+                            "active_pw_gpu_ids must uniquely cover every active GPU"
+                        )
+                    if (
+                        not isinstance(collected_type_ids, list)
+                        or not all(
+                            isinstance(value, int) for value in collected_type_ids
+                        )
+                        or len(set(collected_type_ids)) != allocated_types
+                    ):
+                        errors.append(
+                            f"metrics.profiler_on.gpu_metrics.{name}.value."
+                            "collected_type_ids must uniquely cover every allocated GPU"
+                        )
+                    for field, expected in (
+                        ("collected_target_count", allocated_types),
+                        ("active_target_count", expected_types),
+                        ("allocated_target_count", allocated_types),
+                    ):
+                        if metric_value.get(field) != expected:
+                            errors.append(
+                                f"metrics.profiler_on.gpu_metrics.{name}.value."
+                                f"{field} must equal {expected!r}"
+                            )
+                    target_mapping = metric_value.get("target_mapping")
+                    if (
+                        not isinstance(target_mapping, list)
+                        or len(target_mapping) != allocated_types
+                        or not all(isinstance(item, dict) for item in target_mapping)
+                    ):
+                        errors.append(
+                            f"metrics.profiler_on.gpu_metrics.{name}.value."
+                            "target_mapping must cover every allocated GPU"
+                        )
+                    else:
+                        active_mappings = [
+                            item
+                            for item in target_mapping
+                            if item.get("active") is True
+                        ]
+                        if (
+                            len(active_mappings) != expected_types
+                            or {item.get("type_id") for item in active_mappings}
+                            != set(observed_type_values)
+                            or {item.get("cuda_device_id") for item in active_mappings}
+                            != set(active_cuda_device_ids or [])
+                            or {item.get("pw_gpu_id") for item in active_mappings}
+                            != set(active_pw_gpu_ids or [])
+                        ):
+                            errors.append(
+                                f"metrics.profiler_on.gpu_metrics.{name}.value."
+                                "target_mapping active rows must match CUDA, PerfWorks, "
+                                "and typeId coverage"
+                            )
+                    sample_count = metric_value.get("sample_count")
+                    nonzero_sample_count = metric_value.get("nonzero_sample_count")
+                    if (
+                        not isinstance(nonzero_sample_count, int)
+                        or not isinstance(sample_count, int)
+                        or not 0 <= nonzero_sample_count <= sample_count
+                    ):
+                        errors.append(
+                            f"metrics.profiler_on.gpu_metrics.{name}.value."
+                            "nonzero_sample_count must be within sample_count"
+                        )
+                    if name == "sm_active" and nonzero_sample_count == 0:
+                        errors.append(
+                            "metrics.profiler_on.gpu_metrics.sm_active cannot be all "
+                            "zero when stable-window CUDA kernels cover active devices"
                         )
                     expected_chunk_keys = {
                         str(index)
@@ -605,6 +714,31 @@ def validate_measurement(result: dict[str, Any]) -> None:
                         errors.append(
                             f"metrics.profiler_on.gpu_metrics.{name}.value."
                             "per_type_per_chunk_sample_count must cover every stable chunk"
+                        )
+                    device_coverage = metric_value.get(
+                        "per_device_per_chunk_sample_count"
+                    )
+                    if not isinstance(device_coverage, dict) or {
+                        str(device_id) for device_id in (active_cuda_device_ids or [])
+                    } != set(device_coverage):
+                        errors.append(
+                            f"metrics.profiler_on.gpu_metrics.{name}.value."
+                            "per_device_per_chunk_sample_count must cover active CUDA "
+                            "devices"
+                        )
+                    elif any(
+                        not isinstance(chunk_counts, dict)
+                        or set(chunk_counts) != expected_chunk_keys
+                        or any(
+                            not isinstance(count, int) or count < 1
+                            for count in chunk_counts.values()
+                        )
+                        for chunk_counts in device_coverage.values()
+                    ):
+                        errors.append(
+                            f"metrics.profiler_on.gpu_metrics.{name}.value."
+                            "per_device_per_chunk_sample_count must cover every stable "
+                            "chunk"
                         )
 
             window = on.get("stable_window_coverage")

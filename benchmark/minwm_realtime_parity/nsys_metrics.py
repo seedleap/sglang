@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import re
 import sqlite3
+import statistics
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -18,6 +20,18 @@ _MARKER_RE = re.compile(
     r"\|role=(?P<role>discard|measured|outside)$"
 )
 _CAPTURE_SCOPE = "union of exact measured outer chunk NVTX ranges"
+_SM_ACTIVE_METRIC_BASE_NAMES = frozenset({"sm active", "sms active"})
+_GPU_METRIC_GPU_ID_MASK = 0xFF
+
+
+def _gpu_metric_base_name(name: str) -> str:
+    """Normalize one optional Nsight unit suffix without broad substring matching."""
+    without_suffix = re.sub(r"\s*\[[^][]*\]\s*$", "", name)
+    return " ".join(without_suffix.casefold().split())
+
+
+def _is_sm_active_metric(name: str) -> bool:
+    return _gpu_metric_base_name(name) in _SM_ACTIVE_METRIC_BASE_NAMES
 
 
 def _tables(connection: sqlite3.Connection) -> set[str]:
@@ -635,9 +649,15 @@ def _gpu_metrics(
     tables: set[str],
     intervals: list[dict[str, Any]],
     active_gpu_count: int,
+    allocated_gpu_count: int,
+    active_cuda_device_ids: list[int],
     external_evidence: str,
 ) -> dict[str, dict[str, Any]]:
-    required_tables = {"GPU_METRICS", "TARGET_INFO_GPU_METRICS"}
+    required_tables = {
+        "GPU_METRICS",
+        "TARGET_INFO_GPU",
+        "TARGET_INFO_GPU_METRICS",
+    }
     if not required_tables.issubset(tables):
         missing_tables = sorted(required_tables - tables)
         evidence = f"Missing Nsight tables: {', '.join(missing_tables)}. {external_evidence}".strip()
@@ -654,12 +674,62 @@ def _gpu_metrics(
         )
         return {"sm_active": status, "tensor_active": status, "dram": status}
 
-    id_to_name = {
-        int(row[0]): str(row[1])
-        for row in connection.execute(
-            "SELECT metricId, metricName FROM TARGET_INFO_GPU_METRICS"
+    target_columns = _columns(connection, "TARGET_INFO_GPU")
+    required_target_columns = {"pwGpuId", "cuDevice"}
+    if not required_target_columns.issubset(target_columns):
+        status = unavailable(
+            "gpu_metric_target_mapping_missing",
+            "TARGET_INFO_GPU lacks required pwGpuId/cuDevice columns: "
+            f"{sorted(target_columns)}",
         )
+        return {"sm_active": status, "tensor_active": status, "dram": status}
+
+    optional_target_columns = [
+        name for name in ("busLocation", "uuid", "name") if name in target_columns
+    ]
+    selected_target_columns = ["pwGpuId", "cuDevice", *optional_target_columns]
+    target_rows = list(
+        connection.execute(
+            f"SELECT {', '.join(selected_target_columns)} FROM TARGET_INFO_GPU"
+        )
+    )
+    targets_by_pw_gpu_id: dict[int, dict[str, Any]] = {}
+    cuda_to_pw_gpu_ids: dict[int, list[int]] = {}
+    for row in target_rows:
+        target = dict(zip(selected_target_columns, row))
+        pw_gpu_id = int(target["pwGpuId"])
+        cuda_device_id = int(target["cuDevice"])
+        if pw_gpu_id in targets_by_pw_gpu_id:
+            status = unavailable(
+                "gpu_metric_target_mapping_ambiguous",
+                f"duplicate TARGET_INFO_GPU pwGpuId={pw_gpu_id}",
+            )
+            return {"sm_active": status, "tensor_active": status, "dram": status}
+        target["pwGpuId"] = pw_gpu_id
+        target["cuDevice"] = cuda_device_id
+        targets_by_pw_gpu_id[pw_gpu_id] = target
+        cuda_to_pw_gpu_ids.setdefault(cuda_device_id, []).append(pw_gpu_id)
+
+    metric_names_by_id: dict[int, set[str]] = {}
+    for metric_id, metric_name in connection.execute(
+        "SELECT metricId, metricName FROM TARGET_INFO_GPU_METRICS"
+    ):
+        metric_names_by_id.setdefault(int(metric_id), set()).add(str(metric_name))
+    conflicting_metric_names = {
+        metric_id: sorted(names)
+        for metric_id, names in metric_names_by_id.items()
+        if len(names) != 1
     }
+    if conflicting_metric_names:
+        status = unavailable(
+            "gpu_metric_name_mapping_ambiguous",
+            f"metricId maps to conflicting names: {conflicting_metric_names}",
+        )
+        return {"sm_active": status, "tensor_active": status, "dram": status}
+    id_to_name = {
+        metric_id: next(iter(names)) for metric_id, names in metric_names_by_id.items()
+    }
+
     captured: dict[int, list[tuple[int, float, int]]] = {}
     selected: dict[int, list[tuple[int, float, int, int]]] = {}
     for type_id, metric_id, value, timestamp in connection.execute(
@@ -672,19 +742,123 @@ def _gpu_metrics(
         if chunk is not None:
             selected.setdefault(metric_id, []).append((*sample, chunk))
 
+    collected_type_ids = sorted(
+        {type_id for samples in captured.values() for type_id, _value, _time in samples}
+    )
+    collected_type_ids_by_pw_gpu_id: dict[int, list[int]] = {}
+    for type_id in collected_type_ids:
+        collected_type_ids_by_pw_gpu_id.setdefault(
+            type_id & _GPU_METRIC_GPU_ID_MASK, []
+        ).append(type_id)
+    active_cuda_device_ids = sorted(set(active_cuda_device_ids))
+    ambiguous_cuda_device_ids = {
+        cuda_device_id: pw_gpu_ids
+        for cuda_device_id, pw_gpu_ids in cuda_to_pw_gpu_ids.items()
+        if len(pw_gpu_ids) != 1
+    }
+    missing_active_cuda_device_ids = sorted(
+        set(active_cuda_device_ids) - set(cuda_to_pw_gpu_ids)
+    )
+    active_pw_gpu_ids = sorted(
+        cuda_to_pw_gpu_ids[cuda_device_id][0]
+        for cuda_device_id in active_cuda_device_ids
+        if len(cuda_to_pw_gpu_ids.get(cuda_device_id, [])) == 1
+    )
+    missing_active_pw_gpu_ids = sorted(
+        set(active_pw_gpu_ids) - set(collected_type_ids_by_pw_gpu_id)
+    )
+    duplicate_collected_pw_gpu_ids = {
+        pw_gpu_id: type_ids
+        for pw_gpu_id, type_ids in collected_type_ids_by_pw_gpu_id.items()
+        if len(type_ids) != 1
+    }
+    unknown_collected_pw_gpu_ids = sorted(
+        set(collected_type_ids_by_pw_gpu_id) - set(targets_by_pw_gpu_id)
+    )
+    active_type_ids = sorted(
+        collected_type_ids_by_pw_gpu_id[pw_gpu_id][0]
+        for pw_gpu_id in active_pw_gpu_ids
+        if len(collected_type_ids_by_pw_gpu_id.get(pw_gpu_id, [])) == 1
+    )
+    target_diagnostics = {
+        "active_cuda_device_ids": active_cuda_device_ids,
+        "active_pw_gpu_ids": active_pw_gpu_ids,
+        "active_type_ids": active_type_ids,
+        "collected_type_ids": collected_type_ids,
+        "collected_pw_gpu_ids": sorted(collected_type_ids_by_pw_gpu_id),
+        "active_target_count": len(active_type_ids),
+        "expected_active_target_count": active_gpu_count,
+        "collected_target_count": len(collected_type_ids),
+        "expected_collected_target_count": allocated_gpu_count,
+        "missing_active_cuda_device_ids": missing_active_cuda_device_ids,
+        "missing_active_pw_gpu_ids": missing_active_pw_gpu_ids,
+        "ambiguous_cuda_device_ids": ambiguous_cuda_device_ids,
+        "duplicate_collected_pw_gpu_ids": duplicate_collected_pw_gpu_ids,
+        "unknown_collected_pw_gpu_ids": unknown_collected_pw_gpu_ids,
+    }
+    target_mapping_invalid = (
+        len(active_cuda_device_ids) != active_gpu_count
+        or len(active_type_ids) != active_gpu_count
+        or len(collected_type_ids) != allocated_gpu_count
+        or missing_active_cuda_device_ids
+        or missing_active_pw_gpu_ids
+        or ambiguous_cuda_device_ids
+        or duplicate_collected_pw_gpu_ids
+        or unknown_collected_pw_gpu_ids
+    )
+    if target_mapping_invalid:
+        status = unavailable(
+            "gpu_metric_target_coverage_incomplete",
+            "Nsight GPU metric target mapping did not cover the allocated and active "
+            "devices; diagnostics="
+            f"{json.dumps(target_diagnostics, sort_keys=True)}",
+        )
+        return {"sm_active": status, "tensor_active": status, "dram": status}
+
+    active_type_id_set = set(active_type_ids)
+    pw_gpu_id_to_cuda_device = {
+        pw_gpu_id: int(targets_by_pw_gpu_id[pw_gpu_id]["cuDevice"])
+        for pw_gpu_id in collected_type_ids_by_pw_gpu_id
+    }
+    type_id_to_cuda_device = {
+        type_id: pw_gpu_id_to_cuda_device[type_id & _GPU_METRIC_GPU_ID_MASK]
+        for type_id in collected_type_ids
+    }
+    target_mapping = []
+    for type_id in collected_type_ids:
+        pw_gpu_id = type_id & _GPU_METRIC_GPU_ID_MASK
+        target = targets_by_pw_gpu_id[pw_gpu_id]
+        target_mapping.append(
+            {
+                "type_id": type_id,
+                "pw_gpu_id": pw_gpu_id,
+                "cuda_device_id": int(target["cuDevice"]),
+                "bus_location": str(target.get("busLocation") or ""),
+                "uuid": str(target.get("uuid") or ""),
+                "gpu_name": str(target.get("name") or ""),
+                "active": type_id in active_type_id_set,
+            }
+        )
+
     def select(label: str, predicate: Callable[[str], bool]) -> dict[str, Any]:
-        candidates = [
-            metric_id
-            for metric_id, name in id_to_name.items()
-            if predicate(name.lower()) and selected.get(metric_id)
-        ]
+        candidates = sorted(
+            metric_id for metric_id, name in id_to_name.items() if predicate(name)
+        )
         if not candidates:
             return unavailable(
                 "metric_not_exposed",
                 _metric_evidence(sorted(id_to_name.values()), external_evidence),
             )
         metric_id = candidates[0]
-        samples = selected[metric_id]
+        all_captured_samples = captured.get(metric_id, [])
+        captured_samples = [
+            sample for sample in all_captured_samples if sample[0] in active_type_id_set
+        ]
+        samples = [
+            sample
+            for sample in selected.get(metric_id, [])
+            if sample[0] in active_type_id_set
+        ]
         per_chunk_sample_count = {
             str(interval["chunk_index"]): sum(sample[3] == chunk for sample in samples)
             for chunk, interval in enumerate(intervals)
@@ -706,10 +880,11 @@ def _gpu_metrics(
             for type_id, chunk_counts in per_type_per_chunk_sample_count.items()
             if any(count == 0 for count in chunk_counts.values())
         }
-        if len(observed_type_ids) != active_gpu_count or missing_type_chunks:
+        if observed_type_ids != active_type_ids or missing_type_chunks:
             return unavailable(
                 "gpu_metric_window_coverage_incomplete",
                 f"metric={id_to_name[metric_id]}; expected_type_count={active_gpu_count}; "
+                f"expected_type_ids={active_type_ids}; "
                 f"observed_type_ids={observed_type_ids}; "
                 f"missing_type_chunks={missing_type_chunks}; "
                 f"per_chunk_sample_count={per_chunk_sample_count}",
@@ -722,24 +897,64 @@ def _gpu_metrics(
             for type_id, values in sorted(per_type.items())
         }
         all_values = [value for _type_id, value, _timestamp, _chunk in samples]
-        captured_count = len(captured.get(metric_id, []))
+        if label == "sm_active" and all(value == 0 for value in all_values):
+            return unavailable(
+                "gpu_metric_all_zero_under_kernel_load",
+                f"metric={id_to_name[metric_id]}; active_cuda_device_ids="
+                f"{active_cuda_device_ids}; active_type_ids={active_type_ids}; "
+                f"stable_sample_count={len(all_values)}; nonzero_sample_count=0; "
+                "CUDA kernel rows exist on every active device",
+            )
+        captured_count = len(captured_samples)
+        per_device_per_chunk_sample_count = {
+            str(type_id_to_cuda_device[int(type_id)]): chunk_counts
+            for type_id, chunk_counts in per_type_per_chunk_sample_count.items()
+        }
+        per_device_mean = {
+            str(type_id_to_cuda_device[int(type_id)]): mean
+            for type_id, mean in per_type_mean.items()
+        }
         return available(
             {
                 "metric_name": id_to_name[metric_id],
                 "raw_metric_name": id_to_name[metric_id],
                 "mean": sum(all_values) / len(all_values),
+                "min": min(all_values),
+                "p50": statistics.median(all_values),
+                "max": max(all_values),
+                "nonzero_sample_count": sum(value != 0 for value in all_values),
                 "samples": len(all_values),
                 "sample_count": len(all_values),
                 "captured_sample_count": captured_count,
                 "excluded_sample_count": captured_count - len(all_values),
+                "all_collected_sample_count": len(all_captured_samples),
+                "excluded_inactive_target_sample_count": (
+                    len(all_captured_samples) - captured_count
+                ),
                 "per_chunk_sample_count": per_chunk_sample_count,
                 "per_type_per_chunk_sample_count": per_type_per_chunk_sample_count,
+                "per_device_per_chunk_sample_count": (
+                    per_device_per_chunk_sample_count
+                ),
                 "observed_type_ids": observed_type_ids,
+                "active_cuda_device_ids": active_cuda_device_ids,
+                "active_pw_gpu_ids": active_pw_gpu_ids,
+                "collected_type_ids": collected_type_ids,
+                "collected_target_count": len(collected_type_ids),
+                "active_target_count": len(active_type_ids),
+                "allocated_target_count": allocated_gpu_count,
+                "target_mapping": target_mapping,
+                "gpu_id_extraction": (
+                    "Nsight GPU metric typeId lower 8 bits (typeId & 0xFF) "
+                    "mapped through TARGET_INFO_GPU.pwGpuId -> cuDevice"
+                ),
                 "type_id_coverage_semantics": (
-                    "Nsight GPU_METRICS target identity; formal acceptance requires "
-                    "one distinct typeId per active GPU and samples for every typeId/chunk"
+                    "Nsight collects all allocated targets; only typeIds mapped to CUDA "
+                    "devices with stable-window kernel rows are aggregated, with one "
+                    "sample-covered typeId per active device and chunk"
                 ),
                 "per_type_mean": per_type_mean,
+                "per_device_mean": per_device_mean,
                 "per_type_sample_count": {
                     type_id: len(values) for type_id, values in sorted(per_type.items())
                 },
@@ -752,12 +967,21 @@ def _gpu_metrics(
         )
 
     return {
-        "sm_active": select("sm_active", lambda name: "sm active" in name),
-        "tensor_active": select("tensor_active", lambda name: "tensor active" in name),
+        "sm_active": select(
+            "sm_active",
+            _is_sm_active_metric,
+        ),
+        "tensor_active": select(
+            "tensor_active",
+            lambda name: _gpu_metric_base_name(name) == "tensor active",
+        ),
         "dram": select(
             "dram",
-            lambda name: "dram" in name
-            and any(marker in name for marker in ("throughput", "bandwidth", "active")),
+            lambda name: "dram" in name.casefold()
+            and any(
+                marker in name.casefold()
+                for marker in ("throughput", "bandwidth", "active")
+            ),
         ),
     }
 
@@ -803,6 +1027,8 @@ def merge_nsys_metrics(
                 tables,
                 intervals,
                 int(result["provenance"]["gpu"]["count"]),
+                int(result["provenance"]["gpu"]["allocated_count"]),
+                captured_device_ids,
                 evidence,
             )
     finally:

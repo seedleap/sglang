@@ -86,6 +86,7 @@ ALLOCATED_GPU_COUNT="${MINWM_ALLOCATED_GPU_COUNT:-$(nvidia-smi -L | wc -l | xarg
   echo "sp_degrees=${SP_DEGREES}"
   echo "off_window=${OFF_WARMUP_CHUNKS}+${OFF_MEASURED_CHUNKS}"
   echo "nsys_window=${PROFILE_PRECONDITION_CHUNKS} precondition + ${PROFILE_DISCARD_CHUNKS} discarded + ${PROFILE_MEASURED_CHUNKS} stable"
+  echo "nsys_gpu_metrics_devices=all; parser maps stable-window CUDA deviceId through TARGET_INFO_GPU cuDevice->pwGpuId"
   echo "kv_cache_num_frames=${KV_CACHE_NUM_FRAMES}"
   echo "torch_profiler_concurrent=false"
   echo "resume_profiler_off_root=${RESUME_PROFILER_OFF_ROOT:-none}"
@@ -262,6 +263,8 @@ install_nsys() {
   fi
   nsys --version | tee "${RESULT_ROOT}/nsys-version.txt"
   nsys status -e 2>&1 | tee "${RESULT_ROOT}/nsys-status.txt" || true
+  nsys profile --gpu-metrics-devices=help 2>&1 \
+    | tee "${RESULT_ROOT}/nsys-gpu-metrics-devices.txt" || true
 }
 
 run_profiler_off() {
@@ -368,18 +371,11 @@ run_profiler_on() {
     --warmup-chunks "$((PROFILE_PRECONDITION_CHUNKS - 1))" \
     --measured-chunks 1
 
-  local gpu_devices
-  gpu_devices="$(
-    nvidia-smi --query-gpu=index --format=csv,noheader,nounits \
-      | awk -v count="${degree}" 'NR <= count' \
-      | paste -sd, -
-  )"
-  [[ -n "${gpu_devices}" ]]
   nsys_session="${session}"
   if nsys start \
     --session="${session}" \
     --output="${profile_dir}/sp${degree}" \
-    --gpu-metrics-devices="${gpu_devices}" \
+    --gpu-metrics-devices=all \
     --gpu-metrics-frequency=10000 \
     --sample=none > >(tee "${status_log}") 2>&1; then
     echo "gpu_metrics_start=success" | tee -a "${status_log}"
