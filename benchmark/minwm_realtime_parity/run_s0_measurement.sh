@@ -10,7 +10,13 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 WORK_ROOT="/work/minwm-realtime/${MINWM_RUN_ID}"
 MODEL_DIR="${WORK_ROOT}/sglang-model"
-RESULT_ROOT="${MINWM_RESULTS_ROOT%/}/${MINWM_RUN_ID}/s0-measurement"
+RUN_LABEL="${MINWM_S0_RUN_LABEL:-s0-measurement}"
+if ! [[ "${RUN_LABEL}" =~ ^[A-Za-z0-9_-]+$ ]]; then
+  echo "MINWM_S0_RUN_LABEL must be a safe path component" >&2
+  exit 2
+fi
+RESULT_ROOT="${MINWM_RESULTS_ROOT%/}/${MINWM_RUN_ID}/${RUN_LABEL}"
+BITWISE_ROOT="${MINWM_RESULTS_ROOT%/}/${MINWM_RUN_ID}/temb-hoist-bitwise"
 CASES="${MINWM_CASES_PATH:-${SCRIPT_DIR}/cases_720p_compile_smoke.json}"
 CASE_ID="${MINWM_CASE_ID:-00_forward_080_pottery_720p}"
 SP_DEGREES="${MINWM_S0_SP_DEGREES:-2 4}"
@@ -63,6 +69,8 @@ ALLOCATED_GPU_COUNT="${MINWM_ALLOCATED_GPU_COUNT:-$(nvidia-smi -L | wc -l | xarg
   echo "gpu_model=${GPU_MODEL}"
   echo "allocated_gpu_count=${ALLOCATED_GPU_COUNT}"
   echo "sp_degrees=${SP_DEGREES}"
+  echo "run_label=${RUN_LABEL}"
+  echo "hoist_timestep_modulation=${MINWM_HOIST_TIMESTEP_MODULATION:-unset}"
   echo "off_window=${OFF_WARMUP_CHUNKS}+${OFF_MEASURED_CHUNKS}"
   echo "nsys_window=${PROFILE_PRECONDITION_CHUNKS} precondition + ${PROFILE_DISCARD_CHUNKS} discarded + ${PROFILE_MEASURED_CHUNKS} stable"
   echo "kv_cache_num_frames=${KV_CACHE_NUM_FRAMES}"
@@ -220,12 +228,21 @@ run_profiler_off() {
     "${degree}" \
     "${lane_dir}/profiler-off-server.log" \
     "${lane_dir}/profiler-off-gpu-telemetry.csv"
+  if [[ "${degree}" == "2" && "${MINWM_S0_RUN_BITWISE:-0}" == "1" ]]; then
+    python3 "${SCRIPT_DIR}/run_sglang_api.py" \
+      --cases "${CASES}" \
+      --case "${CASE_ID}" \
+      --results "${BITWISE_ROOT}" \
+      --output-prefix "${RUN_LABEL}" \
+      --engine-name "sglang-minwm-${RUN_LABEL}" \
+      --kv-cache-num-frames "${KV_CACHE_NUM_FRAMES}"
+  fi
   local repeat_paths=()
   for repeat in 1 2; do
     local output="${lane_dir}/profiler-off-repeat${repeat}.json"
     run_client \
       "${degree}" "${output}" "bf16-fast-sp${degree}" \
-      "${MINWM_RUN_ID}-sp${degree}-off-r${repeat}" \
+      "${MINWM_RUN_ID}-${RUN_LABEL}-sp${degree}-off-r${repeat}" \
       --measurement-mode profiler_off \
       --warmup-chunks "${OFF_WARMUP_CHUNKS}" \
       --measured-chunks "${OFF_MEASURED_CHUNKS}"
@@ -241,7 +258,7 @@ PY
     local output="${lane_dir}/profiler-off-repeat3.json"
     run_client \
       "${degree}" "${output}" "bf16-fast-sp${degree}" \
-      "${MINWM_RUN_ID}-sp${degree}-off-r3" \
+      "${MINWM_RUN_ID}-${RUN_LABEL}-sp${degree}-off-r3" \
       --measurement-mode profiler_off \
       --warmup-chunks "${OFF_WARMUP_CHUNKS}" \
       --measured-chunks "${OFF_MEASURED_CHUNKS}"
@@ -258,7 +275,7 @@ PY
 run_profiler_on() {
   local degree="$1" lane_dir="$2"
   local profile_dir="${lane_dir}/profiler-on"
-  local session="minwm-s0-${MINWM_RUN_ID}-sp${degree}"
+  local session="minwm-s0-${MINWM_RUN_ID}-${RUN_LABEL}-sp${degree}"
   local report="${profile_dir}/sp${degree}.nsys-rep"
   local sqlite="${profile_dir}/sp${degree}.sqlite"
   local status_log="${profile_dir}/nsys-capture-status.log"
@@ -282,7 +299,7 @@ run_profiler_on() {
   run_client \
     "${degree}" "${profile_dir}/precondition-warmup.json" \
     "bf16-fast-sp${degree}-precondition" \
-    "${MINWM_RUN_ID}-sp${degree}-precondition" \
+    "${MINWM_RUN_ID}-${RUN_LABEL}-sp${degree}-precondition" \
     --measurement-mode profiler_off \
     --warmup-chunks "$((PROFILE_PRECONDITION_CHUNKS - 1))" \
     --measured-chunks 1
@@ -314,7 +331,7 @@ run_profiler_on() {
   run_client \
     "${degree}" "${profile_dir}/client.json" \
     "bf16-fast-sp${degree}-nsys" \
-    "${MINWM_RUN_ID}-sp${degree}-nsys" \
+    "${MINWM_RUN_ID}-${RUN_LABEL}-sp${degree}-nsys" \
     --measurement-mode profiler_on \
     --precondition-warmup-chunks "${PROFILE_PRECONDITION_CHUNKS}" \
     --warmup-chunks "${PROFILE_DISCARD_CHUNKS}" \
