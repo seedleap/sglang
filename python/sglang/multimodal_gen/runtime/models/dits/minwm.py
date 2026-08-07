@@ -194,11 +194,7 @@ class _MinWMSegmentCompile:
 
     @classmethod
     def get(cls, function, use_compile: bool):
-        if (
-            not use_compile
-            or not _MINWM_SEGMENT_COMPILE
-            or _MINWM_CUDA_GRAPH_ACTIVE
-        ):
+        if not use_compile or not _MINWM_SEGMENT_COMPILE or _MINWM_CUDA_GRAPH_ACTIVE:
             return function
         if function not in cls._compiled:
             kwargs = {}
@@ -220,9 +216,7 @@ def set_minwm_cuda_graph_active(enabled: bool) -> None:
         return
     _MINWM_CUDA_GRAPH_ACTIVE = enabled
     if enabled and _MINWM_SEGMENT_COMPILE:
-        logger.info(
-            "MinWM CUDA graph disables nested segment torch.compile for parity"
-        )
+        logger.info("MinWM CUDA graph disables nested segment torch.compile for parity")
 
 
 def apply_minwm_rotary_embedding(
