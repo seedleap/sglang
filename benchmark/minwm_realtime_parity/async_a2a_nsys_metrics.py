@@ -47,6 +47,9 @@ _TARGET_RANGES = {
     "ffn",
 }
 _NCCL_RE = re.compile(r"nccl|alltoall|sendrecv", re.I)
+_IPC_OUTPUT_COPY_KERNEL = "elementwise_kernel"
+_IPC_OUTPUT_SIGNAL_KERNEL = "bump_signal_kernel"
+_IPC_OUTPUT_WAIT_KERNEL = "spin_wait_kernel"
 _SYNC_RE = re.compile(
     r"(?:device|context|ctx|stream|event).*synchroniz|synchroniz.*(?:device|context|ctx|stream|event)",
     re.I,
@@ -338,6 +341,26 @@ def _compute(kernels: Iterable[Kernel]) -> list[Kernel]:
     return [kernel for kernel in kernels if not _NCCL_RE.search(kernel.name)]
 
 
+def _output_transport(kernels: Iterable[Kernel]) -> list[Kernel]:
+    """Return reverse-A2A transport kernels for NCCL or the SP2 IPC protocol."""
+    selected = list(kernels)
+    nccl = _nccl(selected)
+    if nccl:
+        return nccl
+    names = {kernel.name for kernel in selected}
+    if not {
+        _IPC_OUTPUT_SIGNAL_KERNEL,
+        _IPC_OUTPUT_WAIT_KERNEL,
+    }.issubset(names):
+        return []
+    protocol_names = {
+        _IPC_OUTPUT_COPY_KERNEL,
+        _IPC_OUTPUT_SIGNAL_KERNEL,
+        _IPC_OUTPUT_WAIT_KERNEL,
+    }
+    return [kernel for kernel in selected if kernel.name in protocol_names]
+
+
 def _first_kernel_after(
     ranges: list[NvtxRange],
     kernels: dict[int, list[Kernel]],
@@ -458,7 +481,7 @@ def _add_output(
     kernels: dict[int, list[Kernel]],
 ) -> None:
     span_kernels = kernels.get(output_span.identifier, ())
-    comm = _nccl(span_kernels)
+    comm = _output_transport(span_kernels)
     if not comm:
         return
     dependent = _first_kernel_after(

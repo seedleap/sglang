@@ -1,0 +1,200 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: minwm-async-a2a-nsys-reader-20260807-03
+  namespace: default
+  labels:
+    app.kubernetes.io/name: minwm-async-a2a-nsys-reader-20260807-03
+    seedleap.ai/owner: chenshengdong
+    seedleap.ai/task: minwm-async-a2a
+  annotations:
+    seedleap.ai/source-job: minwm-async-a2a-nsys-h200-20260807-01
+    seedleap.ai/source-artifacts: /results/attempts/minwm-async-a2a-nsys-h200-20260807-01-nlkgg/minwm-async-a2a-nsys-h200-20260807-01/async-a2a-nsys
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 1800
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: minwm-async-a2a-nsys-reader-20260807-03
+        seedleap.ai/owner: chenshengdong
+        seedleap.ai/task: minwm-async-a2a
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        kubernetes.io/hostname: i-06888dc1ca88547e1
+      tolerations:
+        - key: seedleap.ai/capacity-pool
+          operator: Equal
+          value: minwm-test-phx2-karpenter
+          effect: NoSchedule
+      containers:
+        - name: reader
+          image: 829115578968.dkr.ecr.us-east-2.amazonaws.com/leap-world/minwm-training@sha256:bedc07ea3ba55059a8c1c569c3b177c4d00d41f37d4fa9105375531534ef5f2a
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/bash
+            - -lc
+            - |
+              set -euo pipefail
+              source_root=/results/attempts/minwm-async-a2a-nsys-h200-20260807-01-nlkgg/minwm-async-a2a-nsys-h200-20260807-01/async-a2a-nsys
+              SOURCE_ROOT="${source_root}" python3 - <<'PY'
+              import bisect
+              import json
+              import os
+              import sqlite3
+              import statistics
+              from pathlib import Path
+
+              root = Path(os.environ["SOURCE_ROOT"])
+
+              def load(path):
+                  return json.loads(path.read_text(encoding="utf-8"))
+
+              def median(values):
+                  return statistics.median(values) if values else None
+
+              summary = {
+                  "source_root": str(root),
+                  "comparison": load(root / "comparison.json"),
+                  "lanes": {},
+              }
+              for lane in ("baseline", "candidate"):
+                  result = load(root / lane / "a2a-metrics.json")
+                  general = result["general_nsys"]
+                  gpu = general["gpu_metrics"]
+                  launch_start = []
+                  launch_end = []
+                  wait_cpu = []
+                  for chunk in result["chunks"]:
+                      for rank in chunk["ranks"].values():
+                          for source, target in (
+                              (rank["launch_start_to_wait_start_ms"], launch_start),
+                              (rank["launch_end_to_wait_start_ms"], launch_end),
+                              (rank["wait_cpu_range_ms"], wait_cpu),
+                          ):
+                              if source["median"] is not None:
+                                  target.append(source["median"])
+                  lane_summary = {
+                      "trace_id": result["trace_id"],
+                      "aggregate": result["aggregate"],
+                      "raw_counts": result["raw_counts"],
+                      "synchronization_apis": result["synchronization_apis"],
+                      "cuda_kernel_per_chunk": general["kernel_count"]["value"]["per_stable_chunk"],
+                      "cuda_launch_per_rank_per_chunk": general["kernel_launch_api_count"]["value"]["per_rank_per_chunk"]["value"],
+                      "launch_start_to_wait_start_chunk_rank_median_ms": median(launch_start),
+                      "launch_end_to_wait_start_chunk_rank_median_ms": median(launch_end),
+                      "wait_cpu_range_chunk_rank_median_ms": median(wait_cpu),
+                      "gpu_metrics": {},
+                  }
+                  for name in ("sm_active", "tensor_active", "dram"):
+                      metric = gpu[name]
+                      lane_summary["gpu_metrics"][name] = {
+                          "status": metric["status"],
+                          "metric_name": metric.get("value", {}).get("metric_name"),
+                          "mean": metric.get("value", {}).get("mean"),
+                          "p50": metric.get("value", {}).get("p50"),
+                          "p95": metric.get("value", {}).get("p95"),
+                          "per_device_mean": metric.get("value", {}).get("per_device_mean"),
+                      }
+
+                  sqlite_path = root / lane / f"{lane}.sqlite"
+                  connection = sqlite3.connect(f"file:{sqlite_path}?mode=ro", uri=True)
+                  try:
+                      tables = [row[0] for row in connection.execute(
+                          "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+                      )]
+                      strings = dict(connection.execute("SELECT id, value FROM StringIds"))
+                      stable_intervals = [
+                          (int(item["start_ns"]), int(item["end_ns"]))
+                          for item in result["stable_chunks"]
+                      ]
+                      output_ranges = []
+                      for start, end, text, text_id, global_tid in connection.execute(
+                          "SELECT start, end, text, textId, globalTid FROM NVTX_EVENTS "
+                          "WHERE end IS NOT NULL AND globalTid IS NOT NULL"
+                      ):
+                          name = str(text) if text is not None else str(strings.get(text_id, ""))
+                          in_stable_window = any(
+                              int(start) >= lower and int(end) <= upper
+                              for lower, upper in stable_intervals
+                          )
+                          if name.startswith("output_a2a") and in_stable_window:
+                              output_ranges.append((int(start), int(end), name, int(global_tid)))
+                      runtime_by_tid = {}
+                      for call_start, call_end, name_id, global_tid, correlation in connection.execute(
+                          "SELECT start, end, nameId, globalTid, correlationId "
+                          "FROM CUPTI_ACTIVITY_KIND_RUNTIME"
+                      ):
+                          runtime_by_tid.setdefault(int(global_tid), []).append(
+                              (int(call_start), int(call_end), int(name_id), int(correlation))
+                          )
+                      runtime_starts_by_tid = {}
+                      for global_tid, calls in runtime_by_tid.items():
+                          calls.sort()
+                          runtime_starts_by_tid[global_tid] = [call[0] for call in calls]
+                      output_runtime = {}
+                      output_correlations = set()
+                      for start, end, name, global_tid in output_ranges:
+                          calls = runtime_by_tid.get(global_tid, ())
+                          starts = runtime_starts_by_tid.get(global_tid, ())
+                          left = bisect.bisect_left(starts, start)
+                          right = bisect.bisect_left(starts, end)
+                          for call_start, call_end, name_id, correlation in calls[left:right]:
+                              call_name = str(strings.get(name_id, name_id))
+                              item = output_runtime.setdefault(call_name, {"count": 0, "duration_ms": 0.0})
+                              item["count"] += 1
+                              item["duration_ms"] += (int(call_end) - int(call_start)) / 1e6
+                              output_correlations.add((global_tid & -16777216, correlation))
+                      output_kernels = {}
+                      for start, end, device, correlation, global_pid, short_name in connection.execute(
+                          "SELECT start, end, deviceId, correlationId, globalPid, shortName "
+                          "FROM CUPTI_ACTIVITY_KIND_KERNEL"
+                      ):
+                          if (int(global_pid), int(correlation)) not in output_correlations:
+                              continue
+                          kernel_name = str(strings.get(short_name, short_name))
+                          item = output_kernels.setdefault(
+                              kernel_name, {"count": 0, "duration_ms": 0.0, "devices": {}}
+                          )
+                          item["count"] += 1
+                          item["duration_ms"] += (int(end) - int(start)) / 1e6
+                          device_key = str(device)
+                          item["devices"][device_key] = item["devices"].get(device_key, 0) + 1
+                      memory_tables = [name for name in tables if "MEM" in name.upper()]
+                      lane_summary["output_transport_diagnostics"] = {
+                          "nvtx_range_count": len(output_ranges),
+                          "nvtx_host_duration_ms": sum(end - start for start, end, _, _ in output_ranges) / 1e6,
+                          "runtime_calls": dict(sorted(output_runtime.items())),
+                          "kernels": dict(sorted(output_kernels.items())),
+                          "memory_activity_tables": {
+                              table: {
+                                  "row_count": connection.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0],
+                                  "columns": [row[1] for row in connection.execute(f'PRAGMA table_info("{table}")')],
+                              }
+                              for table in memory_tables
+                          },
+                      }
+                  finally:
+                      connection.close()
+                  summary["lanes"][lane] = lane_summary
+
+              output = root / "evidence-summary.json"
+              output.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+              print(json.dumps(summary, indent=2, sort_keys=True))
+              print(f"MINWM_ASYNC_A2A_NSYS_READER_COMPLETE output={output}")
+              PY
+          resources:
+            requests:
+              cpu: "4"
+              memory: 16Gi
+            limits:
+              cpu: "8"
+              memory: 32Gi
+          volumeMounts:
+            - name: results
+              mountPath: /results
+      volumes:
+        - name: results
+          persistentVolumeClaim:
+            claimName: minwm-async-a2a-perf-results-20260807
