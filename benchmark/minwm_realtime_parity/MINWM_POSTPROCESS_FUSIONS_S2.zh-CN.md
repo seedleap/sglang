@@ -149,6 +149,13 @@ cross/FFN 已确认是单 kernel，不用“关闭已有优化”的退化结果
   中对象始终 Pending、未启动容器或占 GPU，随后只按完整 Job 名精确删除。之后所有
   read/dry-run/apply/logs/delete 均显式指定 `--context codex-minwm-test-phx2`。正式记录
   的 region/NodePool 为 us-west-2 / `minwm-test-phx2-p5e-spot`。
+- 跨任务发现 source checkout 的 registered/unit tests 可能在收集 `sglang.test.ci` 时因
+  `PYTHONPATH` 未暴露 `/workspace/sglang/python` 而提前失败。S2 micro-trace manifest
+  已显式 export 该路径，所以四次记录不是这个原因；但当时没有在 pytest 前单独执行
+  `python -c 'import sglang.test.ci.ci_register'`。以后凡 Pod 内运行仓库测试，必须先做
+  这两个 machine-check，失败则在模型准备/client 前止损。正式 A/B runner 不运行
+  registered/unit tests，只运行质量 client、S0 validator 与测量，因此不热修改当前
+  Pending Job。
 
 ## 证据与决策过程
 
