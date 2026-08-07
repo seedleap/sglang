@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +23,66 @@ def _write(path: Path, value: dict[str, Any]) -> None:
     path.write_text(
         json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def build_invalid_marker(
+    root: Path,
+    *,
+    reason: str,
+    marker_path: Path,
+    preserved_root: Path | None = None,
+    timestamp_utc: str | None = None,
+) -> dict[str, Any]:
+    if not reason.strip():
+        raise ValueError("invalid-attempt reason must be non-empty")
+    root = root.resolve()
+    marker_path = marker_path.resolve()
+    if not root.is_dir():
+        raise ValueError(f"invalid-attempt root is not a directory: {root}")
+    preserved_root = preserved_root.resolve() if preserved_root else root
+    files = []
+    for path in sorted(root.rglob("*")):
+        if not path.is_file() or path.resolve() == marker_path:
+            continue
+        relative = path.relative_to(root)
+        files.append(
+            {
+                "original_path": str(path),
+                "preserved_path": str(preserved_root / relative),
+                "size_bytes": path.stat().st_size,
+                "sha256": _sha256(path),
+                "recoverable": True,
+            }
+        )
+    return {
+        "schema_version": "minwm-realtime-invalid-attempt/v1",
+        "reason": reason,
+        "timestamp_utc": timestamp_utc or datetime.now(timezone.utc).isoformat(),
+        "original_root": str(root),
+        "preserved_root": str(preserved_root),
+        "recoverability": (
+            "moved_to_attempt_invalid"
+            if preserved_root != root
+            else "preserved_in_place"
+        ),
+        "files": files,
+    }
+
+
+def load_aggregate_records(
+    paths: list[Path],
+) -> tuple[list[dict[str, Any]], list[Path]]:
+    excluded = [path for path in paths if "invalid" in path.parts]
+    accepted = [path for path in paths if path not in excluded]
+    return [_read(path) for path in accepted], excluded
 
 
 def _off_scalar(record: dict[str, Any], name: str) -> float:
@@ -105,11 +167,29 @@ def parse_args() -> argparse.Namespace:
     aggregate_parser.add_argument("results", nargs="+", type=Path)
     aggregate_parser.add_argument("--noise-explanation")
     aggregate_parser.add_argument("--output", required=True, type=Path)
+
+    invalid_parser = subparsers.add_parser("mark-invalid")
+    invalid_parser.add_argument("--root", required=True, type=Path)
+    invalid_parser.add_argument("--reason", required=True)
+    invalid_parser.add_argument("--marker", required=True, type=Path)
+    invalid_parser.add_argument("--preserved-root", type=Path)
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+    if args.command == "mark-invalid":
+        if args.marker.exists():
+            raise ValueError(f"refusing to overwrite invalid marker: {args.marker}")
+        marker = build_invalid_marker(
+            args.root,
+            reason=args.reason,
+            marker_path=args.marker,
+            preserved_root=args.preserved_root,
+        )
+        _write(args.marker, marker)
+        print(f"invalid attempt marked: {args.marker}")
+        return
     if args.command == "validate":
         validate_measurement(_read(args.result))
         print(f"valid: {args.result}")
@@ -125,7 +205,10 @@ def main() -> None:
             result["artifacts"]["nsys_status_log"] = str(args.status_log)
         _write(args.output, result)
         return
-    summary = aggregate([_read(path) for path in args.results], args.noise_explanation)
+    records, excluded = load_aggregate_records(args.results)
+    for path in excluded:
+        print(f"excluded invalid result: {path}")
+    summary = aggregate(records, args.noise_explanation)
     _write(args.output, summary)
 
 

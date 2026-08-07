@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import sqlite3
 import sys
@@ -25,7 +26,11 @@ from measurement import (  # noqa: E402
     stage_trace_values,
     validate_measurement,
 )
-from measurement_tool import aggregate  # noqa: E402
+from measurement_tool import (  # noqa: E402
+    aggregate,
+    build_invalid_marker,
+    load_aggregate_records,
+)
 from nsys_metrics import merge_nsys_metrics  # noqa: E402
 
 
@@ -384,3 +389,46 @@ def test_repeat_summary_uses_sample_cv_and_flags_variance() -> None:
     assert summary["metrics"]["client_fps"]["passes"] is False
     assert "scheduler_chunk_wall_ms" not in summary["acceptance"]["required_metrics"]
     assert summary["acceptance"]["environment_noise_explanation"]
+
+
+def test_invalid_attempt_marker_inventories_files_and_aggregate_excludes_it(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "attempt" / "s0-measurement"
+    root.mkdir(parents=True)
+    artifact = root / "partial.json"
+    artifact.write_bytes(b"partial evidence\n")
+    marker_path = root / "invalid-marker.json"
+    preserved_root = tmp_path / "attempt" / "invalid" / "retry" / root.name
+    marker = build_invalid_marker(
+        root,
+        reason="old contract missing latency count",
+        marker_path=marker_path,
+        preserved_root=preserved_root,
+        timestamp_utc="2026-08-07T00:00:00+00:00",
+    )
+    assert marker["recoverability"] == "moved_to_attempt_invalid"
+    assert marker["reason"] == "old contract missing latency count"
+    assert marker["files"] == [
+        {
+            "original_path": str(artifact),
+            "preserved_path": str(preserved_root / artifact.name),
+            "size_bytes": len(b"partial evidence\n"),
+            "sha256": hashlib.sha256(b"partial evidence\n").hexdigest(),
+            "recoverable": True,
+        }
+    ]
+
+    valid_one = tmp_path / "valid-one.json"
+    valid_two = tmp_path / "valid-two.json"
+    invalid = tmp_path / "attempt" / "invalid" / "old.json"
+    invalid.parent.mkdir(parents=True, exist_ok=True)
+    for path, record in (
+        (valid_one, _record(run_id="valid-one")),
+        (valid_two, _record(run_id="valid-two")),
+        (invalid, _record(run_id="invalid")),
+    ):
+        path.write_text(json.dumps(record), encoding="utf-8")
+    records, excluded = load_aggregate_records([valid_one, invalid, valid_two])
+    assert [record["run_id"] for record in records] == ["valid-one", "valid-two"]
+    assert excluded == [invalid]
