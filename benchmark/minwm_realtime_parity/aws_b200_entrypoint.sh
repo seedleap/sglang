@@ -720,6 +720,7 @@ fi
 
 if [[ "${MINWM_BENCHMARK_MODE}" == "cudagraphmatrix" ]]; then
   CG_CASES="${MINWM_CASES_PATH:-${SCRIPT_DIR}/cases_720p_compile_smoke.json}"
+  CG_CASE="${MINWM_CUDA_GRAPH_CASE:-00_forward_080_pottery_720p}"
   CG_RESULTS="${RESULTS}/cuda-graph-matrix"
   CG_DEGREES="${MINWM_CUDA_GRAPH_SP_DEGREES:-1 2}"
   CG_WARMUP_CHUNKS="${MINWM_CUDA_GRAPH_WARMUP_CHUNKS:-10}"
@@ -804,7 +805,7 @@ PY
     set +e
     python3 "${SCRIPT_DIR}/benchmark_realtime_throughput.py" \
       --cases "${CG_CASES}" \
-      --case 00_forward_080_pottery_720p \
+      --case "${CG_CASE}" \
       --output "${profile_dir}/throughput.json" \
       --profile-name "${profile}" \
       --warmup-chunks "${CG_WARMUP_CHUNKS}" \
@@ -834,7 +835,10 @@ PY
   done
 
   python3 - "${CG_RESULTS}" <<'PY' | tee "${CG_RESULTS}/summary.log"
+import base64
 import json
+import math
+import statistics
 import sys
 from pathlib import Path
 
@@ -844,6 +848,74 @@ profiles = {
     for path in sorted(root.glob("*/throughput.json"))
 }
 summary = {"profiles": profiles, "comparisons": {}}
+
+
+def denoise_metrics(profile_name, warmup_chunks):
+    values = []
+    log_path = root / profile_name / "server.log"
+    for line in log_path.read_text().splitlines():
+        if "realtime_trace {" not in line:
+            continue
+        try:
+            event = json.loads(line[line.index("{"):])
+        except (ValueError, json.JSONDecodeError):
+            continue
+        if (
+            event.get("event") == "server.model_denoise_complete"
+            and event.get("component") == "minwm_denoising"
+            and "source" not in event
+            and "error" not in event
+            and int(event.get("chunk_index", -1)) >= warmup_chunks
+        ):
+            values.append(float(event["duration_ms"]))
+    if not values:
+        return None
+    return {
+        "count": len(values),
+        "mean_ms": statistics.fmean(values),
+        "p50_ms": statistics.median(values),
+        "latent_fps_ratio_of_sums": 4 * len(values) / (sum(values) / 1000.0),
+        "pixel_fps_ratio_of_sums": 16 * len(values) / (sum(values) / 1000.0),
+    }
+
+
+def sampled_pixel_error(eager, graph):
+    eager_samples = eager["measured_payload_samples_base64"]
+    graph_samples = graph["measured_payload_samples_base64"]
+    if eager_samples.keys() != graph_samples.keys():
+        raise AssertionError("eager/CUDA graph sampled payload keys differ")
+    absolute_error_sum = 0
+    squared_error_sum = 0
+    equal_count = 0
+    max_error = 0
+    count = 0
+    for key in eager_samples:
+        eager_bytes = base64.b64decode(eager_samples[key])
+        graph_bytes = base64.b64decode(graph_samples[key])
+        if len(eager_bytes) != len(graph_bytes):
+            raise AssertionError(f"sampled payload length differs for {key}")
+        for eager_value, graph_value in zip(eager_bytes, graph_bytes):
+            error = abs(eager_value - graph_value)
+            absolute_error_sum += error
+            squared_error_sum += error * error
+            equal_count += int(error == 0)
+            max_error = max(max_error, error)
+            count += 1
+    mse = squared_error_sum / count
+    return {
+        "sample_count": count,
+        "mae_u8": absolute_error_sum / count,
+        "rmse_u8": math.sqrt(mse),
+        "psnr_db": None if mse == 0 else 20 * math.log10(255 / math.sqrt(mse)),
+        "max_abs_u8": max_error,
+        "exact_fraction": equal_count / count,
+    }
+
+
+for profile_name, profile in profiles.items():
+    profile["dit_denoise"] = denoise_metrics(
+        profile_name, int(profile["warmup_chunks"])
+    )
 for degree in (1, 2):
     eager_name = f"sp{degree}-eager"
     graph_name = f"sp{degree}-cuda-graph"
@@ -858,10 +930,13 @@ for degree in (1, 2):
         "equal": eager["measured_payload_sha256"]
         == graph["measured_payload_sha256"],
     }
+    comparison["sampled_pixel_error"] = sampled_pixel_error(eager, graph)
     for name, getter in {
         "scheduler_fps": lambda item: item["server"]["scheduler_forward_fps_ratio_of_sums"],
         "client_fps": lambda item: item["client"]["steady_received_fps_ratio_of_sums"],
         "scheduler_p50_ms": lambda item: item["server"]["scheduler_forward_ms"]["p50"],
+        "dit_denoise_pixel_fps": lambda item: item["dit_denoise"]["pixel_fps_ratio_of_sums"],
+        "dit_denoise_p50_ms": lambda item: item["dit_denoise"]["p50_ms"],
     }.items():
         baseline = getter(eager)
         candidate = getter(graph)
