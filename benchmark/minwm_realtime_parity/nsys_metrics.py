@@ -19,6 +19,10 @@ def _tables(connection: sqlite3.Connection) -> set[str]:
     }
 
 
+def _columns(connection: sqlite3.Connection, table: str) -> set[str]:
+    return {str(row[1]) for row in connection.execute(f"PRAGMA table_info('{table}')")}
+
+
 def _permission_reason(evidence: str) -> str:
     lowered = evidence.lower()
     if "permission" in lowered or "perf_event" in lowered or "access denied" in lowered:
@@ -62,7 +66,7 @@ def _merged_busy(intervals: list[tuple[int, int]]) -> tuple[int, int]:
 
 
 def _kernel_metrics(
-    connection: sqlite3.Connection, tables: set[str]
+    connection: sqlite3.Connection, tables: set[str], stable_chunks: int
 ) -> dict[str, dict[str, Any]]:
     table = "CUPTI_ACTIVITY_KIND_KERNEL"
     if table not in tables:
@@ -81,16 +85,22 @@ def _kernel_metrics(
             f"SELECT deviceId, start, end FROM {table} ORDER BY deviceId, start"
         )
     ]
-    durations_us = [(end - start) / 1000.0 for _device, start, end in rows]
-    buckets = {
-        "lt_10_us": sum(value < 10 for value in durations_us),
-        "10_to_lt_50_us": sum(10 <= value < 50 for value in durations_us),
-        "50_to_lt_100_us": sum(50 <= value < 100 for value in durations_us),
-        "gte_100_us": sum(value >= 100 for value in durations_us),
-    }
+
+    def bucket_counts(selected: list[tuple[int, int, int]]) -> dict[str, int]:
+        durations_us = [(end - start) / 1000.0 for _device, start, end in selected]
+        return {
+            "lt_10_us": sum(value < 10 for value in durations_us),
+            "10_to_lt_50_us": sum(10 <= value < 50 for value in durations_us),
+            "50_to_lt_100_us": sum(50 <= value < 100 for value in durations_us),
+            "gte_100_us": sum(value >= 100 for value in durations_us),
+        }
+
+    buckets = bucket_counts(rows)
     by_device: dict[int, list[tuple[int, int]]] = {}
+    rows_by_device: dict[int, list[tuple[int, int, int]]] = {}
     for device, start, end in rows:
         by_device.setdefault(device, []).append((start, end))
+        rows_by_device.setdefault(device, []).append((device, start, end))
     busy_pct: dict[str, float] = {}
     for device, intervals in sorted(by_device.items()):
         busy, span = _merged_busy(intervals)
@@ -101,10 +111,41 @@ def _kernel_metrics(
         "mean_pct": sum(busy_pct.values()) / len(busy_pct) if busy_pct else None,
         "window": "first kernel start to last kernel end per device",
     }
+    kernel_count = {
+        "raw_total": len(rows),
+        "per_stable_chunk": len(rows) / stable_chunks,
+        "per_device": {
+            str(device): {
+                "raw_total": len(device_rows),
+                "per_stable_chunk": len(device_rows) / stable_chunks,
+            }
+            for device, device_rows in sorted(rows_by_device.items())
+        },
+        "stable_chunk_denominator": stable_chunks,
+        "capture_scope": "entire nsys start/stop capture",
+    }
+    bucket_value = {
+        "raw_total": buckets,
+        "per_stable_chunk": {
+            name: count / stable_chunks for name, count in buckets.items()
+        },
+        "per_device": {
+            str(device): {
+                "raw_total": bucket_counts(device_rows),
+                "per_stable_chunk": {
+                    name: count / stable_chunks
+                    for name, count in bucket_counts(device_rows).items()
+                },
+            }
+            for device, device_rows in sorted(rows_by_device.items())
+        },
+        "stable_chunk_denominator": stable_chunks,
+        "capture_scope": "entire nsys start/stop capture",
+    }
     return {
-        "kernel_count": available(len(rows), "count", table),
+        "kernel_count": available(kernel_count, "count", table),
         "short_kernel_buckets": available(
-            buckets, "count", f"{table}.end-start; fixed microsecond buckets"
+            bucket_value, "count", f"{table}.end-start; fixed microsecond buckets"
         ),
         "gpu_kernel_busy": available(
             busy_value, "percent", f"merged {table} intervals"
@@ -112,8 +153,62 @@ def _kernel_metrics(
     }
 
 
+def _capture_coverage(
+    connection: sqlite3.Connection,
+    tables: set[str],
+    expected_ranks: int,
+    captured_device_ids: list[int],
+) -> dict[str, Any]:
+    table = "CUPTI_ACTIVITY_KIND_RUNTIME"
+    if table not in tables:
+        return unavailable(
+            "rank_capture_coverage_unconfirmed",
+            f"{table} is absent; expected_ranks={expected_ranks}; "
+            f"captured_device_ids={captured_device_ids}",
+        )
+    columns = _columns(connection, table)
+    process_column = next(
+        (name for name in ("globalPid", "processId") if name in columns), None
+    )
+    if process_column is None:
+        return unavailable(
+            "rank_capture_coverage_unconfirmed",
+            f"{table} columns do not expose globalPid/processId: "
+            f"columns={sorted(columns)}; expected_ranks={expected_ranks}; "
+            f"captured_device_ids={captured_device_ids}",
+        )
+    process_ids = sorted(
+        int(row[0])
+        for row in connection.execute(
+            f"SELECT DISTINCT {process_column} FROM {table} "
+            f"WHERE {process_column} IS NOT NULL"
+        )
+    )
+    evidence = (
+        f"expected_ranks={expected_ranks}; process_column={process_column}; "
+        f"observed_process_ids={process_ids}; captured_device_ids={captured_device_ids}"
+    )
+    if len(process_ids) != expected_ranks or len(captured_device_ids) != expected_ranks:
+        return unavailable("rank_capture_coverage_unconfirmed", evidence)
+    return available(
+        {
+            "expected_ranks": expected_ranks,
+            "observed_process_count": len(process_ids),
+            "process_id_column": process_column,
+            "observed_process_ids": process_ids,
+            "captured_device_ids": captured_device_ids,
+        },
+        "capture_coverage",
+        evidence,
+    )
+
+
 def _api_metrics(
-    connection: sqlite3.Connection, tables: set[str]
+    connection: sqlite3.Connection,
+    tables: set[str],
+    stable_chunks: int,
+    active_gpu_count: int,
+    coverage: dict[str, Any],
 ) -> dict[str, dict[str, Any]]:
     table = "CUPTI_ACTIVITY_KIND_RUNTIME"
     if table not in tables:
@@ -131,12 +226,34 @@ def _api_metrics(
     launch_count = sum(
         bool(launch_pattern.search(names.get(name_id, ""))) for name_id in name_ids
     )
-    return {
-        "cuda_api_count": available(len(name_ids), "count", table),
-        "kernel_launch_api_count": available(
-            launch_count,
+
+    def normalized_count(raw_total: int, source: str) -> dict[str, Any]:
+        if coverage["status"] == "available":
+            per_rank = available(
+                raw_total / stable_chunks / active_gpu_count,
+                "count_per_rank_per_stable_chunk",
+                f"{source}; {coverage['source']}",
+            )
+        else:
+            per_rank = unavailable(
+                "rank_capture_coverage_unconfirmed", coverage["evidence"]
+            )
+        return available(
+            {
+                "raw_total": raw_total,
+                "total_per_stable_chunk": raw_total / stable_chunks,
+                "per_rank_per_stable_chunk": per_rank,
+                "stable_chunk_denominator": stable_chunks,
+                "capture_scope": "entire nsys start/stop capture",
+            },
             "count",
-            f"{table} names matching CUDA kernel/graph launch APIs",
+            source,
+        )
+
+    return {
+        "cuda_api_count": normalized_count(len(name_ids), table),
+        "kernel_launch_api_count": normalized_count(
+            launch_count, f"{table} names matching CUDA kernel/graph launch APIs"
         ),
     }
 
@@ -190,9 +307,15 @@ def _gpu_metrics(
         return available(
             {
                 "metric_name": id_to_name[metric_id],
+                "raw_metric_name": id_to_name[metric_id],
                 "mean": sum(all_values) / len(all_values),
                 "samples": len(all_values),
+                "sample_count": len(all_values),
                 "per_type_mean": per_type_mean,
+                "per_type_sample_count": {
+                    type_id: len(values) for type_id, values in sorted(per_type.items())
+                },
+                "exposed_metric_names": sorted(id_to_name.values()),
             },
             "nsys_native",
             f"GPU_METRICS metricId={metric_id} selected for {label}",
@@ -219,8 +342,33 @@ def merge_nsys_metrics(
     try:
         tables = _tables(connection)
         on = result["metrics"]["profiler_on"]
-        on.update(_kernel_metrics(connection, tables))
-        on.update(_api_metrics(connection, tables))
+        stable_chunks = int(result["workload"]["measured_chunks"])
+        active_gpu_count = int(result["provenance"]["gpu"]["count"])
+        kernel_table = "CUPTI_ACTIVITY_KIND_KERNEL"
+        captured_device_ids = (
+            sorted(
+                int(row[0])
+                for row in connection.execute(
+                    f"SELECT DISTINCT deviceId FROM {kernel_table}"
+                )
+            )
+            if kernel_table in tables
+            else []
+        )
+        coverage = _capture_coverage(
+            connection, tables, active_gpu_count, captured_device_ids
+        )
+        on.update(_kernel_metrics(connection, tables, stable_chunks))
+        on.update(
+            _api_metrics(
+                connection,
+                tables,
+                stable_chunks,
+                active_gpu_count,
+                coverage,
+            )
+        )
+        on["capture_coverage"] = coverage
         on["gpu_metrics"] = _gpu_metrics(connection, tables, evidence)
     finally:
         connection.close()
