@@ -13,10 +13,11 @@
 当前实现只改动候选 1，并由 `MINWM_FUSE_SELF_ATTN_POST_FAST` 独立控制，默认关闭。
 候选 2 和 3 的 H200 生成代码已确认各自是单 Triton kernel/单 launch，因此不新增等价
 融合层。候选 1 的单 kernel 会改变 LayerNorm reduction，只能作为显式 fast lane，
-不能成为 parity 默认路径。统一性能记录固定使用 S0 canonical 工具 commit
-`59aa68a382`（包含 `25cc42ef8c` 的机器可校验 JSON Schema，并等待完整的 DiT/VAE
-stage trace indices，避免最后一条 199/200 竞态）；S0 合并前只在临时测试分支叠加其
-提交链，本任务对 `main` 的实现 diff 不复制测量基础设施。
+不能成为 parity 默认路径。`59aa68a382` 已修复最后一条 DiT/VAE stage trace 的
+199/200 竞态，但其 latency summary 漏写显式 `count`，无法机器核验 count=200，因此
+正式 profiler-off/on client 已在启动前暂停，且不会保留该版本产物。S0 发布替代
+canonical pin 后才恢复测量；S0 合并前只在临时测试分支叠加其提交链，本任务对
+`main` 的实现 diff 不复制测量基础设施。
 
 ## 调用链与数值合同
 
@@ -62,6 +63,14 @@ segment 与新单 compiled segment：residual 必须 bitwise；LayerNorm fast �
 fraction 的 12.5% regression guardrail 来自 H200 autocast off/on 的 8.7%/9.7% 首次观测
 并预留约 29% 相对幅度；它只是微算子回归界，不替代端到端质量验收。
 
+这里没有把 micro trace 相对 eager 的 `max_abs=0.125` 反向写成全局 tolerance。CUDA
+约束按旧双 compiled segment 的每个输出位置计算向正/负方向的 BF16 ULP，并要求每个
+非零差异都不超过该位置 1 ULP；同时单独打印/限制 changed fraction。端到端视频沿用
+仓库已评审的 `bf16_backend_candidate` 合同：generated frames 的 `max_abs<=8`、
+`RMSE<=1.0`、`SSIM>=0.995`。仓库没有既有 latent 阈值，所以 latent 只强制文件集合、
+shape、dtype 一致且值 finite，并完整报告 bitwise、changed fraction、max_abs、RMSE、
+relative-L2 和 cosine；不会根据本次观测杜撰一个“刚好通过”的 latent 门槛。
+
 - batch/sequence 边界：`B1/S1`、`B2/S7`；
 - 1248×704、4 latent frames 的 SP2/SP4 local sequence：6864/3432 tokens；
 - gate shape：`[D]`、`[1,D]`、`[B,1,D]`，以及非连续 `[B,S,D]` timestep gate；
@@ -74,8 +83,9 @@ fraction 的 12.5% regression guardrail 来自 H200 autocast off/on 的 8.7%/9.7
 
 ## 实际 A/B
 
-以下表格只接受通过 S0 canonical `59aa68a382` validator 的
-`minwm-realtime-measurement/v1` 产物。
+以下表格只接受通过 S0 替代 canonical validator、且 DiT/VAE latency summary 都显式
+包含 `count=200` 的 `minwm-realtime-measurement/v1` 产物。`59aa68a382` 的 schema
+尚未提供这个可机器核验字段，因此当前没有启动或保留正式 client 结果。
 profiler-off headline 使用 20 warmup + 200 measured；Nsight 在外部完成 20 warmup 后
 抓至少 10 个 steady chunks，且不同时启用 `torch.profiler`。baseline/candidate 都固定
 `MINWM_S0_KV_CACHE_NUM_FRAMES=45`：这是 rolling-window steady-state contract，不能随
@@ -124,6 +134,10 @@ cross/FFN 已确认是单 kernel，不用“关闭已有优化”的退化结果
   profiler 行；容器最后按 `test_status=1` 执行 `exit 1`，所以 Job 正确显示 Failed。
   这是测试暴露 fast lane 非 bitwise，不是上传或基础设施失败；证据完整，不做第五次
   micro trace。
+- S0 `59aa68a382` 虽修复了完整 stage-trace 等待，但真机复核发现 latency summary JSON
+  没有显式 `count`，无法证明 DiT/VAE 均收齐 200 条。S2 在正式 A/B client 前暂停，
+  没有产生需丢弃的 profiler-off/on 数据；等待 S0 发布替代 canonical 后更新临时
+  checkout，不能靠日志行数或旧 JSON 人工补字段验收。
 - 提交 `...-02` 时发现桌面默认 kube context 漂移到了 `codex-seed-leap-use1`：该集群
   中对象始终 Pending、未启动容器或占 GPU，随后只按完整 Job 名精确删除。之后所有
   read/dry-run/apply/logs/delete 均显式指定 `--context codex-minwm-test-phx2`。正式记录
@@ -137,8 +151,9 @@ cross/FFN 已确认是单 kernel，不用“关闭已有优化”的退化结果
    residual/gate 也位于同一函数的另一 specialization。
 3. 因此先只实现 self 组合段，避免为 cross/FFN 再包一层等价函数。
 4. self 的 2→1 launch 已证实，但 bitwise 未通过，所以环境变量显式命名为 `_FAST` 且
-   永远默认关闭。只有 59aa profiler-off/Nsight 有显著收益、端到端 latent/视频通过
-   既有 fast-lane 质量合同，才保留 opt-in 实现；否则删除实现，只保留负结论文档。
+   永远默认关闭。只有替代 canonical 的 profiler-off/Nsight 有显著收益、端到端
+   latent 证据完整且视频通过既有 fast-lane 质量合同，才保留 opt-in 实现；否则删除
+   实现，只保留负结论文档。
 
 ## 尝试后放弃的方案
 
@@ -169,8 +184,10 @@ ruff format --check python/sglang/multimodal_gen/runtime/models/dits/minwm.py \
 ```
 
 真机测量命令和产物路径将在任务专用 `minwm-s2-postproc-*` Job dry-run 后补充；clean
-runner checkout 固定 S0 canonical `59aa68a382`，稳态固定 KV cache 45 帧。不复用或
-清理 CUDA Graph/S0 任务的 Job、Pod、PVC。所有 Kubernetes 命令显式固定
+runner checkout 等待 S0 替代 canonical pin，稳态固定 KV cache 45 帧。A/B Job 的
+manifest 与 live `.spec.backoffLimit` 都必须是 0，并按 Pod/attempt 写唯一结果目录；
+验收或脚本失败即停住保留诊断，禁止 controller 自动重跑、覆盖或混合 provenance。
+不复用或清理 CUDA Graph/S0 任务的 Job、Pod、PVC。所有 Kubernetes 命令显式固定
 `--context codex-minwm-test-phx2`，不依赖或切换桌面的 global current-context。
 
 生成代码与 micro kernel 诊断使用独立脚本，它不产生另一套 headline schema：
