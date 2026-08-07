@@ -5,6 +5,9 @@ set -Eeuo pipefail
 : "${MINWM_RESULTS_ROOT:?set MINWM_RESULTS_ROOT}"
 : "${MINWM_S1_LEGACY_OFF_ROOT:?set MINWM_S1_LEGACY_OFF_ROOT}"
 : "${MINWM_S1_CANDIDATE_OFF_ROOT:?set MINWM_S1_CANDIDATE_OFF_ROOT}"
+: "${MINWM_S1_PROFILER_OFF_GIT_REF:?set MINWM_S1_PROFILER_OFF_GIT_REF}"
+: "${MINWM_S1_LEGACY_OFF_RUNNER_REF:?set MINWM_S1_LEGACY_OFF_RUNNER_REF}"
+: "${MINWM_S1_CANDIDATE_OFF_RUNNER_REF:?set MINWM_S1_CANDIDATE_OFF_RUNNER_REF}"
 : "${SGLANG_GIT_REF:?set SGLANG_GIT_REF}"
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -52,8 +55,12 @@ trap on_exit EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-python3 - "${SOURCE_ROOT}" "${SCRIPT_DIR}" <<'PY'
+python3 - \
+  "${SOURCE_ROOT}" "${SCRIPT_DIR}" \
+  "${MINWM_S1_LEGACY_OFF_RUNNER_REF}" \
+  "${MINWM_S1_CANDIDATE_OFF_RUNNER_REF}" <<'PY'
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -88,6 +95,29 @@ for name, required in required_by_file.items():
         if text not in contents:
             raise SystemExit(f"canonical Nsight guard missing from {name}: {text}")
 print(f"S1 Nsight source-registration/canonical preflight passed: {source_python}")
+
+sys.path.insert(0, str(script_dir))
+from compare_temb_hoist_nsys import _assert_historical_runner_flag_guard
+
+historical_runners = {
+    "legacy": (
+        sys.argv[3],
+        "benchmark/minwm_realtime_parity/run_temb_hoist_ab.sh",
+    ),
+    "candidate": (
+        sys.argv[4],
+        "benchmark/minwm_realtime_parity/run_temb_hoist_off_resume.sh",
+    ),
+}
+for variant, (revision, path) in historical_runners.items():
+    contents = subprocess.run(
+        ["git", "-C", str(source_root), "show", f"{revision}:{path}"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    _assert_historical_runner_flag_guard(contents, variant)
+print("S1 historical profiler-off flag provenance passed")
 PY
 
 if pgrep -x nsys >/dev/null; then
@@ -111,24 +141,22 @@ validate_off_source() {
     python3 "${SCRIPT_DIR}/measurement_tool.py" validate \
       "${lane}/profiler-off-repeat${repeat}.json"
   done
-  python3 - "${lane}" "${SGLANG_GIT_REF}" <<'PY'
+  python3 - \
+    "${lane}" "${MINWM_S1_PROFILER_OFF_GIT_REF}" "${SCRIPT_DIR}" \
+    "${variant}" <<'PY'
 import json
 import sys
 from pathlib import Path
 
 lane = Path(sys.argv[1])
-sglang_ref = sys.argv[2]
+off_sglang_ref = sys.argv[2]
+sys.path.insert(0, sys.argv[3])
+
+from compare_temb_hoist_nsys import _assert_off_resume_contract
+
 for repeat in (1, 2):
     record = json.loads((lane / f"profiler-off-repeat{repeat}.json").read_text())
-    assert record["mode"] == "profiler_off"
-    assert record["provenance"]["sglang_commit"] == sglang_ref
-    assert record["provenance"]["gpu"]["count"] == 2
-    assert record["provenance"]["gpu"]["allocated_count"] == 8
-    assert record["workload"]["sp_degree"] == 2
-    assert record["workload"]["precision"] == "bf16"
-    assert record["workload"]["warmup_chunks"] == 20
-    assert record["workload"]["measured_chunks"] == 200
-    assert record["comparison_contract"]["kv_cache_num_frames"] == 45
+    _assert_off_resume_contract(record, off_sglang_ref, sys.argv[4])
 summary = json.loads((lane / "repeat-summary.json").read_text())
 assert summary["acceptance"]["passes_cv_target"] is True
 print(f"validated profiler-off resume source: {lane}")
@@ -146,19 +174,25 @@ python3 -m pytest -q \
 
 validate_profile_result() {
   local variant="$1" measurement="$2"
-  python3 - "${SCRIPT_DIR}" "${measurement}" "${variant}" <<'PY'
+  python3 - \
+    "${SCRIPT_DIR}" "${measurement}" "${variant}" "${SGLANG_GIT_REF}" <<'PY'
 import sys
 from pathlib import Path
 
 script_dir = Path(sys.argv[1])
 measurement = Path(sys.argv[2])
 variant = sys.argv[3]
+expected_sglang_ref = sys.argv[4]
 sys.path.insert(0, str(script_dir))
 
 from compare_temb_hoist_nsys import _assert_contract, _load_record
 
 record = _load_record(measurement)
 _assert_contract(record)
+if record["provenance"]["sglang_commit"] != expected_sglang_ref:
+    raise ValueError(
+        f"{variant}: formal Nsight result did not run the pinned product ref"
+    )
 print(f"validated exact formal Nsight result: variant={variant} path={measurement}")
 PY
 }

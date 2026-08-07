@@ -19,12 +19,26 @@ def test_wrapper_pins_exact_sp2_window_and_variant_order() -> None:
         "export MINWM_S0_PROFILE_DISCARD_CHUNKS=1",
         "export MINWM_S0_PROFILE_MEASURED_CHUNKS=10",
         "export MINWM_S0_KV_CACHE_NUM_FRAMES=45",
+        '"${MINWM_S1_PROFILER_OFF_GIT_REF}"',
         'run_variant legacy 0 "${MINWM_S1_LEGACY_OFF_ROOT}"',
         'run_variant candidate 1 "${MINWM_S1_CANDIDATE_OFF_ROOT}"',
     )
     positions = [text.index(item) for item in expected]
     assert positions == sorted(positions)
     assert "unset SGLANG_DIFFUSION_TORCH_PROFILER_DIR" in text
+
+
+def test_wrapper_separates_resumed_off_and_formal_nsys_refs() -> None:
+    text = WRAPPER.read_text()
+    assert ': "${MINWM_S1_PROFILER_OFF_GIT_REF:' in text
+    assert (
+        '"${lane}" "${MINWM_S1_PROFILER_OFF_GIT_REF}" "${SCRIPT_DIR}"' in text
+    )
+    assert '"${variant}" "${SGLANG_GIT_REF}"' in text
+    assert "formal Nsight result did not run the pinned product ref" in text
+    assert "MINWM_S1_LEGACY_OFF_RUNNER_REF" in text
+    assert "MINWM_S1_CANDIDATE_OFF_RUNNER_REF" in text
+    assert "_assert_historical_runner_flag_guard(contents, variant)" in text
 
 
 def test_wrapper_keeps_post_validation_failure_lane_scoped() -> None:

@@ -35,6 +35,72 @@ def _available_value(metric: dict[str, Any], name: str) -> Any:
     return metric["value"]
 
 
+def _assert_off_resume_contract(
+    record: dict[str, Any], expected_sglang_ref: str, variant: str
+) -> None:
+    if record["mode"] != "profiler_off":
+        raise ValueError(f"expected profiler_off, got {record['mode']}")
+    if record["provenance"]["sglang_commit"] != expected_sglang_ref:
+        raise ValueError("profiler-off resume source has an unexpected sglang commit")
+    workload = record["workload"]
+    gpu = record["provenance"]["gpu"]
+    expected = {
+        "sp_degree": 2,
+        "warmup_chunks": 20,
+        "measured_chunks": 200,
+        "precision": "bf16",
+        "fast_lane": True,
+        "dmd_forwards_per_chunk": 4,
+        "clean_cache_forwards_per_chunk": 1,
+    }
+    for key, value in expected.items():
+        if workload[key] != value:
+            raise ValueError(f"workload.{key}={workload[key]!r}, expected {value!r}")
+    if gpu["count"] != 2 or gpu["allocated_count"] != 8:
+        raise ValueError(f"expected active/allocated GPUs 2/8, got {gpu}")
+    if record["comparison_contract"]["kv_cache_num_frames"] != 45:
+        raise ValueError("comparison_contract.kv_cache_num_frames must be 45")
+    expected_run_label = f"-temb-hoist-{variant}-sp2-off-"
+    if expected_run_label not in record["run_id"]:
+        raise ValueError(f"profiler-off resume source is not labeled {variant}")
+    if record["profile_name"] != "bf16-fast-sp2":
+        raise ValueError("profiler-off resume source has an unexpected profile name")
+    off = record["metrics"]["profiler_off"]
+    for name in ("scheduler_chunk_wall_ms", "dit_wall_ms", "vae_wall_ms"):
+        value = _available_value(off[name], name)
+        if value["count"] != 200:
+            raise ValueError(f"{name}: expected 200 complete profiler-off samples")
+
+
+def _assert_historical_runner_flag_guard(contents: str, variant: str) -> None:
+    expected_by_variant = {
+        "legacy": (
+            'if [[ "${lane}" == "legacy" ]]; then',
+            "export MINWM_HOIST_TIMESTEP_MODULATION=0",
+            'export MINWM_S0_RUN_LABEL="temb-hoist-${lane}"',
+            'bash "${SCRIPT_DIR}/run_s0_measurement.sh"',
+        ),
+        "candidate": (
+            "export MINWM_HOIST_TIMESTEP_MODULATION=1",
+            "export MINWM_S0_RUN_LABEL=temb-hoist-candidate",
+            'bash "${SCRIPT_DIR}/run_s0_measurement.sh"',
+        ),
+    }
+    try:
+        expected = expected_by_variant[variant]
+    except KeyError as exc:
+        raise ValueError(f"unsupported historical variant: {variant}") from exc
+    search_start = 0
+    for item in expected:
+        try:
+            position = contents.index(item, search_start)
+        except ValueError as exc:
+            raise ValueError(
+                f"historical {variant} runner lost its flag guard or reordered it"
+            ) from exc
+        search_start = position + len(item)
+
+
 def _assert_contract(record: dict[str, Any]) -> None:
     if record["mode"] != "profiler_on":
         raise ValueError(f"expected profiler_on, got {record['mode']}")
