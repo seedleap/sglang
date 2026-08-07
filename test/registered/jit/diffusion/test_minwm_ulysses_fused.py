@@ -1,5 +1,7 @@
 """Bit-exact tests for MinWM kernels around the Ulysses collective."""
 
+import sys
+
 import pytest
 import torch
 
@@ -420,3 +422,7 @@ def test_fused_rope_cache_update_rejects_malformed_cache_rank():
         sin,
         0,
     )
+
+
+if __name__ == "__main__":
+    sys.exit(pytest.main([__file__, "-v", "-s"]))
