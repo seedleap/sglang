@@ -1,0 +1,118 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: minwm-async-a2a-nsys-reanalyze-20260807-01
+  namespace: default
+  labels:
+    app.kubernetes.io/name: minwm-async-a2a-nsys-reanalyze-20260807-01
+    seedleap.ai/owner: chenshengdong
+    seedleap.ai/task: minwm-async-a2a
+  annotations:
+    seedleap.ai/source-job: minwm-async-a2a-nsys-h200-20260807-01
+    seedleap.ai/source-artifacts: /results/attempts/minwm-async-a2a-nsys-h200-20260807-01-nlkgg/minwm-async-a2a-nsys-h200-20260807-01/async-a2a-nsys
+    seedleap.ai/sglang-git-ref: 3ed01a42a33423a9d86ceccd7aff2c2d95cca02d
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 1800
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: minwm-async-a2a-nsys-reanalyze-20260807-01
+        seedleap.ai/owner: chenshengdong
+        seedleap.ai/task: minwm-async-a2a
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        kubernetes.io/hostname: i-06888dc1ca88547e1
+      tolerations:
+        - key: seedleap.ai/capacity-pool
+          operator: Equal
+          value: minwm-test-phx2-karpenter
+          effect: NoSchedule
+      containers:
+        - name: reanalyze
+          image: 829115578968.dkr.ecr.us-east-2.amazonaws.com/leap-world/minwm-training@sha256:bedc07ea3ba55059a8c1c569c3b177c4d00d41f37d4fa9105375531534ef5f2a
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: github-token
+                  key: token
+            - name: SGLANG_GIT_REF
+              value: 3ed01a42a33423a9d86ceccd7aff2c2d95cca02d
+          command:
+            - /bin/bash
+            - -lc
+            - |
+              set -euo pipefail
+              source_root=/results/attempts/minwm-async-a2a-nsys-h200-20260807-01-nlkgg/minwm-async-a2a-nsys-h200-20260807-01/async-a2a-nsys
+              git clone --no-checkout \
+                "https://x-access-token:${GITHUB_TOKEN}@github.com/seedleap/sglang.git" \
+                /workspace/sglang
+              git -C /workspace/sglang checkout --detach "${SGLANG_GIT_REF}"
+              [[ "$(git -C /workspace/sglang rev-parse HEAD)" == "${SGLANG_GIT_REF}" ]]
+              for lane in baseline candidate; do
+                python3 /workspace/sglang/benchmark/minwm_realtime_parity/async_a2a_nsys_metrics.py analyze \
+                  --sqlite "${source_root}/${lane}/${lane}.sqlite" \
+                  --client "${source_root}/${lane}/profile-client.json" \
+                  --lane "${lane}" \
+                  --status-log "${source_root}/${lane}/nsys-capture-status.log" \
+                  --output "${source_root}/${lane}/a2a-metrics-ipc-output.json" \
+                  > "${source_root}/${lane}/a2a-metrics-ipc-output.log"
+              done
+              python3 /workspace/sglang/benchmark/minwm_realtime_parity/async_a2a_nsys_metrics.py compare \
+                --baseline "${source_root}/baseline/a2a-metrics-ipc-output.json" \
+                --candidate "${source_root}/candidate/a2a-metrics-ipc-output.json" \
+                --output "${source_root}/comparison-ipc-output.json" \
+                > "${source_root}/comparison-ipc-output.log"
+              SOURCE_ROOT="${source_root}" python3 - <<'PY'
+              import json
+              import os
+              from pathlib import Path
+
+              root = Path(os.environ["SOURCE_ROOT"])
+              summary = {}
+              for lane in ("baseline", "candidate"):
+                  result = json.loads(
+                      (root / lane / "a2a-metrics-ipc-output.json").read_text()
+                  )
+                  critical = result["aggregate"]["metrics"]["critical_rank_max"]
+                  summary[lane] = {
+                      name: critical[name]
+                      for name in (
+                          "input_a2a_total_ms",
+                          "input_compute_overlap_ms",
+                          "input_exposed_kernel_ms",
+                          "input_exposed_stage_ms",
+                          "output_a2a_total_ms",
+                          "output_exposed_stage_ms",
+                          "output_pre_idle_ms",
+                          "output_post_idle_ms",
+                      )
+                  }
+              summary["comparison"] = json.loads(
+                  (root / "comparison-ipc-output.json").read_text()
+              )
+              output = root / "ipc-output-summary.json"
+              output.write_text(
+                  json.dumps(summary, indent=2, sort_keys=True) + "\n",
+                  encoding="utf-8",
+              )
+              print(json.dumps(summary, indent=2, sort_keys=True))
+              print(f"MINWM_ASYNC_A2A_NSYS_REANALYZE_COMPLETE output={output}")
+              PY
+          resources:
+            requests:
+              cpu: "4"
+              memory: 16Gi
+            limits:
+              cpu: "8"
+              memory: 32Gi
+          volumeMounts:
+            - name: results
+              mountPath: /results
+      volumes:
+        - name: results
+          persistentVolumeClaim:
+            claimName: minwm-async-a2a-perf-results-20260807

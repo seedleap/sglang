@@ -12,7 +12,7 @@
 | MinWM 逻辑基线 | `0e30671cf8a00622fd138c71af3faa93353b5425`（`codex/ulysses-pre-post-a2a-fusion`；失败的 pre-A2A QK-norm 已删除，post-A2A parity 路径默认关闭） |
 | upstream 通信基线 | 已 cherry-pick `754b692afc29`（本分支 `4202d2a043`，SP2 IPC）、`bfce378e5fbc`（本分支 `36066c3d44`，capture-safe PyNCCL A2A）、`f829fb30d3d3`（本分支 `35a313e616`，IPC lifecycle/reset）和 `44bde391d0b1`（本分支 `ed152d6c48`，真实 peer CUDA ordinal）；`a5888c956f90` 的 packed QKV + reusable staging 与 MinWM 现有同名但不同返回合同的实现重复，未强行合并 |
 | 实现分支 | `codex/minwm-async-a2a-overlap` |
-| 候选提交 | 核心实现 `dad5de09f1b644074cb3d977fdad11ffd18772bf`；GPU 测试隔离修复 `0a975bac14e20660e6a31744bf864c8d51d99aff`；精确 Nsight chunk 窗口与 forward 标记整合至 `c6309c3004`。完整模型任务继续使用每次已推送的不可变 SHA，并在对应实验条目固定 |
+| 候选提交 | 核心实现 `dad5de09f1b644074cb3d977fdad11ffd18772bf`；GPU 测试隔离修复 `0a975bac14e20660e6a31744bf864c8d51d99aff`；精确 Nsight chunk 窗口与 forward 标记整合至 `c6309c3004`；IPC output A2A trace 识别修复为 `3ed01a42a33423a9d86ceccd7aff2c2d95cca02d`。完整模型任务继续使用每次已推送的不可变 SHA，并在对应实验条目固定 |
 | 主硬件 | B200/B300 同节点 Spot；若容量不可得，H200 只用于诊断，不能冒充最终硬件结论 |
 | 软件 | 首轮 H200 transport 合同实测为 PyTorch `2.12.1+cu130`、CUDA `13.0`、NCCL `2.29.7`；完整模型与正式 B200/B300 各自继续保存 runtime provenance。Nsight Systems 目标版本为 `2026.4.1` |
 | checkpoint | 预定沿用 canonical MinWM 5B DMD checkpoint；精确 S3 URI、VersionId、ETag/CRC64/SHA256 在任务 dry-run 与 provenance 中固定 |
@@ -233,6 +233,64 @@ time、与 compute kernel 的区间交集及 buffer slot/generation。
 - 结论：候选 1 的当前 ProcessGroup 实现明确低于 `+3%` 保留门槛，短预检即为负结果；不把
   它扩成正式 6+6 性能验收。保留代码开关用于机制 trace 和下一轮定向修改，默认继续关闭。
 
+### 2026-08-07：H200 SP2 精确稳态 Nsight 机制验收
+
+- 假设：profiler-off 负收益可能仍包含可保留的真实 QK-A2A/V-GEMM overlap；若其 exposed
+  time 或 A2A+idle 下降达到门槛，可继续优化第二个 collective 的固定成本。反之应淘汰整个
+  split-collective 形态，而不是只调 API。
+- 命令与资源：Job `minwm-async-a2a-nsys-h200-20260807-01`，manifest
+  `benchmark/minwm_realtime_parity/k8s/minwm_async_a2a_nsys_h200_20260807.yaml`，固定 H200
+  节点 `i-06888dc1ca88547e1` 的 4 GPU（活跃 SP2 rank 为 GPU0/1），SGLang
+  `9b8a6ee787883a79b92cab61883c5dd0a2ff10d2`，minWM
+  `2efc6485f65e8fcab506665efde79bc41406385e`，PyTorch `2.11.0+cu130`、CUDA `13.0`、
+  NCCL `2.28.9`、Nsight Systems `2026.4.1.191`。同一 Job 先 baseline 后 candidate；每 lane
+  在 profiler 外完成 20 chunks 预条件，再以 `nsys launch/start/stop` 只捕获 1 个 discard +
+  10 个稳态 chunk。固定 1248×704、seed 42、SP2、ProcessGroup input backend、output async
+  关闭、`trace=cuda,nvtx`、`trace-fork-before-exec=true`、`cuda-graph-trace=node`、
+  `gpu-metrics-devices=all@10kHz`、`SGLANG_REALTIME_TRACE_SYNC_CUDA=0`，无 torch profiler。
+  复现入口：
+
+  ```bash
+  kubectl --context codex-minwm-test-phx2 apply \
+    -f benchmark/minwm_realtime_parity/k8s/minwm_async_a2a_nsys_h200_20260807.yaml
+  ```
+
+- 结果：Job `Complete 1/1`。PVC `minwm-async-a2a-perf-results-20260807`，根目录
+  `/results/attempts/minwm-async-a2a-nsys-h200-20260807-01-nlkgg/minwm-async-a2a-nsys-h200-20260807-01/async-a2a-nsys`；
+  原始 trace 为 `baseline/baseline.nsys-rep` 与 `candidate/candidate.nsys-rep`，SQLite、
+  `profile-client.json`、`a2a-metrics.json`、`comparison.json` 均同目录保留。修正 SP2 IPC
+  output 识别后，以 `3ed01a42a3` 的 CPU-only Job
+  `minwm-async-a2a-nsys-reanalyze-20260807-01` 只读重放两份 SQLite，新证据为
+  `baseline/a2a-metrics-ipc-output.json`、`candidate/a2a-metrics-ipc-output.json`、
+  `comparison-ipc-output.json`、`ipc-output-summary.json`；没有重跑 GPU。
+- input A2A：关键 rank 每 chunk 中位数从同步 packed baseline 的 `68.631 ms`
+  （p10/p90 `27.503/122.300`）增到候选总 A2A `172.551 ms`
+  （`79.182/329.463`），其中候选 QK/V 分别为 `110.663/58.627 ms`。候选真实
+  compute/communication 交集为 `1.630 ms`（`0.645/2.717`），10/10 chunk 非零，但 QK
+  overlap ratio 中位仅 `1.646%`；launch-start→wait-start 与 launch-end→wait-start 的
+  chunk×rank 中位分别为 `0.713/0.511 ms`，wait CPU range 中位 `0.0418 ms`。最终 input
+  exposed kernel `68.631→170.398 ms`，是 **增加 `148.282%`**；input A2A+邻接 idle
+  `70.595→178.174 ms`，增加 `152.391%`，远离 `-20%/-10%` 两个通过门槛。
+- output reverse A2A：SP2 同步路径走 IPC，而不是 NCCL。每个稳态窗精确识别 3000 个
+  output range，含 6000 个 `elementwise_kernel` 数据 copy、3000 个
+  `bump_signal_kernel` 和 3000 个 `spin_wait_kernel`。虽然候选没有开启 async output，输入
+  阶段造成的 rank skew 仍使 output IPC transport 关键 rank 中位 `56.160→95.966 ms`
+  （增加约 `70.88%`），output+依赖边界 `56.998→97.385 ms`（增加约 `70.86%`）；全窗
+  spin-wait 总时长 `569.623→903.204 ms`。
+- kernel/利用率/同步：每 chunk 两 rank CUDA kernel `34908→35208`；每 rank/chunk launch
+  `17454→17604`，NCCL kernel 全窗 `6060→9060`，即拆分后每 rank/chunk恰好多 150 个
+  NCCL kernel。SM Active mean `60.822%→56.136%`，Tensor Active mean
+  `28.113%→25.689%`，DRAM read throughput mean `8.209%→7.531%`。检测到的
+  `cudaStreamSynchronize` 数 `1550→1550`，没有新增全局同步 API；其累计 duration
+  `6336.560→6504.648 ms`，候选仍因 stream/rank 等待变慢。
+- wall/FPS：Nsight 捕获窗客户端为 `12.505→11.423 FPS`，只用于与 trace 对齐，明确
+  `profiler_wall_headline_eligible=false`，不进入最终 FPS。最终 wall 仍以同机 profiler-off
+  预检的 `-1.765%` 为准。
+- 结论：机制验收 **FAIL**。真实 overlap 已被证明，但隐藏量远小于新增 collective 及其引发
+  的跨 rank/反向 IPC wait；不是“API 不够异步”，而是本依赖图下的单层合法窗口不足。停止
+  扩测 QK/V split ProcessGroup 候选，默认开关保持关闭；下一候选必须保持单 packed input
+  collective，并从跨 request/chunk 的独立 GPU 工作或不增加 collective 的调度方式寻找窗口。
+
 ### 2026-08-07：候选 1——QK A2A 与 V projection 重叠
 
 - 假设：完整 packed-QKV A2A 前没有可移动工作，但 Q/K/V projection 相互独立；将 wire
@@ -315,11 +373,16 @@ time、与 compute kernel 的区间交集及 buffer slot/generation。
 - 实际证据：H200 SP2 profiler-off 四位置预检中 Client FPS `-1.765%`、DiT wall
   `-4.455%`、scheduler chunk wall `-3.602%`；各 lane 变异低于 `1%`（chunk wall 的
   candidate CV 为 `2.319%`），方向稳定且三项关键指标一致变差。
-- 根因：profiler-off 只能确认净效应为负，尚不能在无 trace 情况下区分 V GEMM 窗口不足、
-  第二个 collective 固定成本、ProcessGroup Work/stream 依赖或新增 pack 的占比。
-- 决策：不运行该形态的正式 6+6 主验收，也不宣称 async 已获益；先采同机精确窗口 Nsight，
-  若 trace 证实 QK 有 overlap 但总 exposed time 上升，则淘汰 split-collective 设计，转向保持
-  单 packed collective 的跨 request/chunk 双缓冲或减少 V A2A 暴露的可执行设计。
+- 实际证据补充：精确 Nsight 的 10/10 chunk 都有真实 overlap，但关键 rank 中位仅隐藏
+  `1.630 ms`、QK overlap ratio 仅 `1.646%`；input exposed `68.631→170.398 ms`，output IPC
+  exposed stage `56.998→97.385 ms`，SM/Tensor Active 同时下降。候选没有新增
+  synchronize API，却每 rank/chunk 多 150 个 NCCL kernel/launch。
+- 根因：V GEMM 的合法窗口存在但 GPU 时间交集极小；把一个 packed collective 拆成 QK/V
+  两个后，第二次协议/launch 和 rank 到达时差主导关键路径，并把偏斜传递到 reverse IPC 的
+  `spin_wait_kernel`。因此简单减少 host wait、改 event 或声称 `async_op=True` 都不能修复。
+- 决策：正式淘汰 QK/V split ProcessGroup 产品形态，不运行其 6+6 主验收，也不宣称 async
+  已获益。保留默认关闭的诊断开关与完整负证据；下一设计先验证 scheduler 是否能以隔离 cache
+  和双缓冲承载跨 request/chunk 计算，同时保持单 packed collective。
 
 ### 2026-08-07：MinWM origin 与 upstream 通信提交不在同一条主线
 
@@ -385,7 +448,34 @@ time、与 compute kernel 的区间交集及 buffer slot/generation。
 - 决策：post fusion 可留作默认关闭的 parity-passed 基线能力，但不算本任务异步收益；主验收
   仍以 SP2 B200/B300 profiler-off FPS 与 exposed-time 证据为准。
 
-## 最终 before/after、复现与剩余风险
+## 当前 before/after、复现与剩余风险
 
-待完成。最终将列出每个硬件/SP/分辨率的 before/after median、p10/p90、变异、parity、
-稳定性、trace 统计、完整命令、结果路径、回滚开关和未解决风险，并给出明确 PASS/FAIL。
+以下为候选 1 的 H200 诊断结论，不是 B200/B300 最终硬件验收：
+
+| 指标（SP2，1248×704） | 同步 baseline | QK/V split candidate | 变化/判定 |
+| --- | ---: | ---: | ---: |
+| profiler-off Client FPS median | 12.9927 | 12.7634 | `-1.765%`，FAIL（门槛 `+3%`） |
+| profiler-off DiT wall median | 712.588 ms | 744.332 ms | 性能 `-4.455%` |
+| profiler-off chunk wall median | 1258.350 ms | 1303.675 ms | 性能 `-3.602%` |
+| input exposed kernel median | 68.631 ms | 170.398 ms | exposed 增加 `148.282%`，FAIL |
+| input A2A+idle median | 70.595 ms | 178.174 ms | 关键路径增加 `152.391%`，FAIL |
+| output IPC transport median | 56.160 ms | 95.966 ms | 增加约 `70.88%` |
+| output IPC+依赖边界 median | 56.998 ms | 97.385 ms | 增加约 `70.86%` |
+| compute/comm overlap | 0 | 1.630 ms，10/10 chunk | overlap 真实但不足 |
+| SM Active / Tensor Active mean | 60.822% / 28.113% | 56.136% / 25.689% | 双双下降 |
+| 同步 API count | 1550 | 1550 | 无新增，但不构成通过 |
+| 720p 5s parity / 连续请求 | baseline | SP2/SP4 bitwise；候选连续 10 请求 | H200 eager 正确性通过 |
+
+回滚开关为 `MINWM_ASYNC_A2A=0`（默认）；`MINWM_ASYNC_A2A_OUTPUT=0` 继续保持。候选 1
+不进入 B200/B300 正式性能验收。剩余风险与下一步：
+
+- B300 64 张卡在最近盘点时仍被四个他人训练任务占满；不抢占。最终 PASS 必须在同节点
+  B200/B300 上重做 profiler-off ABBA/BAAB 各至少 5 样本与相同 Nsight 稳态窗。
+- 单请求 block 内完整 input/output A2A 都没有合法独立工作。下一步必须先审计 realtime
+  scheduler 的在途 request/chunk 数、causal cache/session ownership 和输出顺序，证明能安全
+  放入另一请求/下一 chunk 的 GPU work，再实现跨请求双缓冲；不能只把现有 begin/wait 拉开。
+- SP2 reverse IPC 对 rank skew 很敏感；后续分析器已同时识别 NCCL 与
+  copy/signal/spin-wait IPC 协议。任何下一候选都要分别报告 input 与 output，不得再把 IPC
+  output 误报为 0。
+- 480p 边界对照、SP4 次验收、生产 CUDA Graph 完整模型 10 请求稳定性及最终 trace
+  截图/统计仍待下一可行候选与 B200/B300 资源；当前整体状态仍为 **未验收**。
