@@ -25,6 +25,7 @@ NSYS_URL="${MINWM_NSYS_URL:-https://developer.nvidia.com/downloads/assets/tools/
 NSYS_ROOT="${WORK_ROOT}/nsight-systems"
 NSYS_DEB="${WORK_ROOT}/nsight-systems-cli.deb"
 RESUME_PROFILER_OFF_ROOT="${MINWM_S0_RESUME_PROFILER_OFF_ROOT:-}"
+NSYS_ONLY="${MINWM_S0_NSYS_ONLY:-0}"
 
 [[ -f "${MODEL_DIR}/minwm_conversion_manifest.json" ]]
 [[ -f "${CASES}" ]]
@@ -39,6 +40,10 @@ if ! [[ "${OFF_WARMUP_CHUNKS}" =~ ^[1-9][0-9]*$ \
 fi
 if (( PROFILE_MEASURED_CHUNKS < 10 )); then
   echo "Nsight capture requires at least 10 stable measured chunks" >&2
+  exit 2
+fi
+if ! [[ "${NSYS_ONLY}" =~ ^[01]$ ]]; then
+  echo "MINWM_S0_NSYS_ONLY must be 0 or 1" >&2
   exit 2
 fi
 if [[ -n "${SGLANG_DIFFUSION_TORCH_PROFILER_DIR:-}" ]]; then
@@ -89,6 +94,7 @@ ALLOCATED_GPU_COUNT="${MINWM_ALLOCATED_GPU_COUNT:-$(nvidia-smi -L | wc -l | xarg
   echo "nsys_gpu_metrics_devices=all; parser maps stable-window CUDA deviceId through TARGET_INFO_GPU cuDevice->pwGpuId"
   echo "kv_cache_num_frames=${KV_CACHE_NUM_FRAMES}"
   echo "torch_profiler_concurrent=false"
+  echo "nsys_only=${NSYS_ONLY}"
   echo "resume_profiler_off_root=${RESUME_PROFILER_OFF_ROOT:-none}"
   echo "started_utc=$(date --utc +%Y-%m-%dT%H:%M:%SZ)"
 } | tee "${RESULT_ROOT}/contract.txt"
@@ -428,7 +434,9 @@ for degree in "${degrees[@]}"; do
   mkdir -p "${lane_dir}"
   failure_scope="${lane_dir}"
   source_lane="${RESUME_PROFILER_OFF_ROOT%/}/sp${degree}"
-  if [[ -n "${RESUME_PROFILER_OFF_ROOT}" && -d "${source_lane}" ]]; then
+  if [[ "${NSYS_ONLY}" == "1" ]]; then
+    echo "Skipping profiler-off for SP${degree}; Nsight-only attribution run"
+  elif [[ -n "${RESUME_PROFILER_OFF_ROOT}" && -d "${source_lane}" ]]; then
     resume_profiler_off "${degree}" "${lane_dir}" "${source_lane}"
   else
     run_profiler_off "${degree}" "${lane_dir}"
@@ -438,24 +446,30 @@ for degree in "${degrees[@]}"; do
 done
 
 failure_scope="${RESULT_ROOT}"
-python3 - "${RESULT_ROOT}" <<'PY'
+python3 - "${RESULT_ROOT}" "${NSYS_ONLY}" <<'PY'
 import json
 import sys
 from pathlib import Path
 
 root = Path(sys.argv[1])
+nsys_only = sys.argv[2] == "1"
 lanes = {}
 for lane_dir in sorted(root.glob("sp*")):
     if not lane_dir.is_dir():
         continue
-    repeat = json.loads((lane_dir / "repeat-summary.json").read_text())
     profile = json.loads((lane_dir / "profiler-on/measurement.json").read_text())
-    lanes[lane_dir.name] = {
-        "profiler_off": repeat,
-        "profiler_on": profile,
-    }
+    lane = {"profiler_on": profile}
+    if not nsys_only:
+        lane["profiler_off"] = json.loads(
+            (lane_dir / "repeat-summary.json").read_text()
+        )
+    lanes[lane_dir.name] = lane
 summary = {
-    "schema_version": "minwm-realtime-s0-baseline/v1",
+    "schema_version": (
+        "minwm-realtime-s0-nsys-only/v1"
+        if nsys_only
+        else "minwm-realtime-s0-baseline/v1"
+    ),
     "lanes": lanes,
 }
 (root / "baseline-summary.json").write_text(
@@ -463,7 +477,11 @@ summary = {
 )
 print(json.dumps({
     lane: {
-        "off_cv_pass": value["profiler_off"]["acceptance"]["passes_cv_target"],
+        "off_cv_pass": (
+            None
+            if nsys_only
+            else value["profiler_off"]["acceptance"]["passes_cv_target"]
+        ),
         "gpu_metrics": {
             name: metric["status"]
             for name, metric in value["profiler_on"]["metrics"]["profiler_on"]["gpu_metrics"].items()

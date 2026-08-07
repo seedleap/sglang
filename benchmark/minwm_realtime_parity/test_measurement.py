@@ -1113,3 +1113,15 @@ def test_runner_collects_all_allocated_gpu_metric_targets() -> None:
     assert "--gpu-metrics-devices=all" in runner
     assert '--gpu-metrics-devices="${gpu_devices}"' not in runner
     assert "nvidia-smi --query-gpu=index" not in runner
+
+
+def test_runner_nsys_only_mode_skips_only_profiler_off() -> None:
+    runner = (
+        Path(__file__).with_name("run_s0_measurement.sh").read_text(encoding="utf-8")
+    )
+    assert 'NSYS_ONLY="${MINWM_S0_NSYS_ONLY:-0}"' in runner
+    assert 'if [[ "${NSYS_ONLY}" == "1" ]]; then' in runner
+    assert "Skipping profiler-off" in runner
+    assert 'run_profiler_on "${degree}" "${lane_dir}"' in runner
+    assert '"minwm-realtime-s0-nsys-only/v1"' in runner
+    assert 'else "minwm-realtime-s0-baseline/v1"' in runner
