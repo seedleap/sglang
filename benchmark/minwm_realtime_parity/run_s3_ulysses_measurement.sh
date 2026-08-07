@@ -199,7 +199,7 @@ for lane in 00 10 01 11; do
   mkdir -p "${lane_result_root}"
   {
     echo "sglang_commit=${SGLANG_GIT_REF}"
-    echo "s0_tool_commit=59aa68a382cb9f481e77f98647644347671561dc"
+    echo "s0_tool_commit=b9240233b2438829cbd72ee3dfbc1d37ed675560"
     echo "lane=${lane}"
     echo "fused_pre_a2a_qk_norm=${MINWM_FUSED_PRE_A2A_QK_NORM}"
     echo "fused_post_a2a_rope_cache=${MINWM_FUSED_POST_A2A_ROPE_CACHE}"
@@ -214,6 +214,42 @@ for lane in 00 10 01 11; do
     export PATH="$(dirname "${nsys_bin}"):${PATH}"
   fi
 done
+
+python3 - "${measurement_root}" <<'PY' \
+  | tee "${measurement_root}/s3-latency-count-assertions.log"
+import json
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+results = sorted(root.glob("lane*/**/profiler-off-repeat*.json"))
+results += sorted(root.glob("lane*/**/measurement.json"))
+if not results:
+    raise RuntimeError(f"no S3 measurement JSON found under {root}")
+for result in results:
+    record = json.loads(result.read_text())
+    expected = record["workload"]["measured_chunks"]
+    if record["mode"] == "profiler_off" and expected != 200:
+        raise RuntimeError(f"{result}: profiler-off measured_chunks={expected}, want 200")
+    sections = (
+        ("profiler_off", "scheduler_chunk_wall_ms", "dit_wall_ms", "vae_wall_ms"),
+        ("profiler_on", "dit_cuda_ms", "vae_cuda_ms"),
+    )
+    for section, *names in sections:
+        metrics = record["metrics"].get(section)
+        if metrics is None:
+            continue
+        for name in names:
+            metric = metrics.get(name)
+            if metric is None or metric.get("status") != "available":
+                raise RuntimeError(f"{result}: {section}.{name} is not available")
+            count = metric["value"].get("count")
+            if count != expected:
+                raise RuntimeError(
+                    f"{result}: {section}.{name}.count={count}, want {expected}"
+                )
+    print(f"count-ok {result} measured_chunks={expected}")
+PY
 
 while IFS= read -r result; do
   python3 "${SCRIPT_DIR}/measurement_tool.py" validate "${result}"
