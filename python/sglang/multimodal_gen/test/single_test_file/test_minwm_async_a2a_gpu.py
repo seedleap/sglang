@@ -128,6 +128,61 @@ def _worker() -> int:
     if workspace._busy:
         failures.append(f"workspace retained busy leases: {workspace._busy}")
 
+    # The two-rank IPC transport is a separate product candidate: unlike the
+    # ProcessGroup arm above, both split exchanges use peer staging plus a
+    # GPU-side signal/wait protocol. Compare it against the same synchronous
+    # packed-QKV numerical contract before spending time on full-model A/B.
+    if _WORLD == 2:
+        for iteration in range(12):
+            q, k, v = inputs(500 + iteration)
+            expected = _usp_input_all_to_all_qkv(q, k, v)
+            got_q, got_k, got_v, independent = split_input(q, k, v, "ipc")
+            torch.cuda.synchronize()
+            if not torch.equal(torch.cat((got_q, got_k, got_v), dim=-1), expected):
+                failures.append(f"IPC split input iteration {iteration}")
+            if independent.shape != q.shape[:-1]:
+                failures.append("IPC independent overlap kernel returned wrong shape")
+
+            expected_output = _usp_output_all_to_all(got_q, head_dim=2)
+            got_output = async_output(got_q, "ipc")
+            torch.cuda.synchronize()
+            if not torch.equal(got_output, expected_output):
+                failures.append(f"IPC output iteration {iteration}")
+        if workspace._busy:
+            failures.append(
+                f"workspace retained IPC busy leases: {workspace._busy}"
+            )
+
+        # Warm every workspace/staging shape, then prove the split IPC path is
+        # capture-safe and that replay advances its device-side sequence number
+        # without reusing stale receive data.
+        for seed in (600, 601):
+            q, k, v = inputs(seed)
+            split_input(q, k, v, "ipc")
+        torch.cuda.synchronize()
+
+        static_q, static_k, static_v = inputs(602)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, capture_error_mode="thread_local"):
+            graph_q, graph_k, graph_v, graph_independent = split_input(
+                static_q, static_k, static_v, "ipc"
+            )
+        torch.cuda.synchronize()
+
+        for replay, seed in enumerate((700, 701, 702)):
+            q, k, v = inputs(seed)
+            expected = _usp_input_all_to_all_qkv(q, k, v)
+            static_q.copy_(q)
+            static_k.copy_(k)
+            static_v.copy_(v)
+            graph.replay()
+            torch.cuda.synchronize()
+            got = torch.cat((graph_q, graph_k, graph_v), dim=-1)
+            if not torch.equal(got, expected):
+                failures.append(f"IPC graph replay {replay}")
+            if graph_independent.shape != q.shape[:-1]:
+                failures.append("captured IPC independent kernel returned wrong shape")
+
     # Capture and replay the same split API. ProcessGroupNCCL intentionally
     # falls back in capture; this arm proves the raw PyNCCL selection instead.
     communicator = _usp_pynccl_communicator()

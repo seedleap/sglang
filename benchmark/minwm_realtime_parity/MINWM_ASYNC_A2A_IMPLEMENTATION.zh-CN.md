@@ -291,6 +291,35 @@ time、与 compute kernel 的区间交集及 buffer slot/generation。
   扩测 QK/V split ProcessGroup 候选，默认开关保持关闭；下一候选必须保持单 packed input
   collective，并从跨 request/chunk 的独立 GPU 工作或不增加 collective 的调度方式寻找窗口。
 
+### 2026-08-07：scheduler/cache 依赖审计与候选 2——split IPC
+
+- 假设 A（跨 chunk）：若下一 chunk 的 GPU 工作能在本 chunk A2A 期间提前执行，可保留单次
+  packed collective 并获得更大的独立窗口。
+- 依赖审计：Realtime WebSocket 入口用 `_ACTIVE_SESSION_IDS` 拒绝第二个并发 session；
+  `_generate_loop` 必须 `await process_generation_batch(...)` 完整返回后才能提交下一 chunk。
+  GPU worker 的 `RealtimeSessionCache(max_sessions=1)` 和 scheduler 的
+  `_can_dynamic_batch=False` 又分别禁止第二份 session cache 与 realtime 动态 batching。
+  单个 MinWM chunk 内是 4 次逐步依赖前一 latent 的 DMD transformer forward，随后第 5 次
+  clean-cache forward 才把最终 K/V 写为下一 chunk 的历史；`current_chunk_start_frame` 也只在
+  clean-cache 完成后推进。因此下一 chunk 的 attention、cache/RoPE 或 block 计算不能合法跨过
+  当前 clean-cache commit。当前 scheduler 不存在可直接接入双缓冲的第二份独立 GPU 工作。
+- 决策 A：不做只增加 host queue 的“跨 chunk 双缓冲”。真正的跨请求方案必须同时增加
+  WebSocket admission、每 session 独立 cache/workspace、scheduler in-flight capacity，并把
+  whole-DiT 原子 forward 重构成按 block 交错的两请求 wavefront；只做 request batching 会把
+  payload 合进同一 collective，仍不会产生 compute/communication overlap。该方案作为候选 3
+  的可执行设计保留，但在验证更小的 transport 候选前不直接扩大改动面。
+- 假设 B（split IPC）：SP2 的 IPC 协议用 peer staging copy、单 CTA `spin_wait_kernel` 和
+  GPU-side sequence counter，可能比两次 ProcessGroupNCCL 更少占用 SM/固定开销，使 QK IPC
+  与 V GEMM 真正并行。同步 input baseline 仍是一次 packed ProcessGroup A2A；因此这是新
+  transport 产品候选，不是“同 transport 复测”，最终仍必须直接对生产同步 baseline 判定。
+  SP4 不支持 IPC，必须明确 fallback 到已证负收益的 ProcessGroup 路径，故候选即使 SP2 通过，
+  SP4 也只能先满足正确性、不能宣称同机制性能通过。
+- 修改/正确性：GPU 合同新增 SP2 连续 12 轮 split IPC input/output、双 slot 复用，以及预热后
+  IPC CUDA Graph capture + 3 次 replay；每轮和同步 packed-QKV/output 做 bitwise 比较。本地
+  `py_compile` 已通过，真 GPU 合同尚待运行；合同通过前不启动整模型 A/B。
+- wall/FPS、Nsight、结论：尚未运行，候选 2 **未验收**。下一顺序为 H200 小合同 → 同节点
+  profiler-off 四位置预检；只有 Client FPS/DiT/chunk wall 同向且接近门槛，才采精确 Nsight。
+
 ### 2026-08-07：候选 1——QK A2A 与 V projection 重叠
 
 - 假设：完整 packed-QKV A2A 前没有可移动工作，但 Q/K/V projection 相互独立；将 wire
@@ -383,6 +412,21 @@ time、与 compute kernel 的区间交集及 buffer slot/generation。
 - 决策：正式淘汰 QK/V split ProcessGroup 产品形态，不运行其 6+6 主验收，也不宣称 async
   已获益。保留默认关闭的诊断开关与完整负证据；下一设计先验证 scheduler 是否能以隔离 cache
   和双缓冲承载跨 request/chunk 计算，同时保持单 packed collective。
+
+### 2026-08-07：曾误把 MinWM 同步 input packed A2A 识别为 IPC
+
+- 原认知：看到通用 attention 的 `_ipc_input_a2a_qkv` 和 SP2 trace 中大量 IPC copy/signal/spin
+  kernel 后，一度判断上一轮同步 input baseline 也命中了 IPC，而 candidate 被单独固定为
+  ProcessGroupNCCL。
+- 实际证据：沿 MinWM 自定义 `MinWMCausalSelfAttention.forward` 追到
+  `_usp_input_all_to_all_qkv`，uniform sequence-shard input 明确调用一次
+  `torch.distributed.all_to_all_single`；通用 attention 的 `_ipc_input_a2a_qkv` 不在该调用链。
+  IPC trace 来自 `_usp_output_all_to_all` 的 reverse output。上一轮新增的每 rank/chunk 150 个
+  NCCL kernel 对应把一次 packed input 拆为 QK/V 两次，而不是 baseline transport 不一致。
+- 根因：只按 transport helper 的全仓存在性和 IPC kernel 总量判断，没有先限定 MinWM 自定义
+  causal attention 的精确调用链。
+- 决策：保留候选 1 的公平 PG A/B 负结论；候选 2 明确标为“split IPC 对生产 packed PG”的
+  新 transport 比较。以后 input/output 分开按 NVTX 调用点与 kernel 协议双重归因。
 
 ### 2026-08-07：MinWM origin 与 upstream 通信提交不在同一条主线
 
