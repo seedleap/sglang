@@ -15,7 +15,7 @@ metadata:
     seedleap.ai/branch: codex/minwm-trace-sync-cleanup
     seedleap.ai/sglang-git-ref: "f4b7d5eaf4d054f9d93bfb1ae26d90a0a9f932f2"
     seedleap.ai/source-job: minwm-p0-trace-sync-h200-20260807-01
-    seedleap.ai/retry-reason: SP2 candidate scheduler_chunk_wall_ms CV 3.55 percent
+    seedleap.ai/retry-reason: SP2 and SP4 candidate scheduler_chunk_wall_ms CV above 3 percent
     seedleap.ai/resource-isolation: same full 8-GPU H200 node as source job
 spec:
   backoffLimit: 0
@@ -70,7 +70,7 @@ spec:
             - name: MINWM_ALLOCATED_GPU_COUNT
               value: "8"
             - name: MINWM_TRACE_SYNC_SP_DEGREES
-              value: "2"
+              value: "2 4"
             - name: MINWM_TRACE_SYNC_REPEATS
               value: "3 4"
             - name: MINWM_TRACE_SYNC_WARMUP_CHUNKS
