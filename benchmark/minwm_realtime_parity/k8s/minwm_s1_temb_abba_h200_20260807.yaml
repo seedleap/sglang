@@ -1,0 +1,241 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: minwm-s1-temb-ab-h200-results-20260807
+  namespace: default
+  labels:
+    seedleap.ai/owner: chenshengdong
+    seedleap.ai/purpose: minwm-s1-temb-hoist-ab
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: minwm-dmd-0724-p6-gp3
+  resources:
+    requests:
+      storage: 100Gi
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: minwm-s1-temb-abba-h200-20260807-05
+  namespace: default
+  labels:
+    app.kubernetes.io/name: minwm-s1-temb-abba-h200-20260807-05
+    seedleap.ai/owner: chenshengdong
+    seedleap.ai/purpose: minwm-s1-temb-hoist-sp4-abba
+    seedleap.ai/task: minwm-temb-index-hoist-s1
+    seedleap.ai/run-id: minwm-s1-temb-abba-20260807-05
+  annotations:
+    seedleap.ai/capacity-type: spot
+    seedleap.ai/repo: seedleap/sglang
+    seedleap.ai/branch: codex/minwm-s1-temb-measure-e75-20260807
+    seedleap.ai/runner-git-ref: "f2267c46277f2c40a27785e075d2043e63afc821"
+    seedleap.ai/sglang-git-ref: "5f92d276c08086db638f05536a46fa5434ecb169"
+    seedleap.ai/s0-tool-ref: "b9240233b2438829cbd72ee3dfbc1d37ed675560"
+    seedleap.ai/minwm-git-ref: "2efc6485f65e8fcab506665efde79bc41406385e"
+    seedleap.ai/checkpoint-version-id: "wduScksw2f3yPErnG9lBioOuE2AToyAP"
+    seedleap.ai/resource-isolation: full 8-GPU H200 node request
+    seedleap.ai/measurement-plan: sp4-off-only-abba-a1-b1-b2-a2
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 28800
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: minwm-s1-temb-abba-h200-20260807-05
+        seedleap.ai/owner: chenshengdong
+        seedleap.ai/purpose: minwm-s1-temb-hoist-sp4-abba
+        seedleap.ai/task: minwm-temb-index-hoist-s1
+        seedleap.ai/run-id: minwm-s1-temb-abba-20260807-05
+      annotations:
+        seedleap.ai/repo: seedleap/sglang
+        seedleap.ai/branch: codex/minwm-s1-temb-measure-e75-20260807
+        seedleap.ai/runner-git-ref: "f2267c46277f2c40a27785e075d2043e63afc821"
+        seedleap.ai/sglang-git-ref: "5f92d276c08086db638f05536a46fa5434ecb169"
+        seedleap.ai/s0-tool-ref: "b9240233b2438829cbd72ee3dfbc1d37ed675560"
+    spec:
+      restartPolicy: Never
+      terminationGracePeriodSeconds: 60
+      tolerations:
+        - key: seedleap.ai/capacity-pool
+          operator: Equal
+          value: minwm-test-phx2-karpenter
+          effect: NoSchedule
+      nodeSelector:
+        karpenter.sh/capacity-type: spot
+        karpenter.sh/nodepool: minwm-test-phx2-p5e-spot
+        node.kubernetes.io/instance-type: p5e.48xlarge
+        topology.kubernetes.io/zone: us-west-2-phx-2a
+      containers:
+        - name: benchmark
+          image: 829115578968.dkr.ecr.us-east-2.amazonaws.com/leap-world/minwm-training@sha256:bedc07ea3ba55059a8c1c569c3b177c4d00d41f37d4fa9105375531534ef5f2a
+          imagePullPolicy: IfNotPresent
+          workingDir: /workspace
+          securityContext:
+            runAsUser: 0
+          env:
+            - name: GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: github-token
+                  key: token
+            - name: SGLANG_GIT_REF
+              value: "5f92d276c08086db638f05536a46fa5434ecb169"
+            - name: S1_RUNNER_REF
+              value: "f2267c46277f2c40a27785e075d2043e63afc821"
+            - name: MINWM_S0_TOOL_REF
+              value: "b9240233b2438829cbd72ee3dfbc1d37ed675560"
+            - name: MINWM_GIT_REF
+              value: "2efc6485f65e8fcab506665efde79bc41406385e"
+            - name: MINWM_CONTAINER_IMAGE
+              value: 829115578968.dkr.ecr.us-east-2.amazonaws.com/leap-world/minwm-training@sha256:bedc07ea3ba55059a8c1c569c3b177c4d00d41f37d4fa9105375531534ef5f2a
+            - name: MINWM_BENCHMARK_MODE
+              value: setup_only
+            - name: MINWM_RUN_ID
+              value: minwm-s1-temb-abba-20260807-05
+            - name: MINWM_ALLOCATED_GPU_COUNT
+              value: "8"
+            - name: MINWM_S0_OFF_WARMUP_CHUNKS
+              value: "20"
+            - name: MINWM_S0_OFF_MEASURED_CHUNKS
+              value: "200"
+            - name: MINWM_S0_KV_CACHE_NUM_FRAMES
+              value: "45"
+            - name: MINWM_STAGE_FROM_MOUNT
+              value: "1"
+            - name: MINWM_CHECKPOINT_MOUNT_PATH
+              value: /s3/world-model/evals/minwm/checkpoint-staging/wan22-5B-stage3-dmd-8-0721-6a531f0e067/global_step_003200/ema_student/model.pt
+            - name: MINWM_PRETRAINED_MOUNT_PATH
+              value: /s3/world-model/checkpoints/minWM/Wan2.2-TI2V-5B-from-diffusers
+            - name: MINWM_CHECKPOINT_S3_EAST
+              value: s3://leap-world-us-east-2/world-model/evals/minwm/checkpoint-staging/wan22-5B-stage3-dmd-8-0721-6a531f0e067/global_step_003200/ema_student/model.pt
+            - name: MINWM_CHECKPOINT_VERSION_EAST
+              value: wduScksw2f3yPErnG9lBioOuE2AToyAP
+            - name: MINWM_CHECKPOINT_SOURCE_URI
+              value: s3://leap-world-us-west-2/world-model/minwm/checkpoints/run-archive/rolling/Wan21/Action2V/dmd/wan22-5B-stage3-dmd-8-0721-6a531f0e067/global_step_003200/ema_student/model.pt
+            - name: MINWM_CHECKPOINT_SOURCE_VERSION
+              value: x.2zYaRRNzyqngI7O_cYSrsK3NvgPKKt
+            - name: MINWM_CHECKPOINT_SOURCE_ETAG
+              value: 5c29d614972e06fd0df859abfd1d6f4d-191
+            - name: MINWM_CHECKPOINT_BYTES
+              value: "10007171771"
+            - name: MINWM_CHECKPOINT_CRC64
+              value: I0IQ+p0pREI=
+            - name: MINWM_PRETRAINED_S3
+              value: s3://leap-world-us-east-2/world-model/checkpoints/minWM/Wan2.2-TI2V-5B-from-diffusers
+            - name: K8S_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: SGLANG_SOURCE_ROOT
+              value: /workspace/sglang
+            - name: MINWM_RESULTS_ROOT
+              value: /results/attempts
+          command:
+            - /bin/bash
+            - -lc
+            - |
+              set -euo pipefail
+              export MINWM_RESULTS_ROOT="/results/attempts/${HOSTNAME}"
+              mkdir -p "${MINWM_RESULTS_ROOT}"
+              record_exit() {
+                local status=$?
+                {
+                  echo "exit_status=${status}"
+                  echo "finished_utc=$(date --utc +%Y-%m-%dT%H:%M:%SZ)"
+                  df -h /work /results || true
+                  nvidia-smi || true
+                } > "${MINWM_RESULTS_ROOT}/pod-exit-diagnostic.txt"
+              }
+              trap record_exit EXIT
+              clone_at() {
+                local repository="$1" destination="$2" revision="$3"
+                git clone --no-checkout \
+                  "https://x-access-token:${GITHUB_TOKEN}@github.com/seedleap/${repository}.git" \
+                  "${destination}"
+                git -C "${destination}" checkout --detach "${revision}"
+                [[ "$(git -C "${destination}" rev-parse HEAD)" == "${revision}" ]]
+              }
+              clone_at minWM /workspace/minWM "${MINWM_GIT_REF}"
+              clone_at sglang /workspace/sglang "${S1_RUNNER_REF}"
+              mkdir -p /work/s1-runner
+              cp -a \
+                /workspace/sglang/benchmark/minwm_realtime_parity \
+                /work/s1-runner/minwm_realtime_parity
+              git -C /workspace/sglang checkout --detach "${SGLANG_GIT_REF}"
+              [[ "$(git -C /workspace/sglang rev-parse HEAD)" == "${SGLANG_GIT_REF}" ]]
+              export PYTHONPATH="/workspace/sglang/python${PYTHONPATH:+:${PYTHONPATH}}"
+              python3 -c 'import sglang.test.ci.ci_register'
+              python3 - /work/s1-runner/minwm_realtime_parity/run_temb_hoist_sp4_abba.sh <<'PY'
+              import re
+              import sys
+              from pathlib import Path
+
+              wrapper = Path(sys.argv[1]).read_text()
+              if re.search(r"^\s*nsys\s+start(?:\s|$)", wrapper, re.MULTILINE):
+                  raise SystemExit("ABBA wrapper contains an executable nsys start")
+              if re.search(r"^\s*run_profiler_on(?:\s|$)", wrapper, re.MULTILINE):
+                  raise SystemExit("ABBA wrapper contains a profiler-on call")
+              expected = (
+                  "run_position temb-hoist-abba-a1-candidate 1",
+                  "run_position temb-hoist-abba-b1-legacy 0",
+                  "run_position temb-hoist-abba-b2-legacy 0",
+                  "run_position temb-hoist-abba-a2-candidate 1",
+              )
+              positions = [wrapper.index(call) for call in expected]
+              if positions != sorted(positions):
+                  raise SystemExit("ABBA order is not A1/B1/B2/A2")
+              PY
+              if pgrep -x nsys >/dev/null; then
+                echo "ABBA setup refuses to run while an nsys process exists" >&2
+                pgrep -a -x nsys >&2 || true
+                exit 2
+              fi
+              {
+                echo "sglang_commit=$(git -C /workspace/sglang rev-parse HEAD)"
+                echo "s1_runner_ref=${S1_RUNNER_REF}"
+                echo "s0_tool_ref=${MINWM_S0_TOOL_REF}"
+                echo "kube_context=codex-minwm-test-phx2"
+                echo "aws_region=us-west-2"
+                echo "nodepool=minwm-test-phx2-p5e-spot"
+                echo "node_name=${K8S_NODE_NAME}"
+                echo "instance_type=p5e.48xlarge"
+                echo "active_gpu_count=4"
+                echo "allocated_gpu_count=8"
+                echo "measurement_plan=sp4-off-only-abba-a1-b1-b2-a2"
+                echo "nsys=forbidden"
+              } | tee "${MINWM_RESULTS_ROOT}/provenance.txt"
+              bash /workspace/sglang/benchmark/minwm_realtime_parity/aws_b200_entrypoint.sh
+              bash /work/s1-runner/minwm_realtime_parity/run_temb_hoist_sp4_abba.sh
+          resources:
+            requests:
+              cpu: "64"
+              memory: 400Gi
+              nvidia.com/gpu: "8"
+            limits:
+              cpu: "128"
+              memory: 800Gi
+              nvidia.com/gpu: "8"
+          volumeMounts:
+            - name: s3
+              mountPath: /s3
+              readOnly: true
+            - name: work
+              mountPath: /work
+            - name: results
+              mountPath: /results
+            - name: shm
+              mountPath: /dev/shm
+      volumes:
+        - name: s3
+          persistentVolumeClaim:
+            claimName: s3-claim
+        - name: work
+          emptyDir: {}
+        - name: results
+          persistentVolumeClaim:
+            claimName: minwm-s1-temb-ab-h200-results-20260807
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 256Gi
