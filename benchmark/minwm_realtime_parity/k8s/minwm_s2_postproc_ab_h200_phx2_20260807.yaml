@@ -1,5 +1,6 @@
-# S2 runner b69bf3c41b contains S0 canonical b9240233b2 plus the task-local
-# quality/A-B runner and exact count assertions. Always validate/apply with the
+# S2 runner 4a35ed30d2 contains S0 canonical b9240233b2 and final audit
+# b178572f84, plus the task-local quality/A-B runner and exact count assertions.
+# Always validate/apply with the
 # explicit codex-minwm-test-phx2 context.
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -35,8 +36,8 @@ metadata:
     seedleap.ai/nodepool: minwm-test-phx2-p5e-spot
     seedleap.ai/repo: seedleap/sglang
     seedleap.ai/branch: codex/minwm-s2-postproc-s0-test
-    seedleap.ai/sglang-git-ref: b69bf3c41bdf122041b17e9d9ba161641cc5de74
-    seedleap.ai/s0-tooling-ref: b9240233b2438829cbd72ee3dfbc1d37ed675560
+    seedleap.ai/sglang-git-ref: 4a35ed30d28704c8550d1607671b729a48978513
+    seedleap.ai/s0-tooling-ref: b178572f84521fa44400670fa76a29ad40c433d7
     seedleap.ai/minwm-git-ref: 2efc6485f65e8fcab506665efde79bc41406385e
     seedleap.ai/checkpoint-version-id: wduScksw2f3yPErnG9lBioOuE2AToyAP
     seedleap.ai/resource-isolation: full 8-GPU H200 node request
@@ -58,11 +59,11 @@ spec:
         seedleap.ai/nodepool: minwm-test-phx2-p5e-spot
         seedleap.ai/repo: seedleap/sglang
         seedleap.ai/branch: codex/minwm-s2-postproc-s0-test
-        seedleap.ai/sglang-git-ref: b69bf3c41bdf122041b17e9d9ba161641cc5de74
-        seedleap.ai/s0-tooling-ref: b9240233b2438829cbd72ee3dfbc1d37ed675560
+        seedleap.ai/sglang-git-ref: 4a35ed30d28704c8550d1607671b729a48978513
+        seedleap.ai/s0-tooling-ref: b178572f84521fa44400670fa76a29ad40c433d7
     spec:
       restartPolicy: Never
-      terminationGracePeriodSeconds: 60
+      terminationGracePeriodSeconds: 900
       tolerations:
         - key: seedleap.ai/capacity-pool
           operator: Equal
@@ -90,7 +91,7 @@ spec:
                   name: github-token
                   key: token
             - name: SGLANG_GIT_REF
-              value: b69bf3c41bdf122041b17e9d9ba161641cc5de74
+              value: 4a35ed30d28704c8550d1607671b729a48978513
             - name: MINWM_GIT_REF
               value: 2efc6485f65e8fcab506665efde79bc41406385e
             - name: MINWM_CONTAINER_IMAGE
@@ -148,13 +149,72 @@ spec:
               export MINWM_RESULTS_ROOT="/results/attempts/${HOSTNAME}"
               mkdir -p "${MINWM_RESULTS_ROOT}"
               record_exit() {
-                local task_status=$?
+                local task_status=$? existing_invalid_marker
                 {
                   echo "exit_status=${task_status}"
                   echo "finished_utc=$(date --utc +%Y-%m-%dT%H:%M:%SZ)"
                   df -h /work /results || true
                   nvidia-smi || true
                 } > "${MINWM_RESULTS_ROOT}/pod-exit-diagnostic.txt"
+                existing_invalid_marker="$(find "${MINWM_RESULTS_ROOT}" -type f \
+                  \( -name 'invalid-marker-*.json' -o -path '*/invalid/*.json' \) \
+                  -print -quit)"
+                if (( task_status != 0 )) && [[ -z "${existing_invalid_marker}" ]]; then
+                  mkdir -p "${MINWM_RESULTS_ROOT}/invalid"
+                  python3 - "${MINWM_RESULTS_ROOT}" "${task_status}" <<'PY' || true
+              import hashlib
+              import json
+              import sys
+              from datetime import datetime, timezone
+              from pathlib import Path
+
+              root = Path(sys.argv[1])
+              status = int(sys.argv[2])
+              marker = root / "invalid" / "attempt.json"
+              base = {
+                  "schema_version": "minwm-invalid-attempt/v1",
+                  "reason": f"container exited nonzero ({status}); acceptance/script failure or interruption",
+                  "exit_status": status,
+                  "invalidated_utc": datetime.now(timezone.utc).isoformat(),
+                  "attempt_root": str(root),
+                  "physically_deleted": False,
+                  "recoverability": (
+                      "all artifacts remain in place on the task PVC; mount the PVC in a "
+                      "reader Pod to recover them"
+                  ),
+                  "inventory_status": "hashing",
+                  "artifacts": [],
+              }
+              marker.write_text(json.dumps(base, indent=2, sort_keys=True) + "\n")
+
+              artifacts = []
+              inventory_complete = True
+              for artifact in sorted(root.rglob("*")):
+                  if not artifact.is_file() or marker.parent in artifact.parents:
+                      continue
+                  record = {
+                      "path": str(artifact.relative_to(root)),
+                      "size_bytes": artifact.stat().st_size,
+                  }
+                  try:
+                      digest = hashlib.sha256()
+                      with artifact.open("rb") as source:
+                          for chunk in iter(lambda: source.read(8 * 1024 * 1024), b""):
+                              digest.update(chunk)
+                      record["sha256"] = digest.hexdigest()
+                  except OSError as error:
+                      inventory_complete = False
+                      record["sha256"] = None
+                      record["error"] = repr(error)
+                  artifacts.append(record)
+
+              base["inventory_status"] = "complete" if inventory_complete else "partial"
+              base["artifacts"] = artifacts
+              temporary = marker.with_suffix(".json.tmp")
+              temporary.write_text(json.dumps(base, indent=2, sort_keys=True) + "\n")
+              temporary.replace(marker)
+              PY
+                fi
               }
               trap record_exit EXIT
               {
