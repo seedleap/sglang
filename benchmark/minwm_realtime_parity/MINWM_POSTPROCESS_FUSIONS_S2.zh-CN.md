@@ -127,6 +127,18 @@ ruff format --check python/sglang/multimodal_gen/runtime/models/dits/minwm.py \
 真机测量命令和产物路径将在任务专用 `minwm-s2-postproc-*` Job dry-run 后补充；不复用
 或清理 CUDA Graph/S0 任务的 Job、Pod、PVC。
 
+生成代码与 micro kernel 诊断使用独立脚本，它不产生另一套 headline schema：
+
+```bash
+TORCH_LOGS=output_code,kernel_code python \
+  benchmark/minwm_realtime_parity/trace_postprocess_fusions.py \
+  --candidate self-fused --sequence-length 6864 --profile-kernels
+```
+
+`self-baseline`、`cross`、`ffn` 分别单独启动进程，以免不同
+`_minwm_adaln_op` specialization 的编译日志混在一起。该脚本的时间只用于解释 kernel
+边界；正式 FPS/wall 只来自 S0 schema。
+
 ## 给负责人掌握代码的检查题
 
 1. **self 候选为什么不能直接把 residual 到 LayerNorm 全程保持 FP32？** 参考答案：
