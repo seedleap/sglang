@@ -72,6 +72,25 @@ def record_required_stage_trace(
             pass
 
 
+def missing_required_stage_trace(
+    required: dict[TraceSelector, set[int]], expected_indices: set[int]
+) -> dict[str, dict[str, list[int]]]:
+    return {
+        "/".join(selector): {
+            "missing": sorted(expected_indices - observed),
+            "unexpected": sorted(observed - expected_indices),
+        }
+        for selector, observed in required.items()
+        if not expected_indices.issubset(observed)
+    }
+
+
+def required_stage_trace_is_complete(
+    required: dict[TraceSelector, set[int]], expected_indices: set[int]
+) -> bool:
+    return all(expected_indices.issubset(observed) for observed in required.values())
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cases", default=Path(__file__).with_name("cases.json"))
@@ -250,11 +269,11 @@ async def receive_run(args: argparse.Namespace, contract: dict, case: dict) -> d
         if args.require_complete_stage_trace
         else {}
     )
+    expected_trace_indices = set(range(total_chunks))
 
     def stage_trace_is_complete() -> bool:
-        return all(
-            len(chunk_indices) >= total_chunks
-            for chunk_indices in required_trace_chunks.values()
+        return required_stage_trace_is_complete(
+            required_trace_chunks, expected_trace_indices
         )
 
     init_started_ns = time.perf_counter_ns()
@@ -268,7 +287,22 @@ async def receive_run(args: argparse.Namespace, contract: dict, case: dict) -> d
             or len(payload_complete_ns) < total_chunks
             or not stage_trace_is_complete()
         ):
-            packed = await asyncio.wait_for(websocket.recv(), timeout=args.timeout)
+            try:
+                packed = await asyncio.wait_for(websocket.recv(), timeout=args.timeout)
+            except TimeoutError as exc:
+                trace_diagnostic = missing_required_stage_trace(
+                    required_trace_chunks, expected_trace_indices
+                )
+                missing_stats = sorted(expected_trace_indices - set(stats_by_chunk))
+                missing_payloads = sorted(
+                    expected_trace_indices - set(payload_complete_ns)
+                )
+                raise TimeoutError(
+                    "timed out waiting for complete realtime measurement: "
+                    f"missing_stats={missing_stats}; "
+                    f"missing_payloads={missing_payloads}; "
+                    f"stage_trace={json.dumps(trace_diagnostic, sort_keys=True)}"
+                ) from exc
             if not isinstance(packed, bytes):
                 raise TypeError(
                     f"expected binary MessagePack, got {type(packed).__name__}"

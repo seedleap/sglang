@@ -20,7 +20,9 @@ from measurement import (  # noqa: E402
 from measurement_tool import aggregate  # noqa: E402
 from nsys_metrics import merge_nsys_metrics  # noqa: E402
 from benchmark_realtime_throughput import (  # noqa: E402
+    missing_required_stage_trace,
     record_required_stage_trace,
+    required_stage_trace_is_complete,
     required_stage_trace_chunks,
 )
 
@@ -194,6 +196,18 @@ def test_required_stage_trace_waits_for_wall_and_profiler_on_cuda() -> None:
 
     profiler_off = required_stage_trace_chunks("profiler_off")
     assert len(profiler_off) == 2
+
+
+def test_required_stage_trace_rejects_equal_length_with_out_of_range_index() -> None:
+    required = required_stage_trace_chunks("profiler_off")
+    expected = {0, 1}
+    for observed in required.values():
+        observed.update({0, 2})
+    assert required_stage_trace_is_complete(required, expected) is False
+    diagnostic = missing_required_stage_trace(required, expected)
+    assert len(diagnostic) == 2
+    for detail in diagnostic.values():
+        assert detail == {"missing": [1], "unexpected": [2]}
 
 
 def _create_nsys_fixture(
