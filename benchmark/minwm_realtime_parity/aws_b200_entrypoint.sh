@@ -774,6 +774,7 @@ PY
       --model-path "${MODEL_DIR}" \
       --pipeline-class-name MinWMCausalDMDPipeline \
       --vae-config.use-parallel-decode true \
+      --vae-config.parallel-decode-mode auto \
       --attention-backend "${MINWM_SERVER_ATTENTION_BACKEND:-fa}" \
       --performance-mode speed \
       --num-gpus "${degree}" \

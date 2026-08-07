@@ -209,7 +209,12 @@ class _MinWMSegmentCompile:
 
 
 def set_minwm_cuda_graph_active(enabled: bool) -> None:
-    """Keep segment-level Inductor graphs out of the manual DiT graph."""
+    """Keep lazily compiled Inductor segments out of manual DiT capture.
+
+    Segment compilation can allocate or compile on its first invocation, which
+    is unsafe inside CUDA Graph capture. It can also change MinWM's BF16 rounding
+    boundaries, so the graph and eager benchmark lanes both use eager segments.
+    """
     global _MINWM_CUDA_GRAPH_ACTIVE
     enabled = bool(enabled)
     if enabled == _MINWM_CUDA_GRAPH_ACTIVE:

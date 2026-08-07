@@ -651,7 +651,7 @@ class CausalWanTransformer3DModel(BaseDiT, LayerwiseOffloadableModuleMixin):
 
         return block_mask
 
-    @lru_cache(maxsize=32)
+    @lru_cache(maxsize=4)
     def _get_causal_rotary_pos_embed(
         self,
         post_patch_num_frames: int,
@@ -660,6 +660,13 @@ class CausalWanTransformer3DModel(BaseDiT, LayerwiseOffloadableModuleMixin):
         start_frame: int,
         device: torch.device,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Reuse stable GPU RoPE storage across repeated denoising forwards.
+
+        Manual CUDA Graph capture records tensor addresses, so rebuilding these
+        tensors inside every forward is not only redundant but also makes the
+        captured SP=1 path depend on temporary allocations. Keep only a few
+        recent shapes/start positions to bound GPU memory during long streams.
+        """
         d = self.hidden_size // self.num_attention_heads
         rope_dim_list = [d - 4 * (d // 6), 2 * (d // 6), 2 * (d // 6)]
         freqs_cos, freqs_sin = get_rotary_pos_embed(
