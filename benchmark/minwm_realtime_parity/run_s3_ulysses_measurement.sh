@@ -121,7 +121,7 @@ run_parity_case() {
     | tee "${output_root}/${output_prefix}-client.log"
 }
 
-python3 -m pytest -q \
+PYTHONPATH=/workspace/sglang/python python3 -m pytest -q \
   /workspace/sglang/test/registered/jit/diffusion/test_minwm_ulysses_fused.py \
   | tee "${RUN_ROOT}/kernel-bitwise-tests.log"
 
