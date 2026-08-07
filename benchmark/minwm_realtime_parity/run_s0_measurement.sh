@@ -10,14 +10,19 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 WORK_ROOT="/work/minwm-realtime/${MINWM_RUN_ID}"
 MODEL_DIR="${WORK_ROOT}/sglang-model"
-RESULT_ROOT="${MINWM_RESULTS_ROOT%/}/${MINWM_RUN_ID}/s4-qkv-measurement"
 CASES="${MINWM_CASES_PATH:-${SCRIPT_DIR}/cases_720p_compile_smoke.json}"
 CASE_ID="${MINWM_CASE_ID:-00_forward_080_pottery_720p}"
 SP_DEGREES="${MINWM_S0_SP_DEGREES:-2 4}"
 QKV_LANES="${MINWM_S4_QKV_LANES:-control candidate}"
+ABBA_SEQUENCE="${MINWM_S4_QKV_ABBA_SEQUENCE:-}"
 OFF_WARMUP_CHUNKS="${MINWM_S0_OFF_WARMUP_CHUNKS:-20}"
 OFF_MEASURED_CHUNKS="${MINWM_S0_OFF_MEASURED_CHUNKS:-200}"
 KV_CACHE_NUM_FRAMES="${MINWM_S0_KV_CACHE_NUM_FRAMES:-45}"
+RESULT_KIND="s4-qkv-measurement"
+if [[ -n "${ABBA_SEQUENCE}" ]]; then
+  RESULT_KIND="s4-qkv-abba"
+fi
+RESULT_ROOT="${MINWM_RESULTS_ROOT%/}/${MINWM_RUN_ID}/${RESULT_KIND}"
 
 [[ -f "${MODEL_DIR}/minwm_conversion_manifest.json" ]]
 [[ -f "${CASES}" ]]
@@ -56,6 +61,8 @@ ALLOCATED_GPU_COUNT="${MINWM_ALLOCATED_GPU_COUNT:-$(nvidia-smi -L | wc -l | xarg
   echo "allocated_gpu_count=${ALLOCATED_GPU_COUNT}"
   echo "sp_degrees=${SP_DEGREES}"
   echo "qkv_lanes=${QKV_LANES}"
+  echo "qkv_abba_sequence=${ABBA_SEQUENCE:-disabled}"
+  echo "server_restart_per_position=$([[ -n "${ABBA_SEQUENCE}" ]] && echo true || echo false)"
   echo "qkv_control=MINWM_FUSED_QKV_PROJECTION=0"
   echo "qkv_candidate=MINWM_FUSED_QKV_PROJECTION=1"
   echo "measurement_mode=profiler_off_only"
@@ -269,6 +276,7 @@ PY
 aggregate_repeats() {
   local lane_dir="$1"
   shift
+  mkdir -p "${lane_dir}"
   python3 "${SCRIPT_DIR}/measurement_tool.py" aggregate "$@" \
     --output "${lane_dir}/repeat-summary.json"
 }
@@ -313,6 +321,228 @@ PY
   fi
   stop_server
 }
+
+record_compile_cache_state() {
+  local output="$1"
+  python3 - "${output}" <<'PY'
+import hashlib
+import json
+import os
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+roots = {
+    "inductor": Path(
+        os.environ.get(
+            "TORCHINDUCTOR_CACHE_DIR",
+            "/root/.cache/sgl_diffusion/torch_compile_cache/inductor",
+        )
+    ),
+    "triton": Path(
+        os.environ.get(
+            "TRITON_CACHE_DIR",
+            "/root/.cache/sgl_diffusion/torch_compile_cache/triton",
+        )
+    ),
+}
+summary = {}
+for name, root in roots.items():
+    entries = []
+    if root.exists():
+        for path in sorted(root.rglob("*")):
+            if path.is_file():
+                stat = path.stat()
+                entries.append(
+                    f"{path.relative_to(root)}\0{stat.st_size}\0{stat.st_mtime_ns}"
+                )
+    payload = "\n".join(entries).encode()
+    summary[name] = {
+        "path": str(root),
+        "exists": root.exists(),
+        "file_count": len(entries),
+        "total_size_bytes": sum(int(entry.split("\0")[1]) for entry in entries),
+        "metadata_listing_sha256": hashlib.sha256(payload).hexdigest(),
+    }
+record = {
+    "schema_version": "minwm-s4-compile-cache-state/v1",
+    "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+    "roots": summary,
+    "note": "Read-only metadata snapshot; cache contents were not cleared or rewritten.",
+}
+with Path(sys.argv[1]).open("x") as output_file:
+    output_file.write(json.dumps(record, indent=2, sort_keys=True) + "\n")
+PY
+}
+
+assert_server_stopped() {
+  if pgrep -f "sglang serve --model-path ${MODEL_DIR}.*--port 30000" >/dev/null; then
+    echo "Previous position server still exists after stop_server" >&2
+    return 1
+  fi
+  if curl --fail --silent http://127.0.0.1:30000/health >/dev/null; then
+    echo "Previous position health endpoint is still live after stop_server" >&2
+    return 1
+  fi
+}
+
+run_profiler_off_position() {
+  local degree="$1" position="$2" lane="$3" position_dir="$4"
+  case "${lane}" in
+    control) qkv_fused_flag=0 ;;
+    candidate) qkv_fused_flag=1 ;;
+    *)
+      echo "S4 ABBA accepts QKV lane control or candidate, got ${lane}" >&2
+      exit 2
+      ;;
+  esac
+  qkv_lane="${lane}"
+  invalid_scope="${position_dir}"
+  mkdir -p "${position_dir}"
+  {
+    echo "position=${position}"
+    echo "qkv_lane=${lane}"
+    echo "MINWM_FUSED_QKV_PROJECTION=${qkv_fused_flag}"
+    echo "sp_degree=${degree}"
+    echo "server_restart_boundary=before_and_after_this_position"
+  } > "${position_dir}/qkv-contract.txt"
+  record_compile_cache_state "${position_dir}/compile-cache-before.json"
+  start_server \
+    "${degree}" \
+    "${position_dir}/profiler-off-server.log" \
+    "${position_dir}/profiler-off-gpu-telemetry.csv"
+  local output="${position_dir}/profiler-off.json"
+  run_client \
+    "${degree}" "${output}" "bf16-${lane}-sp${degree}-position${position}" \
+    "${MINWM_RUN_ID}-sp${degree}-position${position}-${lane}" \
+    --measurement-mode profiler_off \
+    --warmup-chunks "${OFF_WARMUP_CHUNKS}" \
+    --measured-chunks "${OFF_MEASURED_CHUNKS}"
+  stop_server
+  assert_server_stopped
+  record_compile_cache_state "${position_dir}/compile-cache-after.json"
+}
+
+run_abba_measurements() {
+  read -r -a abba_lanes <<< "${ABBA_SEQUENCE}"
+  if (( ${#abba_lanes[@]} != 4 )); then
+    echo "MINWM_S4_QKV_ABBA_SEQUENCE must contain exactly four lanes" >&2
+    exit 2
+  fi
+  if [[ "${abba_lanes[*]}" != "candidate control control candidate" ]]; then
+    echo "S4 reverse ABBA contract is: candidate control control candidate" >&2
+    exit 2
+  fi
+
+  read -r -a degrees <<< "${SP_DEGREES}"
+  for degree in "${degrees[@]}"; do
+    if ! [[ "${degree}" =~ ^(2|4)$ ]]; then
+      echo "S0 accepts SP degree 2 or 4, got ${degree}" >&2
+      exit 2
+    fi
+    local sp_dir="${RESULT_ROOT}/sp${degree}"
+    mkdir -p "${sp_dir}"
+    local control_paths=()
+    local candidate_paths=()
+    local index=0
+    for lane in "${abba_lanes[@]}"; do
+      index=$((index + 1))
+      local position
+      position="$(printf '%02d' "${index}")"
+      local position_dir="${sp_dir}/position-${position}-${lane}"
+      run_profiler_off_position "${degree}" "${position}" "${lane}" "${position_dir}"
+      if [[ "${lane}" == "control" ]]; then
+        control_paths+=("${position_dir}/profiler-off.json")
+      else
+        candidate_paths+=("${position_dir}/profiler-off.json")
+      fi
+    done
+    invalid_scope="${sp_dir}/summary"
+    mkdir -p "${invalid_scope}"
+    aggregate_repeats "${sp_dir}/summary/control" "${control_paths[@]}"
+    aggregate_repeats "${sp_dir}/summary/candidate" "${candidate_paths[@]}"
+  done
+
+  invalid_scope="${RESULT_ROOT}/summary"
+  mkdir -p "${invalid_scope}"
+  python3 - "${RESULT_ROOT}" "${ABBA_SEQUENCE}" <<'PY'
+import json
+import statistics
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+order = sys.argv[2].split()
+metric_names = (
+    "client_fps",
+    "scheduler_fps",
+    "scheduler_chunk_wall_ms",
+    "dit_wall_ms",
+    "vae_wall_ms",
+)
+degrees = {}
+for sp_dir in sorted(root.glob("sp*")):
+    lanes = {}
+    for lane in ("control", "candidate"):
+        records = []
+        for position_dir in sorted(sp_dir.glob(f"position-??-{lane}")):
+            record = json.loads((position_dir / "profiler-off.json").read_text())
+            metrics = record["metrics"]["profiler_off"]
+            records.append(
+                {
+                    "position": int(position_dir.name.split("-")[1]),
+                    "run_id": record["run_id"],
+                    "metrics": {
+                        "client_fps": metrics["client_fps"]["value"],
+                        "scheduler_fps": metrics["scheduler_fps"]["value"],
+                        "scheduler_chunk_wall_ms": metrics["scheduler_chunk_wall_ms"]["value"]["mean"],
+                        "dit_wall_ms": metrics["dit_wall_ms"]["value"]["mean"],
+                        "vae_wall_ms": metrics["vae_wall_ms"]["value"]["mean"],
+                    },
+                }
+            )
+        lanes[lane] = {
+            "positions": records,
+            "repeat_summary": json.loads(
+                (sp_dir / "summary" / lane / "repeat-summary.json").read_text()
+            ),
+            "means": {
+                name: statistics.fmean(record["metrics"][name] for record in records)
+                for name in metric_names
+            },
+        }
+    deltas = {}
+    for name in metric_names:
+        control = lanes["control"]["means"][name]
+        candidate = lanes["candidate"]["means"][name]
+        raw_percent = (candidate / control - 1.0) * 100.0
+        deltas[name] = {
+            "candidate_vs_control_percent": raw_percent,
+            "performance_change_percent": (
+                raw_percent if name.endswith("fps") else -raw_percent
+            ),
+        }
+    degrees[sp_dir.name] = {"lanes": lanes, "deltas": deltas}
+
+summary = {
+    "schema_version": "minwm-realtime-s4-qkv-abba/v1",
+    "order": order,
+    "server_restart_per_position": True,
+    "compile_cache_policy": "preserve_and_snapshot_before_after_each_position",
+    "degrees": degrees,
+}
+with (root / "s4-qkv-abba-summary.json").open("x") as output:
+    output.write(json.dumps(summary, indent=2, sort_keys=True) + "\n")
+print(json.dumps(summary, indent=2, sort_keys=True))
+PY
+  date --utc +%Y-%m-%dT%H:%M:%SZ | tee "${RESULT_ROOT}/complete.txt"
+  echo "MINWM_S4_QKV_ABBA_COMPLETE results=${RESULT_ROOT}"
+}
+
+if [[ -n "${ABBA_SEQUENCE}" ]]; then
+  run_abba_measurements
+  exit 0
+fi
 
 read -r -a degrees <<< "${SP_DEGREES}"
 read -r -a qkv_lanes <<< "${QKV_LANES}"
