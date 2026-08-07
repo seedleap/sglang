@@ -14,7 +14,6 @@ import unittest
 import torch
 
 from sglang.multimodal_gen.runtime.platforms import current_platform
-from sglang.test.test_utils import CustomTestCase
 
 _WORLD = int(os.environ.get("MINWM_ASYNC_TEST_WORLD", "2"))
 
@@ -176,7 +175,7 @@ def _worker() -> int:
     return 1 if verdict.item() else 0
 
 
-class TestMinWMAsyncA2A(CustomTestCase):
+class TestMinWMAsyncA2A(unittest.TestCase):
     def test_split_async_a2a_contracts(self):
         if not current_platform.is_cuda():
             self.skipTest("MinWM async A2A requires CUDA")
