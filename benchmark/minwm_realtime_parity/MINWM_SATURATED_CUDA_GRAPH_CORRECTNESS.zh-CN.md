@@ -65,6 +65,13 @@
 - `fe414b1a6a` 增加 graph output snapshot，`f355e52143` 强引用 captured attention plan/RoPE inputs。随后 PVC run `...-20`（短样本）、`...-21`（832x480，122880 samples）以及 `...-22`（1248x704，122880 samples）均记录 SP1/SP2 payload SHA 相等、sample max abs 0。
 - 这些后续结果说明已有修复方向成立，但旧验收仍是 KV=20、10+30，且不是本任务当前 tip 的独立复验；因此它们不能单独解除 NO-GO。下节记录了本任务 KV=45 的独立 Graph-only H200 复验。
 
+### 根因与修复判定
+
+- 根因一是 capture 边界语义：stream capture 期间产生的 output 不能当成常规 replay 结果。`068a972078` 在 capture 完成后显式 `graph.replay()`，首个用户可见结果与后续 replay 走同一路径；`5318284afe` 的 `capture != eager`、但 replay 1/2 exact 是直接证据。
+- 根因二是输出生命周期：CUDA Graph 每次 replay 复用同一个静态 output allocation；旧路径把该 tensor 直接交给下游 scheduler，下一次 DMD replay 可能在 scheduler 消费完之前覆写它。`fe414b1a6a` 在离开 graph 路径前 clone，切断这条复用地址别名。
+- 根因三是 capture 输入生命周期：attention plan 及其中 RoPE tensor 在 capture 前创建，graph 只记录原始设备地址；旧 runner 不持有这些对象，allocator 可在后续 chunk 回收并复用地址。`f355e52143` 把完整 plan 存入 runner 的 `capture_dependencies`，使地址与 runner 同寿命。
+- 本任务没有重新发明修复，而是审计并保留来源提交，再增加可硬失败的 30-block + forward 首差仪器，使用 KV=45/current tip 独立复验上述修复是否真实成立。
+
 ## 命令与失败记录
 
 以下命令均在本 task worktree 执行；只记录有审计/复现意义的命令，输出结论见相邻章节。
@@ -90,6 +97,8 @@
 19. checkpoint staging：14 files、34,201,345,192 bytes、46 秒；聚合 SHA-256 `1dc42d498cad84349987db2015120ce4d77e6b641f7f38c75ec9df3f942a7975`。模型转换确认 30 blocks、5,003,467,456 parameters、45-frame local/sliding window、step-3200。
 20. Job 于 `2026-08-07T09:48:05Z` Succeeded。外层 eager/graph measured payload SHA 均为 `8dec25dcb7ef498776e50b0b199e4cd9de6e29a460889b91cfc32636157b2773`；16,384 个采样像素 exact fraction 1、max abs 0。
 21. 完成后以只读 reader 重挂结果 PVC。reader 第一次 grep 只包含旧 verification 关键字，漏掉新 `block verification` 行；修复 reader 正则并只重建该 reader。最终取得 chunk 10-13、step 1-3 共 12 次证据：每次 31 个边界（30 blocks + forward）均 `exact=True`，无 first-difference。读取完删除 reader；不再占 CPU，Job pod 已 Completed、不占 GPU。
+22. SP1 通过后检查 H200 Spot nodepool：两台 8-GPU 节点中，`i-06888dc1ca88547e1` 当时有一个 Running 4-GPU 作业，另有 4 GPU 可用；未删除或抢占其他任务。以已提交 SP1 Job 为不可变模板，`kubectl get job -o json | jq ... | kubectl create --dry-run=server -f -` 只修改 run/name、case 文件、case id、SP degrees 与 GPU request/limit；server dry-run 确认 1248x704 case、SP `2 4`、4 GPU、16+4、verify=12、KV/window=45、代码 `60672ea51f` 和固定 image。随后用相同 jq 变换创建 `minwm-cg-correct-sp24-704p-h200-20260807-01`；立即调度到同一 H200 节点，未发生 Pending 或资源争用。
+23. Job 启动后复核 `aws_b200_entrypoint.sh` 发现 harness schema 缺口：`CG_DEGREES` 可配置，但合法值正则和 Python summary 循环只硬编码 SP1/SP2。因此该 Job 会先产出有效 SP2 eager/graph，再在 SP4 前以 `unsupported CUDA graph SP degree: 4` 明确失败；这不是模型 correctness 失败，也不能记成 SP4 结果。保留该 Job 取得 SP2 证据，不中途删除；本分支只把 harness allowlist/summary 扩到 SP4，待提交新 SHA 后单独复验 SP4。
 
 ## 当前 H200 Graph-only 复现
 
@@ -112,6 +121,15 @@
 - 下一步仅扩到既有 1248x704 SP2/SP4 Graph correctness；继续保持 45-frame KV，并要求所有 rank 同步通过或一致 fallback。
 - 本任务当前只处理 correctness，不在本阶段跑 20+200 paired x2、Nsight 或 headline 性能；这些必须等 SP2/SP4 bitwise 后另行执行。
 - growing KV、clean graph family、multi-bucket/LRU graph pool 仍禁止；graph pool 仍无容量上限/session 清理设计。
+
+## 当前 1248x704 SP2/SP4 correctness 复验
+
+- Job：`minwm-cg-correct-sp24-704p-h200-20260807-01`
+- 初始 pod/node：`minwm-cg-correct-sp24-704p-h200-20260807-01-2qjz2` / `i-06888dc1ca88547e1`
+- 代码/image/checkpoint 与 SP1 相同；4x H200，顺序运行 SP2 eager/graph 与 SP4 eager/graph。
+- 请求：1248x704 BF16、step-3200、固定 45-frame rolling KV、16+4、每个 SP graph lane 前 12 次 replay 做 31-boundary matched-eager bitwise。
+- 产物：`/results/minwm-cg-correct-sp24-704p-h200-20260807-01/cuda-graph-matrix/`。
+- 当前状态：Running；SP2 尚无 correctness 结果。已确认旧 harness 会在 SP2 完成后、SP4 启动前明确失败，故此 Job 不会产生 SP4 结果；修复后将以新 SHA 单独重跑 SP4。
 
 ## 最终 go/no-go
 

@@ -826,7 +826,7 @@ PY
 
   read -r -a cg_degrees <<< "${CG_DEGREES}"
   for degree in "${cg_degrees[@]}"; do
-    if ! [[ "${degree}" =~ ^(1|2)$ ]]; then
+    if ! [[ "${degree}" =~ ^(1|2|4)$ ]]; then
       echo "unsupported CUDA graph SP degree: ${degree}" >&2
       exit 2
     fi
@@ -916,7 +916,7 @@ for profile_name, profile in profiles.items():
     profile["dit_denoise"] = denoise_metrics(
         profile_name, int(profile["warmup_chunks"])
     )
-for degree in (1, 2):
+for degree in (1, 2, 4):
     eager_name = f"sp{degree}-eager"
     graph_name = f"sp{degree}-cuda-graph"
     if eager_name not in profiles or graph_name not in profiles:
