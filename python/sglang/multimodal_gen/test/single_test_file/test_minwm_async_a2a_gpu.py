@@ -134,8 +134,6 @@ def _worker() -> int:
             # For tile_index > 0 this compute is enqueued after the previous
             # reverse A2A launch and before its wait.
             independent = tile.square().sum(dim=-1)
-            if tile_index >= 2 and handles[tile_index - 2].backend == "ipc":
-                outputs[tile_index - 2] = _usp_wait_all_to_all(handles[tile_index - 2])
             lease = workspace.acquire(f"output_tile_{tile_index}", tile, tile.numel())
             assert lease is not None
             send, recv, stream, events, release = lease
@@ -148,6 +146,7 @@ def _worker() -> int:
                     comm_stream=stream,
                     events=events,
                     backend=backend,
+                    role=f"output_tile_{tile_index}",
                     release=release,
                 )
             )

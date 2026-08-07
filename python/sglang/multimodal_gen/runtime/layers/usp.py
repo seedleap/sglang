@@ -141,7 +141,7 @@ def _usp_select_async_backend(backend: str, *, capturing: bool) -> str:
     return "process_group"
 
 
-def _usp_launch_ipc_equal_split(packed: torch.Tensor) -> torch.Tensor:
+def _usp_launch_ipc_equal_split(packed: torch.Tensor, *, role: str) -> torch.Tensor:
     """Enqueue a two-rank destination-major A2A on the current CUDA stream."""
     group = _ipc_ready_group()
     if group is None:
@@ -153,7 +153,7 @@ def _usp_launch_ipc_equal_split(packed: torch.Tensor) -> torch.Tensor:
     flat = packed.reshape(-1)
     if flat.numel() % 2:
         raise ValueError("two-rank IPC A2A requires an even element count")
-    pair = IPC_A2A.get_staging(flat.numel(), flat.numel(), flat.dtype, group)
+    pair = IPC_A2A.get_staging(flat.numel(), flat.numel(), flat.dtype, group, tag=role)
     if pair is None:
         raise _UlyssesA2ABackendUnavailable(
             "IPC staging was not warmed before CUDA graph capture"
@@ -242,7 +242,7 @@ def _usp_begin_all_to_all_single(
                         output.reshape(-1), packed.reshape(-1), stream=comm_stream
                     )
             else:
-                output = _usp_launch_ipc_equal_split(packed)
+                output = _usp_launch_ipc_equal_split(packed, role=role)
             done_event.record(comm_stream)
         packed.record_stream(comm_stream)
         output.record_stream(comm_stream)
@@ -515,6 +515,7 @@ def _usp_begin_output_all_to_all(
         torch.cuda.Event, torch.cuda.Event, torch.cuda.Event, torch.cuda.Event
     ],
     backend: str,
+    role: str = "output",
     release: Callable[[], None] | None = None,
 ) -> _UlyssesA2AHandle:
     """Pack and launch the inverse Ulysses A2A; consumption remains explicit."""
@@ -568,7 +569,7 @@ def _usp_begin_output_all_to_all(
             output_buffer=output_buffer,
             comm_stream=comm_stream,
             events=events,
-            role="output",
+            role=role,
             backend=backend,
             transform=transform,
             release=release,

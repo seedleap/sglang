@@ -211,7 +211,7 @@ class IpcA2AState:
         self.peer_timed_out = self._share(self.timed_out, group)
         self.inited = True
 
-    def get_staging(self, n_local, n_peer, dtype, group):
+    def get_staging(self, n_local, n_peer, dtype, group, *, tag=None):
         """Local buffer of `n_local` elements (the peer writes into it) paired
         with the peer's mapped buffer of `n_peer` elements (we write into it).
         Creation is a paired collective, so both ranks must reach a new key at
@@ -220,7 +220,11 @@ class IpcA2AState:
         inside capture, so callers fall back to NCCL and the graph bakes that
         path; pre-warmed keys keep the IPC fast path (its copies and
         spin/bump kernels are capture-safe)."""
-        key = (n_local, n_peer, dtype)
+        # Equal-sized asynchronous exchanges may coexist until their handles
+        # are consumed. A semantic tag gives each role its own two-slot ring;
+        # shape-only reuse would let a later role overwrite an older handle's
+        # still-unconsumed staging view.
+        key = (tag, n_local, n_peer, dtype)
         pair = self.staging.get(key)
         if pair is None:
             if torch.cuda.is_current_stream_capturing():

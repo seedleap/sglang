@@ -369,11 +369,16 @@ time、与 compute kernel 的区间交集及 buffer slot/generation。
   `2.29.7`）运行。ProcessGroup tiled output 未报错，但 SP2 IPC tiled output 12/12 轮及
   graph replay 第 1 轮即不等于同步参考，合同整体 **FAIL**；没有 hang。
 - wall/FPS、Nsight：合同失败，按门禁未启动 checkpoint、A/B 或 Nsight。
-- 结论：根因是 IPC staging 是按 shape 共享的两槽环，而 handle 返回张量在 consume 前仍别名
-  staging。第 3/4 个 launch 虽在同一 comm stream 上分别等过第 1/2 个 peer signal，却可在
-  compute stream 执行 transform/consume 前覆盖 slot 0/1。下一修改把 IPC 最大在途数限制为
-  2：在计算 tile `i` 后、launch `i` 前先 consume `i-2`，使 transform 完成后才允许 slot
-  复用，同时继续让 tile `i` attention 与较早 IPC 重叠。修复后必须重新跑同一合同。
+- 结论：首个根因是 IPC staging 是按 shape 共享的两槽环，而 handle 返回张量在 consume 前
+  仍别名 staging。第 3/4 个 launch 可在 compute stream 执行 transform/consume 前覆盖 slot
+  0/1。提交 `3b01875652` 首先把本 rank 的 IPC 最大在途数限制为 2；同节点 `-02` job 把错误
+  从双 rank 12/12 轮全部失败降到 rank1 的 6/12，但仍 FAIL，graph replay 也失败。进一步证据
+  说明本 rank 已 consume 不代表 peer 已 consume：快 rank 仍可覆盖慢 rank 的 slot。因此该
+  限制不是充分正确性条件，不能进入 checkpoint 测量。
+- 下一修改：按语义 role（`output_tile_0..3`）而非仅 shape 隔离 IPC staging ring；每个 tile
+  独享双 slot。产品路径每个 block 下一次复用同 role 前必须先完成同步 packed input
+  ProcessGroup rendezvous，而该 rendezvous 位于上一 block output consume 之后，因此不存在
+  跨两个 block 的未消费覆盖。合同还需重新证明 eager 12 轮与 graph replay。
 
 ### 2026-08-07：候选 1——QK A2A 与 V projection 重叠
 
@@ -414,7 +419,7 @@ time、与 compute kernel 的区间交集及 buffer slot/generation。
 
 ## 偏离原认知
 
-### 2026-08-07：同一 comm stream 不能单独保护 IPC staging 的跨流消费生命周期
+### 2026-08-07：同一 comm stream 和本 rank 在途限制都不能保护 peer staging 消费
 
 - 原认知：IPC 的两个 staging slot 在同一 comm stream 上由 `spin_wait` 串行保护；4 个 tiled
   output handle 即使最后统一 consume，也不会在仍被使用时复用 slot。
@@ -425,9 +430,12 @@ time、与 compute kernel 的区间交集及 buffer slot/generation。
   已消费旧 staging view。第 3 次调用复用 slot 0 时，旧 handle 尚未执行 wait 后的 layout
   transform，数据已被覆盖。workspace 的独立 send/recv lease 不能保护 IPC helper 返回的共享
   staging alias。
-- 决策：不通过给所有 IPC 增加 staging→recv 拷贝来掩盖问题；tiled pipeline 对 IPC 显式维持
-  最多两个未 consume handle，并在复用前完成 `i-2` 的 wait/transform。ProcessGroup 仍可保留
-  全部 tile 在途。首轮失败 job、日志和 manifest 保留，不计为正确性通过。
+- 第二轮证据：`3b01875652` 在 launch `i` 前先 consume `i-2` 后，rank0 eager 通过、rank1
+  仍有 6/12 轮失败，两个 rank 的 graph replay 均失败。根因是 slot 实际由 peer 写入；本 rank
+  consume 完成只能保护自己即将写 peer staging 的时序，不能证明 peer 已消费其本地旧 view。
+- 决策：不通过给所有 IPC 增加 staging→recv 拷贝或依赖时序“通常足够”来掩盖问题；为并发
+  tiled role 分配独立 staging key，恢复全部 tile 在途。首两轮失败 job、日志和 manifest 均
+  保留，不计为正确性通过；新角色隔离方案必须重新通过 eager/graph 合同。
 
 ### 2026-08-07：H200 合同镜像不是可直接运行测试的完整开发环境
 

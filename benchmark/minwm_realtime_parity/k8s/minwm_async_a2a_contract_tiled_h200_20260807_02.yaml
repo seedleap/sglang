@@ -1,0 +1,136 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: minwm-async-a2a-contract-tiled-h200-20260807-02
+  namespace: default
+  labels:
+    app.kubernetes.io/name: minwm-async-a2a-contract-tiled-h200-20260807-02
+    seedleap.ai/owner: chenshengdong
+    seedleap.ai/run-id: minwm-async-a2a-contract-tiled-h200-20260807-02
+    seedleap.ai/task: minwm-async-a2a
+  annotations:
+    seedleap.ai/branch: codex/minwm-async-a2a-overlap
+    seedleap.ai/fixed-node: i-0973db0dc2a8448d1
+    seedleap.ai/hardware-role: H200-SP2-SP4-tiled-output-contract
+    seedleap.ai/kube-context: codex-minwm-test-phx2
+    seedleap.ai/repo: seedleap/sglang
+    seedleap.ai/sglang-git-ref: 3b018756524b0211bfc42bd05f3c9ffe28a2dcdb
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 3600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: minwm-async-a2a-contract-tiled-h200-20260807-02
+        seedleap.ai/owner: chenshengdong
+        seedleap.ai/run-id: minwm-async-a2a-contract-tiled-h200-20260807-02
+        seedleap.ai/task: minwm-async-a2a
+    spec:
+      restartPolicy: Never
+      terminationGracePeriodSeconds: 60
+      nodeSelector:
+        kubernetes.io/hostname: i-0973db0dc2a8448d1
+      tolerations:
+        - key: seedleap.ai/capacity-pool
+          operator: Equal
+          value: minwm-test-phx2-karpenter
+          effect: NoSchedule
+      containers:
+        - name: contract
+          image: 829115578968.dkr.ecr.us-east-2.amazonaws.com/leap-world/minwm-training@sha256:bedc07ea3ba55059a8c1c569c3b177c4d00d41f37d4fa9105375531534ef5f2a
+          imagePullPolicy: IfNotPresent
+          workingDir: /workspace
+          env:
+            - name: GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: github-token
+                  key: token
+            - name: SGLANG_GIT_REF
+              value: 3b018756524b0211bfc42bd05f3c9ffe28a2dcdb
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          command:
+            - /bin/bash
+            - -lc
+            - |
+              set -euo pipefail
+              result_root=/results/minwm-async-a2a-contract-tiled-h200-20260807-02
+              mkdir -p "${result_root}"
+              exec > >(tee -a "${result_root}/job.log") 2>&1
+              git clone --no-checkout \
+                "https://x-access-token:${GITHUB_TOKEN}@github.com/seedleap/sglang.git" \
+                /workspace/sglang
+              git -C /workspace/sglang checkout --detach "${SGLANG_GIT_REF}"
+              [[ "$(git -C /workspace/sglang rev-parse HEAD)" == "${SGLANG_GIT_REF}" ]]
+              python3 -m pip install --no-deps \
+                addict==2.4.0 \
+                msgspec==0.21.1 \
+                orjson==3.11.9 \
+                partial-json-parser \
+                prometheus-client==0.26.0 \
+                pybase64==1.4.3 \
+                python-multipart==0.0.32 \
+                setproctitle==1.3.7 \
+                uvicorn==0.52.0 \
+                uvloop==0.22.1 \
+                watchfiles==1.2.0 \
+                websockets==17.0.1 \
+                zstandard==0.25.0 \
+                --root-user-action=ignore
+              python3 -m pip install \
+                fastapi==0.141.1 \
+                IPython==9.16.0 \
+                pyzmq==27.1.0 \
+                --root-user-action=ignore
+              export PYTHONPATH=/workspace/sglang/python
+              {
+                echo "node=${NODE_NAME}"
+                echo "image=829115578968.dkr.ecr.us-east-2.amazonaws.com/leap-world/minwm-training@sha256:bedc07ea3ba55059a8c1c569c3b177c4d00d41f37d4fa9105375531534ef5f2a"
+                echo "sglang=${SGLANG_GIT_REF}"
+                echo "started_utc=$(date --utc +%Y-%m-%dT%H:%M:%SZ)"
+              } > "${result_root}/provenance.txt"
+              nvidia-smi -q > "${result_root}/nvidia-smi.txt"
+              nvidia-smi topo -m > "${result_root}/nvidia-topology.txt"
+              python3 - <<'PY' | tee "${result_root}/runtime.json"
+              import json
+              import torch
+              print(json.dumps({
+                  "torch": torch.__version__,
+                  "cuda": torch.version.cuda,
+                  "nccl": torch.cuda.nccl.version(),
+                  "gpu": torch.cuda.get_device_name(0),
+                  "gpu_count": torch.cuda.device_count(),
+              }, indent=2, sort_keys=True))
+              PY
+              MINWM_ASYNC_TEST_WORLD=2 python3 -m pytest -q -s \
+                /workspace/sglang/python/sglang/multimodal_gen/test/single_test_file/test_minwm_async_a2a_gpu.py \
+                | tee "${result_root}/sp2.log"
+              MINWM_ASYNC_TEST_WORLD=4 python3 -m pytest -q -s \
+                /workspace/sglang/python/sglang/multimodal_gen/test/single_test_file/test_minwm_async_a2a_gpu.py \
+                | tee "${result_root}/sp4.log"
+              touch "${result_root}/SUCCESS"
+          resources:
+            requests:
+              cpu: "32"
+              memory: 160Gi
+              nvidia.com/gpu: "4"
+            limits:
+              cpu: "64"
+              memory: 320Gi
+              nvidia.com/gpu: "4"
+          volumeMounts:
+            - name: results
+              mountPath: /results
+            - name: shm
+              mountPath: /dev/shm
+      volumes:
+        - name: results
+          persistentVolumeClaim:
+            claimName: minwm-async-a2a-contract-results-20260807
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 64Gi

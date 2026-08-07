@@ -933,20 +933,6 @@ class MinWMCausalSelfAttention(CausalWanSelfAttention):
                 retire_launched()
                 raise
             attention_tiles.append(tile_output)
-            # IPC owns only two shared staging slots per shape. A handle's
-            # output aliases its slot until wait() performs the layout
-            # transform on the consumer stream, so consume i-2 before launch
-            # i can overwrite that slot. Computing tile i above is still
-            # independent work between the older launch and wait.
-            if tile_index >= 2 and handles[tile_index - 2].backend == "ipc":
-                try:
-                    consume(tile_index - 2)
-                except Exception:
-                    release()
-                    for *_, unused_release in leases[tile_index + 1 :]:
-                        unused_release()
-                    retire_launched()
-                    raise
             try:
                 with _minwm_nvtx_range(
                     f"output_a2a_tile_launch_{tile_index}", tile_output
@@ -959,6 +945,7 @@ class MinWMCausalSelfAttention(CausalWanSelfAttention):
                         comm_stream=comm_stream,
                         events=events,
                         backend=_MINWM_ASYNC_A2A_BACKEND,
+                        role=f"output_tile_{tile_index}",
                         release=release,
                     )
             except Exception:
