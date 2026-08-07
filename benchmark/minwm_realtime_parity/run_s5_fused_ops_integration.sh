@@ -269,6 +269,10 @@ for config in configs:
     if reasons and len(aggregates[config]["run_ids"]) == 2:
         triggers[config] = reasons
 
+trigger_path = summary_root / f"headline-sp{degree}-adaptive-trigger.json"
+recorded_triggers = json.loads(trigger_path.read_text()) if trigger_path.exists() else {}
+recorded_triggers.update(triggers)
+
 base = aggregates["000"]
 candidate = aggregates["111"]
 comparisons = {}
@@ -296,15 +300,40 @@ summary = {
     },
     "aggregates": aggregates,
     "comparison": comparisons,
-    "adaptive_triggers": triggers,
+    "adaptive_triggers": recorded_triggers,
 }
 (summary_root / f"headline-sp{degree}.json").write_text(
     json.dumps(summary, indent=2, sort_keys=True) + "\n"
 )
-(summary_root / f"headline-sp{degree}-adaptive-trigger.json").write_text(
-    json.dumps(triggers, indent=2, sort_keys=True) + "\n"
+trigger_path.write_text(
+    json.dumps(recorded_triggers, indent=2, sort_keys=True) + "\n"
 )
-print(json.dumps(triggers, sort_keys=True))
+print(json.dumps(recorded_triggers, sort_keys=True))
+PY
+}
+
+assert_headline_cv_gate() {
+  local degree="$1"
+  python3 - "${SUMMARY_ROOT}" "${degree}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+degree = int(sys.argv[2])
+failures = {}
+for config in ("000", "111"):
+    path = root / f"headline-sp{degree}-{config}.json"
+    summary = json.loads(path.read_text())
+    if not summary["acceptance"]["passes_cv_target"]:
+        failures[config] = {
+            name: metric["cv"]
+            for name, metric in summary["metrics"].items()
+            if name in summary["acceptance"]["required_metrics"]
+            and not metric["passes"]
+        }
+if failures:
+    raise SystemExit(f"SP{degree} headline CV gate failed after adaptive lane: {failures}")
 PY
 }
 
@@ -419,6 +448,7 @@ PY
     aggregate_variant "${degree}" "${config}"
   done
   write_headline_summary "${degree}"
+  assert_headline_cv_gate "${degree}"
   run_correctness_lane "${degree}" 111
   run_correctness_lane "${degree}" 000
   CURRENT_LANE_DIR="${RUN_ROOT}/correctness/sp${degree}"
@@ -481,6 +511,48 @@ PY
 done
 
 CURRENT_LANE_DIR="${SUMMARY_ROOT}"
+python3 - "${RUN_ROOT}" "${SUMMARY_ROOT}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+run_root = Path(sys.argv[1])
+summary_root = Path(sys.argv[2])
+for degree in (2, 4):
+    correctness_path = run_root / "correctness" / f"sp{degree}" / "correctness-summary.json"
+    nsys_path = summary_root / f"nsys-sp{degree}.json"
+    correctness = json.loads(correctness_path.read_text())
+    nsys = json.loads(nsys_path.read_text())
+    control_post = nsys["metrics"]["000"]["fused_post_kernel"]
+    candidate_post = nsys["metrics"]["111"]["fused_post_kernel"]
+    correctness["fallback_detection"] = {
+        "qkv_correctness_server": {
+            "requested": True,
+            "compatible_fallback_observed": False,
+            "evidence": str(
+                run_root
+                / f"correctness-sp{degree}-111"
+                / f"sp{degree}"
+                / "correctness-server.log"
+            ),
+        },
+        "post_a2a_exact_window": {
+            "000": control_post,
+            "111": candidate_post,
+            "candidate_stable_fallback_launch_slots": candidate_post[
+                "explicit_fallback_launch_slots"
+            ],
+            "scope": "20 precondition + 1 discard + exact 10 stable, KV45",
+        },
+        "policy": (
+            "Unsupported planner/layout cases retain the eager path; the stable "
+            "exact window must account for all 150 block-forwards per active GPU/chunk."
+        ),
+    }
+    correctness_path.write_text(
+        json.dumps(correctness, indent=2, sort_keys=True) + "\n"
+    )
+PY
 python3 - "${RUN_ROOT}" "${SUMMARY_ROOT}/artifact-manifest.json" <<'PY'
 import hashlib
 import json

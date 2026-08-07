@@ -284,10 +284,16 @@ def compare(root: Path, degree: int) -> dict[str, Any]:
     summaries = {config: _metric_summary(record) for config, record in records.items()}
     for config, record in records.items():
         fused_post = _fused_post_kernel_count(Path(paths[config]["sqlite"]), record)
+        expected_fused_post = degree * 10 * 150 if config[1] == "1" else 0
+        fused_post["expected_raw_total"] = expected_fused_post
+        fused_post["explicit_fallback_launch_slots"] = max(
+            expected_fused_post - fused_post["raw_total"], 0
+        )
         summaries[config]["fused_post_kernel"] = fused_post
-        if config[1] == "1" and fused_post["raw_total"] == 0:
+        if config[1] == "1" and fused_post["raw_total"] != expected_fused_post:
             raise ValueError(
-                f"{config}: post-A2A fusion was requested but its kernel did not launch"
+                f"{config}: expected {expected_fused_post} post-A2A launches, "
+                f"got {fused_post['raw_total']}; fallback coverage is incomplete"
             )
         if config[1] == "0" and fused_post["raw_total"] != 0:
             raise ValueError(
@@ -337,6 +343,7 @@ def compare(root: Path, degree: int) -> dict[str, Any]:
             "precision": "bf16",
             "dmd_forwards_per_chunk": 4,
             "clean_cache_forwards_per_chunk": 1,
+            "expected_fused_post_launches_per_active_gpu_per_chunk": 150,
             "wall_residual_trigger_abs_percentage_points": 0.5,
             "count_residual_trigger": "any non-zero per-chunk residual",
         },

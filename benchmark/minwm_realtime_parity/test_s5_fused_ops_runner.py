@@ -31,6 +31,8 @@ def test_runner_has_one_initial_abba_per_sp_and_adaptive_only_followup():
     assert '"order": ["111", "000", "000", "111"]' in runner
     assert "MINWM_S0_OFF_REPEAT_COUNT=1" in runner
     assert 'POSITION_DRIFT_PCT="${MINWM_S5_POSITION_DRIFT_PCT:-3.0}"' in runner
+    assert 'assert_headline_cv_gate "${degree}"' in runner
+    assert "recorded_triggers.update(triggers)" in runner
 
 
 def test_runner_covers_primary_and_conditional_pairwise_nsys_matrix():
@@ -59,6 +61,7 @@ def test_runner_records_three_flags_and_strict_correctness_outputs():
     assert "torch.equal(base_tensor, candidate_tensor)" in runner
     assert "chunk_*_latents.pt" in runner
     assert "compatible three-projection fallback" in runner
+    assert '"candidate_stable_fallback_launch_slots"' in runner
 
 
 def test_s0_runner_modes_keep_profiler_off_and_nsys_isolated():
@@ -102,3 +105,10 @@ def test_triple_interaction_residual_uses_all_three_singletons():
         assert residual[metric]["component_delta_sum"] == -6.0
         assert residual[metric]["absolute"] == -0.5
         assert residual[metric]["percentage_points_of_000"] == -0.5
+
+
+def test_nsys_requires_full_post_a2a_launch_coverage():
+    comparator = (ROOT / "compare_s5_fused_ops.py").read_text()
+    assert 'degree * 10 * 150 if config[1] == "1" else 0' in comparator
+    assert '"explicit_fallback_launch_slots"' in comparator
+    assert '"expected_fused_post_launches_per_active_gpu_per_chunk": 150' in comparator
