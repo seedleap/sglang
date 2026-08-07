@@ -164,7 +164,11 @@ Job 名与产物路径在创建后补入，且只清理带本任务唯一前缀�
 
 首次 `minwm-s3-a2a-h200-20260807-01` 在 setup/staging 阶段收到 59aa pin 更新，
 尚未进入 kernel/parity/A/B client 即删除该精确 Job，保留本任务 PVC；不保留任何
-25cc 测量数据。重提 Job 为 `minwm-s3-a2a-h200-20260807-02`。
+25cc 测量数据。第二次 `minwm-s3-a2a-h200-20260807-02` 已使用 59aa，但在任何
+CUDA kernel/client 启动前，registered test 收集因临时 runner 未把 source tree 加入
+`PYTHONPATH` 而失败；这不是实现测试失败，也不产生可保留的测量数据。修正后的 runner
+commit 为 `88d54943f1d77a0919643fcb35e5961931464bef`，第三次 Job
+`minwm-s3-a2a-h200-20260807-03` 继续复用同一结果 PVC，并重新从 correctness gate 开始。
 
 ## 给负责人掌握代码的检查题
 
