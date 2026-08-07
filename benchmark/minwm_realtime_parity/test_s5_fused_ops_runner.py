@@ -20,14 +20,14 @@ def _load_compare_module():
 def test_runner_has_one_initial_abba_per_sp_and_adaptive_only_followup():
     runner = (ROOT / "run_s5_fused_ops_integration.sh").read_text()
     required_order = (
-        'run_headline_lane "${degree}" a1 111 1',
-        'run_headline_lane "${degree}" a1 000 1',
-        'run_headline_lane "${degree}" a2 000 0',
-        'run_headline_lane "${degree}" a2 111 0',
+        'run_headline_lane "${degree}" a1 111',
+        'run_headline_lane "${degree}" a1 000',
+        'run_headline_lane "${degree}" a2 000',
+        'run_headline_lane "${degree}" a2 111',
     )
     positions = [runner.index(item) for item in required_order]
     assert positions == sorted(positions)
-    assert runner.count('run_headline_lane "${degree}" adaptive "${config}" 0') == 1
+    assert runner.count('run_headline_lane "${degree}" adaptive "${config}"') == 1
     assert '"order": ["111", "000", "000", "111"]' in runner
     assert "MINWM_S0_OFF_REPEAT_COUNT=1" in runner
     assert 'POSITION_DRIFT_PCT="${MINWM_S5_POSITION_DRIFT_PCT:-3.0}"' in runner
@@ -71,6 +71,18 @@ def test_s0_runner_modes_keep_profiler_off_and_nsys_isolated():
     assert '"${lane_dir}/correctness-server.log"' in runner
     assert "MINWM_S0_PARITY_DUMP_DIR= \\\n" in runner
     assert '"${lane_dir}/profiler-off-server.log"' in runner
+    assert 'BITWISE_ONLY="${MINWM_S0_BITWISE_ONLY:-0}"' in runner
+    assert 'if [[ "${BITWISE_ONLY}" == "1" ]]; then\n      return' in runner
+
+
+def test_correctness_servers_do_not_precondition_headline_abba():
+    runner = (ROOT / "run_s5_fused_ops_integration.sh").read_text()
+    assert "run_correctness_lane()" in runner
+    assert "export MINWM_S0_BITWISE_ONLY=1" in runner
+    assert "export MINWM_S0_BITWISE_ONLY=0" in runner
+    last_headline = runner.index('run_headline_lane "${degree}" a2 111')
+    first_correctness = runner.index('run_correctness_lane "${degree}" 111')
+    assert last_headline < first_correctness
 
 
 def test_triple_interaction_residual_uses_all_three_singletons():

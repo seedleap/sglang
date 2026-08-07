@@ -154,7 +154,7 @@ python3 -m pytest -q \
 date --utc +%Y-%m-%dT%H:%M:%SZ > "${CURRENT_LANE_DIR}/complete.txt"
 
 run_headline_lane() {
-  local degree="$1" position="$2" config="$3" run_bitwise="$4"
+  local degree="$1" position="$2" config="$3"
   local label="headline-sp${degree}-${position}-${config}"
   apply_config "${config}"
   export MINWM_S0_SP_DEGREES="${degree}"
@@ -162,19 +162,10 @@ run_headline_lane() {
   export MINWM_S0_PROFILER_OFF_ONLY=1
   export MINWM_S0_NSYS_ONLY=0
   export MINWM_S0_OFF_REPEAT_COUNT=1
-  export MINWM_S0_RUN_BITWISE="${run_bitwise}"
-  export MINWM_S0_BITWISE_RESULTS_ROOT="${RUN_ROOT}/correctness/sp${degree}/results"
-  export MINWM_S0_PARITY_DUMP_ALL_BLOCKS=1
-  if [[ "${run_bitwise}" == "1" ]]; then
-    export MINWM_S0_PARITY_DUMP_DIR="${RUN_ROOT}/correctness/sp${degree}/dumps/${config}"
-    if [[ "${config}" == "000" ]]; then
-      export MINWM_S0_BITWISE_OUTPUT_PREFIX=baseline
-    else
-      export MINWM_S0_BITWISE_OUTPUT_PREFIX=sglang
-    fi
-  else
-    unset MINWM_S0_PARITY_DUMP_DIR MINWM_S0_BITWISE_OUTPUT_PREFIX
-  fi
+  export MINWM_S0_RUN_BITWISE=0
+  export MINWM_S0_BITWISE_ONLY=0
+  export MINWM_S0_PARITY_DUMP_ALL_BLOCKS=0
+  unset MINWM_S0_PARITY_DUMP_DIR MINWM_S0_BITWISE_OUTPUT_PREFIX
   CURRENT_LANE_DIR="${RUN_ROOT}/${label}"
   assert_no_nsys
   bash "${SCRIPT_DIR}/run_s0_measurement.sh"
@@ -183,9 +174,34 @@ run_headline_lane() {
   python3 "${SCRIPT_DIR}/measurement_tool.py" validate \
     "${lane}/profiler-off-repeat1.json"
   assert_execution_profile "${lane}/profiler-off-server.log" "${config}"
-  if [[ "${run_bitwise}" == "1" ]]; then
-    assert_execution_profile "${lane}/correctness-server.log" "${config}"
+  CURRENT_LANE_DIR="${RUN_ROOT}"
+}
+
+run_correctness_lane() {
+  local degree="$1" config="$2"
+  local label="correctness-sp${degree}-${config}"
+  apply_config "${config}"
+  export MINWM_S0_SP_DEGREES="${degree}"
+  export MINWM_S0_RUN_LABEL="${label}"
+  export MINWM_S0_PROFILER_OFF_ONLY=1
+  export MINWM_S0_NSYS_ONLY=0
+  export MINWM_S0_OFF_REPEAT_COUNT=1
+  export MINWM_S0_RUN_BITWISE=1
+  export MINWM_S0_BITWISE_ONLY=1
+  export MINWM_S0_BITWISE_RESULTS_ROOT="${RUN_ROOT}/correctness/sp${degree}/results"
+  export MINWM_S0_PARITY_DUMP_ALL_BLOCKS=1
+  export MINWM_S0_PARITY_DUMP_DIR="${RUN_ROOT}/correctness/sp${degree}/dumps/${config}"
+  if [[ "${config}" == "000" ]]; then
+    export MINWM_S0_BITWISE_OUTPUT_PREFIX=baseline
+  else
+    export MINWM_S0_BITWISE_OUTPUT_PREFIX=sglang
   fi
+  CURRENT_LANE_DIR="${RUN_ROOT}/${label}"
+  assert_no_nsys
+  bash "${SCRIPT_DIR}/run_s0_measurement.sh"
+  assert_no_nsys
+  assert_execution_profile \
+    "${RUN_ROOT}/${label}/sp${degree}/correctness-server.log" "${config}"
   CURRENT_LANE_DIR="${RUN_ROOT}"
 }
 
@@ -382,10 +398,10 @@ PY
 }
 
 for degree in 2 4; do
-  run_headline_lane "${degree}" a1 111 1
-  run_headline_lane "${degree}" a1 000 1
-  run_headline_lane "${degree}" a2 000 0
-  run_headline_lane "${degree}" a2 111 0
+  run_headline_lane "${degree}" a1 111
+  run_headline_lane "${degree}" a1 000
+  run_headline_lane "${degree}" a2 000
+  run_headline_lane "${degree}" a2 111
   CURRENT_LANE_DIR="${SUMMARY_ROOT}/headline-sp${degree}-analysis"
   mkdir -p "${CURRENT_LANE_DIR}"
   aggregate_variant "${degree}" 111
@@ -399,10 +415,12 @@ for config in json.load(open(sys.argv[1])):
 PY
   )
   for config in "${adaptive_configs[@]}"; do
-    run_headline_lane "${degree}" adaptive "${config}" 0
+    run_headline_lane "${degree}" adaptive "${config}"
     aggregate_variant "${degree}" "${config}"
   done
   write_headline_summary "${degree}"
+  run_correctness_lane "${degree}" 111
+  run_correctness_lane "${degree}" 000
   CURRENT_LANE_DIR="${RUN_ROOT}/correctness/sp${degree}"
   compare_correctness "${degree}"
 done
@@ -417,6 +435,8 @@ run_nsys_lane() {
   export MINWM_S0_NSYS_ONLY=1
   export MINWM_S0_OFF_REPEAT_COUNT=2
   export MINWM_S0_RUN_BITWISE=0
+  export MINWM_S0_BITWISE_ONLY=0
+  export MINWM_S0_PARITY_DUMP_ALL_BLOCKS=0
   unset MINWM_S0_PARITY_DUMP_DIR MINWM_S0_BITWISE_OUTPUT_PREFIX
   CURRENT_LANE_DIR="${RUN_ROOT}/${label}"
   bash "${SCRIPT_DIR}/run_s0_measurement.sh"

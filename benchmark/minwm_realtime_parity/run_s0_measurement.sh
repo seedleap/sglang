@@ -14,6 +14,7 @@ RUN_LABEL="${MINWM_S0_RUN_LABEL:-s0-measurement}"
 PROFILER_OFF_ONLY="${MINWM_S0_PROFILER_OFF_ONLY:-0}"
 OFF_REPEAT_COUNT="${MINWM_S0_OFF_REPEAT_COUNT:-2}"
 RUN_BITWISE="${MINWM_S0_RUN_BITWISE:-0}"
+BITWISE_ONLY="${MINWM_S0_BITWISE_ONLY:-0}"
 BITWISE_OUTPUT_PREFIX="${MINWM_S0_BITWISE_OUTPUT_PREFIX:-${RUN_LABEL}}"
 BITWISE_RESULTS_ROOT="${MINWM_S0_BITWISE_RESULTS_ROOT:-${MINWM_RESULTS_ROOT%/}/${MINWM_RUN_ID}/bitwise}"
 RESULT_ROOT="${MINWM_RESULTS_ROOT%/}/${MINWM_RUN_ID}/${RUN_LABEL}"
@@ -76,6 +77,15 @@ if ! [[ "${RUN_BITWISE}" =~ ^[01]$ ]]; then
   echo "MINWM_S0_RUN_BITWISE must be 0 or 1" >&2
   exit 2
 fi
+if ! [[ "${BITWISE_ONLY}" =~ ^[01]$ ]]; then
+  echo "MINWM_S0_BITWISE_ONLY must be 0 or 1" >&2
+  exit 2
+fi
+if [[ "${BITWISE_ONLY}" == "1" \
+  && ( "${RUN_BITWISE}" != "1" || "${PROFILER_OFF_ONLY}" != "1" ) ]]; then
+  echo "Bitwise-only mode requires bitwise and profiler-off-only modes" >&2
+  exit 2
+fi
 if [[ -n "${SGLANG_DIFFUSION_TORCH_PROFILER_DIR:-}" ]]; then
   echo "SGLANG_DIFFUSION_TORCH_PROFILER_DIR must be unset during Nsight capture" >&2
   exit 2
@@ -132,6 +142,7 @@ ALLOCATED_GPU_COUNT="${MINWM_ALLOCATED_GPU_COUNT:-$(nvidia-smi -L | wc -l | xarg
   echo "nsys_only=${NSYS_ONLY}"
   echo "profiler_off_only=${PROFILER_OFF_ONLY}"
   echo "run_bitwise=${RUN_BITWISE}"
+  echo "bitwise_only=${BITWISE_ONLY}"
   echo "resume_profiler_off_root=${RESUME_PROFILER_OFF_ROOT:-none}"
   echo "started_utc=$(date --utc +%Y-%m-%dT%H:%M:%SZ)"
 } | tee "${RESULT_ROOT}/contract.txt"
@@ -341,6 +352,9 @@ run_profiler_off() {
       --kv-cache-num-frames "${KV_CACHE_NUM_FRAMES}"
     stop_server
     assert_no_nsys_processes
+    if [[ "${BITWISE_ONLY}" == "1" ]]; then
+      return
+    fi
   fi
   MINWM_S0_PARITY_DUMP_DIR= \
   MINWM_S0_PARITY_DUMP_ALL_BLOCKS=0 \
@@ -525,7 +539,9 @@ for degree in "${degrees[@]}"; do
 done
 
 failure_scope="${RESULT_ROOT}"
-python3 - "${RESULT_ROOT}" "${NSYS_ONLY}" "${PROFILER_OFF_ONLY}" "${OFF_REPEAT_COUNT}" <<'PY'
+python3 - \
+  "${RESULT_ROOT}" "${NSYS_ONLY}" "${PROFILER_OFF_ONLY}" \
+  "${OFF_REPEAT_COUNT}" "${BITWISE_ONLY}" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -534,6 +550,7 @@ root = Path(sys.argv[1])
 nsys_only = sys.argv[2] == "1"
 profiler_off_only = sys.argv[3] == "1"
 off_repeat_count = int(sys.argv[4])
+bitwise_only = sys.argv[5] == "1"
 lanes = {}
 for lane_dir in sorted(root.glob("sp*")):
     if not lane_dir.is_dir():
@@ -543,7 +560,9 @@ for lane_dir in sorted(root.glob("sp*")):
         lane["profiler_on"] = json.loads(
             (lane_dir / "profiler-on/measurement.json").read_text()
         )
-    if profiler_off_only and off_repeat_count == 1:
+    if bitwise_only:
+        lane["bitwise_only"] = {"status": "complete"}
+    elif profiler_off_only and off_repeat_count == 1:
         lane["profiler_off_single"] = json.loads(
             (lane_dir / "profiler-off-repeat1.json").read_text()
         )
@@ -554,12 +573,16 @@ for lane_dir in sorted(root.glob("sp*")):
     lanes[lane_dir.name] = lane
 summary = {
     "schema_version": (
-        "minwm-realtime-s0-profiler-off-only/v1"
-        if profiler_off_only
+        "minwm-realtime-s0-bitwise-only/v1"
+        if bitwise_only
         else (
-            "minwm-realtime-s0-nsys-only/v1"
-            if nsys_only
-            else "minwm-realtime-s0-baseline/v1"
+            "minwm-realtime-s0-profiler-off-only/v1"
+            if profiler_off_only
+            else (
+                "minwm-realtime-s0-nsys-only/v1"
+                if nsys_only
+                else "minwm-realtime-s0-baseline/v1"
+            )
         )
     ),
     "lanes": lanes,
