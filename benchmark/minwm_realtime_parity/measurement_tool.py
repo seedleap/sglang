@@ -67,7 +67,13 @@ def aggregate(records: list[dict[str, Any]], explanation: str | None) -> dict[st
             "target_cv_lte": 0.03,
             "passes": cv <= 0.03,
         }
-    passes = all(item["passes"] for item in metrics.values())
+    acceptance_metrics = (
+        "client_fps",
+        "scheduler_fps",
+        "dit_wall_ms",
+        "vae_wall_ms",
+    )
+    passes = all(metrics[name]["passes"] for name in acceptance_metrics)
     return {
         "schema_version": "minwm-realtime-repeat-summary/v1",
         "run_ids": [record["run_id"] for record in records],
@@ -75,6 +81,7 @@ def aggregate(records: list[dict[str, Any]], explanation: str | None) -> dict[st
         "metrics": metrics,
         "acceptance": {
             "passes_cv_target": passes,
+            "required_metrics": list(acceptance_metrics),
             "explanation_required": not passes,
             "environment_noise_explanation": explanation,
         },

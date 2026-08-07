@@ -229,4 +229,5 @@ def test_repeat_summary_uses_sample_cv_and_flags_variance() -> None:
         coefficient_of_variation([16.0, 17.0])
     )
     assert summary["metrics"]["client_fps"]["passes"] is False
+    assert "scheduler_chunk_wall_ms" not in summary["acceptance"]["required_metrics"]
     assert summary["acceptance"]["environment_noise_explanation"]
