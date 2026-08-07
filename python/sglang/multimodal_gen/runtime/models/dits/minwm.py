@@ -35,7 +35,6 @@ from sglang.multimodal_gen.runtime.layers.attention import LocalAttention
 from sglang.multimodal_gen.runtime.layers.layernorm import tensor_parallel_rms_norm
 from sglang.multimodal_gen.runtime.layers.rotary_embedding import NDRotaryEmbedding
 from sglang.multimodal_gen.runtime.layers.usp import (
-    _usp_input_all_to_all_packed_qkv,
     _usp_input_all_to_all_qkv,
     _usp_input_all_to_all_varlen_qkv,
     _usp_output_all_to_all,
@@ -82,7 +81,6 @@ _MINWM_SEGMENT_COMPILE = _env_flag("MINWM_SEGMENT_COMPILE", True)
 _MINWM_CACHE_ROTATED_K = _env_flag("MINWM_CACHE_ROTATED_K", True)
 _MINWM_PRECOMPUTE_CACHE_ROPE = _env_flag("MINWM_PRECOMPUTE_CACHE_ROPE", True)
 _MINWM_CACHE_PACKED_METADATA = _env_flag("MINWM_CACHE_PACKED_METADATA", True)
-_MINWM_FUSED_PRE_A2A_QK_NORM = _env_flag("MINWM_FUSED_PRE_A2A_QK_NORM", False)
 _MINWM_FUSED_POST_A2A_ROPE_CACHE = _env_flag("MINWM_FUSED_POST_A2A_ROPE_CACHE", False)
 _MINWM_ANNOUNCED_ATTENTION_BACKENDS: set[tuple[str, str]] = set()
 
@@ -472,22 +470,6 @@ def _minwm_qk_norm_op(
     return query, key
 
 
-def _minwm_qk_norm_head_layout(
-    query: torch.Tensor,
-    key: torch.Tensor,
-    query_weight: torch.Tensor,
-    key_weight: torch.Tensor,
-    eps: float,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Apply across-head RMSNorm while retaining ``[B,S,H,D]`` layout."""
-    shape = query.shape
-    if query.ndim != 4 or query.shape != key.shape:
-        raise ValueError("MinWM Q/K head layouts must match")
-    query = MinWMRMSNorm._norm(query.flatten(2), query_weight, eps).view(shape)
-    key = MinWMRMSNorm._norm(key.flatten(2), key_weight, eps).view(shape)
-    return query, key
-
-
 def _minwm_apply_qk_op(
     qk_op,
     qk_args: list,
@@ -657,11 +639,8 @@ class MinWMCausalSelfAttention(CausalWanSelfAttention):
         current_start=0,
         cache_start=None,
         qk_already_roped=False,
-        pre_a2a_qk_norm=None,
     ):
         if kv_cache is None:
-            if pre_a2a_qk_norm is not None:
-                raise ValueError("pre-A2A Q/K norm requires the MinWM cache path")
             return super().forward(
                 query,
                 key,
@@ -702,60 +681,16 @@ class MinWMCausalSelfAttention(CausalWanSelfAttention):
                     packed_numel = 3 * query.numel()
                     input_buffer = workspace.get("qkv_send", query, packed_numel)
                     output_buffer = workspace.get("qkv_recv", query, packed_numel)
-                qkv = None
-                if pre_a2a_qk_norm is not None:
-                    query_weight, key_weight, eps = pre_a2a_qk_norm
-                    try:
-                        from sglang.jit_kernel.diffusion.triton.minwm_ulysses import (
-                            can_fuse_qk_rmsnorm_pack_peer_first,
-                            fused_qk_rmsnorm_pack_peer_first,
-                        )
-                    except ImportError:
-                        pass
-                    else:
-                        world_size = get_ulysses_parallel_world_size()
-                        if can_fuse_qk_rmsnorm_pack_peer_first(
-                            query,
-                            key,
-                            value,
-                            query_weight,
-                            key_weight,
-                            world_size,
-                        ):
-                            packed = fused_qk_rmsnorm_pack_peer_first(
-                                query,
-                                key,
-                                value,
-                                query_weight,
-                                key_weight,
-                                eps,
-                                world_size,
-                                input_buffer,
-                            )
-                            qkv = _usp_input_all_to_all_packed_qkv(
-                                packed, output_buffer=output_buffer
-                            )
-                if qkv is None:
-                    if pre_a2a_qk_norm is not None:
-                        query, key = _minwm_qk_norm_head_layout(
-                            query, key, *pre_a2a_qk_norm
-                        )
-                    qkv = _usp_input_all_to_all_qkv(
-                        query,
-                        key,
-                        value,
-                        input_buffer=input_buffer,
-                        output_buffer=output_buffer,
-                    )
+                qkv = _usp_input_all_to_all_qkv(
+                    query,
+                    key,
+                    value,
+                    input_buffer=input_buffer,
+                    output_buffer=output_buffer,
+                )
             else:
-                if pre_a2a_qk_norm is not None:
-                    query, key = _minwm_qk_norm_head_layout(
-                        query, key, *pre_a2a_qk_norm
-                    )
                 qkv = _usp_input_all_to_all_varlen_qkv(query, key, value, seq_splits)
             query, key, value = qkv.chunk(3, dim=-1)
-        elif pre_a2a_qk_norm is not None:
-            query, key = _minwm_qk_norm_head_layout(query, key, *pre_a2a_qk_norm)
 
         cache_head_start = 0 if sequence_shard_enabled else self.head_start
         fused_post_result = None
@@ -991,7 +926,6 @@ class MinWMCausalTransformerBlock(CausalWanTransformerBlock):
         query, _ = self.to_q(norm_hidden_states)
         key, _ = self.to_k(norm_hidden_states)
         value, _ = self.to_v(norm_hidden_states)
-        pre_a2a_qk_norm = None
         if self.tp_rmsnorm:
             query = tensor_parallel_rms_norm(query, self.norm_q)
             key = tensor_parallel_rms_norm(key, self.norm_k)
@@ -999,48 +933,26 @@ class MinWMCausalTransformerBlock(CausalWanTransformerBlock):
             key = key.squeeze(1).unflatten(2, (self.local_num_heads, self.dim_head))
             qk_already_roped = False
         else:
-            forward_batch = get_forward_context().forward_batch
-            defer_pre_a2a_qk_norm = bool(
-                _MINWM_FUSED_PRE_A2A_QK_NORM
-                and kv_cache is not None
-                and forward_batch is not None
-                and getattr(forward_batch, "enable_sequence_shard", False)
-                and get_ulysses_parallel_world_size() > 1
+            qk_op = _minwm_qk_norm_rope_op if kv_cache is None else _minwm_qk_norm_op
+            qk_args = [
+                query.squeeze(1),
+                key.squeeze(1),
+                self.norm_q.weight,
+                self.norm_k.weight,
+                self.norm_q.eps,
+            ]
+            if kv_cache is None:
+                qk_args.append(torch.stack(freqs_cis, dim=-1))
+            qk_args.append(self.local_num_heads)
+            # minWM main's inference/cache path calls qk_norm_op eagerly.
+            # Compiling this reduction changes its BF16 rounding boundary.
+            query, key = _minwm_apply_qk_op(
+                qk_op,
+                qk_args,
+                use_cache=kv_cache is not None,
+                use_compile=query.is_cuda,
             )
-            if defer_pre_a2a_qk_norm:
-                query = query.squeeze(1).unflatten(
-                    2, (self.local_num_heads, self.dim_head)
-                )
-                key = key.squeeze(1).unflatten(2, (self.local_num_heads, self.dim_head))
-                pre_a2a_qk_norm = (
-                    self.norm_q.weight,
-                    self.norm_k.weight,
-                    self.norm_q.eps,
-                )
-                qk_already_roped = False
-            else:
-                qk_op = (
-                    _minwm_qk_norm_rope_op if kv_cache is None else _minwm_qk_norm_op
-                )
-                qk_args = [
-                    query.squeeze(1),
-                    key.squeeze(1),
-                    self.norm_q.weight,
-                    self.norm_k.weight,
-                    self.norm_q.eps,
-                ]
-                if kv_cache is None:
-                    qk_args.append(torch.stack(freqs_cis, dim=-1))
-                qk_args.append(self.local_num_heads)
-                # minWM main's inference/cache path calls qk_norm_op eagerly.
-                # Compiling this reduction changes its BF16 rounding boundary.
-                query, key = _minwm_apply_qk_op(
-                    qk_op,
-                    qk_args,
-                    use_cache=kv_cache is not None,
-                    use_compile=query.is_cuda,
-                )
-                qk_already_roped = kv_cache is None
+            qk_already_roped = kv_cache is None
         value = value.squeeze(1).unflatten(2, (self.local_num_heads, self.dim_head))
         attn_output = self.attn1(
             query,
@@ -1052,7 +964,6 @@ class MinWMCausalTransformerBlock(CausalWanTransformerBlock):
             current_start,
             cache_start,
             qk_already_roped=qk_already_roped,
-            pre_a2a_qk_norm=pre_a2a_qk_norm,
         ).flatten(2)
         attn_output, _ = self.to_out(attn_output)
         attn_output = attn_output.squeeze(1)
@@ -1131,14 +1042,13 @@ class MinWMCausalTransformer3DModel(CausalWanTransformer3DModel):
             "MinWM execution profile: attention_impl=%s "
             "packed_deterministic=%s segment_compile=%s cache_rotated_k=%s "
             "precompute_cache_rope=%s cache_packed_metadata=%s "
-            "fused_pre_a2a_qk_norm=%s fused_post_a2a_rope_cache=%s",
+            "fused_post_a2a_rope_cache=%s",
             _MINWM_ATTENTION_IMPL,
             _MINWM_PACKED_ATTENTION_DETERMINISTIC,
             _MINWM_SEGMENT_COMPILE,
             _MINWM_CACHE_ROTATED_K,
             _MINWM_PRECOMPUTE_CACHE_ROPE,
             _MINWM_CACHE_PACKED_METADATA,
-            _MINWM_FUSED_PRE_A2A_QK_NORM,
             _MINWM_FUSED_POST_A2A_ROPE_CACHE,
         )
         deterministic = os.environ.get("MINWM_PARITY_DETERMINISTIC", "0")

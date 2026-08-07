@@ -39,7 +39,6 @@ from sglang.multimodal_gen.runtime.models.dits.minwm import (
     _minwm_layer_norm,
     _minwm_packed_attention_backend,
     _minwm_project_output_in_reference_row_bucket,
-    _minwm_qk_norm_head_layout,
     _minwm_qk_norm_op,
     _minwm_qk_norm_rope_op,
     _minwm_should_restore_reference_output_projection,
@@ -1946,11 +1945,6 @@ def test_minwm_causal_attention_packs_one_ulysses_collective(monkeypatch, seq_sp
         kv_cache=cache,
         current_start=17,
         qk_already_roped=False,
-        pre_a2a_qk_norm=(
-            torch.ones(4 * head_dim),
-            torch.full((4 * head_dim,), 2.0),
-            0.0,
-        ),
     )
 
     assert output.shape == (1, local_seq, 4, head_dim)
@@ -2159,15 +2153,6 @@ def test_minwm_fused_segments_match_main_eager_formulas():
     raw_query, raw_key = _minwm_qk_norm_op(
         query, key, query_weight, key_weight, 1e-6, 2
     )
-    head_query, head_key = _minwm_qk_norm_head_layout(
-        query.view(1, 6, 2, 4),
-        key.view(1, 6, 2, 4),
-        query_weight,
-        key_weight,
-        1e-6,
-    )
-    torch.testing.assert_close(head_query, raw_query, rtol=0, atol=0)
-    torch.testing.assert_close(head_key, raw_key, rtol=0, atol=0)
     separated_query = apply_minwm_rotary_embedding(
         raw_query, rope[..., 0], rope[..., 1]
     )
