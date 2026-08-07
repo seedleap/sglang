@@ -5,6 +5,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 RUNNER = ROOT / "run_s3_post_sp4_abba_off_only.sh"
+MANIFEST = ROOT / "k8s" / "minwm_s3_post_sp4_abba_h200_20260807.yaml"
 
 
 def _shell_function(name: str) -> str:
@@ -26,11 +27,17 @@ def _run_bash(script: str, env: dict[str, str] | None = None) -> None:
 
 
 def test_wrapper_is_physically_off_only() -> None:
-    text = RUNNER.read_text().lower()
-    assert "nsys" not in text
-    assert "profiler_on" not in text
-    assert "positions=(a1 b1 b2 a2)" in text
-    assert "lanes=(01 00 00 01)" in text
+    runner = RUNNER.read_text().lower()
+    manifest = MANIFEST.read_text().lower()
+    for text in (runner, manifest):
+        assert "nsys" not in text
+        assert "profiler_on" not in text
+    assert "positions=(a1 b1 b2 a2)" in runner
+    assert "lanes=(01 00 00 01)" in runner
+    assert "backofflimit: 0" in manifest
+    assert "kubernetes.io/hostname: i-06888dc1ca88547e1" in manifest
+    assert 'value: "900b5f279b65b2afcfbe6cc9b36cfa4496b41bc3"' in manifest
+    assert 'value: "29c6ada1a514c137c2ca4cf81b58fdc2065b401a"' in manifest
 
 
 def test_failed_position_marker_does_not_invalidate_siblings(tmp_path: Path) -> None:
