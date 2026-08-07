@@ -386,6 +386,8 @@ for degree in 2 4; do
   run_headline_lane "${degree}" a1 000 1
   run_headline_lane "${degree}" a2 000 0
   run_headline_lane "${degree}" a2 111 0
+  CURRENT_LANE_DIR="${SUMMARY_ROOT}/headline-sp${degree}-analysis"
+  mkdir -p "${CURRENT_LANE_DIR}"
   aggregate_variant "${degree}" 111
   aggregate_variant "${degree}" 000
   write_headline_summary "${degree}"
@@ -401,6 +403,7 @@ PY
     aggregate_variant "${degree}" "${config}"
   done
   write_headline_summary "${degree}"
+  CURRENT_LANE_DIR="${RUN_ROOT}/correctness/sp${degree}"
   compare_correctness "${degree}"
 done
 
@@ -434,6 +437,8 @@ for degree in 2 4; do
   for config in "${primary_order[@]}"; do
     run_nsys_lane "${degree}" "${config}"
   done
+  CURRENT_LANE_DIR="${SUMMARY_ROOT}/nsys-sp${degree}-analysis"
+  mkdir -p "${CURRENT_LANE_DIR}"
   python3 "${SCRIPT_DIR}/compare_s5_fused_ops.py" \
     --root "${RUN_ROOT}" \
     --degree "${degree}" \
@@ -447,6 +452,7 @@ PY
     for config in 110 101 011; do
       run_nsys_lane "${degree}" "${config}"
     done
+    CURRENT_LANE_DIR="${SUMMARY_ROOT}/nsys-sp${degree}-analysis"
     python3 "${SCRIPT_DIR}/compare_s5_fused_ops.py" \
       --root "${RUN_ROOT}" \
       --degree "${degree}" \
