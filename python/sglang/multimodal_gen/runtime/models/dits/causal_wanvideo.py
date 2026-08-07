@@ -749,6 +749,9 @@ class CausalWanTransformer3DModel(BaseDiT, LayerwiseOffloadableModuleMixin):
         assert encoder_hidden_states.dtype == orig_dtype
 
         # 4. Transformer blocks
+        transformer_block_temb = self._prepare_transformer_block_temb(
+            hidden_states, timestep_proj
+        )
         for block_index, block in enumerate(self.blocks):
             if torch.is_grad_enabled() and self.gradient_checkpointing:
                 causal_kwargs = {
@@ -761,7 +764,7 @@ class CausalWanTransformer3DModel(BaseDiT, LayerwiseOffloadableModuleMixin):
                     block,
                     hidden_states,
                     encoder_hidden_states,
-                    timestep_proj,
+                    transformer_block_temb,
                     freqs_cis,
                     **causal_kwargs,
                 )
@@ -776,10 +779,11 @@ class CausalWanTransformer3DModel(BaseDiT, LayerwiseOffloadableModuleMixin):
                 hidden_states = block(
                     hidden_states,
                     encoder_hidden_states,
-                    timestep_proj,
+                    transformer_block_temb,
                     freqs_cis,
                     **causal_kwargs,
                 )
+        del transformer_block_temb
 
         # 5. Output norm and projection. Model-specific implementations can
         # preserve checkpoint-family rounding boundaries here.
@@ -799,6 +803,15 @@ class CausalWanTransformer3DModel(BaseDiT, LayerwiseOffloadableModuleMixin):
         output = hidden_states.flatten(6, 7).flatten(4, 5).flatten(2, 3)
 
         return output
+
+    def _prepare_transformer_block_temb(
+        self,
+        hidden_states: torch.Tensor,
+        timestep_proj: torch.Tensor,
+    ) -> torch.Tensor:
+        """Prepare the timestep input shared by every transformer block."""
+        del hidden_states
+        return timestep_proj
 
     def _apply_output_head(
         self,
