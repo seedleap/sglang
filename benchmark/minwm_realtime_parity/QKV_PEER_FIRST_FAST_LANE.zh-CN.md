@@ -155,17 +155,18 @@ steady-state contract。首块、短程 append/recompute、cache growth 和尚�
 H200 临时测量分支只允许临时引入：
 
 - S0 branch：`origin/codex/minwm-fused-ops-s0`
-- S0 commit：`e75e9e24b5`（包含 `411d9b9ec4`）
+- S0 canonical commit：`25cc42ef8c`（包含 `e75e9e24b5` 与 `411d9b9ec4`）
 - draft PR：#19
 
-旧的 `30cb16708f` / `8e06ab2fc3` / `411d9b9ec4` 不再作为 clean runner 的最终 pin。
-S0 未合并前，测量分支可以在 S4 实现 commit 上 cherry-pick `e75e9e24b5`；S4 PR 对
-main 的最终 diff 必须移除 S0 基础设施。
+旧的 `30cb16708f` / `8e06ab2fc3` / `411d9b9ec4` / `e75e9e24b5` 不再作为新 clean
+runner 的最终 pin。S0 未合并前，临时测量分支从 `25cc42ef8c` checkout 后叠加 S4
+实现 commit；S4 PR 对 main 的最终 diff 必须移除 S0 基础设施。
 入口使用 `benchmark/minwm_realtime_parity/run_s0_measurement.sh`，结果再经同一 commit 的
 `measurement_tool.py` validate/merge-nsys/aggregate。
 
-若 raw capture 是由 `411d9b9ec4` 启动，可以保留 `.sqlite`，但最终 JSON 必须用
-`e75e9e24b5` 的工具重新 merge，并记录实际 checkout SHA，不能沿用旧 schema 的 JSON。
+若 raw capture 是由 `411d9b9ec4` 或 `e75e9e24b5` 启动，可以保留 `.sqlite`，但最终
+JSON 必须通过 `25cc42ef8c` 的 jsonschema validator，并记录实际 checkout SHA，不能
+沿用未验证的旧 JSON。
 
 每个 JSON 必须记录实际 SGLang SHA、minWM SHA、镜像、GPU、SP、精度和 UTC 时间。
 `provenance.gpu.count` 是 active GPU（SP2=2、SP4=4），整机隔离的 8 卡写入
