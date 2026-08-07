@@ -10,7 +10,13 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 WORK_ROOT="/work/minwm-realtime/${MINWM_RUN_ID}"
 MODEL_DIR="${WORK_ROOT}/sglang-model"
-RESULT_ROOT="${MINWM_RESULTS_ROOT%/}/${MINWM_RUN_ID}/s0-measurement"
+RUN_LABEL="${MINWM_S0_RUN_LABEL:-s0-measurement}"
+PROFILER_OFF_ONLY="${MINWM_S0_PROFILER_OFF_ONLY:-0}"
+OFF_REPEAT_COUNT="${MINWM_S0_OFF_REPEAT_COUNT:-2}"
+RUN_BITWISE="${MINWM_S0_RUN_BITWISE:-0}"
+BITWISE_OUTPUT_PREFIX="${MINWM_S0_BITWISE_OUTPUT_PREFIX:-${RUN_LABEL}}"
+BITWISE_RESULTS_ROOT="${MINWM_S0_BITWISE_RESULTS_ROOT:-${MINWM_RESULTS_ROOT%/}/${MINWM_RUN_ID}/bitwise}"
+RESULT_ROOT="${MINWM_RESULTS_ROOT%/}/${MINWM_RUN_ID}/${RUN_LABEL}"
 RESULT_PARENT="${MINWM_RESULTS_ROOT%/}/${MINWM_RUN_ID}"
 CASES="${MINWM_CASES_PATH:-${SCRIPT_DIR}/cases_720p_compile_smoke.json}"
 CASE_ID="${MINWM_CASE_ID:-00_forward_080_pottery_720p}"
@@ -27,6 +33,10 @@ NSYS_DEB="${WORK_ROOT}/nsight-systems-cli.deb"
 RESUME_PROFILER_OFF_ROOT="${MINWM_S0_RESUME_PROFILER_OFF_ROOT:-}"
 NSYS_ONLY="${MINWM_S0_NSYS_ONLY:-0}"
 
+if ! [[ "${RUN_LABEL}" =~ ^[A-Za-z0-9_-]+$ ]]; then
+  echo "MINWM_S0_RUN_LABEL must be a safe path component" >&2
+  exit 2
+fi
 [[ -f "${MODEL_DIR}/minwm_conversion_manifest.json" ]]
 [[ -f "${CASES}" ]]
 [[ "$(git -C /workspace/sglang rev-parse HEAD)" == "${SGLANG_GIT_REF}" ]]
@@ -46,6 +56,26 @@ if ! [[ "${NSYS_ONLY}" =~ ^[01]$ ]]; then
   echo "MINWM_S0_NSYS_ONLY must be 0 or 1" >&2
   exit 2
 fi
+if ! [[ "${PROFILER_OFF_ONLY}" =~ ^[01]$ ]]; then
+  echo "MINWM_S0_PROFILER_OFF_ONLY must be 0 or 1" >&2
+  exit 2
+fi
+if [[ "${NSYS_ONLY}" == "1" && "${PROFILER_OFF_ONLY}" == "1" ]]; then
+  echo "Nsight-only and profiler-off-only modes are mutually exclusive" >&2
+  exit 2
+fi
+if ! [[ "${OFF_REPEAT_COUNT}" =~ ^(1|2)$ ]]; then
+  echo "MINWM_S0_OFF_REPEAT_COUNT must be 1 or 2" >&2
+  exit 2
+fi
+if [[ "${OFF_REPEAT_COUNT}" == "1" && "${PROFILER_OFF_ONLY}" != "1" ]]; then
+  echo "A single profiler-off repeat is only valid in profiler-off-only mode" >&2
+  exit 2
+fi
+if ! [[ "${RUN_BITWISE}" =~ ^[01]$ ]]; then
+  echo "MINWM_S0_RUN_BITWISE must be 0 or 1" >&2
+  exit 2
+fi
 if [[ -n "${SGLANG_DIFFUSION_TORCH_PROFILER_DIR:-}" ]]; then
   echo "SGLANG_DIFFUSION_TORCH_PROFILER_DIR must be unset during Nsight capture" >&2
   exit 2
@@ -58,7 +88,7 @@ archive_preexisting_results() {
   fi
   local timestamp archive_root
   timestamp="$(date --utc +%Y%m%dT%H%M%S%NZ)"
-  archive_root="${RESULT_PARENT}/invalid/preexisting-${timestamp}/s0-measurement"
+  archive_root="${RESULT_PARENT}/invalid/preexisting-${timestamp}/${RUN_LABEL}"
   python3 "${SCRIPT_DIR}/measurement_tool.py" mark-invalid \
     --root "${RESULT_ROOT}" \
     --reason "runner refused to overwrite a pre-existing result root" \
@@ -89,12 +119,19 @@ ALLOCATED_GPU_COUNT="${MINWM_ALLOCATED_GPU_COUNT:-$(nvidia-smi -L | wc -l | xarg
   echo "gpu_model=${GPU_MODEL}"
   echo "allocated_gpu_count=${ALLOCATED_GPU_COUNT}"
   echo "sp_degrees=${SP_DEGREES}"
+  echo "run_label=${RUN_LABEL}"
+  echo "hoist_timestep_modulation=${MINWM_HOIST_TIMESTEP_MODULATION:-unset}"
+  echo "fused_post_a2a_rope_cache=${MINWM_FUSED_POST_A2A_ROPE_CACHE:-unset}"
+  echo "fused_qkv_projection=${MINWM_FUSED_QKV_PROJECTION:-unset}"
   echo "off_window=${OFF_WARMUP_CHUNKS}+${OFF_MEASURED_CHUNKS}"
+  echo "off_repeat_count=${OFF_REPEAT_COUNT}"
   echo "nsys_window=${PROFILE_PRECONDITION_CHUNKS} precondition + ${PROFILE_DISCARD_CHUNKS} discarded + ${PROFILE_MEASURED_CHUNKS} stable"
   echo "nsys_gpu_metrics_devices=all; parser maps stable-window CUDA deviceId through TARGET_INFO_GPU cuDevice->pwGpuId"
   echo "kv_cache_num_frames=${KV_CACHE_NUM_FRAMES}"
   echo "torch_profiler_concurrent=false"
   echo "nsys_only=${NSYS_ONLY}"
+  echo "profiler_off_only=${PROFILER_OFF_ONLY}"
+  echo "run_bitwise=${RUN_BITWISE}"
   echo "resume_profiler_off_root=${RESUME_PROFILER_OFF_ROOT:-none}"
   echo "started_utc=$(date --utc +%Y-%m-%dT%H:%M:%SZ)"
 } | tee "${RESULT_ROOT}/contract.txt"
@@ -170,6 +207,14 @@ trap on_exit EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
+assert_no_nsys_processes() {
+  if [[ "${PROFILER_OFF_ONLY}" == "1" ]] && pgrep -x nsys >/dev/null; then
+    echo "profiler-off-only contract violated: nsys process is running" >&2
+    pgrep -a -x nsys >&2 || true
+    exit 2
+  fi
+}
+
 server_args() {
   local degree="$1"
   printf '%s\0' \
@@ -202,6 +247,8 @@ start_server() {
   MINWM_PACKED_ATTENTION_DETERMINISTIC=true \
   MINWM_NATIVE_COMPONENTS=text_encoder,vae \
   MINWM_VAE_LANE=parallel \
+  MINWM_PARITY_DUMP_DIR="${MINWM_S0_PARITY_DUMP_DIR:-}" \
+  MINWM_PARITY_DUMP_ALL_BLOCKS="${MINWM_S0_PARITY_DUMP_ALL_BLOCKS:-0}" \
     "${SERVER_ARGS[@]}" > "${log_path}" 2>&1 &
   server_pid=$!
   wait_for_server "${server_pid}" "${log_path}"
@@ -260,10 +307,13 @@ aggregate_repeats() {
 install_nsys() {
   if ! command -v nsys >/dev/null; then
     mkdir -p "${NSYS_ROOT}"
-    curl --fail --location --retry 3 --output "${NSYS_DEB}" "${NSYS_URL}"
-    sha256sum "${NSYS_DEB}" | tee "${RESULT_ROOT}/nsys-package-sha256.txt"
-    dpkg-deb --extract "${NSYS_DEB}" "${NSYS_ROOT}"
     NSYS_BIN="$(find "${NSYS_ROOT}" -type f -name nsys -perm -111 -print -quit)"
+    if [[ -z "${NSYS_BIN}" ]]; then
+      curl --fail --location --retry 3 --output "${NSYS_DEB}" "${NSYS_URL}"
+      sha256sum "${NSYS_DEB}" | tee "${RESULT_ROOT}/nsys-package-sha256.txt"
+      dpkg-deb --extract "${NSYS_DEB}" "${NSYS_ROOT}"
+      NSYS_BIN="$(find "${NSYS_ROOT}" -type f -name nsys -perm -111 -print -quit)"
+    fi
     [[ -n "${NSYS_BIN}" ]]
     export PATH="$(dirname "${NSYS_BIN}"):${PATH}"
   fi
@@ -275,21 +325,37 @@ install_nsys() {
 
 run_profiler_off() {
   local degree="$1" lane_dir="$2"
+  assert_no_nsys_processes
   start_server \
     "${degree}" \
     "${lane_dir}/profiler-off-server.log" \
     "${lane_dir}/profiler-off-gpu-telemetry.csv"
+  if [[ "${RUN_BITWISE}" == "1" ]]; then
+    mkdir -p "${BITWISE_RESULTS_ROOT}"
+    python3 "${SCRIPT_DIR}/run_sglang_api.py" \
+      --cases "${CASES}" \
+      --case "${CASE_ID}" \
+      --results "${BITWISE_RESULTS_ROOT}" \
+      --output-prefix "${BITWISE_OUTPUT_PREFIX}" \
+      --engine-name "sglang-minwm-${RUN_LABEL}" \
+      --kv-cache-num-frames "${KV_CACHE_NUM_FRAMES}"
+  fi
   local repeat_paths=()
-  for repeat in 1 2; do
+  for repeat in $(seq 1 "${OFF_REPEAT_COUNT}"); do
     local output="${lane_dir}/profiler-off-repeat${repeat}.json"
     run_client \
       "${degree}" "${output}" "bf16-fast-sp${degree}" \
-      "${MINWM_RUN_ID}-sp${degree}-off-r${repeat}" \
+      "${MINWM_RUN_ID}-${RUN_LABEL}-sp${degree}-off-r${repeat}" \
       --measurement-mode profiler_off \
       --warmup-chunks "${OFF_WARMUP_CHUNKS}" \
       --measured-chunks "${OFF_MEASURED_CHUNKS}"
     repeat_paths+=("${output}")
   done
+  if [[ "${OFF_REPEAT_COUNT}" == "1" ]]; then
+    stop_server
+    assert_no_nsys_processes
+    return
+  fi
   aggregate_repeats "${lane_dir}" "${repeat_paths[@]}"
   if ! python3 - "${lane_dir}/repeat-summary.json" <<'PY'
 import json, sys
@@ -300,7 +366,7 @@ PY
     local output="${lane_dir}/profiler-off-repeat3.json"
     run_client \
       "${degree}" "${output}" "bf16-fast-sp${degree}" \
-      "${MINWM_RUN_ID}-sp${degree}-off-r3" \
+      "${MINWM_RUN_ID}-${RUN_LABEL}-sp${degree}-off-r3" \
       --measurement-mode profiler_off \
       --warmup-chunks "${OFF_WARMUP_CHUNKS}" \
       --measured-chunks "${OFF_MEASURED_CHUNKS}"
@@ -312,6 +378,7 @@ PY
       --output "${lane_dir}/repeat-summary.json"
   fi
   stop_server
+  assert_no_nsys_processes
 }
 
 resume_profiler_off() {
@@ -343,7 +410,7 @@ resume_profiler_off() {
 run_profiler_on() {
   local degree="$1" lane_dir="$2"
   local profile_dir="${lane_dir}/profiler-on"
-  local session="minwm-s0-${MINWM_RUN_ID}-sp${degree}"
+  local session="minwm-s0-${MINWM_RUN_ID}-${RUN_LABEL}-sp${degree}"
   local report="${profile_dir}/sp${degree}.nsys-rep"
   local sqlite="${profile_dir}/sp${degree}.sqlite"
   local status_log="${profile_dir}/nsys-capture-status.log"
@@ -372,7 +439,7 @@ run_profiler_on() {
   run_client \
     "${degree}" "${profile_dir}/precondition-warmup.json" \
     "bf16-fast-sp${degree}-precondition" \
-    "${MINWM_RUN_ID}-sp${degree}-precondition" \
+    "${MINWM_RUN_ID}-${RUN_LABEL}-sp${degree}-precondition" \
     --measurement-mode profiler_off \
     --warmup-chunks "$((PROFILE_PRECONDITION_CHUNKS - 1))" \
     --measured-chunks 1
@@ -397,7 +464,7 @@ run_profiler_on() {
   run_client \
     "${degree}" "${profile_dir}/client.json" \
     "bf16-fast-sp${degree}-nsys" \
-    "${MINWM_RUN_ID}-sp${degree}-nsys" \
+    "${MINWM_RUN_ID}-${RUN_LABEL}-sp${degree}-nsys" \
     --measurement-mode profiler_on \
     --precondition-warmup-chunks "${PROFILE_PRECONDITION_CHUNKS}" \
     --warmup-chunks "${PROFILE_DISCARD_CHUNKS}" \
@@ -423,7 +490,9 @@ run_profiler_on() {
     --require-complete-stable-nsys
 }
 
-install_nsys
+if [[ "${PROFILER_OFF_ONLY}" != "1" ]]; then
+  install_nsys
+fi
 read -r -a degrees <<< "${SP_DEGREES}"
 for degree in "${degrees[@]}"; do
   if ! [[ "${degree}" =~ ^(2|4)$ ]]; then
@@ -441,34 +510,49 @@ for degree in "${degrees[@]}"; do
   else
     run_profiler_off "${degree}" "${lane_dir}"
   fi
-  failure_scope="${lane_dir}/profiler-on"
-  run_profiler_on "${degree}" "${lane_dir}"
+  if [[ "${PROFILER_OFF_ONLY}" != "1" ]]; then
+    failure_scope="${lane_dir}/profiler-on"
+    run_profiler_on "${degree}" "${lane_dir}"
+  fi
 done
 
 failure_scope="${RESULT_ROOT}"
-python3 - "${RESULT_ROOT}" "${NSYS_ONLY}" <<'PY'
+python3 - "${RESULT_ROOT}" "${NSYS_ONLY}" "${PROFILER_OFF_ONLY}" "${OFF_REPEAT_COUNT}" <<'PY'
 import json
 import sys
 from pathlib import Path
 
 root = Path(sys.argv[1])
 nsys_only = sys.argv[2] == "1"
+profiler_off_only = sys.argv[3] == "1"
+off_repeat_count = int(sys.argv[4])
 lanes = {}
 for lane_dir in sorted(root.glob("sp*")):
     if not lane_dir.is_dir():
         continue
-    profile = json.loads((lane_dir / "profiler-on/measurement.json").read_text())
-    lane = {"profiler_on": profile}
-    if not nsys_only:
+    lane = {}
+    if not profiler_off_only:
+        lane["profiler_on"] = json.loads(
+            (lane_dir / "profiler-on/measurement.json").read_text()
+        )
+    if profiler_off_only and off_repeat_count == 1:
+        lane["profiler_off_single"] = json.loads(
+            (lane_dir / "profiler-off-repeat1.json").read_text()
+        )
+    elif not nsys_only:
         lane["profiler_off"] = json.loads(
             (lane_dir / "repeat-summary.json").read_text()
         )
     lanes[lane_dir.name] = lane
 summary = {
     "schema_version": (
-        "minwm-realtime-s0-nsys-only/v1"
-        if nsys_only
-        else "minwm-realtime-s0-baseline/v1"
+        "minwm-realtime-s0-profiler-off-only/v1"
+        if profiler_off_only
+        else (
+            "minwm-realtime-s0-nsys-only/v1"
+            if nsys_only
+            else "minwm-realtime-s0-baseline/v1"
+        )
     ),
     "lanes": lanes,
 }
@@ -477,14 +561,16 @@ summary = {
 )
 print(json.dumps({
     lane: {
-        "off_cv_pass": (
-            None
-            if nsys_only
-            else value["profiler_off"]["acceptance"]["passes_cv_target"]
-        ),
+        "off_cv_pass": value.get("profiler_off", {}).get(
+            "acceptance", {}
+        ).get("passes_cv_target"),
         "gpu_metrics": {
             name: metric["status"]
-            for name, metric in value["profiler_on"]["metrics"]["profiler_on"]["gpu_metrics"].items()
+            for name, metric in value.get("profiler_on", {})
+            .get("metrics", {})
+            .get("profiler_on", {})
+            .get("gpu_metrics", {})
+            .items()
         },
     }
     for lane, value in lanes.items()
