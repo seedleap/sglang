@@ -106,9 +106,15 @@ Client/Scheduler FPS 不回退。
 | 位置 | 默认实时路径 | 当前处理 | 原因 |
 | --- | --- | --- | --- |
 | `RealtimeTraceSpan.__exit__ -> cuda_end.synchronize()` | 是；默认 trace id 总存在，覆盖 MinWM denoise、VAE encode/decode | 默认关闭，显式 opt-in 保留 | 本任务主同步点 |
+| `GenerateSession.trace_id -> Req.realtime_trace_id` | 是；未传 query/body trace id 时也回退到 session UUID | 保留 trace，只改变 CUDA timing 默认值 | 证明旧同步不是仅 debug request 才触发 |
+| realtime VAE encoder / decoder span | 是 | 默认 wall + `cuda_timing_status=disabled`；opt-in 才 event sync | 两个默认 CUDA span |
+| realtime MinWM denoising span | 是 | 同上 | 每 chunk DMD/clean-cache 主 span |
 | VAE decoder load / post-decode span | 是 | 原本已 `measure_cuda=False`，保留 | CPU/host wall span |
+| pipeline stage `perf_counter` wall trace | 是 | 保留，无新增 CUDA synchronize | wall 可观测性不丢失 |
 | `StageProfiler` 的 device synchronize | 仅 `SGLANG_DIFFUSION_SYNC_STAGE_PROFILING=1` | 不改；默认 0 | 已是显式 profiler |
 | `GPUWorker` frame materialize synchronize | 同上 | 不改；默认 0 | 已是显式 profiler |
+| RealESRGAN upscaler event synchronize | 非本轮 MinWM pipeline；仅启用 upscaling 时 | 不改 | 独立可选后处理组件 |
+| LoRA/offload cache clear 与 sleep/awake device synchronize | 非 chunk steady-state；本 workload 未启用 | 不改 | 权重/显存生命周期 barrier |
 | disaggregation `stage_event.synchronize()` | 非本轮默认单体 MinWM 路径 | 不改 | buffer 发送前的正确性 barrier，不是 trace timing |
 | disaggregation/transport stream synchronize | 非本轮默认路径 | 不改 | 传输所有权/生命周期 barrier |
 | benchmark 脚本内 `torch.cuda.synchronize()` | 否 | 不改 | 离线 benchmark 计时 |
@@ -332,3 +338,27 @@ API 返回 `namespaces "minwm-test-phx2" not found`，随后从 manifest 确认 
 `default`；一次尝试用本机 GNU `timeout` 做有界轮询，macOS 环境没有该命令，后续改用
 工具层有界 wait。两者均未对 Pod/PVC/Job 产生写操作。SP4 control1 已在同一 Pod/node
 启动；Nsight Job 仍未提交，避免与 profiler-off headline 抢占资源。
+
+同步点复审命令还覆盖了 `multimodal_gen/runtime` 与本 benchmark 下全部
+`.synchronize()`、`RealtimeTraceSpan`、trace id 传播。第一次把不存在的
+`runtime/entrypoints/realtime*` glob 直接交给 zsh，搜索在执行前以 `no matches found`
+失败；改为确定目录的 `rg` 后完成。没有把失败搜索当作审计通过。
+
+SP4 candidate repeat1/2 已完成，220 hashes 与 SP4 control1 完全一致，trace status 均为
+`disabled` 且各有 440 个 denoising 事件。两次 candidate 的 chunk wall 分别为 1122.17、
+1068.21 ms，CV 约 3.48%，也超过 3%，因此追加范围从 SP2 扩为 SP2+SP4 repeat3/4。
+
+追加 runner 默认仍是 SP2+SP4、repeat1/2；只有 manifest 显式传
+`MINWM_TRACE_SYNC_REPEATS="3 4"`。comparator 支持显式 SP lane 与至少两次重复，五个指标
+全部进入 CV 门；本地回归增至 `49 passed`。追加源码为
+`f4b7d5eaf4d054f9d93bfb1ae26d90a0a9f932f2`，已用远端 ref 精确核对；Job
+`minwm-p0-trace-sync-h200-20260807-02` 固定到原 node `i-0973db0dc2a8448d1`、同一 PVC，
+整机 8 GPU，因此只能在主 Job 释放资源后开始。
+
+最初创建的追加 Job 是 SP2-only Pending。发现 SP4 CV 也超标后，client dry-run 通过，
+但直接 server dry-run 被 Kubernetes 以 Job `spec.template` immutable 拒绝，命令链在删除
+前停止。随后将只用于 dry-run 的对象名经 stdin 改为 `-02-dryrun`，server create dry-run
+通过；确认旧 Pod 仍为 Pending、未挂卷、无产物后，仅删除并从 manifest 重建该 Pending
+Job/Pod。PVC、主 Job、已有结果均未删除；新 Pod `...-55dbf` 当前因原 node GPU 被占满
+而 Pending。EKS auto-mode 同时警告 hostname 不能用于新节点 provisioning；默认 scheduler
+仍保留该 Pod，这个限制符合“不另起机器”的目的。
