@@ -115,6 +115,7 @@ def _worker() -> int:
         assert local_seq % tile_count == 0
         tile_seq = local_seq // tile_count
         handles = []
+        outputs = [None] * tile_count
         independent = None
         for tile_index in range(tile_count):
             offset = tile_index * tile_seq
@@ -133,6 +134,8 @@ def _worker() -> int:
             # For tile_index > 0 this compute is enqueued after the previous
             # reverse A2A launch and before its wait.
             independent = tile.square().sum(dim=-1)
+            if tile_index >= 2 and handles[tile_index - 2].backend == "ipc":
+                outputs[tile_index - 2] = _usp_wait_all_to_all(handles[tile_index - 2])
             lease = workspace.acquire(f"output_tile_{tile_index}", tile, tile.numel())
             assert lease is not None
             send, recv, stream, events, release = lease
@@ -148,8 +151,12 @@ def _worker() -> int:
                     release=release,
                 )
             )
+        for tile_index, handle in enumerate(handles):
+            if not handle.consumed:
+                outputs[tile_index] = _usp_wait_all_to_all(handle)
+        assert all(output is not None for output in outputs)
         return (
-            torch.cat([_usp_wait_all_to_all(handle) for handle in handles], dim=1),
+            torch.cat([output for output in outputs if output is not None], dim=1),
             independent,
         )
 

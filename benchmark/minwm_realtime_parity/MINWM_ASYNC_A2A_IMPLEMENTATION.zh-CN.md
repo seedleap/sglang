@@ -356,6 +356,25 @@ time、与 compute kernel 的区间交集及 buffer slot/generation。
   720p 小规模 parity → profiler-off 四位置预检；只有 FPS/DiT/chunk wall 同向并达到继续价值，
   才采 Nsight 量化最后 tile exposed time。当前仅完成设计，**尚未验收**。
 
+#### 首轮 H200 transport 合同（失败，保留）
+
+- 假设：每个 tile 使用独立 workspace lease，而所有 collective 共用同一条 comm stream；因此
+  依次 launch 4 个 IPC tile、最后统一 consume，仍应受 IPC 内部双 slot 和同流
+  `spin_wait` 保护。
+- 修改/正确性：提交 `9fe7a086c4` 实现默认关闭的
+  `MINWM_ASYNC_A2A_OUTPUT_TILES=4` 路径，并新增 SP2/SP4 ProcessGroup、SP2 IPC、IPC graph
+  replay 合同；本地 CPU/unit 全集为 `129 passed, 1 skipped`。H200 job
+  `minwm-async-a2a-contract-tiled-h200-20260807-01` 在
+  `i-0973db0dc2a8448d1`（4×H200，PyTorch `2.12.1+cu130`、CUDA `13.0`、NCCL
+  `2.29.7`）运行。ProcessGroup tiled output 未报错，但 SP2 IPC tiled output 12/12 轮及
+  graph replay 第 1 轮即不等于同步参考，合同整体 **FAIL**；没有 hang。
+- wall/FPS、Nsight：合同失败，按门禁未启动 checkpoint、A/B 或 Nsight。
+- 结论：根因是 IPC staging 是按 shape 共享的两槽环，而 handle 返回张量在 consume 前仍别名
+  staging。第 3/4 个 launch 虽在同一 comm stream 上分别等过第 1/2 个 peer signal，却可在
+  compute stream 执行 transform/consume 前覆盖 slot 0/1。下一修改把 IPC 最大在途数限制为
+  2：在计算 tile `i` 后、launch `i` 前先 consume `i-2`，使 transform 完成后才允许 slot
+  复用，同时继续让 tile `i` attention 与较早 IPC 重叠。修复后必须重新跑同一合同。
+
 ### 2026-08-07：候选 1——QK A2A 与 V projection 重叠
 
 - 假设：完整 packed-QKV A2A 前没有可移动工作，但 Q/K/V projection 相互独立；将 wire
@@ -394,6 +413,21 @@ time、与 compute kernel 的区间交集及 buffer slot/generation。
 - 结论：未验收；下一步绘制精确调用依赖并测出真正可用的 GPU overlap 窗口。
 
 ## 偏离原认知
+
+### 2026-08-07：同一 comm stream 不能单独保护 IPC staging 的跨流消费生命周期
+
+- 原认知：IPC 的两个 staging slot 在同一 comm stream 上由 `spin_wait` 串行保护；4 个 tiled
+  output handle 即使最后统一 consume，也不会在仍被使用时复用 slot。
+- 实际证据：H200 SP2 首轮合同中普通 IPC output 通过，但相同 shape 的 4-tile IPC output
+  从第 0 次起 12/12 不等于同步参考，graph replay 同样失败；ProcessGroup tiled output 没有
+  报错，且没有 deadlock。
+- 根因：`spin_wait` 只保证 comm stream 可以安全开始下一次 peer 写，不保证 compute stream
+  已消费旧 staging view。第 3 次调用复用 slot 0 时，旧 handle 尚未执行 wait 后的 layout
+  transform，数据已被覆盖。workspace 的独立 send/recv lease 不能保护 IPC helper 返回的共享
+  staging alias。
+- 决策：不通过给所有 IPC 增加 staging→recv 拷贝来掩盖问题；tiled pipeline 对 IPC 显式维持
+  最多两个未 consume handle，并在复用前完成 `i-2` 的 wait/transform。ProcessGroup 仍可保留
+  全部 tile 在途。首轮失败 job、日志和 manifest 保留，不计为正确性通过。
 
 ### 2026-08-07：H200 合同镜像不是可直接运行测试的完整开发环境
 

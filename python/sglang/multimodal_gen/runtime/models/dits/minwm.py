@@ -897,6 +897,12 @@ class MinWMCausalSelfAttention(CausalWanSelfAttention):
 
         handles: list[_UlyssesA2AHandle] = []
         attention_tiles: list[torch.Tensor] = []
+        local_tiles: list[torch.Tensor | None] = [None] * tile_count
+
+        def consume(tile_index: int) -> None:
+            handle = handles[tile_index]
+            with _minwm_nvtx_range(f"output_a2a_tile_wait_{tile_index}", handle.output):
+                local_tiles[tile_index] = _usp_wait_all_to_all(handle)
 
         def retire_launched() -> None:
             for handle in handles:
@@ -927,6 +933,20 @@ class MinWMCausalSelfAttention(CausalWanSelfAttention):
                 retire_launched()
                 raise
             attention_tiles.append(tile_output)
+            # IPC owns only two shared staging slots per shape. A handle's
+            # output aliases its slot until wait() performs the layout
+            # transform on the consumer stream, so consume i-2 before launch
+            # i can overwrite that slot. Computing tile i above is still
+            # independent work between the older launch and wait.
+            if tile_index >= 2 and handles[tile_index - 2].backend == "ipc":
+                try:
+                    consume(tile_index - 2)
+                except Exception:
+                    release()
+                    for *_, unused_release in leases[tile_index + 1 :]:
+                        unused_release()
+                    retire_launched()
+                    raise
             try:
                 with _minwm_nvtx_range(
                     f"output_a2a_tile_launch_{tile_index}", tile_output
@@ -948,17 +968,19 @@ class MinWMCausalSelfAttention(CausalWanSelfAttention):
                 raise
             handles.append(handle)
 
-        local_tiles = []
         for tile_index, handle in enumerate(handles):
+            if handle.consumed:
+                continue
             try:
-                with _minwm_nvtx_range(
-                    f"output_a2a_tile_wait_{tile_index}", handle.output
-                ):
-                    local_tiles.append(_usp_wait_all_to_all(handle))
+                consume(tile_index)
             except Exception:
                 retire_launched()
                 raise
-        local_output = torch.cat(local_tiles, dim=1)
+        if any(tile is None for tile in local_tiles):
+            raise RuntimeError("MinWM output A2A tile was not consumed")
+        local_output = torch.cat(
+            [tile for tile in local_tiles if tile is not None], dim=1
+        )
         attention_output = (
             _minwm_restore_output_attention_order(
                 attention_tiles, world_size=world_size
