@@ -766,7 +766,7 @@ PY
     local profile="sp${degree}-${suffix}"
     local profile_dir="${CG_RESULTS}/${profile}"
     mkdir -p "${profile_dir}"
-    MINWM_ATTENTION_IMPL=packed \
+    MINWM_ATTENTION_IMPL="${MINWM_ATTENTION_IMPL:-packed}" \
     MINWM_PACKED_ATTENTION_DETERMINISTIC=true \
     MINWM_NATIVE_COMPONENTS=text_encoder,vae \
     MINWM_VAE_LANE=parity \
@@ -774,7 +774,7 @@ PY
       --model-path "${MODEL_DIR}" \
       --pipeline-class-name MinWMCausalDMDPipeline \
       --vae-config.use-parallel-decode true \
-      --attention-backend fa \
+      --attention-backend "${MINWM_SERVER_ATTENTION_BACKEND:-fa}" \
       --performance-mode speed \
       --num-gpus "${degree}" \
       --tp-size 1 \
