@@ -149,6 +149,8 @@ python benchmark/minimax_h3_causal/run_matrix.py \
 | `minimax-h3-b300-probe-r2` | p6-b300 Spot / 1 GPU | 错误 ref | 操作失败 | 手工扩展短 SHA 时写错，Git fetch 返回 `not our ref`；未进入安装或 GPU 测试。 |
 | `minimax-h3-b300-probe-r3` | p6-b300 Spot / 1 GPU | `106bafaa1dfe` | 环境失败 | JIT-cache 已升级至 0.6.15.post1，但旧 standalone cubin 0.6.14 的优先级更高；未执行 GPU kernel，改为移除已无同版发布的旧可选 cubin。 |
 | `minimax-h3-b300-probe-r4` | p6-b300 Spot / 1 GPU | `a681be1ab6b2` | 测试夹具失败 | FlashInfer runtime 检查通过；GPU 单测 5/6 通过，包含 BF16 Flex/dense-reference parity。失败项的模拟音频只有 48 个时间步，却固定查询未被音频覆盖的 block 5；独立速度探针因此未执行。修正为覆盖完整模拟视频时域，并显式断言所有目标 block 都有音频 row。 |
+| `minimax-h3-b300-probe-r5` | p6-b300 Spot / 1 GPU | `d2b8c69adafe` | 容量阻塞，已暂停 | 连续 NodeClaim 均被 AWS 以 `UnfulfillableCapacity` 拒绝，Pod 未启动、未执行代码。为避免与 B200 备选同时占用两台整机，保留 Job 记录并设置 `suspend=true`。 |
+| `minimax-h3-b200-probe-r1` | p6-b200 Spot / 1 GPU | `d2b8c69adafe` | 等待容量 | B300 不可用后改投同一固定代码的 B200 最小验证；NodeClaim 同样收到 `UnfulfillableCapacity`，Job 保持 Pending，容量恢复后可继续。 |
 
 ## 理解检查问题
 
