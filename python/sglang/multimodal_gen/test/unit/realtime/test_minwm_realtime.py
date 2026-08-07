@@ -463,6 +463,36 @@ def test_minwm_hoisted_timestep_modulation_uses_nonuniform_sp_metadata(monkeypat
     assert actual.shape == (1, 5, 6, 3)
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+def test_minwm_hoisted_timestep_modulation_matches_compiled_cuda_index(monkeypatch):
+    import sglang.multimodal_gen.runtime.models.dits.minwm as minwm_module
+
+    frame_index = torch.tensor([0, 2, 1, 2, 0], device="cuda", dtype=torch.long)
+    forward_batch = SimpleNamespace(
+        enable_sequence_shard=True,
+        sequence_shard_frame_indices=frame_index,
+    )
+    monkeypatch.setattr(
+        minwm_module,
+        "get_forward_context",
+        lambda: SimpleNamespace(forward_batch=forward_batch),
+    )
+    monkeypatch.setattr(minwm_module, "get_ulysses_parallel_world_size", lambda: 2)
+    hidden_states = torch.zeros(1, 5, 8, device="cuda", dtype=torch.bfloat16)
+    timestep_proj = torch.arange(
+        1 * 3 * 6 * 8, device="cuda", dtype=torch.bfloat16
+    ).reshape(1, 3, 6, 8)
+
+    hoisted = _minwm_materialize_timestep_modulation(hidden_states, timestep_proj)
+    compiled_index = torch.compile(
+        lambda projected, indices: projected[:, indices], fullgraph=True
+    )
+    legacy = compiled_index(timestep_proj, frame_index)
+
+    torch.testing.assert_close(hoisted, legacy, rtol=0, atol=0)
+    assert hoisted.stride() == legacy.stride()
+
+
 def test_minwm_timestep_modulation_is_pass_local_for_clean_cache_and_recompute(
     monkeypatch,
 ):
