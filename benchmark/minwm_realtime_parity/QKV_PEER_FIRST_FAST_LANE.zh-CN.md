@@ -272,6 +272,22 @@ peer-first Triton kernel 和 NCCL A2A 按 kernel/API 名归因。NVTX 只用于 
 
 不满足时不实现或回滚 6b，并在本节保留测量证据。
 
+## 审计、失败产物与资源止损
+
+H200 Job 必须设置 `backoffLimit: 0`，并把结果写入按 Pod/attempt 隔离的目录；controller
+不得自动重跑后覆盖或混合 provenance。runner 拒绝复用已存在的结果目录，也不得删除或
+覆盖旧 `.nsys-rep`、`.sqlite`、JSON、日志或质量产物。
+
+任何失败、旧契约或 partial attempt 都必须物理保留。失败时在该 attempt 的 `invalid/`
+写 marker，至少记录失败原因、UTC 时间、每个已有文件的相对路径、大小、SHA256 和
+可恢复性。聚合器只读取完成 marker 齐全且没有 `invalid/` 的 attempt；旧数据可原地保留，
+或在不丢 provenance 的前提下移动到同一 attempt 的 `invalid/`，不能删除后伪装成 clean run。
+
+若需要集群止损，只允许删除名称精确匹配本任务 `minwm-s4-qkv-*` 的 Job/Pod 控制对象；
+PVC 和其中的诊断证据必须保留。所有 `kubectl` 读取、dry-run、apply、logs 和 delete 都显式
+使用 `--context codex-minwm-test-phx2`，并在提交前记录 region、NodePool、zone 与
+capacity type。
+
 ## 风险、回滚与验收状态
 
 主要风险是 BF16 数值轨迹、FSDP/TP packed load、compile graph、量化 metadata 和 V copy
