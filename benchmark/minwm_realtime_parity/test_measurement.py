@@ -295,15 +295,22 @@ def _create_nsys_fixture(
     missing_gpu_type_chunk: bool = False,
 ) -> None:
     connection = sqlite3.connect(path)
-    process_column = ", processId INTEGER" if include_process_ids else ""
+    runtime_process_column = ", globalTid INTEGER" if include_process_ids else ""
+    kernel_process_column = ", globalPid INTEGER" if include_process_ids else ""
     connection.executescript(f"""
         CREATE TABLE StringIds (id INTEGER PRIMARY KEY, value TEXT);
-        CREATE TABLE CUPTI_ACTIVITY_KIND_RUNTIME (nameId INTEGER, start INTEGER, end INTEGER{process_column});
-        CREATE TABLE CUPTI_ACTIVITY_KIND_KERNEL (deviceId INTEGER, start INTEGER, end INTEGER);
+        CREATE TABLE CUPTI_ACTIVITY_KIND_RUNTIME (nameId INTEGER, start INTEGER, end INTEGER{runtime_process_column});
+        CREATE TABLE CUPTI_ACTIVITY_KIND_KERNEL (deviceId INTEGER, start INTEGER, end INTEGER{kernel_process_column});
         CREATE TABLE NVTX_EVENTS (start INTEGER, end INTEGER, text TEXT);
         INSERT INTO StringIds VALUES (1, 'cudaLaunchKernel_v7000');
         INSERT INTO StringIds VALUES (2, 'cudaMemcpyAsync_v3020');
         """)
+    if include_process_ids:
+        connection.executescript("""
+            CREATE TABLE PROCESSES (globalPid INTEGER, pid INTEGER, name TEXT);
+            INSERT INTO PROCESSES VALUES (1677721600, 100, 'rank-0');
+            INSERT INTO PROCESSES VALUES (3355443200, 200, 'rank-1');
+            """)
 
     def marker(
         trace_id: str,
@@ -359,29 +366,41 @@ def _create_nsys_fixture(
                 (2, start + 3_000, start + 4_000, 200),
             ]
         )
-        kernel_rows.append((0, start + 5_000, start + 15_000))
+        kernel_rows.append((0, start + 5_000, start + 15_000, 100))
         if not missing_kernel_device:
-            kernel_rows.append((1, start + 5_000, start + 15_000))
+            kernel_rows.append((1, start + 5_000, start + 15_000, 200))
     for start in (12_000, 32_000, 1_102_000):
         runtime_rows.extend(
             [(1, start, start + 500, 100), (2, start, start + 500, 200)]
         )
-        kernel_rows.extend([(0, start, start + 500), (1, start, start + 500)])
+        kernel_rows.extend([(0, start, start + 500, 100), (1, start, start + 500, 200)])
     if include_boundary_event:
         runtime_rows.append((1, 149_000, 151_000, 100))
-        kernel_rows.append((0, 149_000, 151_000))
+        kernel_rows.append((0, 149_000, 151_000, 100))
     if include_process_ids:
         connection.executemany(
-            "INSERT INTO CUPTI_ACTIVITY_KIND_RUNTIME VALUES (?, ?, ?, ?)", runtime_rows
+            "INSERT INTO CUPTI_ACTIVITY_KIND_RUNTIME VALUES (?, ?, ?, ?)",
+            [
+                (name_id, start, end, (pid << 24) + pid)
+                for name_id, start, end, pid in runtime_rows
+            ],
+        )
+        connection.executemany(
+            "INSERT INTO CUPTI_ACTIVITY_KIND_KERNEL VALUES (?, ?, ?, ?)",
+            [
+                (device, start, end, pid << 24)
+                for device, start, end, pid in kernel_rows
+            ],
         )
     else:
         connection.executemany(
             "INSERT INTO CUPTI_ACTIVITY_KIND_RUNTIME VALUES (?, ?, ?)",
             [row[:3] for row in runtime_rows],
         )
-    connection.executemany(
-        "INSERT INTO CUPTI_ACTIVITY_KIND_KERNEL VALUES (?, ?, ?)", kernel_rows
-    )
+        connection.executemany(
+            "INSERT INTO CUPTI_ACTIVITY_KIND_KERNEL VALUES (?, ?, ?)",
+            [row[:3] for row in kernel_rows],
+        )
     if include_gpu_metrics:
         connection.executescript("""
             CREATE TABLE TARGET_INFO_GPU_METRICS (metricId INTEGER, metricName TEXT);
@@ -454,6 +473,16 @@ def test_nsys_merge_extracts_counts_buckets_busy_and_gpu_metrics(
     }
     assert buckets["per_device"]["0"]["raw_total"]["10_to_lt_50_us"] == 10
     assert on["capture_coverage"]["status"] == "available"
+    coverage = on["capture_coverage"]["value"]
+    assert coverage["process_id_source"].endswith(
+        "globalTid masked to PROCESSES.globalPid"
+    )
+    assert coverage["observed_process_ids"] == [100 << 24, 200 << 24]
+    assert coverage["kernel_process_ids"] == coverage["observed_process_ids"]
+    assert coverage["kernel_processes_by_device"] == {
+        "0": [100 << 24],
+        "1": [200 << 24],
+    }
     assert on["gpu_kernel_busy"]["value"]["mean_pct"] == pytest.approx(20.0)
     assert on["gpu_metrics"]["sm_active"]["value"]["mean"] == 81.0
     assert on["gpu_metrics"]["sm_active"]["value"]["raw_metric_name"] == ("SM Active")

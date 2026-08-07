@@ -440,23 +440,36 @@ def _kernel_metrics(
 
 
 def _capture_coverage(
-    selected_process_ids: list[int], expected_ranks: int, captured_device_ids: list[int]
+    selected_process_ids: list[int],
+    process_id_source: str,
+    expected_ranks: int,
+    captured_device_ids: list[int],
+    kernel_process_ids: list[int],
+    kernel_processes_by_device: dict[str, list[int]],
 ) -> dict[str, Any]:
     evidence = (
-        f"stable-window process_ids={selected_process_ids}; "
+        f"stable-window runtime_process_ids={selected_process_ids}; "
+        f"runtime_process_id_source={process_id_source}; "
+        f"kernel_process_ids={kernel_process_ids}; "
+        f"kernel_processes_by_device={kernel_processes_by_device}; "
         f"stable-window device_ids={captured_device_ids}; expected_ranks={expected_ranks}"
     )
     if (
         len(selected_process_ids) != expected_ranks
         or len(captured_device_ids) != expected_ranks
+        or len(kernel_process_ids) != expected_ranks
+        or set(selected_process_ids) != set(kernel_process_ids)
+        or any(len(processes) != 1 for processes in kernel_processes_by_device.values())
     ):
         return unavailable("rank_capture_coverage_unconfirmed", evidence)
     return available(
         {
             "expected_ranks": expected_ranks,
             "observed_process_count": len(selected_process_ids),
-            "process_id_column": "globalPid/processId",
+            "process_id_source": process_id_source,
             "observed_process_ids": selected_process_ids,
+            "kernel_process_ids": kernel_process_ids,
+            "kernel_processes_by_device": kernel_processes_by_device,
             "captured_device_ids": captured_device_ids,
             "capture_scope": _CAPTURE_SCOPE,
         },
@@ -471,6 +484,8 @@ def _api_metrics(
     intervals: list[dict[str, Any]],
     active_gpu_count: int,
     captured_device_ids: list[int],
+    kernel_process_ids: list[int],
+    kernel_processes_by_device: dict[str, list[int]],
 ) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
     table = "CUPTI_ACTIVITY_KIND_RUNTIME"
     if table not in tables:
@@ -480,31 +495,55 @@ def _api_metrics(
         )
         return {"cuda_api_count": missing, "kernel_launch_api_count": missing}, coverage
     columns = _columns(connection, table)
-    process_column = next(
+    direct_process_column = next(
         (name for name in ("globalPid", "processId") if name in columns), None
     )
+    has_global_tid_mapping = "globalTid" in columns and "PROCESSES" in tables
     query_columns = ["nameId", "start", "end"]
-    if process_column:
-        query_columns.append(process_column)
+    if direct_process_column:
+        query_columns.append(direct_process_column)
+        process_id_source = f"{table}.{direct_process_column}"
+    elif has_global_tid_mapping:
+        query_columns.append("globalTid")
+        process_id_source = f"{table}.globalTid masked to PROCESSES.globalPid"
+    else:
+        process_id_source = "unavailable"
     raw = list(connection.execute(f"SELECT {', '.join(query_columns)} FROM {table}"))
+    known_global_pids = (
+        {int(row[0]) for row in connection.execute("SELECT globalPid FROM PROCESSES")}
+        if has_global_tid_mapping
+        else set()
+    )
     selected: list[tuple[int, int | None]] = []
     boundary = 0
     for row in raw:
         name_id, start, end = int(row[0]), int(row[1]), int(row[2])
         _chunk, crosses = _event_membership(start, end, intervals)
         if _chunk is not None:
-            selected.append((name_id, int(row[3]) if process_column else None))
+            process_id = int(row[3]) if len(row) > 3 else None
+            if (
+                process_id is not None
+                and has_global_tid_mapping
+                and not direct_process_column
+            ):
+                process_id &= ~0xFFFFFF
+                if process_id not in known_global_pids:
+                    process_id = None
+            selected.append((name_id, process_id))
         elif crosses:
             boundary += 1
     selected_process_ids = sorted(
         {process_id for _name_id, process_id in selected if process_id is not None}
     )
     coverage = _capture_coverage(
-        selected_process_ids if process_column else [],
+        selected_process_ids,
+        process_id_source,
         active_gpu_count,
         captured_device_ids,
+        kernel_process_ids,
+        kernel_processes_by_device,
     )
-    if process_column is None:
+    if direct_process_column is None and not has_global_tid_mapping:
         coverage = unavailable(
             "rank_capture_coverage_unconfirmed",
             f"{table} columns={sorted(columns)}; stable-window device_ids={captured_device_ids}",
@@ -558,6 +597,37 @@ def _api_metrics(
             launch_count, f"{table} names matching CUDA kernel/graph launch APIs"
         ),
     }, coverage
+
+
+def _kernel_process_coverage(
+    connection: sqlite3.Connection,
+    tables: set[str],
+    intervals: list[dict[str, Any]],
+) -> tuple[list[int], dict[str, list[int]]]:
+    table = "CUPTI_ACTIVITY_KIND_KERNEL"
+    if table not in tables:
+        return [], {}
+    columns = _columns(connection, table)
+    process_column = next(
+        (name for name in ("globalPid", "processId") if name in columns), None
+    )
+    if process_column is None:
+        return [], {}
+    processes_by_device: dict[int, set[int]] = {}
+    for device, process_id, start, end in connection.execute(
+        f"SELECT deviceId, {process_column}, start, end FROM {table}"
+    ):
+        chunk, _crosses = _event_membership(int(start), int(end), intervals)
+        if chunk is not None:
+            processes_by_device.setdefault(int(device), set()).add(int(process_id))
+    normalized = {
+        str(device): sorted(processes)
+        for device, processes in sorted(processes_by_device.items())
+    }
+    return (
+        sorted({item for values in normalized.values() for item in values}),
+        normalized,
+    )
 
 
 def _gpu_metrics(
@@ -713,12 +783,17 @@ def merge_nsys_metrics(
                 intervals,
                 int(result["provenance"]["gpu"]["count"]),
             )
+            kernel_process_ids, kernel_processes_by_device = _kernel_process_coverage(
+                connection, tables, intervals
+            )
             api_metrics, coverage = _api_metrics(
                 connection,
                 tables,
                 intervals,
                 int(result["provenance"]["gpu"]["count"]),
                 captured_device_ids,
+                kernel_process_ids,
+                kernel_processes_by_device,
             )
             on.update(kernel_metrics)
             on.update(api_metrics)
