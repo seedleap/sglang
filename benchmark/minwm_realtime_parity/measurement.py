@@ -9,6 +9,11 @@ from typing import Any
 
 SCHEMA_VERSION = "minwm-realtime-measurement/v1"
 SHORT_KERNEL_BUCKETS_US = ((0, 10), (10, 50), (50, 100), (100, None))
+API_BOUNDARY_ATTRIBUTION_POLICY = (
+    "CUDA runtime/API counts use call start_ns in the measured NVTX range union; "
+    "a boundary-crossing call is included exactly once when its start is inside, "
+    "otherwise excluded"
+)
 
 TIMING_DOMAINS = {
     "client": (
@@ -492,7 +497,12 @@ def validate_measurement(result: dict[str, Any]) -> None:
                         "raw_total",
                         "captured_raw_total",
                         "excluded_raw_total",
-                        "boundary_overlap_count",
+                        "boundary_spanning_count",
+                        "boundary_included_by_start_count",
+                        "boundary_excluded_by_start_count",
+                        "boundary_event_examples",
+                        "boundary_event_examples_truncated",
+                        "boundary_attribution_policy",
                         "total_per_chunk",
                         "per_rank_per_chunk",
                         "stable_chunk_denominator",
@@ -502,12 +512,125 @@ def validate_measurement(result: dict[str, Any]) -> None:
                 )
                 metric = on.get(name)
                 if isinstance(metric, dict) and metric.get("status") == "available":
-                    nested = metric.get("value", {}).get("per_rank_per_chunk")
+                    metric_value = metric.get("value", {})
+                    nested = metric_value.get("per_rank_per_chunk")
                     _require_availability(
                         nested,
                         f"metrics.profiler_on.{name}.value.per_rank_per_chunk",
                         errors,
                     )
+                    raw_total = metric_value.get("raw_total")
+                    captured_raw_total = metric_value.get("captured_raw_total")
+                    excluded_raw_total = metric_value.get("excluded_raw_total")
+                    spanning = metric_value.get("boundary_spanning_count")
+                    included = metric_value.get("boundary_included_by_start_count")
+                    excluded = metric_value.get("boundary_excluded_by_start_count")
+                    examples = metric_value.get("boundary_event_examples")
+                    if (
+                        all(
+                            isinstance(value, int)
+                            for value in (
+                                raw_total,
+                                captured_raw_total,
+                                excluded_raw_total,
+                            )
+                        )
+                        and raw_total + excluded_raw_total != captured_raw_total
+                    ):
+                        errors.append(
+                            f"metrics.profiler_on.{name}.value raw_total + "
+                            "excluded_raw_total must equal captured_raw_total"
+                        )
+                    if (
+                        all(
+                            isinstance(value, int)
+                            for value in (spanning, included, excluded)
+                        )
+                        and spanning != included + excluded
+                    ):
+                        errors.append(
+                            f"metrics.profiler_on.{name}.value boundary counts "
+                            "must partition boundary_spanning_count"
+                        )
+                    if metric_value.get("boundary_attribution_policy") != (
+                        API_BOUNDARY_ATTRIBUTION_POLICY
+                    ):
+                        errors.append(
+                            f"metrics.profiler_on.{name}.value."
+                            "boundary_attribution_policy must use the S0 start rule"
+                        )
+                    if not isinstance(examples, list) or (
+                        isinstance(spanning, int) and len(examples) != min(spanning, 20)
+                    ):
+                        errors.append(
+                            f"metrics.profiler_on.{name}.value."
+                            "boundary_event_examples must retain up to 20 events"
+                        )
+                    elif any(
+                        not isinstance(example, dict)
+                        or not isinstance(example.get("raw_api_name"), str)
+                        or not example.get("raw_api_name")
+                        or not isinstance(example.get("start_ns"), int)
+                        or not isinstance(example.get("end_ns"), int)
+                        or example.get("end_ns", 0) <= example.get("start_ns", 0)
+                        or example.get("included_by_start")
+                        != (example.get("owner_range_chunk_index") is not None)
+                        for example in examples
+                    ):
+                        errors.append(
+                            f"metrics.profiler_on.{name}.value."
+                            "boundary_event_examples must retain raw name/process/"
+                            "start/end/owner evidence"
+                        )
+                    expected_truncated = isinstance(spanning, int) and spanning > 20
+                    if (
+                        metric_value.get("boundary_event_examples_truncated")
+                        is not expected_truncated
+                    ):
+                        errors.append(
+                            f"metrics.profiler_on.{name}.value."
+                            "boundary_event_examples_truncated must match the count"
+                        )
+                    if (
+                        isinstance(included, int)
+                        and isinstance(raw_total, int)
+                        and included > raw_total
+                    ) or (
+                        isinstance(excluded, int)
+                        and isinstance(excluded_raw_total, int)
+                        and excluded > excluded_raw_total
+                    ):
+                        errors.append(
+                            f"metrics.profiler_on.{name}.value boundary inclusion "
+                            "counts must be subsets of normalized/excluded totals"
+                        )
+            cuda_api = on.get("cuda_api_count")
+            launch_api = on.get("kernel_launch_api_count")
+            if all(
+                isinstance(metric, dict) and metric.get("status") == "available"
+                for metric in (cuda_api, launch_api)
+            ):
+                cuda_value = cuda_api["value"]
+                launch_value = launch_api["value"]
+                for field in (
+                    "raw_total",
+                    "captured_raw_total",
+                    "excluded_raw_total",
+                    "boundary_spanning_count",
+                    "boundary_included_by_start_count",
+                    "boundary_excluded_by_start_count",
+                ):
+                    launch_field = launch_value.get(field)
+                    cuda_field = cuda_value.get(field)
+                    if (
+                        isinstance(launch_field, int)
+                        and isinstance(cuda_field, int)
+                        and launch_field > cuda_field
+                    ):
+                        errors.append(
+                            "metrics.profiler_on.kernel_launch_api_count.value."
+                            f"{field} must not exceed cuda_api_count"
+                        )
             _require_normalized_count(
                 on.get("short_kernel_buckets"),
                 "metrics.profiler_on.short_kernel_buckets",
@@ -538,6 +661,7 @@ def validate_measurement(result: dict[str, Any]) -> None:
                         "mean",
                         "min",
                         "p50",
+                        "p95",
                         "max",
                         "nonzero_sample_count",
                         "sample_count",
@@ -558,6 +682,7 @@ def validate_measurement(result: dict[str, Any]) -> None:
                         "target_mapping",
                         "gpu_id_extraction",
                         "type_id_coverage_semantics",
+                        "aggregation_mode",
                         "exposed_metric_names",
                     }
                     if not isinstance(metric_value, dict) or not required.issubset(

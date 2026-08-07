@@ -35,7 +35,11 @@ from measurement_tool import (  # noqa: E402
     load_aggregate_records,
     require_complete_stable_nsys,
 )
-from nsys_metrics import _is_sm_active_metric, merge_nsys_metrics  # noqa: E402
+from nsys_metrics import (  # noqa: E402
+    _discrete_event_start_attribution,
+    _is_sm_active_metric,
+    merge_nsys_metrics,
+)
 
 
 def _latency(value: float, count: int) -> dict:
@@ -317,6 +321,7 @@ def _create_nsys_fixture(
     include_process_ids: bool = True,
     marker_issue: str | None = None,
     include_boundary_event: bool = False,
+    runtime_boundary_rows: tuple[tuple[int, int, int, int], ...] = (),
     missing_kernel_device: bool = False,
     missing_gpu_type_chunk: bool = False,
     active_cuda_devices: tuple[int, ...] = (0, 1),
@@ -334,6 +339,7 @@ def _create_nsys_fixture(
         CREATE TABLE NVTX_EVENTS (start INTEGER, end INTEGER, text TEXT);
         INSERT INTO StringIds VALUES (1, 'cudaLaunchKernel_v7000');
         INSERT INTO StringIds VALUES (2, 'cudaMemcpyAsync_v3020');
+        INSERT INTO StringIds VALUES (3, 'cudaEventQuery_v3020');
         """)
     if include_process_ids:
         connection.execute(
@@ -433,8 +439,8 @@ def _create_nsys_fixture(
             ]
         )
     if include_boundary_event:
-        runtime_rows.append((1, 149_000, 151_000, 100))
         kernel_rows.append((0, 149_000, 151_000, 100))
+    runtime_rows.extend(runtime_boundary_rows)
     if include_process_ids:
         connection.executemany(
             "INSERT INTO CUPTI_ACTIVITY_KIND_RUNTIME VALUES (?, ?, ?, ?)",
@@ -619,6 +625,8 @@ def test_nsys_merge_extracts_counts_buckets_busy_and_gpu_metrics(
     }
     assert on["gpu_kernel_busy"]["value"]["mean_pct"] == pytest.approx(20.0)
     assert on["gpu_metrics"]["sm_active"]["value"]["mean"] == 80.5
+    assert on["gpu_metrics"]["sm_active"]["value"]["p50"] == 80.5
+    assert on["gpu_metrics"]["sm_active"]["value"]["p95"] == 81.0
     assert on["gpu_metrics"]["sm_active"]["value"]["raw_metric_name"] == (
         "SMs Active [Throughput %]"
     )
@@ -654,7 +662,7 @@ def test_nsys_merge_extracts_counts_buckets_busy_and_gpu_metrics(
         "sm_active"
     ]["value"]
     forged_zero_value["nonzero_sample_count"] = 0
-    for field in ("mean", "min", "p50", "max"):
+    for field in ("mean", "min", "p50", "p95", "max"):
         forged_zero_value[field] = 0.0
     with pytest.raises(MeasurementValidationError, match="cannot be all zero"):
         validate_measurement(forged_zero_sm)
@@ -723,7 +731,7 @@ def test_nsys_merge_refuses_incomplete_stable_marker_window(
         require_complete_stable_nsys(record)
 
 
-def test_nsys_merge_refuses_events_crossing_measured_range_boundary(
+def test_nsys_merge_refuses_kernel_duration_crossing_measured_range_boundary(
     tmp_path: Path,
 ) -> None:
     sqlite_path = tmp_path / "profile.sqlite"
@@ -737,12 +745,107 @@ def test_nsys_merge_refuses_events_crossing_measured_range_boundary(
         "kernel_count",
         "short_kernel_buckets",
         "gpu_kernel_busy",
-        "cuda_api_count",
-        "kernel_launch_api_count",
     ):
         assert on[name]["status"] == "unavailable"
         assert on[name]["reason"] == "event_crosses_stable_window_boundary"
         assert "boundary_overlap_count=1" in on[name]["evidence"]
+    assert on["cuda_api_count"]["status"] == "available"
+    assert on["kernel_launch_api_count"]["status"] == "available"
+
+
+def test_discrete_api_start_attribution_is_unique_for_half_open_ranges() -> None:
+    intervals = [
+        {"chunk_index": 1, "start_ns": 100, "end_ns": 200},
+        {"chunk_index": 2, "start_ns": 200, "end_ns": 300},
+    ]
+    assert _discrete_event_start_attribution(150, 250, intervals) == (
+        0,
+        [0, 1],
+        True,
+    )
+    assert _discrete_event_start_attribution(200, 220, intervals) == (
+        1,
+        [1],
+        False,
+    )
+    assert _discrete_event_start_attribution(90, 110, intervals) == (
+        None,
+        [0],
+        True,
+    )
+    assert _discrete_event_start_attribution(150, 350, intervals) == (
+        0,
+        [0, 1],
+        True,
+    )
+    assert _discrete_event_start_attribution(199, 200, intervals) == (
+        0,
+        [0],
+        False,
+    )
+
+
+def test_nsys_api_counts_use_start_attribution_and_preserve_boundary_evidence(
+    tmp_path: Path,
+) -> None:
+    sqlite_path = tmp_path / "profile.sqlite"
+    _create_nsys_fixture(
+        sqlite_path,
+        include_gpu_metrics=True,
+        runtime_boundary_rows=(
+            (1, 149_000, 151_000, 100),
+            (2, 200_000, 200_010, 200),
+            (3, 299_900, 300_100, 100),
+            (1, 149_500, 251_000, 100),
+        ),
+    )
+    record = merge_nsys_metrics(_record("profiler_on"), sqlite_path)
+    on = record["metrics"]["profiler_on"]
+    api = on["cuda_api_count"]["value"]
+    launch = on["kernel_launch_api_count"]["value"]
+
+    assert api["raw_total"] == 23
+    assert api["captured_raw_total"] == 30
+    assert api["excluded_raw_total"] == 7
+    assert api["boundary_spanning_count"] == 3
+    assert api["boundary_included_by_start_count"] == 2
+    assert api["boundary_excluded_by_start_count"] == 1
+    assert [item["raw_api_name"] for item in api["boundary_event_examples"]] == [
+        "cudaLaunchKernel_v7000",
+        "cudaEventQuery_v3020",
+        "cudaLaunchKernel_v7000",
+    ]
+    assert [
+        item["owner_range_chunk_index"] for item in api["boundary_event_examples"]
+    ] == [1, None, 1]
+    assert api["boundary_event_examples"][2]["overlap_chunk_indices"] == [1, 2]
+
+    assert launch["raw_total"] == 12
+    assert launch["captured_raw_total"] == 15
+    assert launch["excluded_raw_total"] == 3
+    assert launch["boundary_spanning_count"] == 2
+    assert launch["boundary_included_by_start_count"] == 2
+    assert launch["boundary_excluded_by_start_count"] == 0
+    assert all(
+        item["raw_api_name"] == "cudaLaunchKernel_v7000"
+        for item in launch["boundary_event_examples"]
+    )
+    require_complete_stable_nsys(record)
+
+    bad_partition = copy.deepcopy(record)
+    bad_partition["metrics"]["profiler_on"]["cuda_api_count"]["value"][
+        "boundary_excluded_by_start_count"
+    ] = 2
+    with pytest.raises(MeasurementValidationError, match="must partition"):
+        validate_measurement(bad_partition)
+
+    missing_raw_evidence = copy.deepcopy(record)
+    del missing_raw_evidence["metrics"]["profiler_on"]["cuda_api_count"]["value"][
+        "boundary_event_examples"
+    ][0]["raw_api_name"]
+    with pytest.raises(MeasurementValidationError, match="raw name/process"):
+        validate_measurement(missing_raw_evidence)
+    assert list(_machine_schema_validator().iter_errors(missing_raw_evidence))
 
 
 def test_nsys_kernel_metrics_require_every_active_device(tmp_path: Path) -> None:
