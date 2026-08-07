@@ -398,6 +398,112 @@ def test_minwm_cache_append_does_not_repack_visible_history(monkeypatch):
     assert cache.k[0, :4, 0, 0].tolist() == [0.0, 1.0, 2.0, 3.0]
 
 
+def _simulate_fused_post_a2a_update(cache, update, key, value):
+    write_end = update.write_start + key.shape[1]
+    update.cache_k[:, update.write_start : write_end].copy_(key)
+    update.cache_v[:, update.write_start : write_end].copy_(value)
+    update.rotated_k.copy_(update.cache_k)
+    return cache.commit_fused_post_a2a_update(update)
+
+
+def test_minwm_fused_post_a2a_cache_prepare_commit_and_recompute():
+    cache = _make_minwm_test_cache(cache_size=4, sink_tokens=0)
+    position_ids = torch.tensor([[0, 0, 0], [1, 0, 0]])
+    cache.set_current_position_ids(position_ids)
+    key = torch.tensor([[[[1.0, 2.0]], [[3.0, 4.0]]]])
+    value = -key
+
+    first = cache.prepare_fused_post_a2a_update(
+        key=key,
+        value=value,
+        current_chunk_start=0,
+    )
+    assert first is not None
+    assert first.write_start == 0
+    assert first.rotate_all_keys
+    first_view = _simulate_fused_post_a2a_update(cache, first, key, value)
+    assert cache._read_indices() == (2, 2)
+    assert first_view.rotated_k_is_valid
+    torch.testing.assert_close(first_view.k, key, rtol=0, atol=0)
+    torch.testing.assert_close(first_view.v, value, rtol=0, atol=0)
+
+    replacement = key + 8
+    recompute = cache.prepare_fused_post_a2a_update(
+        key=replacement,
+        value=-replacement,
+        current_chunk_start=0,
+    )
+    assert recompute is not None
+    assert recompute.plan.is_recompute
+    assert recompute.write_start == 0
+    assert not recompute.rotate_all_keys
+    recompute_view = _simulate_fused_post_a2a_update(
+        cache, recompute, replacement, -replacement
+    )
+    assert cache._read_indices() == (2, 2)
+    torch.testing.assert_close(recompute_view.k, replacement, rtol=0, atol=0)
+
+
+def test_minwm_fused_post_a2a_cache_growth_and_eviction_fallback():
+    growing = _make_minwm_test_cache(cache_size=2, sink_tokens=0)
+    growing.allow_growth = True
+    growing.attention_window_size = 4
+    positions = torch.tensor([[0, 0, 0], [1, 0, 0], [2, 0, 0]])
+    growing.set_current_position_ids(positions)
+    values = torch.arange(6, dtype=torch.float32).view(1, 3, 1, 2)
+    update = growing.prepare_fused_post_a2a_update(
+        key=values,
+        value=-values,
+        current_chunk_start=0,
+    )
+    assert update is not None
+    assert growing.cache_size >= 3
+    _simulate_fused_post_a2a_update(growing, update, values, -values)
+
+    bounded = _make_minwm_test_cache(cache_size=2, sink_tokens=0)
+    _append_minwm_test_frames(bounded, [0, 1], token_start=0)
+    next_positions = torch.tensor([[2, 0, 0]])
+    bounded.set_current_position_ids(next_positions)
+    next_value = torch.full((1, 1, 1, 2), 9.0)
+    assert (
+        bounded.prepare_fused_post_a2a_update(
+            key=next_value,
+            value=-next_value,
+            current_chunk_start=2,
+        )
+        is None
+    )
+    fallback = bounded.update_and_get_attention_kv(
+        key=next_value,
+        value=-next_value,
+        current_chunk_start=2,
+    )
+    assert bounded.token_ids.tolist() == [1, 2]
+    torch.testing.assert_close(
+        fallback.k[0, :, 0, 0], torch.tensor([1.0, 9.0]), rtol=0, atol=0
+    )
+
+
+def test_minwm_fused_post_a2a_rejects_mismatched_prepared_metadata():
+    cache = _make_minwm_test_cache(cache_size=4, sink_tokens=0)
+    position_ids = torch.tensor([[0, 0, 0], [1, 0, 0]])
+    cache.set_prepared_attention_plan(
+        cache.prepare_attention_plan(
+            current_chunk_start=0,
+            position_ids=position_ids,
+        )
+    )
+    values = torch.ones(1, 2, 1, 2)
+    with pytest.raises(
+        RuntimeError, match="prepared cache plan does not match current K/V"
+    ):
+        cache.prepare_fused_post_a2a_update(
+            key=values,
+            value=-values,
+            current_chunk_start=1,
+        )
+
+
 def test_minwm_fixed_shape_metadata_is_cached():
     _minwm_uniform_cu_seqlens.cache_clear()
     cu_seqlens = _minwm_uniform_cu_seqlens(2, 7, torch.device("cpu"))

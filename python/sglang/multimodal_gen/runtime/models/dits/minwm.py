@@ -82,6 +82,7 @@ _MINWM_CACHE_ROTATED_K = _env_flag("MINWM_CACHE_ROTATED_K", True)
 _MINWM_PRECOMPUTE_CACHE_ROPE = _env_flag("MINWM_PRECOMPUTE_CACHE_ROPE", True)
 _MINWM_CACHE_PACKED_METADATA = _env_flag("MINWM_CACHE_PACKED_METADATA", True)
 _MINWM_HOIST_TIMESTEP_MODULATION = _env_flag("MINWM_HOIST_TIMESTEP_MODULATION", True)
+_MINWM_FUSED_POST_A2A_ROPE_CACHE = _env_flag("MINWM_FUSED_POST_A2A_ROPE_CACHE", False)
 _MINWM_ANNOUNCED_ATTENTION_BACKENDS: set[tuple[str, str]] = set()
 
 
@@ -126,6 +127,80 @@ def _minwm_update_and_get_attention_kv(
         cache_head_start=cache_head_start,
         debug_name="MinWM causal KV cache",
     )
+
+
+@torch.compiler.disable
+def _minwm_try_fused_post_a2a_rope_cache(
+    kv_cache: MinWMCausalSelfAttentionKVCache,
+    *,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    current_chunk_start: int,
+    cache_head_start: int | None,
+    rotary_embedding: NDRotaryEmbedding,
+):
+    """Run the post-collective fast lane when the cache needs no history repack."""
+    if not _MINWM_CACHE_ROTATED_K:
+        return None
+    try:
+        from sglang.jit_kernel.diffusion.triton.minwm_ulysses import (
+            can_fuse_rope_cache_update,
+            fused_rope_cache_update,
+        )
+    except ImportError:
+        return None
+
+    update = kv_cache.prepare_fused_post_a2a_update(
+        key=key,
+        value=value,
+        current_chunk_start=current_chunk_start,
+        cache_head_start=cache_head_start,
+    )
+    if update is None:
+        return None
+    plan = update.plan
+    if plan.query_cos is None or plan.query_sin is None:
+        query_cos, query_sin = rotary_embedding.forward_uncached(
+            plan.query_position_ids
+        )
+    else:
+        query_cos, query_sin = plan.query_cos, plan.query_sin
+    if plan.key_cos is None or plan.key_sin is None:
+        key_cos, key_sin = rotary_embedding.forward_uncached(plan.key_position_ids)
+    else:
+        key_cos, key_sin = plan.key_cos, plan.key_sin
+    if not can_fuse_rope_cache_update(
+        query,
+        key,
+        value,
+        update.cache_k,
+        update.cache_v,
+        update.rotated_k,
+        query_cos,
+        query_sin,
+        key_cos,
+        key_sin,
+        update.write_start,
+    ):
+        return None
+
+    roped_query = fused_rope_cache_update(
+        query,
+        key,
+        value,
+        update.cache_k,
+        update.cache_v,
+        update.rotated_k,
+        query_cos,
+        query_sin,
+        key_cos,
+        key_sin,
+        update.write_start,
+        rotate_all_keys=update.rotate_all_keys,
+    )
+    cache_view = kv_cache.commit_fused_post_a2a_update(update)
+    return cache_view, roped_query.type_as(value)
 
 
 class _MinWMTimestepEmbedder(TimestepEmbedder):
@@ -665,47 +740,64 @@ class MinWMCausalSelfAttention(CausalWanSelfAttention):
                 qkv = _usp_input_all_to_all_varlen_qkv(query, key, value, seq_splits)
             query, key, value = qkv.chunk(3, dim=-1)
 
-        cache_view = _minwm_update_and_get_attention_kv(
-            kv_cache,
-            key=key,
-            value=value,
-            current_chunk_start=current_start,
-            cache_head_start=0 if sequence_shard_enabled else self.head_start,
-        )
-        if cache_view.query_cos is None or cache_view.query_sin is None:
-            query_cos, query_sin = self._minwm_rotary_emb.forward_uncached(
-                cache_view.query_position_ids
+        cache_head_start = 0 if sequence_shard_enabled else self.head_start
+        fused_post_result = None
+        if _MINWM_FUSED_POST_A2A_ROPE_CACHE and sequence_shard_enabled:
+            fused_post_result = _minwm_try_fused_post_a2a_rope_cache(
+                kv_cache,
+                query=query,
+                key=key,
+                value=value,
+                current_chunk_start=current_start,
+                cache_head_start=cache_head_start,
+                rotary_embedding=self._minwm_rotary_emb,
             )
-        else:
-            query_cos, query_sin = cache_view.query_cos, cache_view.query_sin
-        roped_query = apply_minwm_rotary_embedding(query, query_cos, query_sin).type_as(
-            value
-        )
-        if (
-            _MINWM_CACHE_ROTATED_K
-            and cache_view.rotated_k_is_valid
-            and cache_view.is_recompute
-        ):
-            rotated_current_key = apply_minwm_rotary_embedding(
-                key, query_cos, query_sin
-            ).type_as(value)
-            cache_view.rotated_k[
-                :, cache_view.current_local_start : cache_view.current_local_end
-            ].copy_(rotated_current_key)
-            attention_key = cache_view.rotated_k
-        else:
-            if cache_view.key_cos is None or cache_view.key_sin is None:
-                key_cos, key_sin = self._minwm_rotary_emb.forward_uncached(
-                    cache_view.key_position_ids
+        if fused_post_result is None:
+            cache_view = _minwm_update_and_get_attention_kv(
+                kv_cache,
+                key=key,
+                value=value,
+                current_chunk_start=current_start,
+                cache_head_start=cache_head_start,
+            )
+            if cache_view.query_cos is None or cache_view.query_sin is None:
+                query_cos, query_sin = self._minwm_rotary_emb.forward_uncached(
+                    cache_view.query_position_ids
                 )
             else:
-                key_cos, key_sin = cache_view.key_cos, cache_view.key_sin
-            attention_key = apply_minwm_rotary_embedding(
-                cache_view.k, key_cos, key_sin
+                query_cos, query_sin = cache_view.query_cos, cache_view.query_sin
+            roped_query = apply_minwm_rotary_embedding(
+                query, query_cos, query_sin
             ).type_as(value)
-            if _MINWM_CACHE_ROTATED_K:
-                cache_view.rotated_k.copy_(attention_key)
-                kv_cache.rotated_k_is_valid = True
+            if (
+                _MINWM_CACHE_ROTATED_K
+                and cache_view.rotated_k_is_valid
+                and cache_view.is_recompute
+            ):
+                rotated_current_key = apply_minwm_rotary_embedding(
+                    key, query_cos, query_sin
+                ).type_as(value)
+                cache_view.rotated_k[
+                    :, cache_view.current_local_start : cache_view.current_local_end
+                ].copy_(rotated_current_key)
+                attention_key = cache_view.rotated_k
+            else:
+                if cache_view.key_cos is None or cache_view.key_sin is None:
+                    key_cos, key_sin = self._minwm_rotary_emb.forward_uncached(
+                        cache_view.key_position_ids
+                    )
+                else:
+                    key_cos, key_sin = cache_view.key_cos, cache_view.key_sin
+                attention_key = apply_minwm_rotary_embedding(
+                    cache_view.k, key_cos, key_sin
+                ).type_as(value)
+                if _MINWM_CACHE_ROTATED_K:
+                    cache_view.rotated_k.copy_(attention_key)
+                    kv_cache.rotated_k_is_valid = True
+        else:
+            cache_view, roped_query = fused_post_result
+            attention_key = cache_view.rotated_k
+            assert attention_key is not None
         attention_value = cache_view.v
         parity_dump_dir = getattr(self, "_minwm_parity_dump_dir", None)
         parity_index = getattr(self, "_minwm_parity_forward_index", 0)
@@ -996,7 +1088,7 @@ class MinWMCausalTransformer3DModel(CausalWanTransformer3DModel):
             "MinWM execution profile: attention_impl=%s "
             "packed_deterministic=%s segment_compile=%s cache_rotated_k=%s "
             "precompute_cache_rope=%s cache_packed_metadata=%s "
-            "hoist_timestep_modulation=%s",
+            "hoist_timestep_modulation=%s fused_post_a2a_rope_cache=%s",
             _MINWM_ATTENTION_IMPL,
             _MINWM_PACKED_ATTENTION_DETERMINISTIC,
             _MINWM_SEGMENT_COMPILE,
@@ -1004,6 +1096,7 @@ class MinWMCausalTransformer3DModel(CausalWanTransformer3DModel):
             _MINWM_PRECOMPUTE_CACHE_ROPE,
             _MINWM_CACHE_PACKED_METADATA,
             _MINWM_HOIST_TIMESTEP_MODULATION,
+            _MINWM_FUSED_POST_A2A_ROPE_CACHE,
         )
         deterministic = os.environ.get("MINWM_PARITY_DETERMINISTIC", "0")
         if deterministic.strip().lower() not in {"", "0", "false", "no", "off"}:
