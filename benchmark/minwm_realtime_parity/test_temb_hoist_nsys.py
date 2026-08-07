@@ -3,6 +3,7 @@ from pathlib import Path
 
 from compare_temb_hoist_nsys import (
     INDEX_KERNEL_RE,
+    _assert_contract,
     _assert_historical_runner_flag_guard,
     _assert_off_resume_contract,
     _kernel_name_counts,
@@ -174,8 +175,10 @@ def test_metric_summary_preserves_api_boundary_evidence() -> None:
     record = {
         "metrics": {
             "profiler_on": {
-                "dit_wall_ms": available({"count": 10, "mean": 0.9}),
-                "vae_wall_ms": available({"count": 10, "mean": 1.9}),
+                "observed_wall_with_profiler_overhead": {
+                    "dit_wall_ms": available({"count": 10, "mean": 0.9}),
+                    "vae_wall_ms": available({"count": 10, "mean": 1.9}),
+                },
                 "dit_cuda_ms": available({"mean": 1.0}),
                 "vae_cuda_ms": available({"mean": 2.0}),
                 "kernel_count": available({"per_stable_chunk": 3.0}),
@@ -197,3 +200,77 @@ def test_metric_summary_preserves_api_boundary_evidence() -> None:
     assert summary["launch_api_per_chunk"] == 45.6
     assert summary["cuda_api_boundary_evidence"] is cuda_api
     assert summary["launch_api_boundary_evidence"] is launch_api
+
+
+def test_formal_contract_reads_wall_from_observed_profiler_container() -> None:
+    def available(value: object) -> dict[str, object]:
+        return {"status": "available", "value": value}
+
+    stage = available({"count": 10})
+    gpu_metric = available(
+        {
+            "collected_target_count": 8,
+            "allocated_target_count": 8,
+            "active_target_count": 2,
+            "active_cuda_device_ids": [0, 1],
+            "active_pw_gpu_ids": [2, 3],
+            "target_mapping": [{} for _ in range(8)],
+            "per_device_per_chunk_sample_count": {
+                "0": [{} for _ in range(10)],
+                "1": [{} for _ in range(10)],
+            },
+        }
+    )
+    api = available(
+        {"boundary_attribution_policy": API_BOUNDARY_ATTRIBUTION_POLICY}
+    )
+    record = {
+        "mode": "profiler_on",
+        "provenance": {"gpu": {"count": 2, "allocated_count": 8}},
+        "workload": {
+            "sp_degree": 2,
+            "warmup_chunks": 1,
+            "precondition_warmup_chunks": 20,
+            "measured_chunks": 10,
+            "precision": "bf16",
+            "dmd_forwards_per_chunk": 4,
+            "clean_cache_forwards_per_chunk": 1,
+        },
+        "comparison_contract": {"kv_cache_num_frames": 45},
+        "metrics": {
+            "profiler_on": {
+                "observed_wall_with_profiler_overhead": {
+                    "dit_wall_ms": stage,
+                    "vae_wall_ms": stage,
+                },
+                "dit_cuda_ms": stage,
+                "vae_cuda_ms": stage,
+                "kernel_count": available({}),
+                "cuda_api_count": api,
+                "kernel_launch_api_count": api,
+                "short_kernel_buckets": available({}),
+                "gpu_kernel_busy": available({}),
+                "stable_window_coverage": available(
+                    {
+                        "expected_stable_chunk_indices": list(range(1, 11)),
+                        "observed_stable_chunk_indices": list(range(1, 11)),
+                        "normalization_denominator": 10,
+                        "intervals": [{} for _ in range(10)],
+                    }
+                ),
+                "capture_coverage": available({}),
+                "gpu_metrics": {
+                    "sm_active": gpu_metric,
+                    "tensor_active": gpu_metric,
+                },
+            }
+        },
+    }
+    _assert_contract(record)
+    del record["metrics"]["profiler_on"]["observed_wall_with_profiler_overhead"]
+    try:
+        _assert_contract(record)
+    except ValueError as exc:
+        assert "observed wall metrics are missing" in str(exc)
+    else:
+        raise AssertionError("formal contract accepted misplaced wall metrics")

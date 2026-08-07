@@ -29,10 +29,20 @@ def _load_record(path: Path) -> dict[str, Any]:
     return record
 
 
-def _available_value(metric: dict[str, Any], name: str) -> Any:
-    if metric.get("status") != "available":
+def _available_value(metric: Any, name: str) -> Any:
+    if not isinstance(metric, dict) or metric.get("status") != "available":
         raise ValueError(f"{name} is unavailable: {metric}")
     return metric["value"]
+
+
+def _profiler_on_stage_metrics(
+    record: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    on = record["metrics"]["profiler_on"]
+    observed_wall = on.get("observed_wall_with_profiler_overhead")
+    if not isinstance(observed_wall, dict):
+        raise ValueError("profiler-on observed wall metrics are missing")
+    return on, observed_wall
 
 
 def _assert_off_resume_contract(
@@ -124,9 +134,13 @@ def _assert_contract(record: dict[str, Any]) -> None:
     if gpu["count"] != 2 or gpu["allocated_count"] != 8:
         raise ValueError(f"expected active/allocated GPUs 2/8, got {gpu}")
 
-    on = record["metrics"]["profiler_on"]
-    for name in ("dit_wall_ms", "vae_wall_ms", "dit_cuda_ms", "vae_cuda_ms"):
-        value = _available_value(on[name], name)
+    on, observed_wall = _profiler_on_stage_metrics(record)
+    for name in ("dit_wall_ms", "vae_wall_ms"):
+        value = _available_value(observed_wall.get(name), name)
+        if value["count"] != 10:
+            raise ValueError(f"{name}: expected 10 complete stage samples")
+    for name in ("dit_cuda_ms", "vae_cuda_ms"):
+        value = _available_value(on.get(name), name)
         if value["count"] != 10:
             raise ValueError(f"{name}: expected 10 complete stage samples")
     for name in (
@@ -264,14 +278,18 @@ def _kernel_name_counts(
 
 
 def _metric_summary(record: dict[str, Any]) -> dict[str, Any]:
-    on = record["metrics"]["profiler_on"]
+    on, observed_wall = _profiler_on_stage_metrics(record)
     cuda_api = _available_value(on["cuda_api_count"], "cuda_api_count")
     launch_api = _available_value(
         on["kernel_launch_api_count"], "kernel_launch_api_count"
     )
     return {
-        "dit_wall_ms": _available_value(on["dit_wall_ms"], "dit_wall_ms")["mean"],
-        "vae_wall_ms": _available_value(on["vae_wall_ms"], "vae_wall_ms")["mean"],
+        "dit_wall_ms": _available_value(observed_wall["dit_wall_ms"], "dit_wall_ms")[
+            "mean"
+        ],
+        "vae_wall_ms": _available_value(observed_wall["vae_wall_ms"], "vae_wall_ms")[
+            "mean"
+        ],
         "dit_cuda_ms": _available_value(on["dit_cuda_ms"], "dit_cuda_ms")["mean"],
         "vae_cuda_ms": _available_value(on["vae_cuda_ms"], "vae_cuda_ms")["mean"],
         "kernel_per_chunk": _available_value(on["kernel_count"], "kernel_count")[
