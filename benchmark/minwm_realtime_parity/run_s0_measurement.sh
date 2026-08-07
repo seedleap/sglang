@@ -11,8 +11,13 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 WORK_ROOT="/work/minwm-realtime/${MINWM_RUN_ID}"
 MODEL_DIR="${WORK_ROOT}/sglang-model"
 RUN_LABEL="${MINWM_S0_RUN_LABEL:-s0-measurement}"
+PROFILER_OFF_ONLY="${MINWM_S0_PROFILER_OFF_ONLY:-0}"
 if ! [[ "${RUN_LABEL}" =~ ^[A-Za-z0-9_-]+$ ]]; then
   echo "MINWM_S0_RUN_LABEL must be a safe path component" >&2
+  exit 2
+fi
+if ! [[ "${PROFILER_OFF_ONLY}" =~ ^(0|1)$ ]]; then
+  echo "MINWM_S0_PROFILER_OFF_ONLY must be 0 or 1" >&2
   exit 2
 fi
 RESULT_ROOT="${MINWM_RESULTS_ROOT%/}/${MINWM_RUN_ID}/${RUN_LABEL}"
@@ -75,6 +80,7 @@ ALLOCATED_GPU_COUNT="${MINWM_ALLOCATED_GPU_COUNT:-$(nvidia-smi -L | wc -l | xarg
   echo "nsys_window=${PROFILE_PRECONDITION_CHUNKS} precondition + ${PROFILE_DISCARD_CHUNKS} discarded + ${PROFILE_MEASURED_CHUNKS} stable"
   echo "kv_cache_num_frames=${KV_CACHE_NUM_FRAMES}"
   echo "torch_profiler_concurrent=false"
+  echo "profiler_off_only=${PROFILER_OFF_ONLY}"
   echo "started_utc=$(date --utc +%Y-%m-%dT%H:%M:%SZ)"
 } | tee "${RESULT_ROOT}/contract.txt"
 nvidia-smi -q > "${RESULT_ROOT}/nvidia-smi-q.txt"
@@ -82,6 +88,7 @@ nvidia-smi -q > "${RESULT_ROOT}/nvidia-smi-q.txt"
 server_pid=""
 monitor_pid=""
 nsys_session=""
+current_lane_dir=""
 
 wait_for_server() {
   local pid="$1" log_path="$2"
@@ -120,7 +127,82 @@ cleanup() {
   fi
   stop_server
 }
-trap cleanup EXIT INT TERM
+
+mark_failed_profiler_off_lane() {
+  local status="$1" lane_root="$2" timestamp marker
+  if [[ "${PROFILER_OFF_ONLY}" != "1" || -z "${lane_root}" ]]; then
+    return
+  fi
+  mkdir -p "${lane_root}"
+  if compgen -G "${lane_root}/invalid-marker*.json" >/dev/null; then
+    return
+  fi
+  timestamp="$(date --utc +%Y%m%dT%H%M%S%NZ)"
+  marker="${lane_root}/invalid-marker-${timestamp}.json"
+  python3 - "${lane_root}" "${marker}" "${status}" <<'PY'
+import hashlib
+import json
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+root = Path(sys.argv[1]).resolve()
+marker = Path(sys.argv[2]).resolve()
+status = int(sys.argv[3])
+files = []
+for path in sorted(root.rglob("*")):
+    if not path.is_file() or path.resolve() == marker:
+        continue
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1 << 20), b""):
+            digest.update(chunk)
+    files.append(
+        {
+            "original_path": str(path),
+            "preserved_path": str(path),
+            "size_bytes": path.stat().st_size,
+            "sha256": digest.hexdigest(),
+            "recoverable": True,
+        }
+    )
+record = {
+    "schema_version": "minwm-realtime-invalid-attempt/v1",
+    "reason": (
+        f"profiler-off-only runner exited non-zero (status={status}); "
+        "artifacts preserved in place"
+    ),
+    "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+    "original_root": str(root),
+    "preserved_root": str(root),
+    "recoverability": "preserved_in_place",
+    "files": files,
+}
+marker.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
+PY
+}
+
+on_exit() {
+  local status="$?"
+  trap - EXIT INT TERM
+  cleanup
+  if (( status != 0 )); then
+    mark_failed_profiler_off_lane "${status}" "${current_lane_dir}" || true
+  fi
+  exit "${status}"
+}
+
+trap on_exit EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+assert_no_nsys_processes() {
+  if [[ "${PROFILER_OFF_ONLY}" == "1" ]] && pgrep -x nsys >/dev/null; then
+    echo "profiler-off-only contract violated: nsys process is running" >&2
+    pgrep -a -x nsys >&2 || true
+    exit 2
+  fi
+}
 
 server_args() {
   local degree="$1"
@@ -359,7 +441,10 @@ run_profiler_on() {
     "${profile_dir}/measurement.json"
 }
 
-install_nsys
+if [[ "${PROFILER_OFF_ONLY}" != "1" ]]; then
+  install_nsys
+fi
+assert_no_nsys_processes
 read -r -a degrees <<< "${SP_DEGREES}"
 for degree in "${degrees[@]}"; do
   if ! [[ "${degree}" =~ ^(2|4)$ ]]; then
@@ -368,44 +453,74 @@ for degree in "${degrees[@]}"; do
   fi
   lane_dir="${RESULT_ROOT}/sp${degree}"
   mkdir -p "${lane_dir}"
+  current_lane_dir="${lane_dir}"
+  assert_no_nsys_processes
   run_profiler_off "${degree}" "${lane_dir}"
-  run_profiler_on "${degree}" "${lane_dir}"
+  assert_no_nsys_processes
+  if [[ "${PROFILER_OFF_ONLY}" != "1" ]]; then
+    run_profiler_on "${degree}" "${lane_dir}"
+  fi
+  current_lane_dir=""
 done
 
-python3 - "${RESULT_ROOT}" <<'PY'
+current_lane_dir="${RESULT_ROOT}/summary"
+python3 - "${RESULT_ROOT}" "${PROFILER_OFF_ONLY}" <<'PY'
 import json
 import sys
 from pathlib import Path
 
 root = Path(sys.argv[1])
+profiler_off_only = sys.argv[2] == "1"
 lanes = {}
 for lane_dir in sorted(root.glob("sp*")):
     if not lane_dir.is_dir():
         continue
     repeat = json.loads((lane_dir / "repeat-summary.json").read_text())
-    profile = json.loads((lane_dir / "profiler-on/measurement.json").read_text())
-    lanes[lane_dir.name] = {
-        "profiler_off": repeat,
-        "profiler_on": profile,
-    }
+    lane = {"profiler_off": repeat}
+    if not profiler_off_only:
+        lane["profiler_on"] = json.loads(
+            (lane_dir / "profiler-on/measurement.json").read_text()
+        )
+    lanes[lane_dir.name] = lane
 summary = {
-    "schema_version": "minwm-realtime-s0-baseline/v1",
+    "schema_version": (
+        "minwm-realtime-profiler-off-only/v1"
+        if profiler_off_only
+        else "minwm-realtime-s0-baseline/v1"
+    ),
     "lanes": lanes,
 }
 (root / "baseline-summary.json").write_text(
     json.dumps(summary, indent=2, sort_keys=True) + "\n"
 )
-print(json.dumps({
-    lane: {
-        "off_cv_pass": value["profiler_off"]["acceptance"]["passes_cv_target"],
-        "gpu_metrics": {
-            name: metric["status"]
-            for name, metric in value["profiler_on"]["metrics"]["profiler_on"]["gpu_metrics"].items()
+print(
+    json.dumps(
+        {
+            lane: {
+                "off_cv_pass": value["profiler_off"]["acceptance"][
+                    "passes_cv_target"
+                ],
+                **(
+                    {}
+                    if profiler_off_only
+                    else {
+                        "gpu_metrics": {
+                            name: metric["status"]
+                            for name, metric in value["profiler_on"]["metrics"][
+                                "profiler_on"
+                            ]["gpu_metrics"].items()
+                        }
+                    }
+                ),
+            }
+            for lane, value in lanes.items()
         },
-    }
-    for lane, value in lanes.items()
-}, indent=2, sort_keys=True))
+        indent=2,
+        sort_keys=True,
+    )
+)
 PY
 
+current_lane_dir=""
 date --utc +%Y-%m-%dT%H:%M:%SZ | tee "${RESULT_ROOT}/complete.txt"
 echo "MINWM_S0_MEASUREMENT_COMPLETE results=${RESULT_ROOT}"
