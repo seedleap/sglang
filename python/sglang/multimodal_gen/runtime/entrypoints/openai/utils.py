@@ -351,6 +351,7 @@ async def process_generation_batch(
             and result.output_file_paths is None
             and result.raw_frame_batches is None
             and result.remote_vae_request is None
+            and result.realtime_latents is None
         ):
             error_msg = result.error or "Unknown error"
             raise RuntimeError(

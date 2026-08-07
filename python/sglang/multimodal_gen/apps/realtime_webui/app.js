@@ -66,6 +66,9 @@ const STARTUP_DECODE_QUEUE_SECONDS = 0.75;
 const RECENT_DROP_DISPLAY_MS = 1800;
 const CONTROL_BUFFERED_AMOUNT_LIMIT = 1 << 20;
 const CONTROL_TRANSITION_FLUSH_DELAY_MS = 50;
+const CONTROL_HELD_STATE_HEARTBEAT_MS = 100;
+const SESSION_HEARTBEAT_MS = 15000;
+const BROWSER_USER_ID_STORAGE_KEY = "sglang-realtime-user-id";
 const MIN_RENDER_TIMER_FPS = 30;
 const MAX_RENDER_TIMER_FPS = 60;
 const CONTROL_KEY_ACTIONS = new Map([
@@ -157,6 +160,10 @@ function selectedGenerationMode() {
 }
 
 function updateT2VFrameHint() {
+  if (selectedGenerationMode() === "t2v" && $("continuous").checked) {
+    $("t2vFrameHint").textContent = "Continuous T2V runs until Stop is pressed.";
+    return;
+  }
   const frames = Number($("numFrames").value);
   const fps = Number($("fps").value || DEFAULT_TARGET_FPS);
   const duration = Number.isFinite(frames) && Number.isFinite(fps) && fps > 0
@@ -176,7 +183,9 @@ function updateGenerationModeUi() {
       savedI2VNumFrames = $("numFrames").value;
       savedI2VContinuous = $("continuous").checked;
       $("numFrames").value = String(DEFAULT_T2V_NUM_FRAMES);
+      $("continuous").checked = savedT2VContinuous;
     } else if (lastGenerationMode === "t2v") {
+      savedT2VContinuous = $("continuous").checked;
       $("numFrames").value = savedI2VNumFrames;
       $("continuous").checked = savedI2VContinuous;
     }
@@ -185,10 +194,10 @@ function updateGenerationModeUi() {
   $("t2vFrameHint").hidden = !isT2V;
   $("numFrames").min = isT2V ? "1" : "5";
   $("numFrames").step = isT2V ? String(T2V_FRAME_STEP) : "4";
-  $("continuous").disabled = isT2V;
-  if (isT2V) $("continuous").checked = false;
+  $("continuous").disabled = false;
+  $("numFrames").disabled = isT2V && $("continuous").checked;
   $("continuousLabelText").textContent = isT2V
-    ? "T2V length is controlled by Frames"
+    ? "Continuous T2V session"
     : "Continuous session";
   lastGenerationMode = mode;
   updateT2VFrameHint();
@@ -217,7 +226,7 @@ const reactorPresets = [
     size: "832x480",
     fps: 16,
     prompt: "A locked first-person dragon-rider view matching the reference image: both tan forearms in brown leather gloves stay visible at the bottom, gripping leather reins around the green-brown scaled dragon neck; the dragon head, horns, and both wide wings frame the jungle valley, waterfalls, mist, and tall castle on the right. Smooth forward flight only, keep the same rider hands, dragon body, wing silhouette, castle placement, and humid daylight colors in every frame.",
-    referenceUrl: `${REACTOR_PRESET_BASE_URL}/dragon-ride.jpg`,
+    referenceUrl: "./assets/dragon-ride.jpg",
     source: "Reactor LingBot preset",
   },
   {
@@ -356,6 +365,7 @@ let selectedReferenceLabel = "";
 let lastGenerationMode = null;
 let savedI2VNumFrames = "9";
 let savedI2VContinuous = true;
+let savedT2VContinuous = true;
 let pendingHeader = null;
 let frames = 0;
 let bytes = 0;
@@ -403,7 +413,6 @@ let recordingBaseFileName = "";
 let currentSessionArtifact = null;
 let recordingArtifact = null;
 let currentTrace = null;
-let traceInitSent = false;
 let renderedTraceChunks = new Set();
 const decodeRequests = new Map();
 let controlStateController = null;
@@ -412,6 +421,19 @@ let lastSampledEventId = 0;
 const traceTopologyApi = window.SGLangRealtimeTraceTopology || {};
 const traceTopology = traceTopologyApi.createRealtimeTraceTopology
   ? traceTopologyApi.createRealtimeTraceTopology({ maxEvents: 220 })
+  : null;
+const traceTransportApi = window.SGLangRealtimeTraceTransport || {};
+const traceHttpClient = traceTransportApi.RealtimeTraceHttpClient
+  ? new traceTransportApi.RealtimeTraceHttpClient({
+      onServerEvents: (events) => {
+        events.forEach((event) => recordTraceTopologyEvent(event));
+      },
+      onAggregate: (aggregate) => {
+        const metricsChanged = traceTopology?.setAggregate?.(aggregate);
+        if (metricsChanged) renderTraceTopology();
+        else if (traceTopology) updateTraceSummary(traceTopology.summary());
+      },
+    })
   : null;
 const formatTraceDuration = traceTopologyApi.formatTraceDuration || formatMs;
 let activeWorkspaceView = "preview";
@@ -428,17 +450,19 @@ const recordingCtx = recordingCanvas.getContext("2d", { alpha: false });
 const playbackController = new RealtimePlaybackController({
   mode: "live",
   targetFps: DEFAULT_TARGET_FPS,
-  holdForTargetLead: true,
-  targetLeadChunkRatio: 0.34,
-  minTargetLeadMs: 220,
-  maxTargetLeadMs: 420,
-  startLeadChunkRatio: 0.28,
-  minStartLeadMs: 160,
-  resumeLeadChunkRatio: 0.3,
-  minResumeLeadMs: 140,
-  maxResumeLeadMs: 320,
-  maxDeliveryLeadBoostMs: 220,
-  deliveryStallExpectedMultiplier: 1.12,
+  lowLatencyPlayback: true,
+  holdForTargetLead: false,
+  targetLeadChunkRatio: 0.08,
+  minTargetLeadMs: 0,
+  maxTargetLeadMs: 80,
+  lowLatencyMaxLeadFrames: 1,
+  startLeadChunkRatio: 0,
+  minStartLeadMs: 0,
+  resumeLeadChunkRatio: 0,
+  minResumeLeadMs: 0,
+  maxResumeLeadMs: 80,
+  maxDeliveryLeadBoostMs: 30,
+  deliveryStallExpectedMultiplier: 1.2,
 });
 
 function setStatus(text, kind = "") {
@@ -477,28 +501,33 @@ function createTraceId() {
   return Array.from(random, (part) => part.toString(16).padStart(8, "0")).join("");
 }
 
-function currentTracePayload() {
-  if (!currentTrace) return undefined;
-  return {
-    trace_id: currentTrace.traceId,
-    time_origin_ms: performance.timeOrigin,
-    created_perf_ms: roundTraceNumber(currentTrace.createdPerfMs),
-    created_epoch_ms: currentTrace.createdEpochMs,
-    user_agent: navigator.userAgent,
-    location: window.location.href,
-    events: currentTrace.events.slice(-32),
-  };
+function stableBrowserUserId() {
+  try {
+    let value = localStorage.getItem(BROWSER_USER_ID_STORAGE_KEY);
+    if (!value) {
+      value = createTraceId();
+      localStorage.setItem(BROWSER_USER_ID_STORAGE_KEY, value);
+    }
+    return value;
+  } catch {
+    return createTraceId();
+  }
 }
 
+const browserUserId = stableBrowserUserId();
+
 function traceWebSocketUrl(baseUrl) {
-  if (!currentTrace) return baseUrl;
   try {
     const url = new URL(baseUrl, window.location.href);
-    url.searchParams.set("trace_id", currentTrace.traceId);
+    if (currentTrace) url.searchParams.set("trace_id", currentTrace.traceId);
+    url.searchParams.set("user_id", browserUserId);
     return url.toString();
   } catch {
     const separator = baseUrl.includes("?") ? "&" : "?";
-    return `${baseUrl}${separator}trace_id=${encodeURIComponent(currentTrace.traceId)}`;
+    const trace = currentTrace
+      ? `trace_id=${encodeURIComponent(currentTrace.traceId)}&`
+      : "";
+    return `${baseUrl}${separator}${trace}user_id=${encodeURIComponent(browserUserId)}`;
   }
 }
 
@@ -515,24 +544,8 @@ function markClientTrace(name, fields = {}, options = {}) {
   currentTrace.events.push(event);
   if (currentTrace.events.length > 64) currentTrace.events.shift();
   recordTraceTopologyEvent(event);
-  if (options.send !== false) sendClientTrace(event);
+  if (options.send !== false) traceHttpClient?.enqueueClientEvent(event);
   return event;
-}
-
-function sendClientTrace(event) {
-  if (!traceInitSent || !currentTrace || !ws || ws.readyState !== WebSocket.OPEN) {
-    return;
-  }
-  try {
-    ws.send(pack({
-      type: "event",
-      kind: "client_trace",
-      trace_id: currentTrace.traceId,
-      payload: event,
-    }));
-  } catch (error) {
-    console.debug("realtime_trace send failed", error);
-  }
 }
 
 function roundTraceNumber(value) {
@@ -572,17 +585,30 @@ function renderTraceTopologyNow() {
 function updateTraceSummary(summary) {
   $("traceIdText").textContent = shortTraceId(summary.traceId);
   $("traceEventCountText").textContent = String(summary.eventCount);
+  const aggregate = summary.aggregate;
+  const observedLabel = aggregate
+    ? `${aggregate.window?.seconds || 300}s · ${aggregate.stale ? "stale" : "fresh"} · ${aggregate.observed_at || "-"}`
+    : "-";
+  $("traceObservedText").textContent = observedLabel;
   const chunk = summary.latestChunk;
   $("traceChunkText").textContent = chunk ? `#${chunk.chunkIndex}` : "-";
   $("traceChunkTotalText").textContent = chunk ? formatTraceDuration(chunk.chunkTotalMs) : "-";
-  $("traceSchedulerText").textContent = chunk ? formatTraceDuration(chunk.schedulerForwardMs) : "-";
-  $("traceVaeEncodeText").textContent = chunk ? formatTraceDuration(chunk.vaeEncodeMs) : "-";
-  $("traceDenoiseText").textContent = chunk ? formatTraceDuration(chunk.denoiseMs) : "-";
+  $("traceSchedulerText").textContent = traceStageMetric(summary, "scheduler", chunk?.schedulerForwardMs);
+  $("traceVaeEncodeText").textContent = traceStageMetric(summary, "vae_encode", chunk?.vaeEncodeMs);
+  $("traceDenoiseText").textContent = traceStageMetric(summary, "denoise", chunk?.denoiseMs);
   const vaeDecodeMs = chunk
     ? sumTraceNumbers(chunk.vaeDecodeMs, chunk.postDecodeMs)
     : null;
-  $("traceVaeDecodeText").textContent = formatTraceDuration(vaeDecodeMs);
+  $("traceVaeDecodeText").textContent = traceStageMetric(summary, "vae_decode", vaeDecodeMs);
   $("traceAsyncEstimateText").textContent = formatAsyncEstimate(summary.asyncEstimate);
+}
+
+function traceStageMetric(summary, stageId, fallbackMs) {
+  const stage = summary.aggregate?.stages?.find((candidate) => candidate.id === stageId);
+  if (stage && Number(stage.count || 0) > 0) {
+    return `p50 ${formatTraceDuration(stage.p50_ms)} · p95 ${formatTraceDuration(stage.p95_ms)}`;
+  }
+  return formatTraceDuration(fallbackMs);
 }
 
 function renderTraceSvg(summary) {
@@ -732,7 +758,12 @@ function setWorkspaceView(view) {
     pane.classList.toggle("is-active", active);
     pane.hidden = !active;
   });
-  if (activeWorkspaceView === "trace") renderTraceTopologyNow();
+  if (activeWorkspaceView === "trace") {
+    renderTraceTopologyNow();
+    traceHttpClient?.setActive(true, 5000);
+  } else {
+    traceHttpClient?.setActive(false);
+  }
 }
 
 function updateControlDebugText() {
@@ -1093,6 +1124,10 @@ function artifactClientMs(artifact = currentSessionArtifact) {
 
 function currentRequestSnapshot() {
   const generationMode = selectedGenerationMode();
+  const continuousT2V = generationMode === "t2v" && $("continuous").checked;
+  const numFrames = generationMode === "t2v"
+    ? (continuousT2V ? undefined : readT2VNumFrames())
+    : Number($("numFrames").value);
   return compact({
     type: "init_snapshot",
     generation_mode: generationMode,
@@ -1100,7 +1135,7 @@ function currentRequestSnapshot() {
     prompt: $("prompt").value,
     size: $("size").value,
     fps: Number($("fps").value || DEFAULT_TARGET_FPS),
-    num_frames: generationMode === "t2v" ? readT2VNumFrames() : Number($("numFrames").value),
+    num_frames: continuousT2V ? undefined : numFrames,
     seed: Number($("seed").value),
     num_inference_steps: Number($("steps").value),
     guidance_scale: Number($("guidance").value),
@@ -2145,9 +2180,17 @@ function buildReplayHtml(artifact) {
       const prompts = Array.isArray(artifact.prompt_history)
         ? artifact.prompt_history.slice().sort((left, right) => Number(left.client_ms || 0) - Number(right.client_ms || 0))
         : [];
+      const tracedChunks = events
+        .filter((event) => event.kind === "trace_event" && event.trace?.event === "server.chunk_complete")
+        .map((event) => ({
+          ...event.trace,
+          client_ms: event.client_ms,
+          received_client_ms: event.client_ms,
+        }));
+      const legacyChunks = events.filter((event) => event.kind === "server_chunk_stats");
       const chunks = Array.isArray(artifact.chunks) && artifact.chunks.length
         ? artifact.chunks.slice().sort((left, right) => replayEventTime(left) - replayEventTime(right))
-        : events.filter((event) => event.kind === "server_chunk_stats")
+        : (tracedChunks.length ? tracedChunks : legacyChunks)
           .sort((left, right) => replayEventTime(left) - replayEventTime(right));
       const referenceImage = request.reference_image || artifact.reference_image || null;
       const referenceSrc = replayReferenceImageSrc(referenceImage);
@@ -2987,6 +3030,13 @@ function renderLoop(now) {
 }
 
 function scheduleRenderLoop() {
+  if (
+    document.visibilityState !== "hidden" &&
+    typeof window.requestAnimationFrame === "function"
+  ) {
+    window.requestAnimationFrame(renderLoop);
+    return;
+  }
   const timerFps = Math.min(
     MAX_RENDER_TIMER_FPS,
     Math.max(MIN_RENDER_TIMER_FPS, previewPlaybackTargetFps() * 2),
@@ -3098,7 +3148,7 @@ function abortCurrentSession(reason = "session closed by client", {
   setStatus(expectedClose ? "Closing" : "Aborting");
   if (!renderedPreviewFrames) setPreviewState("idle");
   addHistory(reason);
-  socket.close(expectedClose ? 1000 : 1008, reason.slice(0, 120));
+  socket.close(expectedClose ? 1000 : 4000, reason.slice(0, 120));
   return socket;
 }
 
@@ -3139,14 +3189,15 @@ async function connect() {
     resetStreamStats();
     const epoch = ++streamEpoch;
     currentTrace = createClientTrace();
-    traceInitSent = false;
+    traceHttpClient?.reset(currentTrace.traceId, $("serverUrl").value);
     resetTraceTopology(currentTrace.traceId);
     markClientTrace("client.generate_clicked", {
       generation_mode: selectedGenerationMode(),
       transport: $("transportFormat").value || "raw",
       fps: Number($("fps").value || DEFAULT_TARGET_FPS),
-    }, { send: false });
+    });
     const generationMode = selectedGenerationMode();
+    const continuousT2V = generationMode === "t2v" && $("continuous").checked;
     let firstFrame;
     let numFrames = Number($("numFrames").value);
     if (generationMode === "i2v") {
@@ -3162,7 +3213,7 @@ async function connect() {
         return;
       }
     } else {
-      numFrames = readT2VNumFrames();
+      numFrames = continuousT2V ? undefined : readT2VNumFrames();
     }
     const previewTransportParams = readPreviewTransportParams();
     const frameInterpolationParams = readFrameInterpolationParams();
@@ -3174,7 +3225,7 @@ async function connect() {
       prompt: $("prompt").value,
       size: $("size").value,
       fps: Number($("fps").value || DEFAULT_TARGET_FPS),
-      num_frames: numFrames,
+      num_frames: continuousT2V ? undefined : numFrames,
       seed: Number($("seed").value),
       num_inference_steps: Number($("steps").value),
       guidance_scale: Number($("guidance").value),
@@ -3184,7 +3235,6 @@ async function connect() {
         ? undefined
         : 1,
       trace_id: currentTrace.traceId,
-      client_trace: currentTracePayload(),
       first_frame: firstFrame,
       ...previewTransportParams,
       ...frameInterpolationParams,
@@ -3208,11 +3258,10 @@ async function connect() {
       if (epoch !== streamEpoch) return;
       markClientTrace("client.ws_open", {
         url: traceWebSocketUrl($("serverUrl").value),
-      }, { send: false });
+      });
       recordTrajectoryEvent("socket_open", { url: traceWebSocketUrl($("serverUrl").value) });
       const initPayload = pack(init);
       socket.send(initPayload);
-      traceInitSent = true;
       markClientTrace("client.init_sent", {
         generation_mode: generationMode,
         num_frames: init.num_frames,
@@ -3236,7 +3285,7 @@ async function connect() {
       markClientTrace("client.ws_close", {
         code: event.code,
         reason: event.reason || "",
-      }, { send: false });
+      });
       $("connectBtn").disabled = false;
       if (clearQueueOnClose) {
         clearFrameQueue();
@@ -3262,12 +3311,13 @@ async function connect() {
         normal_close: normalClose,
         expected_close: socketCloseExpected,
       });
+      void traceHttpClient?.flushClientEvents().catch(() => {});
       if (!renderedPreviewFrames) setPreviewState("idle");
       socketCloseExpected = false;
     };
     socket.onerror = () => {
       if (epoch !== streamEpoch) return;
-      markClientTrace("client.ws_error", {}, { send: false });
+      markClientTrace("client.ws_error");
       recordTrajectoryEvent("socket_error", { ready_state: socket.readyState });
       if (!socketCloseExpected) {
         socketHadError = true;
@@ -3321,24 +3371,6 @@ function receive(data, epoch) {
       if (!renderedPreviewFrames) setPreviewState("idle");
       return;
     }
-    if (message.type === "chunk_stats") {
-      const stats = message;
-      markClientTrace("client.chunk_stats_received", {
-        chunk_index: Number(stats.chunk_index || 0),
-        event_id: Number(stats.event_id || 0),
-        num_frames: Number(stats.num_frames || 0),
-        content_type: stats.content_type || "",
-        payload_bytes: data.byteLength || data.size || 0,
-      });
-      recordTraceTopologyEvent({ event: "server.chunk_complete", ...stats }, receivedAt);
-      recordServerChunkStats(stats);
-      updateServerChunkStats(stats);
-      return;
-    }
-    if (message.type === "trace_event") {
-      recordTraceTopologyEvent(message.trace || message, receivedAt);
-      return;
-    }
     if (message.type === "frame_batch") {
       const payload = message.payload;
       delete message.payload;
@@ -3352,6 +3384,14 @@ function receive(data, epoch) {
       recordFrameBatchReceived(message, payload?.byteLength || payload?.size || payload?.length || 0);
       enqueueDecodeBatch(message, payload, epoch);
       if (!renderedPreviewFrames) setStatus("Receiving", "live");
+      return;
+    }
+    if (message.type === "media_chunk_complete") {
+      recordTrajectoryEvent("media_chunk_complete", {
+        chunk_index: Number(message.chunk_index || 0),
+        event_id: Number(message.event_id || 0),
+        num_frames: Number(message.num_frames || 0),
+      });
       return;
     }
     pendingHeader = message;
@@ -3409,6 +3449,16 @@ async function decodeAndEnqueueFrameBatch(header, data, epoch) {
   recordDecodedFrameBatch(decodedFrames);
   const enqueueResult = playbackController.enqueueDecodedFrames(header, decodedFrames, now);
   closeFrames(enqueueResult.droppedFrames);
+  const playback = enqueueResult.snapshot;
+  lastSampledEventId = Number(header.event_id || lastSampledEventId);
+  updateControlDebugText();
+  $("chunkPayloadText").textContent = `${formatBytes(payloadBytes)} · ${chunkFrameCount}f`;
+  const realtimeRatio = playback.targetFps > 0
+    ? playback.sourceFps / playback.targetFps
+    : 0;
+  $("theoreticalFpsText").textContent = (
+    `${playback.sourceFps.toFixed(1)} fps · ${realtimeRatio.toFixed(2)}x`
+  );
   if (enqueueResult.cutover?.latencyMs) {
     const eventLatency = enqueueResult.cutover.latencyMs / 1000;
     $("latencyText").textContent = `${eventLatency.toFixed(1)}s · event`;
@@ -3419,29 +3469,6 @@ async function decodeAndEnqueueFrameBatch(header, data, epoch) {
   updateOutputSizeFromHeader(header);
   setStatus("Live", "live");
   updateStats();
-}
-
-function recordServerChunkStats(stats) {
-  if (!currentSessionArtifact) return;
-  const chunk = jsonSafe({
-    chunk_index: stats.chunk_index,
-    event_id: stats.event_id,
-    num_frames: stats.num_frames,
-    content_type: stats.content_type,
-    ws_payload_bytes: stats.ws_payload_bytes,
-    raw_write_ms: stats.raw_write_ms,
-    ws_write_ms: stats.ws_write_ms,
-    chunk_total_ms: stats.chunk_total_ms,
-    received_client_ms: artifactClientMs(),
-  });
-  currentSessionArtifact.chunks.push(chunk);
-  if (currentSessionArtifact.chunks.length > SESSION_ARTIFACT_EVENT_LIMIT) {
-    currentSessionArtifact.chunks.splice(
-      0,
-      currentSessionArtifact.chunks.length - SESSION_ARTIFACT_EVENT_LIMIT,
-    );
-  }
-  recordTrajectoryEvent("server_chunk_stats", chunk);
 }
 
 function recordFrameBatchReceived(header, payloadBytes) {
@@ -3484,33 +3511,6 @@ function recordChunkFirstRendered(chunkIndex, details = {}) {
       );
     }
   }
-}
-
-function updateServerChunkStats(stats) {
-  const rawWrite = Number(stats.raw_write_ms || 0) / 1000;
-  const wsWrite = Number(stats.ws_write_ms || 0) / 1000;
-  const chunkTotal = Number(stats.chunk_total_ms || 0) / 1000;
-  const numFrames = Number(stats.num_frames || 0);
-  const chunkIndex = Number(stats.chunk_index || 0);
-  const targetFps = previewPlaybackTargetFps();
-  const theoreticalFps = chunkTotal > 0 ? numFrames / chunkTotal : 0;
-  const playback = playbackController.observeServerStats(stats, performance.now());
-  lastSampledEventId = Number(stats.event_id || 0);
-  updateControlDebugText();
-  const realtimeRatio = targetFps > 0 ? theoreticalFps / targetFps : 0;
-  const isWarmupChunk =
-    chunkIndex === 0 && theoreticalFps > 0 && theoreticalFps < targetFps * 0.8;
-  $("serverSendText").textContent = `raw ${rawWrite.toFixed(2)}s · ws ${wsWrite.toFixed(2)}s`;
-  $("chunkPayloadText").textContent = `${formatBytes(stats.ws_payload_bytes || 0)} · ${numFrames}f`;
-  $("theoreticalFpsText").textContent = isWarmupChunk
-    ? `warmup · ${chunkTotal.toFixed(2)}s`
-    : theoreticalFps > 0
-    ? `${playback.sourceFps.toFixed(1)} fps · ${realtimeRatio.toFixed(2)}x`
-    : "-";
-  if (chunkTotal > 0) {
-    $("latencyText").textContent = `${chunkTotal.toFixed(2)}s · ${playback.sourceFps.toFixed(1)}fps`;
-  }
-  if (stats.content_type) $("payloadMode").textContent = shortPayloadMode(stats.content_type);
 }
 
 function sendEvent(kind, payload, historyText = null) {
@@ -4069,6 +4069,7 @@ $("recordFolderBtn").onclick = () => {
 };
 $("firstFrame").onchange = () => drawReferencePreview($("firstFrame").files[0]);
 $("generationMode").addEventListener("change", updateGenerationModeUi);
+$("continuous").addEventListener("change", updateGenerationModeUi);
 $("numFrames").addEventListener("input", updateT2VFrameHint);
 $("size").addEventListener("input", () => updateOutputSizeText());
 $("fps").addEventListener("input", () => {
@@ -4135,6 +4136,7 @@ class ControlStateController {
     this.activeActions = new Set();
     this.pendingTransitions = [];
     this.flushTimer = 0;
+    this.stateHeartbeatTimer = 0;
   }
 
   reset({ sendRelease = false } = {}) {
@@ -4142,6 +4144,7 @@ class ControlStateController {
     this.activeActions.clear();
     this.pendingTransitions = [];
     this.clearFlushTimer();
+    this.clearStateHeartbeatTimer();
     this.updateButtons();
     if (sendRelease && hadActions) {
       this.enqueueTransition();
@@ -4158,6 +4161,8 @@ class ControlStateController {
     }
     this.updateButtons();
     this.enqueueTransition();
+    if (this.activeActions.size) this.scheduleStateHeartbeat();
+    else this.clearStateHeartbeatTimer();
     return true;
   }
 
@@ -4183,6 +4188,19 @@ class ControlStateController {
       this.flushTimer = 0;
       this.flush();
     }, CONTROL_TRANSITION_FLUSH_DELAY_MS);
+  }
+
+  scheduleStateHeartbeat() {
+    if (this.stateHeartbeatTimer || !this.activeActions.size) return;
+    this.stateHeartbeatTimer = window.setTimeout(() => {
+      this.stateHeartbeatTimer = 0;
+      if (!this.activeActions.size) return;
+      sendCameraControlTransitions([{
+        actions: Array.from(this.activeActions).sort(),
+        clientTsMs: Math.round(performance.now()),
+      }]);
+      this.scheduleStateHeartbeat();
+    }, CONTROL_HELD_STATE_HEARTBEAT_MS);
   }
 
   flush() {
@@ -4229,11 +4247,32 @@ class ControlStateController {
     window.clearTimeout(this.flushTimer);
     this.flushTimer = 0;
   }
+
+  clearStateHeartbeatTimer() {
+    if (!this.stateHeartbeatTimer) return;
+    window.clearTimeout(this.stateHeartbeatTimer);
+    this.stateHeartbeatTimer = 0;
+  }
 }
 
 const CONTROL_ACTION_META_KEYS = Object.keys(CONTROL_ACTION_META);
 controlStateController = new ControlStateController();
 updateControlDebugText();
+window.setInterval(() => {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  const eventId = nextEventId++;
+  ws.send(pack({
+    type: "event",
+    kind: "heartbeat",
+    payload: {
+      active_actions: Array.from(controlStateController.activeActions).sort(),
+    },
+    event_id: eventId,
+    trace_id: currentTrace?.traceId,
+    client_sent_perf_ms: roundTraceNumber(performance.now()),
+    client_sent_epoch_ms: Date.now(),
+  }));
+}, SESSION_HEARTBEAT_MS);
 
 document.addEventListener("keydown", (event) => {
   if (isTypingTarget(event.target)) return;

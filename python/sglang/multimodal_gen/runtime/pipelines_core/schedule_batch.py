@@ -206,12 +206,15 @@ class Req:
 
     # realtime
     realtime_session_id: str | None = None
+    realtime_generation_id: str | None = None
     realtime_trace_id: str | None = None
     realtime_trace_started_at: float | None = None
     session: RealtimeSession | None = None
     block_idx: int = 0
     realtime_chunk_size: int | None = None
     realtime_event_id: int | None = None
+    realtime_action_version: int = 0
+    realtime_prompt_version: int = 0
     realtime_output_format: str | None = None
     realtime_preview_max_width: int | None = None
     realtime_output_pacing: bool = False
@@ -418,6 +421,9 @@ class OutputBatch:
     remote_vae_request: dict[str, Any] | None = None
     realtime_output_chunk_index_start: int | None = None
     realtime_output_event_id: int | None = None
+    realtime_latents: torch.Tensor | None = None
+    realtime_handoff: dict[str, Any] | None = None
+    realtime_request_metadata: dict[str, Any] | None = None
     audio: torch.Tensor | None = None
     audio_sample_rate: int | None = None
     trajectory_timesteps: torch.Tensor | None = None
@@ -445,4 +451,7 @@ class OutputBatch:
         self.output_file_paths = None
         self.raw_frame_batches = None
         self.remote_vae_request = None
+        self.realtime_latents = None
+        self.realtime_handoff = None
+        self.realtime_request_metadata = None
         self.noise_pred = None

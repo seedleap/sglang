@@ -317,6 +317,58 @@ function switchingBackToLiveTrimsTimelineBacklog() {
   assert.equal(decision.snapshot.mode, "live");
 }
 
+function lowLatencyModeFollowsMeasuredSourceInsteadOfDrainingAtTargetFps() {
+  const controller = new RealtimePlaybackController({
+    targetFps: 24,
+    lowLatencyPlayback: true,
+    minTargetLeadMs: 80,
+    maxTargetLeadMs: 180,
+  });
+  enqueueChunk(controller, {
+    chunk: 1,
+    frameCount: 8,
+    durationMs: 1000,
+    now: 1000,
+  });
+  controller.render(1000, { hasPendingInput: true });
+  const snapshot = controller.snapshot();
+  assert.ok(snapshot.sourceFps >= 7.5 && snapshot.sourceFps <= 8.5);
+  assert.ok(snapshot.renderFps <= 9, `render fps ${snapshot.renderFps}`);
+}
+
+function lowLatencyModePreservesNewestChunkAndCutsOldActionImmediately() {
+  const controller = new RealtimePlaybackController({
+    targetFps: 16,
+    lowLatencyPlayback: true,
+    holdForTargetLead: false,
+    minTargetLeadMs: 0,
+    maxTargetLeadMs: 80,
+    maxDeliveryLeadBoostMs: 30,
+    lowLatencyMaxLeadFrames: 1,
+  });
+  enqueueChunk(controller, {
+    chunk: 0,
+    eventId: 0,
+    frameCount: 16,
+    durationMs: 750,
+    now: 1000,
+  });
+  assert.equal(controller.snapshot().droppedFrames, 0);
+  assert.equal(controller.snapshot().queueFrames, 16);
+  controller.noteInputEvent(5, 1010);
+  const result = enqueueChunk(controller, {
+    chunk: 1,
+    eventId: 5,
+    frameCount: 3,
+    durationMs: 188,
+    now: 1100,
+  });
+  assert.ok(result.cutover);
+  assert.equal(result.droppedFrames.length, 16);
+  assert.equal(controller.snapshot().queueFrames, 3);
+  assert.equal(controller.queue.some((frame) => frame.eventId < 5), false);
+}
+
 stableSourceDoesNotDrop();
 slowServerPacesAtSourceFps();
 smallBufferStartsFromFirstChunk();
@@ -332,3 +384,5 @@ staleFramesAfterWallClockPauseResumeAtFreshestChunk();
 timelineModeNeverDropsBacklog();
 timelineModePreservesFramesAcrossEventCutover();
 switchingBackToLiveTrimsTimelineBacklog();
+lowLatencyModeFollowsMeasuredSourceInsteadOfDrainingAtTargetFps();
+lowLatencyModePreservesNewestChunkAndCutsOldActionImmediately();
