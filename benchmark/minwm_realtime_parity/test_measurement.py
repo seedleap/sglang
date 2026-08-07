@@ -737,6 +737,15 @@ def test_nsys_merge_extracts_counts_buckets_busy_and_gpu_metrics(
     assert on["gpu_metrics"]["dram"]["status"] == "available"
     require_complete_stable_nsys(record)
 
+    no_component_cuda = copy.deepcopy(record)
+    for name in ("dit_cuda_ms", "vae_cuda_ms"):
+        no_component_cuda["metrics"]["profiler_on"][name] = unavailable(
+            "incomplete_trace_metric", f"{name}: expected 10 chunks, observed 0"
+        )
+    with pytest.raises(MeasurementValidationError, match="dit_cuda_ms"):
+        require_complete_stable_nsys(no_component_cuda)
+    require_complete_stable_nsys(no_component_cuda, require_component_cuda=False)
+
     forged_zero_sm = copy.deepcopy(record)
     forged_zero_value = forged_zero_sm["metrics"]["profiler_on"]["gpu_metrics"][
         "sm_active"

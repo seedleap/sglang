@@ -110,7 +110,9 @@ def load_aggregate_records(
     return [_read(path) for path in accepted], excluded
 
 
-def require_complete_stable_nsys(result: dict[str, Any]) -> None:
+def require_complete_stable_nsys(
+    result: dict[str, Any], *, require_component_cuda: bool = True
+) -> None:
     validate_measurement(result)
     if result.get("mode") != "profiler_on":
         raise MeasurementValidationError(
@@ -126,6 +128,8 @@ def require_complete_stable_nsys(result: dict[str, Any]) -> None:
         "gpu_kernel_busy",
         "capture_coverage",
     )
+    if require_component_cuda:
+        required += ("dit_cuda_ms", "vae_cuda_ms")
     unavailable_metrics = {
         name: {
             "reason": profiler[name].get("reason"),
@@ -229,6 +233,7 @@ def parse_args() -> argparse.Namespace:
     validate_parser = subparsers.add_parser("validate")
     validate_parser.add_argument("result", type=Path)
     validate_parser.add_argument("--require-complete-stable-nsys", action="store_true")
+    validate_parser.add_argument("--allow-missing-component-cuda", action="store_true")
 
     merge_parser = subparsers.add_parser("merge-nsys")
     merge_parser.add_argument("--result", required=True, type=Path)
@@ -266,8 +271,16 @@ def main() -> None:
     if args.command == "validate":
         result = _read(args.result)
         validate_measurement(result)
+        if args.allow_missing_component_cuda and not args.require_complete_stable_nsys:
+            raise ValueError(
+                "--allow-missing-component-cuda requires "
+                "--require-complete-stable-nsys"
+            )
         if args.require_complete_stable_nsys:
-            require_complete_stable_nsys(result)
+            require_complete_stable_nsys(
+                result,
+                require_component_cuda=not args.allow_missing_component_cuda,
+            )
         print(f"valid: {args.result}")
         return
     if args.command == "merge-nsys":

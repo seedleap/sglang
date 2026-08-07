@@ -10,7 +10,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 WORK_ROOT="/work/minwm-realtime/${MINWM_RUN_ID}"
 MODEL_DIR="${WORK_ROOT}/sglang-model"
-RESULT_ROOT="${MINWM_RESULTS_ROOT%/}/${MINWM_RUN_ID}/s0-measurement"
+RESULT_ROOT="${MINWM_S0_RESULT_ROOT:-${MINWM_RESULTS_ROOT%/}/${MINWM_RUN_ID}/s0-measurement}"
 RESULT_PARENT="${MINWM_RESULTS_ROOT%/}/${MINWM_RUN_ID}"
 CASES="${MINWM_CASES_PATH:-${SCRIPT_DIR}/cases_720p_compile_smoke.json}"
 CASE_ID="${MINWM_CASE_ID:-00_forward_080_pottery_720p}"
@@ -25,6 +25,10 @@ NSYS_URL="${MINWM_NSYS_URL:-https://developer.nvidia.com/downloads/assets/tools/
 NSYS_ROOT="${WORK_ROOT}/nsight-systems"
 NSYS_DEB="${WORK_ROOT}/nsight-systems-cli.deb"
 RESUME_PROFILER_OFF_ROOT="${MINWM_S0_RESUME_PROFILER_OFF_ROOT:-}"
+SKIP_PROFILER_OFF="${MINWM_S0_SKIP_PROFILER_OFF:-0}"
+TRACE_SYNC_CUDA="${MINWM_S0_TRACE_SYNC_CUDA:-1}"
+REQUIRE_COMPLETE_COMPONENT_CUDA="${MINWM_S0_REQUIRE_COMPLETE_COMPONENT_CUDA:-1}"
+NSYS_SESSION_LABEL="${MINWM_S0_NSYS_SESSION_LABEL:-s0}"
 
 [[ -f "${MODEL_DIR}/minwm_conversion_manifest.json" ]]
 [[ -f "${CASES}" ]]
@@ -39,6 +43,12 @@ if ! [[ "${OFF_WARMUP_CHUNKS}" =~ ^[1-9][0-9]*$ \
 fi
 if (( PROFILE_MEASURED_CHUNKS < 10 )); then
   echo "Nsight capture requires at least 10 stable measured chunks" >&2
+  exit 2
+fi
+if ! [[ "${SKIP_PROFILER_OFF}" =~ ^[01]$ \
+  && "${TRACE_SYNC_CUDA}" =~ ^[01]$ \
+  && "${REQUIRE_COMPLETE_COMPONENT_CUDA}" =~ ^[01]$ ]]; then
+  echo "S0 boolean controls must be 0 or 1" >&2
   exit 2
 fi
 if [[ -n "${SGLANG_DIFFUSION_TORCH_PROFILER_DIR:-}" ]]; then
@@ -70,7 +80,7 @@ export MINWM_PARITY_DETERMINISTIC=1
 export MINWM_DETERMINISTIC_ATTENTION=true
 export SGLANG_ENABLE_DETERMINISTIC_INFERENCE=1
 export SGLANG_DIFFUSION_VAE_CHANNELS_LAST_3D=false
-export SGLANG_REALTIME_TRACE_SYNC_CUDA=1
+export SGLANG_REALTIME_TRACE_SYNC_CUDA="${TRACE_SYNC_CUDA}"
 export CUBLAS_WORKSPACE_CONFIG=:4096:8
 export PYTHONHASHSEED=0
 unset SGLANG_DIFFUSION_TORCH_PROFILER_DIR
@@ -89,6 +99,9 @@ ALLOCATED_GPU_COUNT="${MINWM_ALLOCATED_GPU_COUNT:-$(nvidia-smi -L | wc -l | xarg
   echo "nsys_gpu_metrics_devices=all; parser maps stable-window CUDA deviceId through TARGET_INFO_GPU cuDevice->pwGpuId"
   echo "kv_cache_num_frames=${KV_CACHE_NUM_FRAMES}"
   echo "torch_profiler_concurrent=false"
+  echo "skip_profiler_off=${SKIP_PROFILER_OFF}"
+  echo "trace_sync_cuda=${TRACE_SYNC_CUDA}"
+  echo "require_complete_component_cuda=${REQUIRE_COMPLETE_COMPONENT_CUDA}"
   echo "resume_profiler_off_root=${RESUME_PROFILER_OFF_ROOT:-none}"
   echo "started_utc=$(date --utc +%Y-%m-%dT%H:%M:%SZ)"
 } | tee "${RESULT_ROOT}/contract.txt"
@@ -337,7 +350,7 @@ resume_profiler_off() {
 run_profiler_on() {
   local degree="$1" lane_dir="$2"
   local profile_dir="${lane_dir}/profiler-on"
-  local session="minwm-s0-${MINWM_RUN_ID}-sp${degree}"
+  local session="minwm-${NSYS_SESSION_LABEL}-${MINWM_RUN_ID}-sp${degree}"
   local report="${profile_dir}/sp${degree}.nsys-rep"
   local sqlite="${profile_dir}/sp${degree}.sqlite"
   local status_log="${profile_dir}/nsys-capture-status.log"
@@ -412,9 +425,16 @@ run_profiler_on() {
     --sqlite "${sqlite}" \
     --status-log "${status_log}" \
     --output "${profile_dir}/measurement.json"
-  python3 "${SCRIPT_DIR}/measurement_tool.py" validate \
-    "${profile_dir}/measurement.json" \
-    --require-complete-stable-nsys
+  if [[ "${REQUIRE_COMPLETE_COMPONENT_CUDA}" == "1" ]]; then
+    python3 "${SCRIPT_DIR}/measurement_tool.py" validate \
+      "${profile_dir}/measurement.json" \
+      --require-complete-stable-nsys
+  else
+    python3 "${SCRIPT_DIR}/measurement_tool.py" validate \
+      "${profile_dir}/measurement.json" \
+      --require-complete-stable-nsys \
+      --allow-missing-component-cuda
+  fi
 }
 
 install_nsys
@@ -428,7 +448,10 @@ for degree in "${degrees[@]}"; do
   mkdir -p "${lane_dir}"
   failure_scope="${lane_dir}"
   source_lane="${RESUME_PROFILER_OFF_ROOT%/}/sp${degree}"
-  if [[ -n "${RESUME_PROFILER_OFF_ROOT}" && -d "${source_lane}" ]]; then
+  if [[ "${SKIP_PROFILER_OFF}" == "1" ]]; then
+    echo "Skipped profiler-off lane by explicit MINWM_S0_SKIP_PROFILER_OFF=1" \
+      | tee "${lane_dir}/profiler-off-skipped.txt"
+  elif [[ -n "${RESUME_PROFILER_OFF_ROOT}" && -d "${source_lane}" ]]; then
     resume_profiler_off "${degree}" "${lane_dir}" "${source_lane}"
   else
     run_profiler_off "${degree}" "${lane_dir}"
@@ -448,12 +471,12 @@ lanes = {}
 for lane_dir in sorted(root.glob("sp*")):
     if not lane_dir.is_dir():
         continue
-    repeat = json.loads((lane_dir / "repeat-summary.json").read_text())
     profile = json.loads((lane_dir / "profiler-on/measurement.json").read_text())
-    lanes[lane_dir.name] = {
-        "profiler_off": repeat,
-        "profiler_on": profile,
-    }
+    lane = {"profiler_on": profile}
+    repeat_path = lane_dir / "repeat-summary.json"
+    if repeat_path.exists():
+        lane["profiler_off"] = json.loads(repeat_path.read_text())
+    lanes[lane_dir.name] = lane
 summary = {
     "schema_version": "minwm-realtime-s0-baseline/v1",
     "lanes": lanes,
@@ -463,7 +486,10 @@ summary = {
 )
 print(json.dumps({
     lane: {
-        "off_cv_pass": value["profiler_off"]["acceptance"]["passes_cv_target"],
+        "off_cv_pass": (
+            value["profiler_off"]["acceptance"]["passes_cv_target"]
+            if "profiler_off" in value else None
+        ),
         "gpu_metrics": {
             name: metric["status"]
             for name, metric in value["profiler_on"]["metrics"]["profiler_on"]["gpu_metrics"].items()

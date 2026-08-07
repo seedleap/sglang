@@ -252,5 +252,29 @@ kubectl --context codex-minwm-test-phx2 apply \
 | 初始调度 | `Pending`；现有节点 `Insufficient nvidia.com/gpu`，没有抢占/清理其他任务 |
 | 新 NodeClaim | `minwm-test-phx2-p5e-spot-msk8k`，已 Launched，provider `i-0973db0dc2a8448d1`，尚待 Registered/Ready |
 
-截至本次记录更新，Pod 仍 Pending，未产生 A/B 数值。Karpenter 已正常提名并启动新实例，
-不是 rank hang；继续监控 Node register、Pod checkout 和 runner 日志。
+新节点注册时出现一次 `s3.csi.aws.com` 尚未注册的 `FailedMount`，随后卷 attach、9.39 GB
+固定镜像拉取和容器启动均成功。Pod 已 Running、restart=0；日志证明 checkout 精确为
+SGLang `39065138b377…`、minWM `2efc6485…`，环境为 Python 3.12.3、Torch
+2.11.0+cu130、H200。setup 后 SP2 control repeat1 已启动，GPU0/1 可见约 96%/93%
+utilization，其余 6 卡空闲隔离；尚未产生完整 A/B 数值。
+
+一次只读状态命令没有给 zsh 的 `containerStatuses[0]` 加引号，因 glob 展开失败并打印
+`no matches found`；同次日志读取仍成功。后续将 custom-columns 表达式整体单引号包住，
+状态命令恢复。该失败不影响 Job，但作为命令失败保留。
+
+## Nsight 两条诊断 lane
+
+准备 Nsight runner 时发现一个 schema/闸门缺口：
+`measurement_tool.require_complete_stable_nsys()` 原先强制 exact window、kernel/API/
+launch、busy、SM/Tensor/DRAM，却没有把 `dit_cuda_ms`、`vae_cuda_ms` 加入 required。
+这与 S0 文档声称“正式 CUDA metric 缺 count 即失败”不一致。没有沿用这个静默缺口：
+
+- 默认 `--require-complete-stable-nsys` 现在同时要求 DiT/VAE component CUDA available；
+- 只有生产 no-sync Nsight 诊断可显式加 `--allow-missing-component-cuda`；该模式仍严格要求
+  exact window 和全部 Nsight kernel/launch/GPU metrics，只诚实允许 trace CUDA event 字段
+  unavailable；
+- profiling-optin lane 保持默认严格门，必须有 DiT/VAE CUDA。
+
+对应单测构造同一份完整 Nsight record，验证默认对缺 component CUDA fail closed，而显式
+diagnostic override 仅放宽这两个字段。`run_s0_measurement.sh` 的默认行为不变；新增的
+skip-profiler-off、result root、trace-sync 和 session-label 控制都必须显式设置。
