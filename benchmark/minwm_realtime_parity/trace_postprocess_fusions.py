@@ -14,8 +14,54 @@ from sglang.multimodal_gen.runtime.models.dits.minwm import (
     _minwm_adaln_op,
     _minwm_layer_norm,
     _minwm_layer_norm_op,
-    _minwm_self_attn_post,
+    _MinWMSegmentCompile,
 )
+
+
+def _proposed_self_post_op(
+    hidden_states: torch.Tensor,
+    attn_output: torch.Tensor,
+    model_gate: torch.Tensor,
+    timestep_gate: torch.Tensor,
+    weight: torch.Tensor | None,
+    bias: torch.Tensor | None,
+    eps: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Reproduce the rejected S2 proposal without changing the product path."""
+    residual = (
+        hidden_states.float()
+        + attn_output.float() * (model_gate.float() + timestep_gate.float())
+    ).type_as(hidden_states)
+    normalized = torch.nn.functional.layer_norm(
+        residual.float(),
+        (residual.shape[-1],),
+        weight.float() if weight is not None else None,
+        bias.float() if bias is not None else None,
+        eps,
+    ).type_as(hidden_states)
+    return residual, normalized
+
+
+def _proposed_self_post(
+    hidden_states: torch.Tensor,
+    attn_output: torch.Tensor,
+    model_gate: torch.Tensor,
+    timestep_gate: torch.Tensor,
+    weight: torch.Tensor | None,
+    bias: torch.Tensor | None,
+    eps: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    weight = weight.to(hidden_states.dtype) if weight is not None else None
+    bias = bias.to(hidden_states.dtype) if bias is not None else None
+    return _MinWMSegmentCompile.get(_proposed_self_post_op, hidden_states.is_cuda)(
+        hidden_states,
+        attn_output,
+        model_gate,
+        timestep_gate,
+        weight,
+        bias,
+        eps,
+    )
 
 
 def parse_args() -> argparse.Namespace:
@@ -23,7 +69,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--candidate",
         required=True,
-        choices=("self-baseline", "self-fused", "cross", "ffn"),
+        choices=("self-baseline", "self-proposed", "cross", "ffn"),
     )
     parser.add_argument("--sequence-length", type=int, required=True)
     parser.add_argument("--hidden-size", type=int, default=3072)
@@ -80,7 +126,7 @@ def build_candidate(
     bias = randn(hidden_size)
     eps = 1e-6
 
-    if candidate in {"self-baseline", "self-fused"}:
+    if candidate in {"self-baseline", "self-proposed"}:
 
         def reference():
             residual = _minwm_adaln_op(
@@ -112,15 +158,32 @@ def build_candidate(
         else:
 
             def operation():
-                return _minwm_self_attn_post(
+                return _proposed_self_post(
                     hidden_states,
                     update,
                     model_values[:, 2],
                     timestep_storage.select(2, 2),
+                    weight,
+                    bias,
+                    eps,
+                )
+
+            # Compare the proposed one-segment graph with the actual two-segment
+            # product path. This is the numerical contract that rejected it.
+            def reference():
+                residual = _minwm_adaln(
+                    hidden_states,
+                    y=update,
+                    m_gate=model_values[:, 2],
+                    e_gate=timestep_storage.select(2, 2),
+                )
+                normalized = _minwm_layer_norm(
+                    residual,
+                    eps=eps,
                     weight=weight,
                     bias=bias,
-                    eps=eps,
                 )
+                return residual, normalized
 
         return operation, reference
 
