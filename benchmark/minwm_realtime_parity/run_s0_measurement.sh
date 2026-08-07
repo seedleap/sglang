@@ -27,6 +27,7 @@ CASE_ID="${MINWM_CASE_ID:-00_forward_080_pottery_720p}"
 SP_DEGREES="${MINWM_S0_SP_DEGREES:-2 4}"
 OFF_WARMUP_CHUNKS="${MINWM_S0_OFF_WARMUP_CHUNKS:-20}"
 OFF_MEASURED_CHUNKS="${MINWM_S0_OFF_MEASURED_CHUNKS:-200}"
+OFF_REPEAT_COUNT="${MINWM_S0_OFF_REPEAT_COUNT:-2}"
 PROFILE_PRECONDITION_CHUNKS="${MINWM_S0_PROFILE_PRECONDITION_CHUNKS:-20}"
 PROFILE_DISCARD_CHUNKS="${MINWM_S0_PROFILE_DISCARD_CHUNKS:-1}"
 PROFILE_MEASURED_CHUNKS="${MINWM_S0_PROFILE_MEASURED_CHUNKS:-10}"
@@ -48,6 +49,14 @@ if ! [[ "${OFF_WARMUP_CHUNKS}" =~ ^[1-9][0-9]*$ \
 fi
 if (( PROFILE_MEASURED_CHUNKS < 10 )); then
   echo "Nsight capture requires at least 10 stable measured chunks" >&2
+  exit 2
+fi
+if ! [[ "${OFF_REPEAT_COUNT}" =~ ^(1|2)$ ]]; then
+  echo "MINWM_S0_OFF_REPEAT_COUNT must be 1 or 2" >&2
+  exit 2
+fi
+if [[ "${OFF_REPEAT_COUNT}" == "1" && "${PROFILER_OFF_ONLY}" != "1" ]]; then
+  echo "A single profiler-off repeat is only valid in profiler-off-only mode" >&2
   exit 2
 fi
 if [[ -n "${SGLANG_DIFFUSION_TORCH_PROFILER_DIR:-}" ]]; then
@@ -77,6 +86,7 @@ ALLOCATED_GPU_COUNT="${MINWM_ALLOCATED_GPU_COUNT:-$(nvidia-smi -L | wc -l | xarg
   echo "run_label=${RUN_LABEL}"
   echo "hoist_timestep_modulation=${MINWM_HOIST_TIMESTEP_MODULATION:-unset}"
   echo "off_window=${OFF_WARMUP_CHUNKS}+${OFF_MEASURED_CHUNKS}"
+  echo "off_repeat_count=${OFF_REPEAT_COUNT}"
   echo "nsys_window=${PROFILE_PRECONDITION_CHUNKS} precondition + ${PROFILE_DISCARD_CHUNKS} discarded + ${PROFILE_MEASURED_CHUNKS} stable"
   echo "kv_cache_num_frames=${KV_CACHE_NUM_FRAMES}"
   echo "torch_profiler_concurrent=false"
@@ -322,7 +332,7 @@ run_profiler_off() {
       --kv-cache-num-frames "${KV_CACHE_NUM_FRAMES}"
   fi
   local repeat_paths=()
-  for repeat in 1 2; do
+  for repeat in $(seq 1 "${OFF_REPEAT_COUNT}"); do
     local output="${lane_dir}/profiler-off-repeat${repeat}.json"
     run_client \
       "${degree}" "${output}" "bf16-fast-sp${degree}" \
@@ -332,6 +342,10 @@ run_profiler_off() {
       --measured-chunks "${OFF_MEASURED_CHUNKS}"
     repeat_paths+=("${output}")
   done
+  if [[ "${OFF_REPEAT_COUNT}" == "1" ]]; then
+    stop_server
+    return
+  fi
   aggregate_repeats "${lane_dir}" "${repeat_paths[@]}"
   if ! python3 - "${lane_dir}/repeat-summary.json" <<'PY'
 import json, sys
@@ -464,19 +478,27 @@ for degree in "${degrees[@]}"; do
 done
 
 current_lane_dir="${RESULT_ROOT}/summary"
-python3 - "${RESULT_ROOT}" "${PROFILER_OFF_ONLY}" <<'PY'
+python3 - "${RESULT_ROOT}" "${PROFILER_OFF_ONLY}" "${OFF_REPEAT_COUNT}" <<'PY'
 import json
 import sys
 from pathlib import Path
 
 root = Path(sys.argv[1])
 profiler_off_only = sys.argv[2] == "1"
+off_repeat_count = int(sys.argv[3])
 lanes = {}
 for lane_dir in sorted(root.glob("sp*")):
     if not lane_dir.is_dir():
         continue
-    repeat = json.loads((lane_dir / "repeat-summary.json").read_text())
-    lane = {"profiler_off": repeat}
+    if off_repeat_count == 1:
+        lane = {
+            "profiler_off_single": json.loads(
+                (lane_dir / "profiler-off-repeat1.json").read_text()
+            )
+        }
+    else:
+        repeat = json.loads((lane_dir / "repeat-summary.json").read_text())
+        lane = {"profiler_off": repeat}
     if not profiler_off_only:
         lane["profiler_on"] = json.loads(
             (lane_dir / "profiler-on/measurement.json").read_text()
@@ -484,9 +506,13 @@ for lane_dir in sorted(root.glob("sp*")):
     lanes[lane_dir.name] = lane
 summary = {
     "schema_version": (
-        "minwm-realtime-profiler-off-only/v1"
-        if profiler_off_only
-        else "minwm-realtime-s0-baseline/v1"
+        "minwm-realtime-profiler-off-single/v1"
+        if off_repeat_count == 1
+        else (
+            "minwm-realtime-profiler-off-only/v1"
+            if profiler_off_only
+            else "minwm-realtime-s0-baseline/v1"
+        )
     ),
     "lanes": lanes,
 }
@@ -497,9 +523,15 @@ print(
     json.dumps(
         {
             lane: {
-                "off_cv_pass": value["profiler_off"]["acceptance"][
-                    "passes_cv_target"
-                ],
+                **(
+                    {"off_single_complete": True}
+                    if off_repeat_count == 1
+                    else {
+                        "off_cv_pass": value["profiler_off"]["acceptance"][
+                            "passes_cv_target"
+                        ]
+                    }
+                ),
                 **(
                     {}
                     if profiler_off_only
