@@ -166,7 +166,28 @@ complete/consume event；统计 input/output A2A 的 launch→wait 距离、wait
   FPS；scheduler chunk wall 仍是同一客户端可见完成边界，DiT 单独 wall 仅作辅证。
 - 正确性：本地 measurement/runner 合同测试 `15 passed`；完整 H200 checkpoint 运行待提交。
 - wall/FPS、Nsight：待运行。
-- 结论：测量工具不改变产品路径；下一步使用独立 PVC 和完整 8-GPU H200 节点先跑质量门。
+- 结论：测量工具不改变产品路径；下一步使用独立 PVC，在固定 H200 节点分配 SP4 所需的
+  4 GPU 先跑诊断质量门，不抢占该节点上已有的 1-GPU 任务。
+
+### 2026-08-07：H200 720p 5s 完整模型质量门，attempt 01
+
+- 命令与资源：Job `minwm-async-a2a-quality-h200-20260807-01`，固定 H200 节点
+  `i-06888dc1ca88547e1` 的 4 GPU，SGLang `e41b56f626c83854dabc430149a58d41324fb763`，
+  minWM `2efc6485f65e8fcab506665efde79bc41406385e`，checkpoint bytes
+  `10007171771`、SHA256
+  `1dc42d498cad84349987db2015120ce4d77e6b641f7f38c75ec9df3f942a7975`，
+  PyTorch `2.11.0+cu130`、CUDA `13.0`、NCCL `2.28.9`、transformers `5.12.1`。
+  结果 PVC `minwm-async-a2a-quality-results-20260807`，路径
+  `/results/attempts/minwm-async-a2a-quality-h200-20260807-01-grpd9/minwm-async-a2a-quality-h200-20260807-01/async-a2a-quality`。
+- 正确性：SP2 与 SP4 均完成同步 baseline 1 次和候选同进程连续 10 次完整请求；每次输入为
+  1248×704、8 chunks、128 生成帧、seed 42。两种 SP 的第 10 次候选与 baseline 都是
+  129 帧视频 bitwise exact，`max_abs=0`、`RMSE=0`、`SSIM=1`；无 hang 或视频串数据。
+- 最终状态：视频与长跑通过后，attempt 01 在 tensor 文件集合检查上报 FAIL：候选多出
+  `cross_k/cross_norm_k/cross_v_output_001.pt`，baseline 文件没有缺失，尚未执行逐 tensor
+  数值比较完成。因此本条按原始任务状态保留为失败，不把视频成功等同于全部质量门成功。
+- wall/FPS、Nsight：质量任务不计入性能；尚未运行。
+- 决策：修正 comparator 后只读复用同一批 artifact 做逐 rank tensor 验证；不重写或删除
+  attempt 01 的失败 marker。
 
 ### 2026-08-07：候选 1——QK A2A 与 V projection 重叠
 
@@ -218,6 +239,18 @@ complete/consume event；统计 input/output A2A 的 launch→wait 距离、wait
 - 决策：只补齐测试 import 所需最小依赖，并把独立 GPU 合同改为标准
   `unittest.TestCase`；未替换镜像的 PyTorch/CUDA/NCCL 栈。第四次运行才进入真实 CUDA
   合同并通过，前三次不能计入 GPU 正确性样本。
+
+### 2026-08-07：10 请求稳定性使候选 probe 集合严格大于单请求 baseline
+
+- 原认知：baseline 单请求与候选 10 请求的 parity dump 文件集合应完全相等。
+- 实际证据：SP2/SP4 视频均 bitwise exact；tensor comparator 显示 baseline 的所有文件都在
+  候选中，但候选额外包含第二次请求首次触发的
+  `cross_k_output_001.pt`、`cross_norm_k_output_001.pt`、`cross_v_output_001.pt`。
+- 根因：cross-attention K/V 在单请求内被 cache，baseline 只调用一次；候选连续请求为验证
+  跨请求污染，第二个请求产生合法的 `_001` hook 输出。文件数差异不是数值或 buffer 污染。
+- 决策：合同改成“candidate 必须覆盖 baseline 全部 probe；逐个比较 baseline probe
+  bitwise；candidate-only probe 单独报告”。原始 attempt 01 仍标为失败，并通过新 reader 对
+  原 artifact 重验，避免为了修 comparator 重跑 GPU 推理。
 
 ### 2026-08-07：B300 有 Ready 节点，但盘点时没有空闲 GPU
 

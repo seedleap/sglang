@@ -4,6 +4,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 MEASUREMENT_RUNNER = Path(__file__).with_name("run_async_a2a_measurement.sh")
 QUALITY_RUNNER = Path(__file__).with_name("run_async_a2a_quality.sh")
+QUALITY_VALIDATOR = Path(__file__).with_name("validate_async_a2a_quality.py")
 MINWM_MODEL = ROOT / "python/sglang/multimodal_gen/runtime/models/dits/minwm.py"
 
 
@@ -37,6 +38,7 @@ def test_async_a2a_measurement_enforces_alternating_abba_and_sample_floor() -> N
 
 def test_async_a2a_quality_covers_sp2_sp4_long_run_and_tensor_parity() -> None:
     runner = QUALITY_RUNNER.read_text()
+    validator = QUALITY_VALIDATOR.read_text()
     model = MINWM_MODEL.read_text()
 
     assert "cases_720p_5s.json" in runner
@@ -44,6 +46,8 @@ def test_async_a2a_quality_covers_sp2_sp4_long_run_and_tensor_parity() -> None:
     assert "MINWM_ASYNC_A2A_STABILITY_REQUESTS:-10" in runner
     assert '--profile bitwise' in runner
     assert 'MINWM_PARITY_DUMP_DIR="${dump_dir}"' in runner
+    assert "missing_candidate = baseline_names - candidate_names" in validator
+    assert "candidate_names - baseline_names" in validator
     probes = (
         "self_q_norm_000.pt",
         "self_k_norm_000.pt",

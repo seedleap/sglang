@@ -230,11 +230,11 @@ for degree in degrees:
     ):
         baseline_names = {path.name for path in baseline_dir.glob("*.pt")}
         candidate_names = {path.name for path in candidate_dir.glob("*.pt")}
-        if baseline_names != candidate_names:
+        missing_candidate = baseline_names - candidate_names
+        if missing_candidate:
             raise AssertionError(
-                f"{sp_name}/rank{rank}: tensor file set differs; "
-                f"baseline_only={sorted(baseline_names - candidate_names)}, "
-                f"candidate_only={sorted(candidate_names - baseline_names)}"
+                f"{sp_name}/rank{rank}: candidate is missing baseline probes "
+                f"{sorted(missing_candidate)}"
             )
         missing = required - baseline_names
         if missing:
@@ -264,7 +264,10 @@ for degree in degrees:
             }
             if not equal:
                 raise AssertionError(f"{sp_name}/rank{rank}/{name}: not bitwise exact")
-        rank_summaries[f"rank{rank}"] = metrics
+        rank_summaries[f"rank{rank}"] = {
+            "candidate_extra_probes": sorted(candidate_names - baseline_names),
+            "metrics": metrics,
+        }
     summary["tensor_parity"][sp_name] = rank_summaries
 
 (root / "async-a2a-quality-summary.json").write_text(
@@ -273,7 +276,7 @@ for degree in degrees:
 print(json.dumps({
     "video_bitwise": summary["video_bitwise"],
     "tensor_probe_counts": {
-        degree: {rank: len(metrics) for rank, metrics in ranks.items()}
+        degree: {rank: len(record["metrics"]) for rank, record in ranks.items()}
         for degree, ranks in summary["tensor_parity"].items()
     },
 }, indent=2, sort_keys=True))
