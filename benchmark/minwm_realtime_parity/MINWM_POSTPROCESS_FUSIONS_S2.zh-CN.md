@@ -11,9 +11,10 @@
 3. FFN 的 residual/gate。
 
 当前实现只改动候选 1，并由 `MINWM_FUSE_SELF_ATTN_POST` 独立控制，默认关闭。
-候选 2 和 3 在 CUDA 生成代码与 launch 证据完成前不改代码。统一性能记录依赖 S0
-commit `30cb16708fc768adb063c31c2f1a21eac5a016d2`；S0 合并前只在临时测试
-分支叠加该 commit，本任务对 `main` 的实现 diff 不复制测量基础设施。
+候选 2 和 3 在 CUDA 生成代码与 launch 证据完成前不改代码。统一性能记录固定使用 S0
+canonical 工具 commit `25cc42ef8c`（包含 `e75e9e24b5` 的 active/allocated GPU 与
+Nsight per-chunk 口径，并增加机器可校验的 JSON Schema）；S0 合并前只在临时测试
+分支叠加其提交链，本任务对 `main` 的实现 diff 不复制测量基础设施。
 
 ## 调用链与数值合同
 
@@ -67,9 +68,13 @@ commit `30cb16708fc768adb063c31c2f1a21eac5a016d2`；S0 合并前只在临时测�
 
 ## 实际 A/B
 
-以下表格只接受 S0 `minwm-realtime-measurement/v1` 产物。profiler-off headline 使用
-20 warmup + 200 measured；Nsight 在外部完成 20 warmup 后抓至少 10 个 steady chunks，
-且不同时启用 `torch.profiler`。
+以下表格只接受通过 S0 canonical `25cc42ef8c` validator 的
+`minwm-realtime-measurement/v1` 产物。
+profiler-off headline 使用 20 warmup + 200 measured；Nsight 在外部完成 20 warmup 后
+抓至少 10 个 steady chunks，且不同时启用 `torch.profiler`。baseline/candidate 都固定
+`MINWM_S0_KV_CACHE_NUM_FRAMES=45`：这是 rolling-window steady-state contract，不能随
+`max_chunks` 扩张。首块、短程 append/recompute 与窗口增长的数值检查另跑，不混入
+headline 性能窗口。
 
 | SP | 开关 | Client FPS | Scheduler FPS | chunk wall | DiT wall/CUDA | VAE wall/CUDA | kernel/launch | 状态 |
 | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
@@ -87,6 +92,17 @@ cross/FFN 将分别记录其现有 compiled segment 与关闭全局 segment comp
   已由 `_minwm_adaln` 覆盖。最终结论等待 CUDA 生成代码和 kernel launch 名确认。
 - self 融合是否能在保持 BF16 rounding boundary 的同时生成单 kernel，等待 H200
   `TORCH_LOGS=output_code,kernel_code` 证据。
+- 第一次 H200 trace Job `minwm-s2-postproc-trace-h200-phx2-20260807-01` 在执行测试前
+  checkout 失败：manifest 把临时 cherry-pick `e728e59d9a` 错写成不存在的完整 SHA
+  `e728e59d9ad7682dec24b97f7d0007fc0cd0b1c8`。该次没有 CUDA/kernel 结果，不能算作
+  候选证据；重试 Job `...-02` 改为固定已推送的实现 commit `6fcf2bef0e21a95b5...`。
+- `...-02` 在 H200 上正确 checkout 后，pytest 收集阶段发现镜像未安装 `orjson`，仍未
+  进入候选 kernel。`...-03` 复用 S0 已验证的 Python runtime 依赖集合后重跑；没有
+  模型 staging、checkpoint 转换或 sglang-kernel 构建。
+- 提交 `...-02` 时发现桌面默认 kube context 漂移到了 `codex-seed-leap-use1`：该集群
+  中对象始终 Pending、未启动容器或占 GPU，随后只按完整 Job 名精确删除。之后所有
+  read/dry-run/apply/logs/delete 均显式指定 `--context codex-minwm-test-phx2`。正式记录
+  的 region/NodePool 为 us-west-2 / `minwm-test-phx2-p5e-spot`。
 
 ## 证据与决策过程
 
@@ -124,8 +140,10 @@ ruff format --check python/sglang/multimodal_gen/runtime/models/dits/minwm.py \
   python/sglang/multimodal_gen/test/unit/realtime/test_minwm_realtime.py
 ```
 
-真机测量命令和产物路径将在任务专用 `minwm-s2-postproc-*` Job dry-run 后补充；不复用
-或清理 CUDA Graph/S0 任务的 Job、Pod、PVC。
+真机测量命令和产物路径将在任务专用 `minwm-s2-postproc-*` Job dry-run 后补充；clean
+runner checkout 固定 S0 canonical `25cc42ef8c`，稳态固定 KV cache 45 帧。不复用或
+清理 CUDA Graph/S0 任务的 Job、Pod、PVC。所有 Kubernetes 命令显式固定
+`--context codex-minwm-test-phx2`，不依赖或切换桌面的 global current-context。
 
 生成代码与 micro kernel 诊断使用独立脚本，它不产生另一套 headline schema：
 
@@ -162,3 +180,6 @@ TORCH_LOGS=output_code,kernel_code python \
 8. **何时允许默认开启 self 融合？** 参考答案：单测和端到端无正确性回退，有明确
    kernel/launch 或 wall 证据，SP2 主验收和 SP4 复验完成，组合 profiler-off 回退
    不超过 1%；否则保持默认关闭并在本文记录弃用决定。
+9. **为什么 20+200 测量不能把 KV cache 窗口同步扩到 200 chunks？** 参考答案：正式
+   契约要测固定 45 帧 rolling window 下的稳态淘汰成本；随测量长度扩窗会混入增长期
+   并改变 baseline/candidate workload。短程首块和 append/recompute 正确性另测。

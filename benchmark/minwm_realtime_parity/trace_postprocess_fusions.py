@@ -33,22 +33,27 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def assert_bitwise(
+def compare_bitwise(
     actual: torch.Tensor | tuple[torch.Tensor, ...],
     expected: torch.Tensor | tuple[torch.Tensor, ...],
-) -> None:
+) -> tuple[bool, float]:
     actual_values = actual if isinstance(actual, tuple) else (actual,)
     expected_values = expected if isinstance(expected, tuple) else (expected,)
     if len(actual_values) != len(expected_values):
         raise AssertionError("candidate and reference return different arity")
+    exact = True
+    max_abs = 0.0
     for index, (actual_value, expected_value) in enumerate(
         zip(actual_values, expected_values, strict=True)
     ):
         if not torch.equal(actual_value, expected_value):
-            difference = (actual_value.float() - expected_value.float()).abs().max()
-            raise AssertionError(
-                f"output {index} is not bitwise exact; max_abs={difference.item()}"
+            exact = False
+            difference = (
+                (actual_value.float() - expected_value.float()).abs().max().item()
             )
+            max_abs = max(max_abs, difference)
+            print(f"output={index} bitwise_exact=false max_abs={difference}")
+    return exact, max_abs
 
 
 def build_candidate(
@@ -175,7 +180,7 @@ def main() -> None:
     for _ in range(args.warmup):
         actual = operation()
     torch.cuda.synchronize()
-    assert_bitwise(actual, expected)
+    bitwise_exact, max_abs = compare_bitwise(actual, expected)
 
     if args.profile_kernels:
         with torch.profiler.profile(
@@ -186,7 +191,9 @@ def main() -> None:
         ) as profiler:
             profiled = operation()
             torch.cuda.synchronize()
-        assert_bitwise(profiled, expected)
+        profiled_exact, profiled_max_abs = compare_bitwise(profiled, expected)
+        bitwise_exact = bitwise_exact and profiled_exact
+        max_abs = max(max_abs, profiled_max_abs)
         print(
             profiler.key_averages().table(sort_by="self_cuda_time_total", row_limit=30)
         )
@@ -196,11 +203,13 @@ def main() -> None:
         actual = operation()
     torch.cuda.synchronize()
     elapsed_ms = (time.perf_counter() - start) * 1000 / args.iterations
-    assert_bitwise(actual, expected)
+    final_exact, final_max_abs = compare_bitwise(actual, expected)
+    bitwise_exact = bitwise_exact and final_exact
+    max_abs = max(max_abs, final_max_abs)
     print(
         f"candidate={args.candidate} sequence_length={args.sequence_length} "
         f"hidden_size={args.hidden_size} mean_ms={elapsed_ms:.6f} "
-        "bitwise_exact=true"
+        f"bitwise_exact={str(bitwise_exact).lower()} max_abs={max_abs}"
     )
 
 
