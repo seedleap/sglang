@@ -948,6 +948,16 @@ for degree in (1, 2):
     summary["comparisons"][f"sp{degree}"] = comparison
 (root / "summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
 print(json.dumps(summary["comparisons"], indent=2, sort_keys=True))
+parity_failures = {
+    degree: comparison["sampled_pixel_error"]
+    for degree, comparison in summary["comparisons"].items()
+    if not comparison["measured_payload_sha256"]["equal"]
+    or comparison["sampled_pixel_error"]["max_abs_u8"] != 0
+}
+if parity_failures:
+    raise AssertionError(
+        f"MinWM CUDA graph payload parity failed: {parity_failures}"
+    )
 PY
   echo "MINWM_CUDA_GRAPH_MATRIX_COMPLETE results=${CG_RESULTS}"
   exit 0
