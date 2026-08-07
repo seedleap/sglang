@@ -4,7 +4,7 @@
 
 任务：S4 / 点子 6
 
-状态：**6a 已完成实现和本地 CPU 语义回归；H200 v01–v07 的失败证据均判 invalid 并保留。v05 的同合同 QKV eager/compile 门得到 max_abs=192、RMSE=3.096、SSIM=0.98447，未过 fast-lane 门槛，但单组对照不足以归因。v08 正以 control/QKV × eager/compile 四角隔离后再决定是否放行 profiler-off；正式 Nsight 固定 pin d5b25227d4，尚未启动；6b 尚未实现。**
+状态：**6a 已完成实现、本地 CPU 语义回归和 H200 v09 完整质量矩阵；H200 v01–v08 的失败证据均判 invalid 并保留。v09 的 control/QKV × eager/compile 四角隔离证明两条 eager→compile 边以完全相同的数值偏差失败，而 control↔QKV 在 eager/compile 下都逐位一致，因此 blocker 属于既有 whole-model compile，QKV 没有额外劣化。v09 compile-off 同序双重复已完成，但只标 exploratory：SP4 约 +5.0% 触发独立反序 ABBA，v10 正固定原节点等待更早的 S3 释放资源。正式 Nsight 固定 pin d5b25227d4，尚未启动；6b 尚未实现。**
 
 ## 结论与开关
 
@@ -152,15 +152,15 @@ steady-state contract。首块、短程 append/recompute、cache growth 和尚�
 
 | 项目 | control | candidate | 状态 |
 | --- | --- | --- | --- |
-| SP2 主验收 | `MINWM_FUSED_QKV_PROJECTION=0` | `=1` | 待执行 |
-| SP4 复验 | `=0` | `=1` | 待执行 |
-| SP1 eager / compile | `=0` | `=1` | v05 同合同 candidate compile 未过门；v08 四角隔离归因中 |
-| TP2 + SP1 smoke | `=0` | `=1` | full model 被既有 S3 RMSNorm TP 路径阻断；v04 做 control/candidate 同错对照 |
-| static FP8 | 原量化三 projection | 请求 6a 后安全 fallback | 待执行 |
+| SP2 主验收 | `MINWM_FUSED_QKV_PROJECTION=0` | `=1` | v09 129 帧 bitwise，candidate replay bitwise；同序 A/B exploratory，ABBA 待执行 |
+| SP4 复验 | `=0` | `=1` | v09 129 帧 bitwise；同序约 +5.0% 触发 ABBA，待复验 |
+| SP1 eager / compile | `=0` | `=1` | v09 四角：两条同模式 QKV 边 bitwise；既有 whole-model compile blocker |
+| TP2 + SP1 smoke | `=0` | `=1` | v09 两侧均被同一既有 S3 RMSNorm TP 路径阻断 |
+| static FP8 | 原量化三 projection | 请求 6a 后安全 fallback | v09 明确 fallback；129 帧完成且与 BF16 SP1 control bitwise |
 | NVFP4/不支持设备 | 原设备合同 | 同样拒绝或 fallback | 待执行 |
-| layer probe | Q/K/V、norm 后、block output | 同输入/权重/seed | SP1 首次 probe 均 bitwise；全量汇总待 runner 完成 |
-| latent/最终视频 | lossless latent 与 frame metrics | 同 case/seed/backend | SP1 最终 129 帧 bitwise；latent/其余 SP 待完成 |
-| 确定性 | candidate 重复运行 | candidate 重复运行 | SP1 129 帧 replay bitwise；SP2 待完成 |
+| layer probe | Q/K/V、norm 后、block output | 同输入/权重/seed | v09 69 个 probe 文件；质量汇总通过 |
+| latent/最终视频 | lossless latent 与 frame metrics | 同 case/seed/backend | v09 SP1/SP2/SP4 最终 129 帧全部 bitwise |
+| 确定性 | candidate 重复运行 | candidate 重复运行 | v09 SP1、SP2 candidate replay 均 bitwise |
 
 质量先遵循现有 contract：parity lane 要求 bitwise；本 BF16 fast lane 至少满足
 `max_abs <= 8`、`RMSE <= 1.0`、`SSIM >= 0.995`。是否接受即便门槛内但有可见时序漂移，
@@ -259,15 +259,108 @@ preflight 对每条边只允许 `compile_enabled` 或 feature flag 这一项预�
 compile 同量级失败、两种 compile 彼此通过 fast-lane 门且 eager QKV bitwise 时，才记为
 既有 whole-model compile blocker并继续 compile-off 验收；否则止损并回退 compile 模式。
 
+### v09 正式质量门
+
+v08 在 36 项 H200 测试通过后、任何 client 启动前，因为 runner 没有显式创建 SP1 结果
+目录而 `FileNotFoundError`；它按全局质量前置失败写 root-invalid，不能复用。v09 的产品
+修复范围只有在 preflight 前 `mkdir -p "${SP1_RESULTS}"`，并新增静态顺序测试，机器证明
+结果目录创建发生在第一次写入之前。v09 启动后先复核 v01–v08 八个 marker，才运行四角
+和后续矩阵。
+
+四角使用完全相同的 2-chunk 请求合同；每条边分别执行 preflight、actual metadata、逐帧
+SHA 与质量判定：
+
+| 边 | max_abs / RMSE / SSIM | 逐值结果 | 判定 |
+| --- | --- | --- | --- |
+| C eager ↔ C compile | 192 / 3.0957156 / 0.98447169 | 首差异 frame 1 | 未过 fast-lane 门 |
+| QKV eager ↔ QKV compile | 192 / 3.0957156 / 0.98447169 | 首差异 frame 1 | 未过 fast-lane 门 |
+| C eager ↔ QKV eager | 0 / 0 / 1 | 33 帧及整体 SHA 相同 | bitwise |
+| C compile ↔ QKV compile | 0 / 0 / 1 | 33 帧及整体 SHA 相同 | bitwise |
+
+两条 eager→compile 边的 max_abs、RMSE 与 `1-SSIM` 比值都严格为 1.0；eager 两份 NPY
+SHA 均为 `149d0e4b20cdb9df0efdb94d97799d3083e2f3c2d58380306d39e3ad007aa991`，compile
+两份均为 `331dd00a4caa528855e3a44b78abf73f5684cee7db2e15b6461dd9c17e054278`。因此分类为
+`existing_whole_model_compile_blocker`：whole-model compile 本身违反当前质量合同，但 QKV
+在 eager 与 compile 各自模式内都没有额外偏差，允许继续 **compile-off** S4 验收；这不把
+whole-model compile 标成支持。
+
+四角原始 client/scheduler 与 stage trace 中的两块 timing 如下，单位 ms；斜线前后为
+chunk 0/chunk 1：
+
+| lane | client payload | scheduler forward | DiT wall / CUDA | VAE wall / CUDA |
+| --- | --- | --- | --- | --- |
+| C eager | 13684.076 / 1379.273 | 13483 / 1417 | 5484.647 / 571.663；5484.718 / 578.541 | 6774.090 / 368.044；7109.587 / 709.479 |
+| QKV eager | 4050.219 / 1372.703 | 3861 / 1410 | 2503.164 / 564.965；2508.604 / 583.796 | 469.133 / 369.207；804.550 / 712.141 |
+| C compile | 254522.551 / 200120.421 | 254333 / 200161 | 252664.834 / 199319.900；252664.328 / 199319.453 | 480.057 / 369.048；815.306 / 704.825 |
+| QKV compile | 197247.964 / 189185.063 | 197054 / 189230 | 195555.036 / 188342.171；195554.609 / 188341.734 | 478.604 / 370.758；815.959 / 706.693 |
+
+这里没有伪造“纯 compiler timer”：compile-inclusive 时间定义为同 feature 下 compile lane
+减 eager reference，包含 graph compile/recompile、autotune 和 compiled execution。按 client
+payload，control 两块分别为 240838.475 / 198741.148 ms，QKV 为
+193197.745 / 187812.360 ms；相应 DiT wall 为 247180.187 / 198748.237 ms 与
+193051.872 / 187777.206 ms。这些冷编译诊断不用于 headline，也不用于声称 QKV 编译更快。
+四角 summary SHA256 为
+`ad87d602fc1a568fb879fb255f870d2fcff7c0977f79febb57a3bfe00e90a2c3`；派生 timing JSON
+逐一记录不可变原始日志的 path/size/SHA，未改写张量或日志。
+
+通过四角后，v09 完成 H200 36 项 CUDA/source gate；SP1/SP2/SP4 control↔candidate 的
+129 帧全部 bitwise，SP1/SP2 candidate replay 也 bitwise，质量汇总含 69 个 layer probe
+文件。static FP8 请求明确日志为量化安全 fallback 并走三 GEMM，129 帧完成。TP2 control
+和 candidate 均精确命中同一个未改动 S3 `MinWMRMSNorm.variance_epsilon` blocker；两侧
+行为一致后 runner 才继续，不把 TP2 写成 QKV 支持。
+
+### v09 profiler-off 同序探索结果
+
+质量门通过后，v09 才按 SP2 control→candidate、SP4 control→candidate 的固定顺序运行；
+每个 lane 启动一个新 server，并在该 server 上连续跑两次 20 warmup + 200 measured。八个
+JSON 全部通过 b924 schema/validator，Scheduler/DiT/VAE wall 的 `count` 都是 200；四个
+lane 的 S0 必选 Client FPS、Scheduler FPS、DiT wall、VAE wall CV 都通过 3% 门。下表
+CV 使用两样本 sample standard deviation / mean，收益正数表示 candidate 更快：
+
+| SP / metric | control mean（CV） | candidate mean（CV） | candidate 性能变化 |
+| --- | ---: | ---: | ---: |
+| SP2 Client FPS | 12.5317（1.383%） | 12.5706（0.589%） | +0.310% |
+| SP2 Scheduler FPS | 12.5420（1.380%） | 12.5812（0.587%） | +0.312% |
+| SP2 chunk wall ms | 1328.085（3.267%） | 1332.350（1.464%） | −0.321% |
+| SP2 DiT wall ms | 754.772（0.142%） | 755.957（0.185%） | −0.157% |
+| SP2 VAE wall ms | 424.815（0.119%） | 424.382（0.035%） | +0.102% |
+| SP4 Client FPS | 14.5614（0.200%） | 15.2947（0.287%） | +5.036% |
+| SP4 Scheduler FPS | 14.5761（0.223%） | 15.3099（0.299%） | +5.034% |
+| SP4 chunk wall ms | 1187.098（0.458%） | 1111.658（2.732%） | +6.355% |
+| SP4 DiT wall ms | 759.239（0.379%） | 712.209（0.303%） | +6.194% |
+| SP4 VAE wall ms | 233.158（0.242%） | 233.512（0.016%） | −0.152% |
+
+SP2 control 的 chunk wall CV 3.267% 超过 3%，虽然 S0 必选集合使用 Scheduler FPS 而不是
+chunk-total wall，因此 aggregate 仍通过；这里仍把它作为客户端 payload/write 或 session
+顺序噪声证据，不隐藏。profiler-off schema 不提供 DiT/VAE CUDA、kernel/launch、SM 或
+Tensor Active；这些字段在本表是 **unavailable，绝不是 0**，必须由后续 d5 exact-window
+Nsight 补齐。
+
+稳态窗口内的 1 Hz GPU telemetry 没显示 SP4 candidate 享受更高时钟：control 两次 active
+GPU 平均 SM clock 为 1975.1/1974.3 MHz，candidate 为 1973.8/1973.7 MHz；平均 GPU util
+从 71.54%/71.02% 升到 73.29%/73.39%，平均每卡功耗从 429.6/432.5 W 升到
+442.9/447.9 W，温度从 58.54/60.78°C 升到 59.80/62.13°C。candidate 更晚、更热且时钟
+略低仍更快，支持“做了更多有效 GPU 工作”的解释，但不能替代 kernel profile。SP2 的
+时钟、功耗与利用率差异很小，和接近 0 的 wall/FPS 变化一致。
+
+不过固定顺序仍有明确混杂：两次 repeat 复用同一 server；每个 server 的第一次
+init→first-payload 是约 6–10 秒，第二次约 1.5–1.7 秒。whole-model compile 虽关闭，日志
+仍显示 `segment_compile=True`，四个 server 共享同一个容器内
+`/root/.cache/sgl_diffusion/torch_compile_cache`，且日志没有可核验的 hit/miss 事件。因此
+v09 **只标 exploratory，不作为 PR headline**。独立 v10 使用新 PVC/attempt，按
+candidate→control→control→candidate 反序 ABBA；每个位置都完整 stop、校验端口/进程退出、
+再启动新 server，并在位置前后只读记录 inductor/triton cache 的 file count、size 与
+metadata listing SHA。SP2/SP4 都必须由这组 ABBA 的各侧双重复与 CV 决定 headline。
+
 ### Provenance
 
 | 字段 | control | candidate |
 | --- | --- | --- |
-| SGLang commit | 待填 | 待填 |
-| minWM commit | 待填 | 待填 |
-| container image | 待填 | 待填 |
-| GPU active / allocated | 待填 | 待填 |
-| SP / precision / UTC | 待填 | 待填 |
+| SGLang 临时测量 commit | `59e99d87a57ef581d5b23168cdb85d19d549ee0d` | 同左 |
+| minWM commit | `2efc6485f65e8fcab506665efde79bc41406385e` | 同左 |
+| container image | `…/leap-world/minwm-training@sha256:bedc07ea…53ef5f2a` | 同左 |
+| GPU active / allocated | SP2: 2/8；SP4: 4/8，NVIDIA H200 | 同左 |
+| SP / precision / UTC | SP2、SP4 / BF16 / 2026-08-07 | 同左 |
 
 ### Profiler-off headline（20 + 200）
 
@@ -428,6 +521,27 @@ SHA `6a704fcace9f804513e1f40b0c55ad6749fd03bc`，live spec 已复核 context、r
 与 `backoffLimit=0`，并在任何模型/client 前要求 v01–v07 七个 marker 全部存在且 reason
 匹配。v06/v07 只属于 runner provenance，不能混入质量或 A/B。
 
+v08 在 H200 测试通过后由 runner 的结果目录顺序缺口失败，root-invalid marker SHA256 为
+`be99ac0dfaf4c81c126f9580a69ff040c8ed32ebdfbe63f8b3a5095b59605e5c`，包含 17 项
+产物；没有启动四角或正式 client。v09 使用新 Job
+`minwm-s4-qkv-h200-20260807-09`、Pod/attempt
+`minwm-s4-qkv-h200-20260807-09-5zsch`，live spec 机器复核 `backoffLimit=0`，并在任何
+模型/client 前重新核验 v01–v08 全部 marker 的 reason、artifact count、recoverability 和
+SHA256。v08 marker/PVC 保持原位，不复制、不覆盖、不删除。v09 的 kube context 为
+`codex-minwm-test-phx2`，region/zone/NodePool 为
+`us-west-2` / `us-west-2-phx-2a` / `minwm-test-phx2-p5e-spot`。
+
+v10 ABBA 使用新 Job `minwm-s4-qkv-abba-h200-20260807-10`、新结果 PVC
+`minwm-s4-qkv-h200-results-20260807-v10`，并以
+`kubernetes.io/hostname=i-06888dc1ca88547e1` 约束到 v09 的同一现有节点；该不可供
+Karpenter 新建节点的 hostname 约束同时阻止扩容。第一次创建时显式
+`preemptionPolicy=Never` 被 admission 拒绝：未指定 PriorityClass 时该字段必须等于 admission
+计算的 `PreemptLowerPriority`。当时没有 Pod、attempt 或 PVC 数据；为停止 controller 的
+FailedCreate 重试，精确删除该 Job 控制对象后原名重建，PVC 保留。修正版不设置
+PriorityClass、不改变默认优先级，与已先运行的 S3 同优先级；scheduler 现场证据为
+`Insufficient nvidia.com/gpu`、`No preemption victims found`，所以 v10 自然 Pending，不抢占
+S3。这个 setup 事件不冒充 workload attempt。
+
 若需要集群止损，只允许删除名称精确匹配本任务 `minwm-s4-qkv-*` 的 Job/Pod 控制对象；
 PVC 和其中的诊断证据必须保留。所有 `kubectl` 读取、dry-run、apply、logs 和 delete 都显式
 使用 `--context codex-minwm-test-phx2`，并在提交前记录 region、NodePool、zone 与
@@ -452,10 +566,13 @@ dict 都有反向加载路径。若 fast lane 启动日志没有出现 `single-g
   TP2/FP8/SP2/SP4/profiler-off；
 - H200 v06：短 SHA 配置错误在模型前人工止损，控制对象删除、PVC/marker 保留；
 - H200 v07：v06 marker reason 预期错误，在模型前失败并保留；
-- H200 v08：四角 compile 隔离等待/执行中，只有归因为既有 whole-model compile blocker
-  才继续完整 compile-off 矩阵；
-- layer/latent/video/determinism：v03/v04 诊断结果通过，完整矩阵由 v08 重跑；
-- profiler-off A/B：v08 质量门后待执行；Nsight：pin `d5b25227d4`，独立 Job 尚未启动；
+- H200 v08：36 项测试后因 SP1 结果目录未创建而在 client 前失败，root-invalid/PVC 保留；
+- H200 v09 四角：两条同模式 QKV 边 bitwise；两条 eager→compile 边以完全相同幅度失败，
+  分类为既有 whole-model compile blocker，只放行 compile-off；
+- layer/latent/video/determinism：v09 SP1/SP2/SP4 与 replay 完整矩阵通过；
+- profiler-off A/B：v09 同序双重复和 CV 已完成；SP2 约 +0.31%，SP4 约 +5.03%，但固定
+  顺序/共享 cache 使整组仍为 exploratory；v10 反序 ABBA 已提交并等待 S3 释放原节点，
+  ABBA 完成前不写 headline；Nsight pin `d5b25227d4`，独立 Job尚未启动；
 - 6b：等待 6a 证据；
 - 默认开关：保持关闭。
 
