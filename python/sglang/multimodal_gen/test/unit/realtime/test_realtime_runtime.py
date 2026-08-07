@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import pickle
 import time
 from types import SimpleNamespace
 
@@ -57,6 +58,7 @@ from sglang.multimodal_gen.runtime.realtime.session import (
 from sglang.multimodal_gen.runtime.realtime.states import (
     RealtimeCausalDecodeState,
 )
+from sglang.multimodal_gen.runtime.utils import realtime_trace
 from sglang.multimodal_gen.runtime.utils.perf_logger import RequestMetrics
 from sglang.multimodal_gen.runtime.utils.realtime_video import (
     RAW_RGB_CONTENT_TYPE,
@@ -620,6 +622,114 @@ def test_scheduler_stage_metrics_emit_dedicated_realtime_trace_events(monkeypatc
     assert denoise["event_id"] == 9
     assert denoise["duration_ms"] == 620
     assert denoise["source"] == "scheduler_result_metrics"
+
+
+def test_worker_component_timing_is_pickle_safe_without_cuda(monkeypatch):
+    emitted = []
+    monkeypatch.setattr(
+        realtime_trace,
+        "log_realtime_trace_for_batch",
+        lambda _logger, _batch, event, **fields: emitted.append((event, fields)),
+    )
+    metrics = RequestMetrics("request-3")
+    batch = SimpleNamespace(
+        metrics=metrics,
+        request_id="request-3",
+        block_idx=3,
+        realtime_trace_id="trace-3",
+        realtime_trace_started_at=time.perf_counter(),
+        realtime_session_id="session-3",
+    )
+
+    with realtime_trace.realtime_trace_span(
+        None,
+        batch,
+        "server.vae_decode_complete",
+        component="vae_decoder",
+        measure_cuda=False,
+        chunk_index=3,
+    ):
+        pass
+
+    restored = pickle.loads(pickle.dumps(metrics))
+    assert len(restored.realtime_component_timings) == 1
+    timing = restored.realtime_component_timings[0]
+    assert timing["event"] == "server.vae_decode_complete"
+    assert timing["component"] == "vae_decoder"
+    assert timing["chunk_index"] == 3
+    assert timing["request_id"] == "request-3"
+    assert timing["duration_ms"] >= 0
+    assert "cuda_ms" not in timing
+    assert emitted[0][0] == "server.vae_decode_complete"
+
+
+def test_result_component_timing_relay_covers_metrics_list_and_deduplicates(
+    monkeypatch,
+):
+    denoise = {
+        "event": "server.model_denoise_complete",
+        "component": "minwm_denoising",
+        "duration_ms": 620.0,
+        "cuda_ms": 615.0,
+        "chunk_index": 4,
+        "request_id": "request-4",
+    }
+    vae_without_cuda = {
+        "event": "server.vae_decode_complete",
+        "component": "vae_decoder",
+        "duration_ms": 180.0,
+        "chunk_index": 4,
+        "request_id": "request-4",
+    }
+    direct_metrics = RequestMetrics("request-4")
+    direct_metrics.record_realtime_component_timing(denoise)
+    list_metrics = pickle.loads(pickle.dumps(direct_metrics))
+    list_metrics.record_realtime_component_timing(vae_without_cuda)
+    result = OutputBatch(
+        metrics=direct_metrics, metrics_list=[list_metrics, direct_metrics]
+    )
+    emitted = []
+
+    def fake_log_realtime_trace(_logger, _session, event, **fields):
+        emitted.append({"event": event, **fields})
+
+    monkeypatch.setattr(
+        realtime_video_api, "log_realtime_trace", fake_log_realtime_trace
+    )
+    session = GenerateSession()
+    session.trace_id = "trace-4"
+    realtime_video_api._emit_realtime_result_component_timings(session, result)
+
+    assert emitted == [
+        {
+            **denoise,
+            "source": "scheduler_result_component_timing",
+        },
+        {
+            **vae_without_cuda,
+            "source": "scheduler_result_component_timing",
+        },
+    ]
+
+
+def test_result_component_timing_relay_rejects_conflicting_duplicates():
+    first = RequestMetrics("request-5")
+    first.record_realtime_component_timing(
+        {
+            "event": "server.model_denoise_complete",
+            "component": "minwm_denoising",
+            "duration_ms": 620.0,
+            "cuda_ms": 615.0,
+            "chunk_index": 5,
+            "request_id": "request-5",
+        }
+    )
+    conflicting = pickle.loads(pickle.dumps(first))
+    conflicting.realtime_component_timings[0]["cuda_ms"] = 614.0
+    result = OutputBatch(metrics=first, metrics_list=[conflicting])
+
+    with pytest.raises(ValueError, match="conflicting realtime component timings"):
+        list(realtime_video_api._iter_realtime_result_component_timings(result))
 
 
 def test_trace_drain_sends_scheduled_event_before_return():

@@ -469,6 +469,7 @@ async def receive_run(args: argparse.Namespace, contract: dict, case: dict) -> d
         event="server.model_denoise_complete",
         field="cuda_ms",
         measured_indices=measured_index_set,
+        source="scheduler_result_component_timing",
         component="minwm_denoising",
     )
     vae_cuda = stage_trace_values(
@@ -476,6 +477,7 @@ async def receive_run(args: argparse.Namespace, contract: dict, case: dict) -> d
         event="server.vae_decode_complete",
         field="cuda_ms",
         measured_indices=measured_index_set,
+        source="scheduler_result_component_timing",
         component="vae_decoder",
     )
 

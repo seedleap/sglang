@@ -191,6 +191,13 @@ def test_stage_trace_values_selects_source_and_chunk_window() -> None:
             "duration_ms": 590,
             "cuda_ms": 589,
             "component": "minwm_denoising",
+            "source": "scheduler_result_component_timing",
+        },
+        {
+            "event": "server.model_denoise_complete",
+            "chunk_index": 20,
+            "cuda_ms": 999,
+            "component": "minwm_denoising",
         },
         {
             "event": "server.model_denoise_complete",
@@ -211,6 +218,7 @@ def test_stage_trace_values_selects_source_and_chunk_window() -> None:
         event="server.model_denoise_complete",
         field="cuda_ms",
         measured_indices={20},
+        source="scheduler_result_component_timing",
         component="minwm_denoising",
     ) == [589.0]
 

@@ -58,6 +58,7 @@ _REALTIME_RESULT_STAGE_MARKERS = ("vae", "denois")
 _NSYS_CHUNK_MARKER_PREFIX = "sglang.realtime.chunk"
 _NSYS_WARMUP_CHUNKS_ENV = "SGLANG_REALTIME_NSYS_WARMUP_CHUNKS"
 _NSYS_MEASURED_CHUNKS_ENV = "SGLANG_REALTIME_NSYS_MEASURED_CHUNKS"
+_REALTIME_COMPONENT_TIMING_SOURCE = "scheduler_result_component_timing"
 
 
 class _LockedRealtimeWebSocket:
@@ -339,6 +340,86 @@ def _iter_realtime_result_stage_metrics(result: Any):
             yield stage_name, metric_ms, getattr(metrics, "request_id", None)
 
 
+def _iter_realtime_result_component_timings(result: Any):
+    """Yield unique worker timings carried through result metrics."""
+    metrics_candidates = []
+    metrics_list = getattr(result, "metrics_list", None)
+    if metrics_list:
+        metrics_candidates.extend(
+            metrics for metrics in metrics_list if metrics is not None
+        )
+    metrics = getattr(result, "metrics", None)
+    if metrics is not None:
+        metrics_candidates.append(metrics)
+
+    seen_metrics: set[int] = set()
+    seen_timings: dict[tuple[str, str, int, str | None], dict[str, Any]] = {}
+    for metrics in metrics_candidates:
+        metrics_id = id(metrics)
+        if metrics_id in seen_metrics:
+            continue
+        seen_metrics.add(metrics_id)
+
+        timings = getattr(metrics, "realtime_component_timings", None)
+        if not isinstance(timings, list):
+            continue
+        for timing in timings:
+            if not isinstance(timing, dict):
+                continue
+            try:
+                event = str(timing["event"])
+                component = str(timing["component"])
+                duration_ms = float(timing["duration_ms"])
+                chunk_index = int(timing["chunk_index"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if not event or not component:
+                continue
+            request_id_value = timing.get("request_id")
+            request_id = str(request_id_value) if request_id_value is not None else None
+            normalized: dict[str, Any] = {
+                "event": event,
+                "component": component,
+                "duration_ms": duration_ms,
+                "chunk_index": chunk_index,
+            }
+            if request_id is not None:
+                normalized["request_id"] = request_id
+            if timing.get("cuda_ms") is not None:
+                try:
+                    normalized["cuda_ms"] = float(timing["cuda_ms"])
+                except (TypeError, ValueError):
+                    continue
+
+            identity = (event, component, chunk_index, request_id)
+            previous = seen_timings.get(identity)
+            if previous is not None:
+                if previous != normalized:
+                    raise ValueError(
+                        "conflicting realtime component timings for "
+                        f"identity={identity}: {previous!r} != {normalized!r}"
+                    )
+                continue
+            seen_timings[identity] = normalized
+            yield normalized
+
+
+def _emit_realtime_result_component_timings(
+    session: GenerateSession,
+    result: Any,
+) -> None:
+    for timing in _iter_realtime_result_component_timings(result):
+        fields = dict(timing)
+        event = fields.pop("event")
+        log_realtime_trace(
+            logger,
+            session,
+            event,
+            source=_REALTIME_COMPONENT_TIMING_SOURCE,
+            **fields,
+        )
+
+
 def _emit_realtime_result_stage_traces(
     session: GenerateSession,
     chunk: RealtimeChunkContext,
@@ -565,6 +646,7 @@ async def _generate_loop(ws: WebSocket, session: GenerateSession):
                 scheduler_forward_ms=round(scheduler_forward_ms, 3),
             )
             _emit_realtime_result_stage_traces(session, chunk, batch, result)
+            _emit_realtime_result_component_timings(session, result)
 
             # finish
             adapter.on_chunk_complete(session, result)
