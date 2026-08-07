@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import copy
+import json
 import sqlite3
 import sys
 from pathlib import Path
 
 import pytest
+from jsonschema import Draft202012Validator
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -80,6 +82,13 @@ def _record(mode: str = "profiler_off", run_id: str = "run-1") -> dict:
         },
         artifacts={"client_result": "/results/client.json"},
     )
+
+
+def _machine_schema_validator() -> Draft202012Validator:
+    schema_path = Path(__file__).with_name("measurement_schema.json")
+    schema = json.loads(schema_path.read_text(encoding="utf-8"))
+    Draft202012Validator.check_schema(schema)
+    return Draft202012Validator(schema)
 
 
 def test_profiler_off_schema_keeps_timing_domains_separate() -> None:

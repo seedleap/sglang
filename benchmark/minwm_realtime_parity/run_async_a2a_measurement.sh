@@ -12,23 +12,22 @@ WORK_ROOT="/work/minwm-realtime/${MINWM_RUN_ID}"
 MODEL_DIR="${WORK_ROOT}/sglang-model"
 CASES="${MINWM_CASES_PATH:-${SCRIPT_DIR}/cases_720p_compile_smoke.json}"
 CASE_ID="${MINWM_CASE_ID:-00_forward_080_pottery_720p}"
-SP_DEGREES="${MINWM_S0_SP_DEGREES:-2 4}"
-QKV_LANES="${MINWM_S4_QKV_LANES:-control candidate}"
-ABBA_SEQUENCE="${MINWM_S4_QKV_ABBA_SEQUENCE:-}"
+SP_DEGREES="${MINWM_ASYNC_A2A_SP_DEGREES:-2 4}"
+A2A_SEQUENCE="${MINWM_ASYNC_A2A_SEQUENCE:-candidate baseline baseline candidate baseline candidate candidate baseline candidate baseline baseline candidate}"
+A2A_BACKEND="${MINWM_ASYNC_A2A_BENCH_BACKEND:-process_group}"
+MIN_LANE_SAMPLES="${MINWM_ASYNC_A2A_MIN_LANE_SAMPLES:-5}"
 OFF_WARMUP_CHUNKS="${MINWM_S0_OFF_WARMUP_CHUNKS:-20}"
 OFF_MEASURED_CHUNKS="${MINWM_S0_OFF_MEASURED_CHUNKS:-200}"
 KV_CACHE_NUM_FRAMES="${MINWM_S0_KV_CACHE_NUM_FRAMES:-45}"
-RESULT_KIND="s4-qkv-measurement"
-if [[ -n "${ABBA_SEQUENCE}" ]]; then
-  RESULT_KIND="s4-qkv-abba"
-fi
+RESULT_KIND="async-a2a-abba"
 RESULT_ROOT="${MINWM_RESULTS_ROOT%/}/${MINWM_RUN_ID}/${RESULT_KIND}"
 
 [[ -f "${MODEL_DIR}/minwm_conversion_manifest.json" ]]
 [[ -f "${CASES}" ]]
 [[ "$(git -C /workspace/sglang rev-parse HEAD)" == "${SGLANG_GIT_REF}" ]]
 if ! [[ "${OFF_WARMUP_CHUNKS}" =~ ^[1-9][0-9]*$ \
-  && "${OFF_MEASURED_CHUNKS}" =~ ^[1-9][0-9]*$ ]]; then
+  && "${OFF_MEASURED_CHUNKS}" =~ ^[1-9][0-9]*$ \
+  && "${MIN_LANE_SAMPLES}" =~ ^[1-9][0-9]*$ ]]; then
   echo "Profiler-off warmup/measurement chunk counts must be positive integers" >&2
   exit 2
 fi
@@ -37,7 +36,7 @@ if [[ -n "${SGLANG_DIFFUSION_TORCH_PROFILER_DIR:-}" ]]; then
   exit 2
 fi
 if [[ -e "${RESULT_ROOT}" ]]; then
-  echo "Refusing to overwrite existing S4 measurement attempt: ${RESULT_ROOT}" >&2
+  echo "Refusing to overwrite existing async A2A measurement attempt: ${RESULT_ROOT}" >&2
   exit 2
 fi
 mkdir -p "${RESULT_ROOT}"
@@ -46,7 +45,7 @@ export MINWM_PARITY_DETERMINISTIC=1
 export MINWM_DETERMINISTIC_ATTENTION=true
 export SGLANG_ENABLE_DETERMINISTIC_INFERENCE=1
 export SGLANG_DIFFUSION_VAE_CHANNELS_LAST_3D=false
-export SGLANG_REALTIME_TRACE_SYNC_CUDA=1
+export SGLANG_REALTIME_TRACE_SYNC_CUDA=0
 export CUBLAS_WORKSPACE_CONFIG=:4096:8
 export PYTHONHASHSEED=0
 unset SGLANG_DIFFUSION_TORCH_PROFILER_DIR
@@ -60,12 +59,15 @@ ALLOCATED_GPU_COUNT="${MINWM_ALLOCATED_GPU_COUNT:-$(nvidia-smi -L | wc -l | xarg
   echo "gpu_model=${GPU_MODEL}"
   echo "allocated_gpu_count=${ALLOCATED_GPU_COUNT}"
   echo "sp_degrees=${SP_DEGREES}"
-  echo "qkv_lanes=${QKV_LANES}"
-  echo "qkv_abba_sequence=${ABBA_SEQUENCE:-disabled}"
-  echo "server_restart_per_position=$([[ -n "${ABBA_SEQUENCE}" ]] && echo true || echo false)"
-  echo "qkv_control=MINWM_FUSED_QKV_PROJECTION=0"
-  echo "qkv_candidate=MINWM_FUSED_QKV_PROJECTION=1"
+  echo "a2a_sequence=${A2A_SEQUENCE}"
+  echo "a2a_backend=${A2A_BACKEND}"
+  echo "minimum_lane_samples=${MIN_LANE_SAMPLES}"
+  echo "server_restart_per_position=true"
+  echo "a2a_baseline=MINWM_ASYNC_A2A=0"
+  echo "a2a_candidate=MINWM_ASYNC_A2A=1"
+  echo "output_a2a=MINWM_ASYNC_A2A_OUTPUT=0"
   echo "measurement_mode=profiler_off_only"
+  echo "trace_sync_cuda=0"
   echo "off_window=${OFF_WARMUP_CHUNKS}+${OFF_MEASURED_CHUNKS}"
   echo "nsys_status=disabled_pending_exact_window_contract"
   echo "kv_cache_num_frames=${KV_CACHE_NUM_FRAMES}"
@@ -77,8 +79,8 @@ nvidia-smi -q > "${RESULT_ROOT}/nvidia-smi-q.txt"
 
 server_pid=""
 monitor_pid=""
-qkv_lane=""
-qkv_fused_flag=""
+a2a_lane=""
+async_a2a_flag=""
 invalid_scope="${RESULT_ROOT}"
 
 wait_for_server() {
@@ -203,7 +205,9 @@ start_server() {
   MINWM_PACKED_ATTENTION_DETERMINISTIC=true \
   MINWM_NATIVE_COMPONENTS=text_encoder,vae \
   MINWM_VAE_LANE=parallel \
-  MINWM_FUSED_QKV_PROJECTION="${qkv_fused_flag}" \
+  MINWM_ASYNC_A2A="${async_a2a_flag}" \
+  MINWM_ASYNC_A2A_OUTPUT=0 \
+  MINWM_ASYNC_A2A_BACKEND="${A2A_BACKEND}" \
     "${SERVER_ARGS[@]}" > "${log_path}" 2>&1 &
   server_pid=$!
   wait_for_server "${server_pid}" "${log_path}"
@@ -291,8 +295,8 @@ run_profiler_off() {
   for repeat in 1 2; do
     local output="${lane_dir}/profiler-off-repeat${repeat}.json"
     run_client \
-      "${degree}" "${output}" "bf16-${qkv_lane}-sp${degree}" \
-      "${MINWM_RUN_ID}-${qkv_lane}-sp${degree}-off-r${repeat}" \
+      "${degree}" "${output}" "bf16-${a2a_lane}-sp${degree}" \
+      "${MINWM_RUN_ID}-${a2a_lane}-sp${degree}-off-r${repeat}" \
       --measurement-mode profiler_off \
       --warmup-chunks "${OFF_WARMUP_CHUNKS}" \
       --measured-chunks "${OFF_MEASURED_CHUNKS}"
@@ -307,8 +311,8 @@ PY
     echo "CV target missed after two repeats; collecting an automatic third repeat"
     local output="${lane_dir}/profiler-off-repeat3.json"
     run_client \
-      "${degree}" "${output}" "bf16-${qkv_lane}-sp${degree}" \
-      "${MINWM_RUN_ID}-${qkv_lane}-sp${degree}-off-r3" \
+      "${degree}" "${output}" "bf16-${a2a_lane}-sp${degree}" \
+      "${MINWM_RUN_ID}-${a2a_lane}-sp${degree}-off-r3" \
       --measurement-mode profiler_off \
       --warmup-chunks "${OFF_WARMUP_CHUNKS}" \
       --measured-chunks "${OFF_MEASURED_CHUNKS}"
@@ -365,7 +369,7 @@ for name, root in roots.items():
         "metadata_listing_sha256": hashlib.sha256(payload).hexdigest(),
     }
 record = {
-    "schema_version": "minwm-s4-compile-cache-state/v1",
+    "schema_version": "minwm-async-a2a-compile-cache-state/v1",
     "timestamp_utc": datetime.now(timezone.utc).isoformat(),
     "roots": summary,
     "note": "Read-only metadata snapshot; cache contents were not cleared or rewritten.",
@@ -389,23 +393,25 @@ assert_server_stopped() {
 run_profiler_off_position() {
   local degree="$1" position="$2" lane="$3" position_dir="$4"
   case "${lane}" in
-    control) qkv_fused_flag=0 ;;
-    candidate) qkv_fused_flag=1 ;;
+    baseline) async_a2a_flag=0 ;;
+    candidate) async_a2a_flag=1 ;;
     *)
-      echo "S4 ABBA accepts QKV lane control or candidate, got ${lane}" >&2
+      echo "async A2A ABBA accepts A2A lane baseline or candidate, got ${lane}" >&2
       exit 2
       ;;
   esac
-  qkv_lane="${lane}"
+  a2a_lane="${lane}"
   invalid_scope="${position_dir}"
   mkdir -p "${position_dir}"
   {
     echo "position=${position}"
-    echo "qkv_lane=${lane}"
-    echo "MINWM_FUSED_QKV_PROJECTION=${qkv_fused_flag}"
+    echo "a2a_lane=${lane}"
+    echo "MINWM_ASYNC_A2A=${async_a2a_flag}"
+    echo "MINWM_ASYNC_A2A_OUTPUT=0"
+    echo "MINWM_ASYNC_A2A_BACKEND=${A2A_BACKEND}"
     echo "sp_degree=${degree}"
     echo "server_restart_boundary=before_and_after_this_position"
-  } > "${position_dir}/qkv-contract.txt"
+  } > "${position_dir}/async-a2a-contract.txt"
   record_compile_cache_state "${position_dir}/compile-cache-before.json"
   start_server \
     "${degree}" \
@@ -424,13 +430,35 @@ run_profiler_off_position() {
 }
 
 run_abba_measurements() {
-  read -r -a abba_lanes <<< "${ABBA_SEQUENCE}"
-  if (( ${#abba_lanes[@]} != 4 )); then
-    echo "MINWM_S4_QKV_ABBA_SEQUENCE must contain exactly four lanes" >&2
+  read -r -a abba_lanes <<< "${A2A_SEQUENCE}"
+  if (( ${#abba_lanes[@]} % 4 != 0 )); then
+    echo "MINWM_ASYNC_A2A_SEQUENCE must contain complete four-position ABBA/BAAB blocks" >&2
     exit 2
   fi
-  if [[ "${abba_lanes[*]}" != "candidate control control candidate" ]]; then
-    echo "S4 reverse ABBA contract is: candidate control control candidate" >&2
+  local baseline_count=0
+  local candidate_count=0
+  local block_start
+  for ((block_start = 0; block_start < ${#abba_lanes[@]}; block_start += 4)); do
+    local block="${abba_lanes[*]:block_start:4}"
+    local block_index=$((block_start / 4))
+    local expected="candidate baseline baseline candidate"
+    if (( block_index % 2 == 1 )); then
+      expected="baseline candidate candidate baseline"
+    fi
+    if [[ "${block}" != "${expected}" ]]; then
+      echo "block $((block_index + 1)) must alternate ABBA/BAAB; expected '${expected}', got '${block}'" >&2
+      exit 2
+    fi
+  done
+  local lane
+  for lane in "${abba_lanes[@]}"; do
+    case "${lane}" in
+      baseline) baseline_count=$((baseline_count + 1)) ;;
+      candidate) candidate_count=$((candidate_count + 1)) ;;
+    esac
+  done
+  if (( baseline_count < MIN_LANE_SAMPLES || candidate_count < MIN_LANE_SAMPLES )); then
+    echo "each lane needs at least ${MIN_LANE_SAMPLES} samples; baseline=${baseline_count}, candidate=${candidate_count}" >&2
     exit 2
   fi
 
@@ -442,7 +470,7 @@ run_abba_measurements() {
     fi
     local sp_dir="${RESULT_ROOT}/sp${degree}"
     mkdir -p "${sp_dir}"
-    local control_paths=()
+    local baseline_paths=()
     local candidate_paths=()
     local index=0
     for lane in "${abba_lanes[@]}"; do
@@ -451,21 +479,21 @@ run_abba_measurements() {
       position="$(printf '%02d' "${index}")"
       local position_dir="${sp_dir}/position-${position}-${lane}"
       run_profiler_off_position "${degree}" "${position}" "${lane}" "${position_dir}"
-      if [[ "${lane}" == "control" ]]; then
-        control_paths+=("${position_dir}/profiler-off.json")
+      if [[ "${lane}" == "baseline" ]]; then
+        baseline_paths+=("${position_dir}/profiler-off.json")
       else
         candidate_paths+=("${position_dir}/profiler-off.json")
       fi
     done
     invalid_scope="${sp_dir}/summary"
     mkdir -p "${invalid_scope}"
-    aggregate_repeats "${sp_dir}/summary/control" "${control_paths[@]}"
+    aggregate_repeats "${sp_dir}/summary/baseline" "${baseline_paths[@]}"
     aggregate_repeats "${sp_dir}/summary/candidate" "${candidate_paths[@]}"
   done
 
   invalid_scope="${RESULT_ROOT}/summary"
   mkdir -p "${invalid_scope}"
-  python3 - "${RESULT_ROOT}" "${ABBA_SEQUENCE}" <<'PY'
+  python3 - "${RESULT_ROOT}" "${A2A_SEQUENCE}" <<'PY'
 import json
 import statistics
 import sys
@@ -480,10 +508,34 @@ metric_names = (
     "dit_wall_ms",
     "vae_wall_ms",
 )
+
+def percentile(values, q):
+    ordered = sorted(values)
+    if len(ordered) == 1:
+        return ordered[0]
+    offset = (len(ordered) - 1) * q
+    lower = int(offset)
+    upper = min(lower + 1, len(ordered) - 1)
+    weight = offset - lower
+    return ordered[lower] * (1.0 - weight) + ordered[upper] * weight
+
+def summarize(values):
+    mean = statistics.fmean(values)
+    stdev = statistics.stdev(values) if len(values) > 1 else 0.0
+    return {
+        "count": len(values),
+        "mean": mean,
+        "median": statistics.median(values),
+        "p10": percentile(values, 0.10),
+        "p90": percentile(values, 0.90),
+        "stdev": stdev,
+        "cv_percent": stdev / mean * 100.0 if mean else 0.0,
+    }
+
 degrees = {}
 for sp_dir in sorted(root.glob("sp*")):
     lanes = {}
-    for lane in ("control", "candidate"):
+    for lane in ("baseline", "candidate"):
         records = []
         for position_dir in sorted(sp_dir.glob(f"position-??-{lane}")):
             record = json.loads((position_dir / "profiler-off.json").read_text())
@@ -506,18 +558,19 @@ for sp_dir in sorted(root.glob("sp*")):
             "repeat_summary": json.loads(
                 (sp_dir / "summary" / lane / "repeat-summary.json").read_text()
             ),
-            "means": {
-                name: statistics.fmean(record["metrics"][name] for record in records)
+            "summary": {
+                name: summarize([record["metrics"][name] for record in records])
                 for name in metric_names
             },
         }
     deltas = {}
     for name in metric_names:
-        control = lanes["control"]["means"][name]
-        candidate = lanes["candidate"]["means"][name]
-        raw_percent = (candidate / control - 1.0) * 100.0
+        baseline = lanes["baseline"]["summary"][name]["median"]
+        candidate = lanes["candidate"]["summary"][name]["median"]
+        raw_percent = (candidate / baseline - 1.0) * 100.0
         deltas[name] = {
-            "candidate_vs_control_percent": raw_percent,
+            "basis": "median",
+            "candidate_vs_baseline_percent": raw_percent,
             "performance_change_percent": (
                 raw_percent if name.endswith("fps") else -raw_percent
             ),
@@ -525,93 +578,18 @@ for sp_dir in sorted(root.glob("sp*")):
     degrees[sp_dir.name] = {"lanes": lanes, "deltas": deltas}
 
 summary = {
-    "schema_version": "minwm-realtime-s4-qkv-abba/v1",
+    "schema_version": "minwm-realtime-async-a2a-abba/v1",
     "order": order,
     "server_restart_per_position": True,
     "compile_cache_policy": "preserve_and_snapshot_before_after_each_position",
     "degrees": degrees,
 }
-with (root / "s4-qkv-abba-summary.json").open("x") as output:
+with (root / "async-a2a-abba-summary.json").open("x") as output:
     output.write(json.dumps(summary, indent=2, sort_keys=True) + "\n")
 print(json.dumps(summary, indent=2, sort_keys=True))
 PY
   date --utc +%Y-%m-%dT%H:%M:%SZ | tee "${RESULT_ROOT}/complete.txt"
-  echo "MINWM_S4_QKV_ABBA_COMPLETE results=${RESULT_ROOT}"
+  echo "MINWM_ASYNC_A2A_ABBA_COMPLETE results=${RESULT_ROOT}"
 }
 
-if [[ -n "${ABBA_SEQUENCE}" ]]; then
-  run_abba_measurements
-  exit 0
-fi
-
-read -r -a degrees <<< "${SP_DEGREES}"
-read -r -a qkv_lanes <<< "${QKV_LANES}"
-for degree in "${degrees[@]}"; do
-  if ! [[ "${degree}" =~ ^(2|4)$ ]]; then
-    echo "S0 accepts SP degree 2 or 4, got ${degree}" >&2
-    exit 2
-  fi
-  for qkv_lane in "${qkv_lanes[@]}"; do
-    case "${qkv_lane}" in
-      control) qkv_fused_flag=0 ;;
-      candidate) qkv_fused_flag=1 ;;
-      *)
-        echo "S4 accepts QKV lane control or candidate, got ${qkv_lane}" >&2
-        exit 2
-        ;;
-    esac
-    lane_dir="${RESULT_ROOT}/${qkv_lane}/sp${degree}"
-    invalid_scope="${lane_dir}"
-    mkdir -p "${lane_dir}"
-    {
-      echo "qkv_lane=${qkv_lane}"
-      echo "MINWM_FUSED_QKV_PROJECTION=${qkv_fused_flag}"
-      echo "sp_degree=${degree}"
-    } > "${lane_dir}/qkv-contract.txt"
-    run_profiler_off "${degree}" "${lane_dir}"
-  done
-done
-
-invalid_scope="${RESULT_ROOT}/summary"
-python3 - "${RESULT_ROOT}" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-root = Path(sys.argv[1])
-lanes = {}
-for qkv_dir in sorted(root.iterdir()):
-    if not qkv_dir.is_dir():
-        continue
-    degrees = {}
-    for lane_dir in sorted(qkv_dir.glob("sp*")):
-        repeat = json.loads((lane_dir / "repeat-summary.json").read_text())
-        degrees[lane_dir.name] = {
-            "profiler_off": repeat,
-            "profiler_on": {
-                "status": "deferred",
-                "reason": "S0 b924 does not isolate discarded and stable Nsight rows",
-            },
-        }
-    lanes[qkv_dir.name] = degrees
-summary = {
-    "schema_version": "minwm-realtime-s4-qkv-ab/v1",
-    "lanes": lanes,
-}
-(root / "s4-qkv-summary.json").write_text(
-    json.dumps(summary, indent=2, sort_keys=True) + "\n"
-)
-print(json.dumps({
-    qkv_lane: {
-        degree: {
-            "off_cv_pass": value["profiler_off"]["acceptance"]["passes_cv_target"],
-            "profiler_on": value["profiler_on"]["status"],
-        }
-        for degree, value in degrees.items()
-    }
-    for qkv_lane, degrees in lanes.items()
-}, indent=2, sort_keys=True))
-PY
-
-date --utc +%Y-%m-%dT%H:%M:%SZ | tee "${RESULT_ROOT}/complete.txt"
-echo "MINWM_S4_QKV_MEASUREMENT_COMPLETE results=${RESULT_ROOT}"
+run_abba_measurements

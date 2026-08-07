@@ -12,15 +12,15 @@
 | MinWM 逻辑基线 | `0e30671cf8a00622fd138c71af3faa93353b5425`（`codex/ulysses-pre-post-a2a-fusion`；失败的 pre-A2A QK-norm 已删除，post-A2A parity 路径默认关闭） |
 | upstream 通信基线 | 已 cherry-pick `754b692afc29`（本分支 `4202d2a043`，SP2 IPC）、`bfce378e5fbc`（本分支 `36066c3d44`，capture-safe PyNCCL A2A）、`f829fb30d3d3`（本分支 `35a313e616`，IPC lifecycle/reset）和 `44bde391d0b1`（本分支 `ed152d6c48`，真实 peer CUDA ordinal）；`a5888c956f90` 的 packed QKV + reusable staging 与 MinWM 现有同名但不同返回合同的实现重复，未强行合并 |
 | 实现分支 | `codex/minwm-async-a2a-overlap` |
-| 候选提交 | 待实现后固定；真机任务只使用已推送的不可变 SHA |
+| 候选提交 | 核心实现 `dad5de09f1b644074cb3d977fdad11ffd18772bf`；GPU 测试隔离修复 `0a975bac14e20660e6a31744bf864c8d51d99aff`。完整模型任务继续使用每次已推送的不可变 SHA，并在对应实验条目固定 |
 | 主硬件 | B200/B300 同节点 Spot；若容量不可得，H200 只用于诊断，不能冒充最终硬件结论 |
-| 软件 | 待真机 provenance 固定；已有 H200 参考栈为 PyTorch `2.11.0+cu130`、CUDA `13.0`、Triton `3.6.0`、Nsight Systems `2026.4.1`，NCCL 版本待采集 |
+| 软件 | 首轮 H200 transport 合同实测为 PyTorch `2.12.1+cu130`、CUDA `13.0`、NCCL `2.29.7`；完整模型与正式 B200/B300 各自继续保存 runtime provenance。Nsight Systems 目标版本为 `2026.4.1` |
 | checkpoint | 预定沿用 canonical MinWM 5B DMD checkpoint；精确 S3 URI、VersionId、ETag/CRC64/SHA256 在任务 dry-run 与 provenance 中固定 |
 | 模型基座 | `Wan2.2-TI2V-5B-from-diffusers` |
 | 主输入 | 1248×704（项目 720p）、5s、固定 prompt/首帧/action、固定 seed、SP2 |
 | 次输入 | 同一 720p 5s 的 SP4；832×480 仅作边界对照 |
 | 稳定性 | 同配置连续至少 10 请求或等价长跑；覆盖 eager 与生产启用时的 CUDA Graph |
-| 结果根目录 | 待创建；每次尝试使用不可覆盖的 run-id 子目录，负结果同样保留 |
+| 结果根目录 | H200 transport：PVC `minwm-async-a2a-contract-results-20260807`，成功路径 `/results/minwm-async-a2a-contract-h200-20260807-04`；完整模型与正式性能每次使用不可覆盖的 run-id 子目录，负结果同样保留 |
 
 所有正式命令、环境值和路径按实验追加记录，不以“与上次相同”省略。已有 post-A2A
 融合证据只作为基线审计资料，不算本任务的异步 A2A 验收。
@@ -129,6 +129,45 @@ complete/consume event；统计 input/output A2A 的 launch→wait 距离、wait
 
 ## 按时间追加的实验日志
 
+### 2026-08-07：H200 transport/order/CUDA Graph 合同
+
+- 假设：在启动完整 checkpoint 前，独立 A2A 合同应先证明 ProcessGroup eager 的事件顺序、
+  双缓冲复用、同步 packed-QKV 精确对齐、reverse output A2A，以及 capture-safe PyNCCL 的
+  graph capture/replay 均不挂死。
+- 命令与资源：Kubernetes context `codex-minwm-test-phx2`，固定 Ready 节点
+  `i-06888dc1ca88547e1`，镜像
+  `829115578968.dkr.ecr.us-east-2.amazonaws.com/leap-world/minwm-training@sha256:bedc07ea3ba55059a8c1c569c3b177c4d00d41f37d4fa9105375531534ef5f2a`，
+  候选 `0a975bac14e20660e6a31744bf864c8d51d99aff`。成功任务
+  `minwm-async-a2a-contract-h200-20260807-04` 依次执行
+  `MINWM_ASYNC_TEST_WORLD=2 python3 -m pytest -q -s .../test_minwm_async_a2a_gpu.py` 与
+  `MINWM_ASYNC_TEST_WORLD=4 ...`。manifest 为
+  `benchmark/minwm_realtime_parity/k8s/minwm_async_a2a_contract_h200_20260807.yaml`。
+- 硬件与软件：`NVIDIA H200`，4 张可见 GPU，PyTorch `2.12.1+cu130`，CUDA `13.0`，
+  NCCL `2.29.7`。
+- 正确性：SP2 `1 passed`（约 `77.42s`），SP4 `1 passed`（约 `36.14s`），Job
+  `Complete 1/1`。每个 world size 覆盖 12 轮 continuous ordering/buffer reuse、同步
+  packed-QKV bitwise round-trip、独立 kernel 位于 begin/wait 之间、reverse output parity，
+  以及 PyNCCL graph capture 后 3 次 replay。
+- wall/FPS、Nsight：本测试不是完整 MinWM，不产生客户端 FPS，也不作为 overlap/Nsight
+  验收证据。
+- 结论：transport 合同通过，可以进入 720p 5s 完整模型 parity；本任务整体仍未验收。
+
+### 2026-08-07：完整模型质量与 profiler-off 测量合同
+
+- 假设：历史 MinWM S0/S4 测量工具已有稳定的 stage-trace 完整性、样本数、CV 与失败证据
+  合同，可复用其纯 benchmark 部分，而无需带入 QKV fast-lane 产品代码。
+- 修改：移植 measurement schema/tool/Nsight 统计基础；新增
+  `run_async_a2a_quality.sh`，固定 1248×704、8 chunks/128 生成帧、seed 42，SP2/SP4 各跑
+  baseline 与候选，候选同一服务连续 10 请求，并逐 rank 比较视频及中间 tensor bitwise；
+  新增 `run_async_a2a_measurement.sh`，每个位置重启服务，默认按 ABBA/BAAB/ABBA 收集
+  baseline/candidate 各 6 样本，输出 median、p10/p90、CV，且显式固定 output A2A 关闭、
+  input backend 为 ProcessGroupNCCL。客户端最终裁决显式设置
+  `SGLANG_REALTIME_TRACE_SYNC_CUDA=0`，不把为 stage 计时注入的全局同步带进 profiler-off
+  FPS；scheduler chunk wall 仍是同一客户端可见完成边界，DiT 单独 wall 仅作辅证。
+- 正确性：本地 measurement/runner 合同测试 `15 passed`；完整 H200 checkpoint 运行待提交。
+- wall/FPS、Nsight：待运行。
+- 结论：测量工具不改变产品路径；下一步使用独立 PVC 和完整 8-GPU H200 节点先跑质量门。
+
 ### 2026-08-07：候选 1——QK A2A 与 V projection 重叠
 
 - 假设：完整 packed-QKV A2A 前没有可移动工作，但 Q/K/V projection 相互独立；将 wire
@@ -167,6 +206,30 @@ complete/consume event；统计 input/output A2A 的 launch→wait 距离、wait
 - 结论：未验收；下一步绘制精确调用依赖并测出真正可用的 GPU overlap 窗口。
 
 ## 偏离原认知
+
+### 2026-08-07：H200 合同镜像不是可直接运行测试的完整开发环境
+
+- 原认知：固定 MinWM 训练镜像可直接 import SGLang 测试入口。
+- 实际证据：前三次不可覆盖任务分别在 GPU 测试前因缺少 `orjson`（`-01`）、缺少
+  `IPython`（`-02`），以及测试继承重型 `CustomTestCase` 后触发镜像内不兼容的
+  `transformers.PreTrainedConfig` import（`-03`）失败；这些任务与日志均保留。
+- 根因：镜像面向训练/推理，不包含 SGLang test collection 的全部可选 Web 依赖；GPU
+  transport 测试本身不需要 `CustomTestCase` 的模型/transformers 依赖。
+- 决策：只补齐测试 import 所需最小依赖，并把独立 GPU 合同改为标准
+  `unittest.TestCase`；未替换镜像的 PyTorch/CUDA/NCCL 栈。第四次运行才进入真实 CUDA
+  合同并通过，前三次不能计入 GPU 正确性样本。
+
+### 2026-08-07：B300 有 Ready 节点，但盘点时没有空闲 GPU
+
+- 原认知：`aws03-usw2` 的 8 个 Ready `p6-b300.48xlarge` 节点可能可立即用于正式验收。
+- 实际证据：只读盘点显示 64 张 B300 均已被四个双节点训练任务占用：
+  `w22-s0-16000-mix-refine-seg-0805-long-b6828eb`、
+  `wan22-5b-stage3-dmd-44-0807-df5cf37ac5fe8`、
+  `wan22-5b-varlen-pure-product-720p-ct1000-0806-a67b9ae`、
+  `wan22-5b-varlen-stage2-cd-23-0807-0933b5d7331`。
+- 根因：容量块节点已满载，不是调度器或 manifest 错误。
+- 决策：不删除、不抢占他人任务；先用空闲 H200 完成诊断与淘汰明显失败方案，正式
+  PASS/FAIL 仍等待 B200/B300 同节点资源，且不会把 H200 结果冒充主验收。
 
 ### 2026-08-07：MinWM origin 与 upstream 通信提交不在同一条主线
 
