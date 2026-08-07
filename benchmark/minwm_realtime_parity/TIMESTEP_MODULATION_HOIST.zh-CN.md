@@ -1,7 +1,7 @@
 # MinWM timestep modulation pass 内复用
 
-状态：实现与 CPU 回归已完成；H200 CUDA compile smoke 已通过，BF16 output bitwise、A/B
-和 Nsight 数据采集中。
+状态：实现与 CPU 回归已完成；H200 CUDA compile smoke 已通过。正式 BF16 output
+bitwise、A/B 和 Nsight 已按修正后的测量契约重新提交，尚未形成可验收数据。
 
 ## 目标与边界
 
@@ -105,16 +105,27 @@ H200 数值验收将同时保存旧/新 lossless latent/frame 校验；若出现
 ## 统一测量契约
 
 测量工具来自 S0 canonical commit
-`59aa68a382cb9f481e77f98647644347671561dc`（PR #19）：
+`b9240233b2438829cbd72ee3dfbc1d37ed675560`（PR #19）：
 
 - schema：`benchmark/minwm_realtime_parity/measurement_schema.json`
 - profiler-off：`benchmark_realtime_throughput.py`
 - validate/CV/Nsight merge：`measurement_tool.py`
 - Nsight SQL 指标：`nsys_metrics.py`
 
-该 pin 包含 `25cc42ef8c` 的 JSON Schema 机器约束，并强制客户端等待每个合法 chunk
-index 的完整 DiT/VAE wall trace；profiler-on 还等待 DiT/VAE CUDA trace。S0 未合并前，
-只在临时测量分支叠加该工具；S1 最终对 main 的实现 diff 不复制 S0 基础设施。
+该 pin 包含 `59aa68a382` 的完整 stage-trace 等待，并修复 59aa runner 重复实现
+`latency_summary` 时漏写 `value.count` 的问题。schema 现在要求所有可用 wall/CUDA
+latency 显式带 count，自定义 validator 强制 count 等于
+`workload.measured_chunks`（profiler-off 为 200，profiler-on 为 10）。临时 S1 runner
+还会独立递归断言所有 `ms_per_chunk` 指标的 count。S0 未合并前，只在临时测量分支
+叠加该工具；S1 最终对 main 的实现 diff 不复制 S0 基础设施。
+
+本地对 b924 工具边界的回归为：S0 `test_measurement.py + test_common.py` 19 passed；
+S1 额外 count 断言 3 passed，合计 22 passed。
+
+S0 后续审计层 `2f15c29471` 不改变 b924 schema，但规定失败/中止时逐文件记录原路径、
+保留路径、size、SHA256 和 recoverability，并把旧结果移入 attempt 内的 `invalid/`；聚合器
+排除该目录。`-03` 已按 b924 创建后收到此规则，依 S0 指示不热切换：成功结果仍有效；
+若失败则按 2f15 规则后处理且不删除 PVC，新的 retry 才 pin 2f15。
 
 固定 workload：MinWM 5B step-3200、1248×704、BF16、16 pixel frames/4 latent
 frames per chunk、4 DMD + 1 clean-cache，20 warmup + 200 measured。SP2 是主验收，
@@ -184,8 +195,23 @@ fast-lane、UTC 时间和产物路径。Nsight overhead 下的 FPS 不作为 hea
    stage-trace 竞态修复通知；检查确认尚无任何 client JSON 后，只删除了该精确命名 Job，
    保留 PVC 并升级到 canonical `59aa68a382`。重启 Job 为
    `minwm-s1-temb-ab-h200-20260807-02`，临时 runner checkout
-   `1cb8d5221e4a4cf91e1aead5517df2f29272310b`；所有结果必须通过 59aa validator，且
-   profiler-off DiT/VAE wall 的 `count=200`、`status=available` 才可进入表格。
+   `1cb8d5221e4a4cf91e1aead5517df2f29272310b`。
+6. `-02` 已开始 legacy SP2 repeat1 后，真机暴露 59aa JSON 不含显式 latency count；根任务
+   主动终止 Job。PVC 核查确认没有任何正式 JSON，因此该 attempt 标记为
+   `measurement-contract-invalid`，不能进入 A/B。legacy bitwise correctness 与
+   `pod-exit-diagnostic.txt` 保留。
+7. 收到“保留 invalid 诊断文件”的纠偏前，我依据更早的“不得保留正式 profiler 结果”
+   指令删除了中断的 telemetry、空 client log 和 server log；PVC 文件删除无法撤销。这是
+   执行偏差，不能用重建内容掩盖。可核验证据为：telemetry 58,686 B，SHA256
+   `ac79a4c4e15f981075a8864bf42dcadd9e6b451716305b613c94b22344866ea1`；client log 0 B，
+   SHA256 `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`；server log
+   1,688,485 B，SHA256 `52f1fd75f9b1e371a512dc13bd11d1295b66feb7c1a4e383441367c73ed7104d`。
+   invalid marker、原路径/大小/hash 与其余 attempt 证据继续保留，最终聚合不扫描该
+   attempt。
+8. 修正后的 Job 为 `minwm-s1-temb-ab-h200-20260807-03`，S1 runner commit
+   `5f92d276c08086db638f05536a46fa5434ecb169`，S0 tool pin 为 `b9240233b2`；
+   `backoffLimit=0`，每个 Pod 结果仍写入 `/results/attempts/${HOSTNAME}`。只有 b924
+   validator 与 S1 独立 count 断言均通过的结果才可进入表格。
 
 最终保留或回滚规则：bitwise 不通过则回滚；profiler-off DiT/Client 回退超过 paired
 噪声或默认 1% 且无法解释则回滚；若 headline 落在噪声内但能稳定消除预期 launch、
