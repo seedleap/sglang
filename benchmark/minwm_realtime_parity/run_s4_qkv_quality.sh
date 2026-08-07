@@ -51,7 +51,12 @@ trap stop_server EXIT INT TERM
 run_lane() {
   local label="$1" fused="$2" num_gpus="$3" sp_degree="$4" tp_size="$5"
   local output_prefix="$6" result_dir="$7" dump_dir="$8" compile="$9"
+  local quantization="${10:-}"
   local log_path="${result_dir}/${output_prefix}-server.log"
+  local quantization_args=()
+  if [[ -n "${quantization}" ]]; then
+    quantization_args=(--quantization "${quantization}")
+  fi
   mkdir -p "${result_dir}"
 
   MINWM_ATTENTION_IMPL=packed \
@@ -74,6 +79,7 @@ run_lane() {
     --enable-cfg-parallel false \
     --enable-torch-compile "${compile}" \
     --warmup-mode off \
+    "${quantization_args[@]}" \
     --port 30000 > "${log_path}" 2>&1 &
   server_pid=$!
   wait_for_server "${log_path}"
@@ -96,11 +102,27 @@ run_lane candidate 1 1 1 1 sglang "${SP1_RESULTS}" \
 run_lane candidate-replay 1 1 1 1 candidate_replay "${SP1_RESULTS}" "" false
 run_lane candidate-compile 1 1 1 1 candidate_compile "${SP1_RESULTS}" "" true
 run_lane candidate-tp2 1 2 1 2 candidate_tp2 "${SP1_RESULTS}" "" false
+run_lane candidate-fp8-fallback 1 1 1 1 candidate_fp8 "${SP1_RESULTS}" "" false fp8
+
+grep -F "requested with quantized weights; using the compatible three-projection fallback" \
+  "${SP1_RESULTS}/candidate_fp8-server.log"
+grep -F "MinWM QKV projection mode: three-gemm-parity-fallback" \
+  "${SP1_RESULTS}/candidate_fp8-server.log"
 
 python3 "${SCRIPT_DIR}/compare_results.py" \
   --cases "${CASES}" \
   --case "${CASE_ID}" \
   --results "${SP1_RESULTS}" \
+  --profile bf16_backend_candidate
+
+SP4_RESULTS="${RESULT_ROOT}/sp4"
+run_lane control-sp4 0 4 4 1 baseline "${SP4_RESULTS}" "" false
+run_lane candidate-sp4 1 4 4 1 sglang "${SP4_RESULTS}" "" false
+
+python3 "${SCRIPT_DIR}/compare_results.py" \
+  --cases "${CASES}" \
+  --case "${CASE_ID}" \
+  --results "${SP4_RESULTS}" \
   --profile bf16_backend_candidate
 
 SP2_RESULTS="${RESULT_ROOT}/sp2"
