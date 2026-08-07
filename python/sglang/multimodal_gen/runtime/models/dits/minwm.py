@@ -78,6 +78,7 @@ _MINWM_PACKED_ATTENTION_DETERMINISTIC = _env_flag(
     "MINWM_PACKED_ATTENTION_DETERMINISTIC", True
 )
 _MINWM_SEGMENT_COMPILE = _env_flag("MINWM_SEGMENT_COMPILE", True)
+_MINWM_FUSE_SELF_ATTN_POST = _env_flag("MINWM_FUSE_SELF_ATTN_POST", False)
 _MINWM_CACHE_ROTATED_K = _env_flag("MINWM_CACHE_ROTATED_K", True)
 _MINWM_PRECOMPUTE_CACHE_ROPE = _env_flag("MINWM_PRECOMPUTE_CACHE_ROPE", True)
 _MINWM_CACHE_PACKED_METADATA = _env_flag("MINWM_CACHE_PACKED_METADATA", True)
@@ -305,6 +306,56 @@ def _minwm_adaln_op(
 def _minwm_adaln(hidden_states: torch.Tensor, *args, **kwargs):
     return _MinWMSegmentCompile.get(_minwm_adaln_op, hidden_states.is_cuda)(
         hidden_states, *args, **kwargs
+    )
+
+
+def _minwm_self_attn_post_op(
+    hidden_states: torch.Tensor,
+    attn_output: torch.Tensor,
+    model_gate: torch.Tensor,
+    timestep_gate: torch.Tensor,
+    weight: torch.Tensor | None,
+    bias: torch.Tensor | None,
+    eps: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Fuse MinWM's self-attention residual update and affine LayerNorm."""
+    hidden_states = (
+        hidden_states.float()
+        + attn_output.float() * (model_gate.float() + timestep_gate.float())
+    ).type_as(hidden_states)
+    normalized = F.layer_norm(
+        hidden_states.float(),
+        (hidden_states.shape[-1],),
+        weight.float() if weight is not None else None,
+        bias.float() if bias is not None else None,
+        eps,
+    ).type_as(hidden_states)
+    return hidden_states, normalized
+
+
+def _minwm_self_attn_post(
+    hidden_states: torch.Tensor,
+    attn_output: torch.Tensor,
+    model_gate: torch.Tensor,
+    timestep_gate: torch.Tensor,
+    *,
+    weight: torch.Tensor | None,
+    bias: torch.Tensor | None,
+    eps: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    # Preserve the parameter cast performed by _minwm_layer_norm before its
+    # compiled segment. The BF16 residual result inside the op is also an
+    # intentional rounding boundary before the FP32 LayerNorm reduction.
+    weight = weight.to(hidden_states.dtype) if weight is not None else None
+    bias = bias.to(hidden_states.dtype) if bias is not None else None
+    return _MinWMSegmentCompile.get(_minwm_self_attn_post_op, hidden_states.is_cuda)(
+        hidden_states,
+        attn_output,
+        model_gate,
+        timestep_gate,
+        weight,
+        bias,
+        eps,
     )
 
 
@@ -876,12 +927,30 @@ class MinWMCausalTransformerBlock(CausalWanTransformerBlock):
         attn_output, _ = self.to_out(attn_output)
         attn_output = attn_output.squeeze(1)
 
-        hidden_states = _minwm_adaln(
-            hidden_states,
-            y=attn_output,
-            m_gate=modulation[:, 2],
-            e_gate=timestep_modulation.select(-2, 2),
-        )
+        affine_norm = self.self_attn_residual_norm.norm
+        if _MINWM_FUSE_SELF_ATTN_POST:
+            hidden_states, norm_hidden_states = _minwm_self_attn_post(
+                hidden_states,
+                attn_output,
+                modulation[:, 2],
+                timestep_modulation.select(-2, 2),
+                eps=affine_norm.eps,
+                weight=affine_norm.weight,
+                bias=affine_norm.bias,
+            )
+        else:
+            hidden_states = _minwm_adaln(
+                hidden_states,
+                y=attn_output,
+                m_gate=modulation[:, 2],
+                e_gate=timestep_modulation.select(-2, 2),
+            )
+            norm_hidden_states = _minwm_layer_norm(
+                hidden_states,
+                eps=affine_norm.eps,
+                weight=affine_norm.weight,
+                bias=affine_norm.bias,
+            )
         parity_dump_dir = getattr(self, "_minwm_parity_dump_dir", None)
         parity_index = getattr(self, "_minwm_parity_forward_index", 0)
         if parity_dump_dir is not None:
@@ -892,13 +961,6 @@ class MinWMCausalTransformerBlock(CausalWanTransformerBlock):
                 )
             self._minwm_parity_forward_index = parity_index + 1
 
-        affine_norm = self.self_attn_residual_norm.norm
-        norm_hidden_states = _minwm_layer_norm(
-            hidden_states,
-            eps=affine_norm.eps,
-            weight=affine_norm.weight,
-            bias=affine_norm.bias,
-        )
         if parity_dump_dir is not None and parity_index < 2:
             torch.save(
                 norm_hidden_states.detach().cpu(),
@@ -948,11 +1010,13 @@ class MinWMCausalTransformer3DModel(CausalWanTransformer3DModel):
             )
         logger.info(
             "MinWM execution profile: attention_impl=%s "
-            "packed_deterministic=%s segment_compile=%s cache_rotated_k=%s "
+            "packed_deterministic=%s segment_compile=%s "
+            "fuse_self_attn_post=%s cache_rotated_k=%s "
             "precompute_cache_rope=%s cache_packed_metadata=%s",
             _MINWM_ATTENTION_IMPL,
             _MINWM_PACKED_ATTENTION_DETERMINISTIC,
             _MINWM_SEGMENT_COMPILE,
+            _MINWM_FUSE_SELF_ATTN_POST,
             _MINWM_CACHE_ROTATED_K,
             _MINWM_PRECOMPUTE_CACHE_ROPE,
             _MINWM_CACHE_PACKED_METADATA,

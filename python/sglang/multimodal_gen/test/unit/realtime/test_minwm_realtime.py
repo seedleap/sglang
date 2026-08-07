@@ -37,10 +37,13 @@ from sglang.multimodal_gen.runtime.models.dits.minwm import (
     _minwm_apply_qk_op,
     _minwm_frame_indices,
     _minwm_layer_norm,
+    _minwm_layer_norm_op,
     _minwm_packed_attention_backend,
     _minwm_project_output_in_reference_row_bucket,
     _minwm_qk_norm_op,
     _minwm_qk_norm_rope_op,
+    _minwm_self_attn_post,
+    _minwm_self_attn_post_op,
     _minwm_should_restore_reference_output_projection,
     _minwm_uniform_cu_seqlens,
     _minwm_uniform_frame_indices,
@@ -2077,6 +2080,136 @@ def test_minwm_fused_segments_match_main_eager_formulas():
         actual_query, expected(query, query_weight), rtol=0, atol=0
     )
     torch.testing.assert_close(actual_key, expected(key, key_weight), rtol=0, atol=0)
+
+
+@pytest.mark.parametrize(
+    ("batch", "sequence", "hidden_size", "gate_shape", "sp_degree"),
+    [
+        (1, 1, 8, "vector", 1),
+        (2, 7, 32, "batch", 1),
+        (1, 6864, 32, "row", 2),
+        (1, 3432, 32, "row", 4),
+    ],
+)
+def test_minwm_self_attn_post_is_bitwise_exact_for_shards_and_gate_shapes(
+    batch, sequence, hidden_size, gate_shape, sp_degree
+):
+    del sp_degree  # The local sequence length is the SP-dependent contract here.
+    generator = torch.Generator().manual_seed(41 + sequence)
+
+    def noncontiguous_tensor():
+        return (
+            torch.randn(batch, hidden_size, sequence, generator=generator)
+            .transpose(1, 2)
+            .to(torch.bfloat16)
+        )
+
+    hidden = noncontiguous_tensor()
+    attn_output = noncontiguous_tensor()
+    gate_storage = torch.randn(batch, sequence, 6, hidden_size, generator=generator).to(
+        torch.bfloat16
+    )
+    timestep_gate = gate_storage.select(2, 2)
+    if gate_shape == "vector":
+        model_gate = torch.randn(hidden_size, generator=generator).to(torch.bfloat16)
+    elif gate_shape == "batch":
+        model_gate = torch.randn(batch, 1, hidden_size, generator=generator).to(
+            torch.bfloat16
+        )
+    else:
+        model_gate = torch.randn(1, hidden_size, generator=generator).to(torch.bfloat16)
+    weight = torch.randn(hidden_size, generator=generator)
+    bias = torch.randn(hidden_size, generator=generator)
+
+    expected_hidden = _minwm_adaln_op(
+        hidden,
+        y=attn_output,
+        m_gate=model_gate,
+        e_gate=timestep_gate,
+    )
+    expected_norm = _minwm_layer_norm_op(
+        expected_hidden,
+        weight.to(expected_hidden.dtype),
+        bias.to(expected_hidden.dtype),
+        1e-6,
+    )
+    actual_hidden, actual_norm = _minwm_self_attn_post_op(
+        hidden,
+        attn_output,
+        model_gate,
+        timestep_gate,
+        weight.to(hidden.dtype),
+        bias.to(hidden.dtype),
+        1e-6,
+    )
+
+    assert not hidden.is_contiguous()
+    assert not timestep_gate.is_contiguous()
+    torch.testing.assert_close(actual_hidden, expected_hidden, rtol=0, atol=0)
+    torch.testing.assert_close(actual_norm, expected_norm, rtol=0, atol=0)
+
+    fallback_hidden, fallback_norm = _minwm_self_attn_post(
+        hidden,
+        attn_output,
+        model_gate,
+        timestep_gate,
+        weight=weight,
+        bias=bias,
+        eps=1e-6,
+    )
+    torch.testing.assert_close(fallback_hidden, expected_hidden, rtol=0, atol=0)
+    torch.testing.assert_close(fallback_norm, expected_norm, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("autocast_enabled", [False, True])
+@pytest.mark.parametrize("segment_compile", [False, True])
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_minwm_self_attn_post_cuda_compile_and_autocast_fallback(
+    monkeypatch, autocast_enabled, segment_compile
+):
+    from sglang.multimodal_gen.runtime.models.dits import minwm as minwm_module
+
+    monkeypatch.setattr(minwm_module, "_MINWM_SEGMENT_COMPILE", segment_compile)
+    minwm_module._MinWMSegmentCompile._compiled.clear()
+    generator = torch.Generator(device="cuda").manual_seed(47)
+    hidden = torch.randn(
+        2, 31, 64, generator=generator, device="cuda", dtype=torch.bfloat16
+    )
+    attn_output = torch.randn_like(hidden)
+    gate_storage = torch.randn(
+        2, 31, 6, 64, generator=generator, device="cuda", dtype=torch.bfloat16
+    )
+    model_gate = torch.randn(
+        1, 64, generator=generator, device="cuda", dtype=torch.bfloat16
+    )
+    weight = torch.randn(64, generator=generator, device="cuda")
+    bias = torch.randn(64, generator=generator, device="cuda")
+    timestep_gate = gate_storage.select(2, 2)
+    expected_hidden, expected_norm = _minwm_self_attn_post_op(
+        hidden,
+        attn_output,
+        model_gate,
+        timestep_gate,
+        weight.to(hidden.dtype),
+        bias.to(hidden.dtype),
+        1e-6,
+    )
+
+    with torch.autocast(
+        device_type="cuda", dtype=torch.bfloat16, enabled=autocast_enabled
+    ):
+        actual_hidden, actual_norm = _minwm_self_attn_post(
+            hidden,
+            attn_output,
+            model_gate,
+            timestep_gate,
+            weight=weight,
+            bias=bias,
+            eps=1e-6,
+        )
+
+    torch.testing.assert_close(actual_hidden, expected_hidden, rtol=0, atol=0)
+    torch.testing.assert_close(actual_norm, expected_norm, rtol=0, atol=0)
 
 
 def test_minwm_cache_qk_norm_stays_eager(monkeypatch):
