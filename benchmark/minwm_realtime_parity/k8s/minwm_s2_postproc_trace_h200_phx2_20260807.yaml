@@ -1,0 +1,123 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: minwm-s2-postproc-trace-h200-phx2-20260807-01
+  namespace: default
+  labels:
+    app.kubernetes.io/name: minwm-s2-postproc-trace-h200-phx2-20260807-01
+    seedleap.ai/owner: chenshengdong
+    seedleap.ai/purpose: minwm-s2-postproc-trace
+    seedleap.ai/task: minwm-realtime-parity
+    seedleap.ai/run-id: minwm-s2-postproc-trace-h200-phx2-20260807-01
+  annotations:
+    seedleap.ai/capacity-type: spot
+    seedleap.ai/repo: seedleap/sglang
+    seedleap.ai/branch: codex/minwm-s2-postproc-s0-test
+    seedleap.ai/commit: "e728e59d9ad7682dec24b97f7d0007fc0cd0b1c8"
+    seedleap.ai/sglang-git-ref: "e728e59d9ad7682dec24b97f7d0007fc0cd0b1c8"
+    seedleap.ai/ttl: 24h
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 3600
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: minwm-s2-postproc-trace-h200-phx2-20260807-01
+        seedleap.ai/owner: chenshengdong
+        seedleap.ai/purpose: minwm-s2-postproc-trace
+        seedleap.ai/task: minwm-realtime-parity
+        seedleap.ai/run-id: minwm-s2-postproc-trace-h200-phx2-20260807-01
+    spec:
+      restartPolicy: Never
+      terminationGracePeriodSeconds: 60
+      tolerations:
+        - key: seedleap.ai/capacity-pool
+          operator: Equal
+          value: minwm-test-phx2-karpenter
+          effect: NoSchedule
+      nodeSelector:
+        karpenter.sh/capacity-type: spot
+        karpenter.sh/nodepool: minwm-test-phx2-p5e-spot
+        node.kubernetes.io/instance-type: p5e.48xlarge
+        topology.kubernetes.io/zone: us-west-2-phx-2a
+      containers:
+        - name: trace
+          image: 829115578968.dkr.ecr.us-east-2.amazonaws.com/leap-world/minwm-training@sha256:bedc07ea3ba55059a8c1c569c3b177c4d00d41f37d4fa9105375531534ef5f2a
+          imagePullPolicy: IfNotPresent
+          workingDir: /workspace
+          env:
+            - name: GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: github-token
+                  key: token
+                  optional: true
+            - name: SGLANG_GIT_REF
+              value: "e728e59d9ad7682dec24b97f7d0007fc0cd0b1c8"
+            - name: MINWM_SEGMENT_COMPILE
+              value: "true"
+            - name: TORCHINDUCTOR_CACHE_DIR
+              value: /work/torchinductor
+          command:
+            - /bin/bash
+            - -lc
+            - |
+              set -euo pipefail
+              [[ -n "${GITHUB_TOKEN:-}" ]] || {
+                echo "Private seedleap repositories require github-token." >&2
+                exit 2
+              }
+              git clone --no-checkout \
+                "https://x-access-token:${GITHUB_TOKEN}@github.com/seedleap/sglang.git" \
+                /workspace/sglang
+              git -C /workspace/sglang checkout --detach "${SGLANG_GIT_REF}"
+              test "$(git -C /workspace/sglang rev-parse HEAD)" = "${SGLANG_GIT_REF}"
+              cd /workspace/sglang
+              export PYTHONPATH=/workspace/sglang/python
+              nvidia-smi --query-gpu=name,uuid,driver_version --format=csv
+              python - <<'PY'
+              import torch
+              print("torch", torch.__version__)
+              print("cuda", torch.version.cuda)
+              print("device", torch.cuda.get_device_name(0))
+              PY
+              python -m pytest -q \
+                python/sglang/multimodal_gen/test/unit/realtime/test_minwm_realtime.py \
+                -k self_attn_post
+              for candidate in self-baseline self-fused cross ffn; do
+                echo "MINWM_S2_TRACE_BEGIN candidate=${candidate}"
+                candidate_cache="/work/torchinductor/${candidate}"
+                mkdir -p "${candidate_cache}"
+                TORCHINDUCTOR_CACHE_DIR="${candidate_cache}" \
+                TORCH_LOGS=output_code,kernel_code \
+                  python benchmark/minwm_realtime_parity/trace_postprocess_fusions.py \
+                    --candidate "${candidate}" \
+                    --sequence-length 6864 \
+                    --hidden-size 3072 \
+                    --warmup 2 \
+                    --iterations 10 \
+                    --profile-kernels
+                echo "MINWM_S2_TRACE_END candidate=${candidate}"
+              done
+          resources:
+            limits:
+              cpu: "32"
+              memory: 128Gi
+              nvidia.com/gpu: "1"
+            requests:
+              cpu: "16"
+              memory: 64Gi
+              nvidia.com/gpu: "1"
+          volumeMounts:
+            - name: work
+              mountPath: /work
+            - name: shm
+              mountPath: /dev/shm
+      volumes:
+        - name: work
+          emptyDir: {}
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 32Gi
