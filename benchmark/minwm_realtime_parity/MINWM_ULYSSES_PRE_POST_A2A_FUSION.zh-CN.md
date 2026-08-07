@@ -1,10 +1,11 @@
 # MinWM Ulysses A2A 前后融合实现记录
 
-状态：两段实现与本地 CPU 语义回归已完成；H200 CUDA parity、A/B 与 Nsight 尚未完成。
+状态：两段实现与本地 CPU 语义回归已完成；首次 H200 kernel gate 暴露 post RoPE
+bitwise 失败，正在定量定位与修复；端到端 parity、A/B 与 Nsight 尚未完成。
 
 基线为 `origin/main@9a9dc59cd1`，实现分支为
 `codex/ulysses-pre-post-a2a-fusion`。统一测量契约来自 S0
-`59aa68a382cb9f481e77f98647644347671561dc`；S0 未合并前，它只叠加到临时 H200 测量分支，不进入本 PR 对 main 的
+`b9240233b2438829cbd72ee3dfbc1d37ed675560`；S0 未合并前，它只叠加到临时 H200 测量分支，不进入本 PR 对 main 的
 实现 diff。
 
 ## 假设与预期
@@ -70,7 +71,7 @@ plan 不要求淘汰重排就不依赖 source shard 是否均匀。错误 prepar
 | Python syntax、`ruff check`、`git diff --check` | macOS，本地 checkout | 通过 |
 | cache 首块/recompute/growth/eviction fallback/错误 metadata | Python 3.11.13、torch 2.13.0，临时环境仅补 `uvicorn` | fused/pre-fallback 目标用例 `9 passed` |
 | MinWM realtime CPU 语义回归 | 同上 | 全文件 `118 passed` |
-| CUDA/Triton BF16 bitwise | 本机无 NVIDIA GPU/Triton | 未测，必须在 H200 完成 |
+| CUDA/Triton BF16 bitwise | H200、torch 2.11.0+cu130、Triton 3.6.0 | pre 两个形状通过；post `2 failed/3 passed`，不得宣称通过 |
 | profiler-off / Nsight | 本机无 NVIDIA GPU/Nsight | 未测，不能用历史结果代替 |
 
 本地系统默认 Python 3.9.6，无法解析仓库的现代 union type；改用已安装的
@@ -152,23 +153,35 @@ TORCH_COMPILE_DISABLE=1 TORCHDYNAMO_DISABLE=1 PYTHONPATH=python \
   -k 'fused_post_a2a'
 ```
 
-H200 测量临时叠加 S0 `59aa68a382cb9f481e77f98647644347671561dc`，产物必须通过
+H200 测量临时叠加 S0 `b9240233b2438829cbd72ee3dfbc1d37ed675560`，产物必须通过
 `benchmark/minwm_realtime_parity/measurement_tool.py validate`；正式 PR 不包含 S0
 基础设施。最终 JSON 记录实际 checkout SHA，`gpu.count` 按 active GPUs、
 `gpu.allocated_count` 单列；Nsight/API 统一使用 `raw_total`、`total_per_chunk`、
 `per_rank_per_chunk`，其中 per-rank 只在 coverage 检查通过时采用；最终 JSON 再用
-59aa 的 jsonschema validator 复验。profiler-off/on 的 DiT/VAE wall 只有在
+该版本的 jsonschema validator 复验。所有 wall/CUDA latency 必须显式带 `count`，且
+自定义 validator 要求它等于 `workload.measured_chunks`；S3 runner 另做一次独立 count
+断言。profiler-off/on 的 DiT/VAE wall 只有在
 `expected_indices=0..N-1` 完整、两者均为 `status=available`，且 profiler-off count=200
 时才保留；否则重跑对应 lane。具体
 Job 名与产物路径在创建后补入，且只清理带本任务唯一前缀的资源。
 
-首次 `minwm-s3-a2a-h200-20260807-01` 在 setup/staging 阶段收到 59aa pin 更新，
+首次 `minwm-s3-a2a-h200-20260807-01` 在 setup/staging 阶段收到旧 S0 pin 更新，
 尚未进入 kernel/parity/A/B client 即删除该精确 Job，保留本任务 PVC；不保留任何
-25cc 测量数据。第二次 `minwm-s3-a2a-h200-20260807-02` 已使用 59aa，但在任何
+25cc 有效测量；原始 setup 产物已标记 invalid 并保留。第二次
+`minwm-s3-a2a-h200-20260807-02` 已使用 59aa，但在任何
 CUDA kernel/client 启动前，registered test 收集因临时 runner 未把 source tree 加入
 `PYTHONPATH` 而失败；这不是实现测试失败，也不产生可保留的测量数据。修正后的 runner
 commit 为 `88d54943f1d77a0919643fcb35e5961931464bef`，第三次 Job
 `minwm-s3-a2a-h200-20260807-03` 继续复用同一结果 PVC，并重新从 correctness gate 开始。
+v03 是真实实现失败：pre-A2A 的 SP2/SP4 kernel shape bitwise exact，post-A2A raw K/V
+写 exact，但 first/append/recompute 的 RoPE 中两项断言失败；因此没有启动 parity 或
+client。v04 使用旧 kernel 加定量断言复现 mismatch count/fraction、max abs、BF16 ULP
+与重复调用确定性；正式测量 runner 已更新到 b924，59aa 下即使存在 client 产物也一律
+无效。
+
+所有失败、旧契约和 partial attempt 在 PVC 上物理保留：原路径或 `invalid/` 下必须有
+marker，记录原因、UTC、逐文件路径/大小/SHA256 与可恢复性。聚合器排除含 `invalid`
+路径；只删除本任务精确命名的 Job/Pod 控制对象止损，不删除 PVC 证据。
 
 ## 给负责人掌握代码的检查题
 
