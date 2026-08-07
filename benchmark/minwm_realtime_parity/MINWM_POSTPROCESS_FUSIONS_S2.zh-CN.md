@@ -13,11 +13,12 @@
 当前实现只改动候选 1，并由 `MINWM_FUSE_SELF_ATTN_POST_FAST` 独立控制，默认关闭。
 候选 2 和 3 的 H200 生成代码已确认各自是单 Triton kernel/单 launch，因此不新增等价
 融合层。候选 1 的单 kernel 会改变 LayerNorm reduction，只能作为显式 fast lane，
-不能成为 parity 默认路径。`59aa68a382` 已修复最后一条 DiT/VAE stage trace 的
-199/200 竞态，但其 latency summary 漏写显式 `count`，无法机器核验 count=200，因此
-正式 profiler-off/on client 已在启动前暂停，且不会保留该版本产物。S0 发布替代
-canonical pin 后才恢复测量；S0 合并前只在临时测试分支叠加其提交链，本任务对
-`main` 的实现 diff 不复制测量基础设施。
+不能成为 parity 默认路径。统一测量 canonical 为 `b9240233b2`：它修复最后一条
+DiT/VAE stage trace 的 199/200 竞态，且所有 available wall/CUDA latency 都显式写
+`count == workload.measured_chunks`；失败产物审计再叠加 `b178572f84`。S0 合并前只在
+临时测试分支叠加其提交链，本任务对 `main` 的实现 diff 不复制测量基础设施。
+旧 `59aa68a382` 因 latency summary 漏 `count` 而不具备最终验收资格；S2 没有用它启动
+正式 client，也没有旧结果需要冒充或删除。
 
 ## 调用链与数值合同
 
@@ -83,9 +84,8 @@ relative-L2 和 cosine；不会根据本次观测杜撰一个“刚好通过”�
 
 ## 实际 A/B
 
-以下表格只接受通过 S0 替代 canonical validator、且 DiT/VAE latency summary 都显式
-包含 `count=200` 的 `minwm-realtime-measurement/v1` 产物。`59aa68a382` 的 schema
-尚未提供这个可机器核验字段，因此当前没有启动或保留正式 client 结果。
+以下表格只接受通过 S0 `b9240233b2` + audit `b178572f84` validator、且 DiT/VAE
+latency summary 都显式包含 `count=200` 的 `minwm-realtime-measurement/v1` 产物。
 profiler-off headline 使用 20 warmup + 200 measured；Nsight 在外部完成 20 warmup 后
 抓至少 10 个 steady chunks，且不同时启用 `torch.profiler`。baseline/candidate 都固定
 `MINWM_S0_KV_CACHE_NUM_FRAMES=45`：这是 rolling-window steady-state contract，不能随
@@ -94,10 +94,16 @@ headline 性能窗口。
 
 | SP | 开关 | Client FPS | Scheduler FPS | chunk wall | DiT wall/CUDA | VAE wall/CUDA | kernel/launch | 状态 |
 | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
-| 2 | self off | 待测 | 待测 | 待测 | 待测 | 待测 | 待测 | 待测 |
-| 2 | self on | 待测 | 待测 | 待测 | 待测 | 待测 | 待测 | 待测 |
-| 4 | self off | 待测 | 待测 | 待测 | 待测 | 待测 | 待测 | 复验 |
-| 4 | self on | 待测 | 待测 | 待测 | 待测 | 待测 | 待测 | 复验 |
+| 2 | self off | 待测 | 待测 | 待测 | 待测 | 待测 | 待测 | Job 等待整机 |
+| 2 | self on | 待测 | 待测 | 待测 | 待测 | 待测 | 待测 | Job 等待整机 |
+| 4 | self off | 待测 | 待测 | 待测 | 待测 | 待测 | 待测 | SP4 复验待测 |
+| 4 | self on | 待测 | 待测 | 待测 | 待测 | 待测 | 待测 | SP4 复验待测 |
+
+正式 Job `minwm-s2-postproc-ab-h200-phx2-20260807-01` 已创建，但唯一 Pod
+`...-4kncp` 尚未选节点或启动容器。调度事件是四台匹配节点均
+`Insufficient nvidia.com/gpu`，它们当前分别被 S0、S1、S4 和独立训练整机占用；
+NodePool 已到当前限额。S2 原地等待整机释放，不新建 NodePool、不抢占或清理他人
+资源。因容器尚未启动，本表没有 partial client 数据。
 
 H200 SP2（`S=6864,D=3072,BF16`）micro trace 只用于解释结构；节点上有其他微任务，
 以下时间不作为 headline：
@@ -136,8 +142,9 @@ cross/FFN 已确认是单 kernel，不用“关闭已有优化”的退化结果
   micro trace。
 - S0 `59aa68a382` 虽修复了完整 stage-trace 等待，但真机复核发现 latency summary JSON
   没有显式 `count`，无法证明 DiT/VAE 均收齐 200 条。S2 在正式 A/B client 前暂停，
-  没有产生需丢弃的 profiler-off/on 数据；等待 S0 发布替代 canonical 后更新临时
-  checkout，不能靠日志行数或旧 JSON 人工补字段验收。
+  没有产生需丢弃的 profiler-off/on 数据；随后改用 `b9240233b2`，其 schema 和 custom
+  validator 都强制 count 等于 measured chunks。`b178572f84` 又保证原位 partial JSON
+  只被最近 `s0-measurement` 根的直属 invalid marker 排除，不误伤兄弟 attempt。
 - 提交 `...-02` 时发现桌面默认 kube context 漂移到了 `codex-seed-leap-use1`：该集群
   中对象始终 Pending、未启动容器或占 GPU，随后只按完整 Job 名精确删除。之后所有
   read/dry-run/apply/logs/delete 均显式指定 `--context codex-minwm-test-phx2`。正式记录
@@ -151,7 +158,7 @@ cross/FFN 已确认是单 kernel，不用“关闭已有优化”的退化结果
    residual/gate 也位于同一函数的另一 specialization。
 3. 因此先只实现 self 组合段，避免为 cross/FFN 再包一层等价函数。
 4. self 的 2→1 launch 已证实，但 bitwise 未通过，所以环境变量显式命名为 `_FAST` 且
-   永远默认关闭。只有替代 canonical 的 profiler-off/Nsight 有显著收益、端到端
+   永远默认关闭。只有 `b9240233b2` + `b178572f84` 的 profiler-off/Nsight 有显著收益、端到端
    latent 证据完整且视频通过既有 fast-lane 质量合同，才保留 opt-in 实现；否则删除
    实现，只保留负结论文档。
 
@@ -183,10 +190,20 @@ ruff format --check python/sglang/multimodal_gen/runtime/models/dits/minwm.py \
   python/sglang/multimodal_gen/test/unit/realtime/test_minwm_realtime.py
 ```
 
-真机测量命令和产物路径将在任务专用 `minwm-s2-postproc-*` Job dry-run 后补充；clean
-runner checkout 等待 S0 替代 canonical pin，稳态固定 KV cache 45 帧。A/B Job 的
-manifest 与 live `.spec.backoffLimit` 都必须是 0，并按 Pod/attempt 写唯一结果目录；
-验收或脚本失败即停住保留诊断，禁止 controller 自动重跑、覆盖或混合 provenance。
+真机 runner 为临时分支 commit `4a35ed30d2`，包含 S0 canonical `b9240233b2`、audit
+`b178572f84` 和 S2 额外 count validator；S0 21 项 + S2 3 项测试共 24 项通过。正式 Job
+和独立 200 GiB PVC 分别是 `minwm-s2-postproc-ab-h200-phx2-20260807-01` 与
+`minwm-s2-postproc-ab-h200-results-20260807`，manifest 与 live `.spec.backoffLimit` 都是
+0，整机请求 8×H200，稳态固定 KV cache 45 帧。产物根按 Pod hostname 隔离为
+`/results/attempts/${HOSTNAME}`。
+
+任何失败、旧契约或 partial attempt 都不得物理删除：原地保留或先写 marker 再移动到
+attempt 的 `invalid/`；marker 记录原因、UTC 时间、原/保留路径、size、SHA-256 和
+recoverability。S0 聚合器排除路径含 `invalid` 的 JSON，也检查该 JSON 最近
+`s0-measurement` 根的直属 `invalid-marker*.json`，不向上误伤兄弟 attempt。验收或脚本
+失败即停住保留诊断，禁止 controller 自动重跑、覆盖或混合 provenance；只可精确删除
+Job/Pod 控制对象止损，任务 PVC 证据始终保留。
+
 不复用或清理 CUDA Graph/S0 任务的 Job、Pod、PVC。所有 Kubernetes 命令显式固定
 `--context codex-minwm-test-phx2`，不依赖或切换桌面的 global current-context。
 
