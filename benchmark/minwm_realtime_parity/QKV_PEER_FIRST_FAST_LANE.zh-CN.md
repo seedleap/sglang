@@ -4,14 +4,14 @@
 
 任务：S4 / 点子 6
 
-状态：**6a 已完成实现、本地 CPU 语义回归、H200 v09 完整质量矩阵和 v11 独立 server
-反序 ABBA。v09 四角证明 whole-model compile 的既有质量 blocker 对 control/QKV 完全
-相同，QKV 没有额外劣化；compile-off 的 SP1/SP2/SP4 输出、layer probe 和 replay 均
-bitwise。v11 headline 显示 SP2 Client FPS −0.771%、DiT wall −0.108%，SP4 Client FPS
-+5.099%、DiT wall +4.977%；SP4 chunk wall CV 超 3%，保留为噪声风险。v10 因旧 PVC
-双挂载的 SELinux 权限错误 root-invalid，全部证据保留。正式 Nsight control v12 已按
-d5b25227d4 exact-window 契约创建并自然 Pending；candidate 在 control 完成后另起唯一
-Job/PVC。6b 尚未实现。**
+状态：**6a 已完成实现、本地 CPU 语义回归、H200 v09 完整质量矩阵、v11 独立 server
+反序 ABBA，以及 v12/v13 的 d5b25227d4 exact-window Nsight control/candidate 对照。v09
+四角证明 whole-model compile 的既有质量 blocker 对 control/QKV 完全相同，QKV 没有额外
+劣化；compile-off 的 SP1/SP2/SP4 输出、layer probe 和 replay 均 bitwise。v11 headline
+显示 SP2 Client FPS −0.771%、DiT wall −0.108%，SP4 Client FPS +5.099%、DiT wall
++4.977%；SP4 chunk wall CV 超 3%，保留为噪声风险。v12/v13 证明 projection GEMM 为
+450→150/rank/chunk，SP4 projection CUDA −8.83%，但整个 graph 的 kernel/launch 总数因
+V layout materialization 抵消而不变。6b 已完成 go/no-go 评估并决定不实现。**
 
 ## 结论与开关
 
@@ -22,6 +22,10 @@ Job/PVC。6b 尚未实现。**
 
 默认值是 `0`。回滚只需取消该环境变量或设为 `0`，无需转换 checkpoint。量化权重、
 未知 linear 子类和不安全的 column-parallel gather 布局会告警并自动走原三 GEMM 路径。
+
+当前推荐边界是：SP4 可按需显式打开；SP2 headline 有 −0.771% 回退，不建议打开；任何
+其他 shape/设备/量化路径在没有同口径数据前保持默认关闭。该结论不把 profiler-on 的
+SP2 正向样本覆盖到 profiler-off headline。
 
 单 GEMM 可能因为 BF16 GEMM shape、reduction/bucket 或 cuBLASLt 算法选择变化而产生
 数值差异。因此在完成 layer probe、latent、最终视频质量和确定性 A/B 前，本开关不会
@@ -61,8 +65,9 @@ projection M 是：
 | 4 | rank 0/1 为 215，rank 2/3 为 214 | 3 次 3072 | 1 次 9216 |
 
 每个 chunk 有 30 blocks ×（4 DMD + 1 clean-cache）= 150 组 self QKV。SP2 的 429/429
-是 uniform peer-first Triton pack 路径；SP4 的 215/215/214/214 是既有 varlen A2A
-路径，不能把两者的 pack kernel 结果混为一谈。忽略启动、
+是 uniform peer-first Triton pack 路径。纸面切分的 SP4 是 215/215/214/214；正式 trace
+实际在四个 active rank 都观测到现有 peer-first Triton pack，说明运行时 padding/buffer
+合同保持了 uniform fast path，不能再把 SP4 结果误记为 varlen fallback。忽略启动、
 图捕获和后端融合时，projection GEMM kernel 的理论计数从 450 降到 150。预期收益来自：
 
 - 每 chunk 少 300 次 GEMM launch；
@@ -73,8 +78,9 @@ projection M 是：
 
 一个已知抵消项是 V：packed GEMM 的 Q/K/V 是最后一维的三个 view。Q/K norm 会产生
 连续输出，但 V 仍是 strided view。SP2/SP4 的既有 Triton peer-first pack 要求三者连续，
-所以 6a 在该边界显式做一次 `value.contiguous()`。这会增加一个 copy kernel；它是 6b
-要用数据判断是否值得消除的主要候选，不应隐藏在“单 GEMM”收益里。
+所以 6a 在该边界显式做一次 `value.contiguous()`。源码上是一次 materialization；正式
+d5 trace 中它被编译为每次调用两个布局 kernel。它是 6b 要用数据判断是否值得消除的主要
+候选，不应隐藏在“单 GEMM”收益里。
 
 ## 实现与兼容性
 
@@ -164,7 +170,7 @@ steady-state contract。首块、短程 append/recompute、cache growth 和尚�
 | SP1 eager / compile | `=0` | `=1` | v09 四角：两条同模式 QKV 边 bitwise；既有 whole-model compile blocker |
 | TP2 + SP1 smoke | `=0` | `=1` | v09 两侧均被同一既有 S3 RMSNorm TP 路径阻断 |
 | static FP8 | 原量化三 projection | 请求 6a 后安全 fallback | v09 明确 fallback；129 帧完成且与 BF16 SP1 control bitwise |
-| NVFP4/不支持设备 | 原设备合同 | 同样拒绝或 fallback | 待执行 |
+| NVFP4/不支持设备 | 原设备合同 | 同样拒绝或 fallback | generic non-null quant config 单测证明不开 fast lane；H200 static FP8 真机 fallback 通过，不伪造未支持 NVFP4 fast path |
 | layer probe | Q/K/V、norm 后、block output | 同输入/权重/seed | v09 69 个 probe 文件；质量汇总通过 |
 | latent/最终视频 | lossless latent 与 frame metrics | 同 case/seed/backend | v09 SP1/SP2/SP4 最终 129 帧全部 bitwise |
 | 确定性 | candidate 重复运行 | candidate 重复运行 | v09 SP1、SP2 candidate replay 均 bitwise |
@@ -230,9 +236,13 @@ S0 runner 的 `MINWM_S0_KV_CACHE_NUM_FRAMES` 必须显式记录为 45；control 
 headline 资格。
 
 profiler-off server 不打开 layerwise NVTX。单独的 Nsight server 打开
-`--enable-layerwise-nvtx-marker`，用 `to_q/to_k/to_v` 或 `to_qkv` range 归因 projection；
-peer-first Triton kernel 和 NCCL A2A 按 kernel/API 名归因。NVTX 只用于 profile 证据，
-不进入 headline 路径。
+`--enable-layerwise-nvtx-marker`，但 compile graph 没有在 SQLite 留下可用的
+`to_q/to_k/to_v` 或 `to_qkv` module range。projection 因此按固定 shape/name、每 rank
+150 组调用和同 stream 时间序列归因：control 是连续三个短 GEMM，candidate 是一个三倍 N
+GEMM；CUDA 是 kernel duration 和，wall 是首个 projection kernel start 到最后一个 end。
+peer-first Triton kernel 按 `_fused_pack_peer_first_qkv_kernel` 归因；A2A 使用 NCCL 自带的
+`ncclAlltoAll` NVTX range，而不是用全部 `ncclDevKernel_SendRecv` 冒充。NVTX/SQL 只用于
+profile 证据，不进入 headline 路径。
 
 ## 实际 A/B
 
@@ -430,20 +440,47 @@ DiT 更快一致。SP2 candidate/control 时钟都约 1938–1939 MHz；candidat
 
 ### Nsight steady state（20 precondition + 1 discard + >=10）
 
-| SP/lane | DiT CUDA | VAE CUDA | projection CUDA / wall | projection GEMM kernels | V copy | pack kernels / time | A2A time | total kernels / launches | short-kernel buckets | GPU busy | SM Active | Tensor Active | DRAM |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: |
-| SP2 control | — | — | — | — | — | — | — | — | — | — | — | — | — |
-| SP2 candidate | — | — | — | — | — | — | — | — | — | — | — | — | — |
-| SP4 control | — | — | — | — | — | — | — | — | — | — | — | — | — |
-| SP4 candidate | — | — | — | — | — | — | — | — | — | — | — | — | — |
-
-本表当前全部为“待 v12/control 与后续 candidate”，不是 0。control v12 固定临时 runner
+v12 control 与 v13 candidate 都固定临时 runner
 `ad22c2556e3f07fb2862b7e0235c9dd9d6d65839`，其 ancestor 为 canonical
-`d5b25227d4487d113e62c86a0fb572a62d6bcc5b`；只跳过已有 v11 覆盖的 profiler-off，
-不改 d5 的 capture、merge、active mapping 或严格 validator。
+`d5b25227d4487d113e62c86a0fb572a62d6bcc5b`。两侧均是 exact stable indices 1..10、discard
+index 0；DiT/VAE wall/CUDA count 都是 10。每次采集 8 个 target，SP2 只聚合 active
+`pwGpuId=[2,3]`，SP4 只聚合 `[0,1,2,3]`；target mapping、kernel/API/launch boundary、
+SM/Tensor/DRAM coverage 均通过 validator，未出现 degradation。
 
-空值表示尚未测量，不表示 0。若 SM/Tensor/DRAM 指标不可得，必须保留 S0 的
-`unavailable + reason + evidence`，不能用 nvidia-smi utilization 冒充。
+下表的 kernel/launch/API 是 **每 rank、每 stable chunk**；short buckets 是所有 active
+device 每 chunk 的 `<10 / 10–50 / 50–100 / >=100 us`。profiler-on 的 wall/FPS 含 Nsight
+扰动，只作归因，headline 仍是上面的 v11 profiler-off ABBA。
+
+| SP/lane | Client / Scheduler FPS | chunk wall | DiT wall / CUDA | VAE wall / CUDA | kernel = launch | CUDA API | short buckets | GPU busy | SM / Tensor / DRAM Active |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: | ---: |
+| SP2 control | 12.6111 / 12.6193 | 1299.1 ms | 740.252 / 739.788 ms | 443.591 / 442.967 ms | 17304 | 45495.4 | 18217.2 / 12283.3 / 1188.7 / 2918.8 | 76.844% | 61.788% / 28.352% / 8.302% |
+| SP2 candidate | 12.9491 / 12.9576 | 1278.0 ms | 713.950 / 713.533 ms | 443.211 / 442.617 ms | 17304 | 45364.0 | 18553.5 / 11661.2 / 1216.0 / 3177.3 | 77.905% | 63.565% / 29.205% / 8.590% |
+| SP4 control | 13.9853 / 13.9860 | 1213.5 ms | 789.431 / 788.943 ms | 254.816 / 254.195 ms | 17300.5 | 46134.225 | 49085.2 / 13415.7 / 1895.5 / 4805.6 | 67.447% | 37.310% / 15.722% / 4.341% |
+| SP4 candidate | 14.4198 / 14.4300 | 1141.4 ms | 744.296 / 743.812 ms | 255.124 / 254.479 ms | 17300.5 | 45840.8 | 50144.7 / 11759.5 / 2497.2 / 4800.6 | 66.511% | 38.344% / 16.244% / 4.477% |
+
+projection/layout/communication 继续按每 rank、每 chunk 归一化。V layout 是 candidate
+相对 control 多出的、紧跟 Q/K norm 的两个 materialization kernels；A2A wall 是 300 个
+`ncclAlltoAll` NVTX range duration 的和，包含 input/output A2A，不是所有 SendRecv device
+kernel duration。
+
+| SP/lane | projection GEMM kernels | projection CUDA / trace wall | V layout kernels / CUDA / wall | peer-pack kernels / CUDA | A2A calls / NVTX wall |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| SP2 control | 450 | 19.303 / 33.317 ms | 0 / 0 / 0 | 150 / 3.221 ms | 300 / 11.849 ms |
+| SP2 candidate | 150 | 19.305 / 19.305 ms | 300 / 2.802 / 3.541 ms | 150 / 3.099 ms | 300 / 11.765 ms |
+| SP4 control | 450 | 11.363 / 30.063 ms | 0 / 0 / 0 | 150 / 1.660 ms | 300 / 12.469 ms |
+| SP4 candidate | 150 | 10.359 / 10.359 ms | 300 / 1.713 / 2.675 ms | 150 / 1.435 ms | 300 / 12.255 ms |
+
+6a 的实际 device 解释是：SP2 projection CUDA 几乎不变（+0.012%），但三次独立 GEMM
+之间的 idle/launch gap 被消除，trace wall −42.06%；SP4 更短的 M 让三次小 GEMM gap 更
+显著，且 3N GEMM 采用更合适的 `192x176` tile，projection CUDA −8.83%、trace wall
+−65.54%。相应地，Tensor Active 在 SP2/SP4 分别提高 3.01%/3.32%（相对值），SM Active
+提高 2.88%/2.77%。这解释了 SP4 profiler-off/归因两边都受益；SP2 profiler-on 的正向样本
+与 v11 headline 回退相反，说明其收益接近运行顺序/系统噪声，不能据此推荐默认打开。
+
+projection 少掉的每次调用两个 GEMM launch，被 V materialization 的两个 kernel 抵消，
+所以 whole-graph kernel/launch 总数完全不变。candidate 的 V layout + peer-pack 合计仅占
+DiT wall 约 0.93%（SP2）和 0.55%（SP4）；A2A 数量不变，NVTX wall 仅 −0.71%/−1.72%。
+这组绝对量是 6b 的 no-go 证据。
 
 ## 与预期不符处
 
@@ -489,13 +526,18 @@ client metadata 与四边证据。
 同模式 control↔candidate、SP1/SP2/SP4 和 replay 都是 bitwise。性能则分叉：SP4 的
 M=214/215 小 GEMM 符合“加宽 N 提高 Tensor Core 占用”的预期，ABBA DiT/端到端都约
 +5%；SP2 M=429 没有收益，Client/Scheduler 反而约 −0.77%，与“少 300 launch 必然更快”
-的简化预期不符。当前需要 d5 Nsight 逐项解释：
+的简化预期不符。d5 Nsight 给出的解释是：
 
-- GEMM kernel 是否接近理论 3:1；若不是，是否被 compile/cuBLASLt 或 capture 合并；
-- projection CUDA 下降为何没有或有转化为 DiT/chunk wall；
-- 新增 V copy 与 pack、A2A、CPU launch gap 是否抵消收益；
-- SP2/SP4 的 M/N shape 与 SM/Tensor Active 如何解释差异；
-- 单 GEMM BF16 bucket 变化从哪一层开始影响 latent/视频。
+- projection 内部严格是 450→150 GEMM/rank/chunk，但 V layout 物化又增加 300 个 kernel，
+  所以全图 kernel/launch 总数不降；不能把 module 调用数直接当全图 launch 收益；
+- SP2 三个 GEMM 的 CUDA 总和与 fused GEMM 几乎相同，但首末 kernel trace span 缩短
+  42.06%；这个细粒度改善未稳定穿过 profiler-off 的顺序/系统噪声；
+- SP4 的 fused shape 额外带来 projection CUDA −8.83%，Tensor Active 相对 +3.32%，并且
+  projection span −65.54%，与 profiler-off 的约 +5% DiT/端到端方向一致；
+- V layout + pack 只占 candidate DiT wall 的 0.93%/0.55%，A2A 数量不变且 wall 基本不变，
+  它们不是 SP2 回退或 SP4 收益的主导项；
+- 允许 BF16 bucket 改变的风险没有在本 workload 兑现：layer、latent、最终视频和 replay
+  都 bitwise；这只是已测 shape 的结果，不外推到未测设备/量化格式。
 
 ## 证据与决策过程
 
@@ -513,13 +555,21 @@ M=214/215 小 GEMM 符合“加宽 N 提高 Tensor Core 占用”的预期，ABB
    归因；保留 profiler-off 口径，物理移除当前 runner 的 Nsight 路径；正式 Nsight 改 pin
    `d5b25227d4` 并另起 Job。
 8. 真机 probe 纠正了纸面 shape 假设：projection 的 SP1 M 是 patch 后的 858，而不是
-   patch 前 latent 位置 3432；SP2 为 429，SP4 为非均匀 215/215/214/214。因此 SP2 才是
-   uniform peer-first pack 主归因，SP4 还要区分 varlen pack/A2A。
+   patch 前 latent 位置 3432；SP2 为 429，SP4 纸面为 215/215/214/214。正式 trace 又进一步
+   证明 SP4 四 rank 都命中现有 peer-first Triton pack，因此以实际 kernel coverage 为准，
+   不再把它预判成 varlen fallback。
 9. v10 证明“只读旧 PVC + 新结果 PVC”也会因节点 SELinux label 破坏 setup；v11 完全去掉
    旧 PVC，只把外部核验的 path/size/SHA 作为不可变常量打印，既保留证据链又不双挂载。
 10. v11 ABBA 证明 v09 的 SP4 +5% 方向可复现，同时推翻 v09 的 SP2 小幅正收益；因此
     profiler-off headline 改用 v11，Nsight 必须同时解释 SP2 回退和 SP4 收益，不能只挑
     有利的 SP4。
+11. v12/v13 均通过 d5 exact-window、all-target active mapping 和严格 validator；projection
+    的同 stream 序列把 control 三短 GEMM 与 candidate 单 3N GEMM 一一对应到 150 次
+    block×forward/rank/chunk，不依赖模糊的全局 kernel name 猜测。
+12. NCCL 的 `ncclAlltoAll` NVTX range 给出 300 calls/rank/chunk；使用这个高层 range 而非
+    全部 SendRecv device kernel，避免把 unrelated send/recv 或 overlap 时间计入 A2A wall。
+13. V materialization 和 peer-pack 的绝对 wall 占比低于 1%，因此 6b 在写任何定制 epilogue
+    前就被数据门否决；保留现有清晰接口比追求不足 1% 的理论上限更重要。
 
 ## 尝试后放弃或暂缓的方案
 
@@ -527,12 +577,13 @@ M=214/215 小 GEMM 符合“加宽 N 提高 Tensor Core 占用”的预期，ABB
 - **保留三个 module，再在 post-load 复制一份 fused weight**：会常驻双份约 3×3072²
   参数，并给 FSDP/device move/save 制造双源真相，未采用。
 - **直接融合所有量化 QKV**：独立 scale/packed metadata 未验证，改为安全 fallback。
-- **在 6a 同时写 GEMM epilogue/定制布局**：无法区分 GEMM 聚合与布局优化收益，暂缓到 6b。
+- **在 6a 同时写 GEMM epilogue/定制布局**：无法区分 GEMM 聚合与布局优化收益；6b 数据门
+  最终不通过，因此未实现。
 - **为 profile 默认加入 NVTX**：会污染 profiler-off headline，改成只在独立 Nsight 运行打开。
 
 ## 6b go/no-go
 
-6b 当前为 **NO IMPLEMENTATION / PENDING DATA**。至少同时满足以下条件才进入实现：
+6b 最终结论为 **NO-GO / NO IMPLEMENTATION**。进入实现原本要求同时满足：
 
 1. 6a 已通过兼容性和质量门槛；
 2. SP2 主验收中 V copy + peer-first pack 仍占可重复的显著 DiT CUDA 或 wall；
@@ -540,7 +591,11 @@ M=214/215 小 GEMM 符合“加宽 N 提高 Tensor Core 占用”的预期，ABB
 4. 候选方案能保持 fallback 和清晰接口，不要求维护私有 GEMM backend fork；
 5. 6b 独立 A/B 在 profiler-off 也有收益，而非只在 Nsight 下好看。
 
-不满足时不实现或回滚 6b，并在本节保留测量证据。
+实际测量没有满足第 2、3、5 条：candidate 的 V layout + peer-pack 合计仅占 DiT wall
+0.93%（SP2）/0.55%（SP4）；peer-pack 自身没有回退，A2A 仍是固定 300 calls/rank/chunk，
+wall 只变化 −0.71%/−1.72%。即使理想 epilogue 消除全部 V layout，理论上限也只有约
+0.50%/0.36% DiT wall，低于 headline 噪声并需要侵入 GEMM 输出布局。故不写 6b、无需
+独立 profiler-off A/B；表中的 6a control/candidate layout 证据就是条件门的 A/B 记录。
 
 ## 审计、失败产物与资源止损
 
@@ -629,8 +684,32 @@ mount 双重 readOnly 无法做 SELinux relabel；改为仅 container mount read
 正式 Nsight control v12 使用新 Job/PVC，manifest SHA256 为
 `842514cefb8700b10f0c7a7f5874abbb7fbf90564940b151d3d9601ccb20532f`，runner 固定
 `ad22c2556e3f07fb2862b7e0235c9dd9d6d65839`（包含 canonical d5）。client/server dry-run、
-嵌入 shell、无旧 PVC、默认 priority、固定 hostname、backoff0、8GPU 均通过；当前因
-目标节点已有其他 1/4-GPU 工作而自然 Pending，PVC 尚未绑定/写数据，不抢占、不扩容。
+嵌入 shell、无旧 PVC、默认 priority、固定 hostname、backoff0、8GPU 均通过。Job
+`minwm-s4-qkv-nsys-control-h200-20260807-12` / Pod 后缀 `49c8v` 最终 exit 0、零重启；PVC
+`minwm-s4-qkv-nsys-control-results-20260807-v12` 保留。candidate v13 只在 control 成功后
+创建一次，manifest SHA256 为
+`b70cc201d471a19143edf9705c1ceb6dd6d1640a920f8c2c586a2c1723237f8d`；除 lane、flag=1、
+Job/PVC/attempt identity 外与 control 合同相同。Job
+`minwm-s4-qkv-nsys-candidate-h200-20260807-13` / Pod 后缀 `sx6tb` 同样 exit 0、零重启；PVC
+`minwm-s4-qkv-nsys-candidate-results-20260807-v13` 保留。两边 H200 source/CUDA gate 都是
+63 passed、21 warnings，均无 invalid marker。live 审计固定 context
+`codex-minwm-test-phx2`、hostname `i-06888dc1ca88547e1`、region/zone
+`us-west-2/us-west-2-phx-2a`、NodePool `minwm-test-phx2-p5e-spot`、capacity `spot`、默认
+priority、`backoffLimit=0`；没有抢占或扩容。
+
+只读审计 reader 都固定同一节点、无 GPU、单 PVC、`/results` 写 probe 被拒绝；复制小型
+JSON/校验信息后只精确删除 reader Pod，未删除 Job/PVC/raw。证据摘要如下：
+
+| lane/SP | measurement JSON SHA256 | `.nsys-rep` size / SHA256 | SQLite size / SHA256 |
+| --- | --- | --- | --- |
+| control SP2 | `82c9b1f4e3b73092a66aef2c50739ed367955c1560d063083f6ad5336f7d2b25` | 55,298,849 / `7e79e3b0127cc5cabae037264d16d5ba7a0cee9b272b8bab3283c1ed247bfd47` | 1,482,256,384 / `cdc5913bd49e63c672c1b4296ec79aa35b777395555a4ecd04c98bbb7f74dbfa` |
+| control SP4 | `6392f8cf2bd6831d99c68a638b3e8d46354246ed4782196ac811bd64d9aac29d` | 91,968,058 / `39f5ec1fb7182ff20e9da70bd3f6ab50161b8e1583dc98e3bcaffc8622332c39` | 1,446,555,648 / `547c91e883992474c280fae94b1be467d48d96c50048149245adc74d4d85efff` |
+| candidate SP2 | `82eebb4af2244afb751722eebc6532f1dc47357e1464f0dcb2423435a6d3e3b5` | 54,758,780 / `e6debf37d9d4c22fb52ca7716b0fa169bb32afe60dfd7c9ad8480e17544f340d` | 1,459,085,312 / `47a1deddbd9df3d1c09901d1ad6f76a147f68850ace9efbe3126878e999fa39f` |
+| candidate SP4 | `5119b17d9b6cdedb591c8420ad5031299ac22be78cea68eae1937685c5975360` | 91,136,098 / `f2fafb3bf2afdb27d37e02df1b854e13922afffd471c8d39eb8db805078d0a24` | 1,408,634,880 / `fb2756945ef9a47c91e49600a25e0d03fcbc864a4980d8aaea3e56465a09594b` |
+
+小型 control/candidate 审计副本分别位于本机
+`/tmp/minwm-s4-v12-control-audit` 和 `/tmp/minwm-s4-v13-candidate-audit`；四个 JSON 都再次
+通过本地 d5 validator。raw 的权威副本仍是对应 PVC。
 
 若需要集群止损，只允许删除名称精确匹配本任务 `minwm-s4-qkv-*` 的 Job/Pod 控制对象；
 PVC 和其中的诊断证据必须保留。所有 `kubectl` 读取、dry-run、apply、logs 和 delete 都显式
@@ -663,9 +742,10 @@ dict 都有反向加载路径。若 fast lane 启动日志没有出现 `single-g
 - profiler-off A/B：v09 同序仅为 exploratory；v10 因旧 PVC 双挂载 SELinux 权限错误
   root-invalid；v11 反序 ABBA 八个位置全部完成并成为 headline，SP2 Client −0.771% / DiT
   wall −0.108%，SP4 Client +5.099% / DiT wall +4.977%，SP4 chunk wall CV 超 3% 已披露；
-- Nsight：control v12 固定 `d5b25227d4` 语义和临时 runner `ad22c2556e`，当前自然
-  Pending；candidate 将在 control 完成后用新 Job/PVC 执行，尚无 device 指标；
-- 6b：等待 6a 证据；
+- Nsight：control v12 / candidate v13 均固定 `d5b25227d4` 语义和临时 runner
+  `ad22c2556e`，SP2→SP4 exact-window 全部完成；kernel/API/launch、DiT/VAE CUDA、
+  SM/Tensor/DRAM 与 8-target active mapping 均 available；
+- 6b：no-go，不实现；V layout + pack 的 wall 占比不足 1%，A2A 数量/时间基本不变；
 - 默认开关：保持关闭。
 
 ## 给负责人掌握代码的检查题
@@ -696,7 +776,8 @@ dict 都有反向加载路径。若 fast lane 启动日志没有出现 `single-g
 6. **为什么 6a 仍有一次 V copy？**
 
    packed GEMM 的 V 是最后一维 strided view；Q/K norm 会物化，V 不会。SP>1 时显式
-   contiguous 才能继续命中现有 Triton pack。这是 6b 的独立候选，不是隐藏融合。
+   contiguous 才能继续命中现有 Triton pack。源码是一次 materialization，d5 compile
+   trace 是每次调用两个 kernel；边界在 `minwm.py` 的 `_project_qkv` 后、USP pack 前。
 
 7. **为什么不能把 single GEMM 称作 bitwise parity？**
 
@@ -705,7 +786,8 @@ dict 都有反向加载路径。若 fast lane 启动日志没有出现 `single-g
 
 8. **projection kernel 理论上每 chunk 从多少降到多少？**
 
-   30 blocks × 5 forwards 下从 450 降到 150；实际数以 Nsight stable-chunk 归一化为准。
+   30 blocks × 5 forwards 下从 450 降到 150/rank；v12/v13 的 exact-window trace 实测就是
+   450→150。全图 launch 不降，因为 V materialization 增加 300 kernels/rank/chunk。
 
 9. **看到 FPS 没提升时先查什么？**
 
@@ -715,4 +797,5 @@ dict 都有反向加载路径。若 fast lane 启动日志没有出现 `single-g
 10. **什么条件下 6b 应直接放弃？**
 
     pack/V copy 不显著、收益落入 repeat CV 噪声、A2A 才是主瓶颈，或方案需要难维护的
-    私有 GEMM backend 且 profiler-off 无收益时，保留证据并不实现。
+    私有 GEMM backend 且 profiler-off 无收益时，保留证据并不实现。本次 0.93%/0.55%
+    layout+pack wall 占比已触发该 no-go。
