@@ -182,6 +182,15 @@ SendRecv 时间与次数、两侧 idle gap、GPU kernel busy、SM Active、Tenso
 API/launch 边界证据，采集 all 8 target 后只汇总 active `pwGpuId`，并要求 exact 10
 ranges、DiT/VAE CUDA、kernel/API/launch、SM/Tensor 与 target coverage 全部通过。
 
+正式 Nsight 使用独立临时 runner `58ed4daf7e4208eedde4f8fc8f0a8c1e20e0007d`，其祖先
+包含 d5b，且产品相关代码逐文件与 `61aa8809e6` 一致。四条 lane 顺序为 SP2 baseline、
+SP2 candidate、SP4 baseline、SP4 candidate；每条均复用 v06 对应 profiler-off source，
+但重新启动独立 server，执行 20 precondition + 1 discarded + exact 10 stable、KV45、
+all-8 GPU metrics capture。每条 lane 在完成后先单独验收 stage wall/CUDA count=10、range
+1..10、active CUDA device 到 `pwGpuId` 映射；失败只在该 lane 写 marker。比较器另报
+post-A2A fused/语义匹配 kernel、所有减少的 kernel name、NCCL SendRecv/AllToAll duration、
+其前后 device-visible gap，以及 profiler-off/on 的 scheduler 未归类余量。
+
 正确性另跑两组：短程无淘汰用例覆盖首块、growth、append 与同一 active
 chunk 的 DMD/clean-cache recompute；45-frame 固定窗口用例覆盖稳态淘汰与 fallback
 parity。当前 post fast lane 在 eviction plan 上主动 fallback，因此若 45-frame 稳态不命中、
@@ -320,6 +329,13 @@ aggregate SHA256 为
 `f24672b7d1a34257c629901cd2f7da022e45cc10bb41d25ef8dbdc88c6ed2714`，总 summary 为
 `ee3e01d8d6960962b3b68dfbbc6d4071252092a15ea9b49f7aa8b67f8a6a41f5`。审计用 0-GPU、
 只读 PVC reader 已精确删除，PVC 与全部 evidence 保留。
+
+Nsight manifest 证据 commit 为 `1b6a91d695`，Job
+`minwm-s3-post-nsys-h200-20260807-08` 使用 `backoffLimit=0`、8×H200、`SYS_ADMIN` 和现有
+S3 PVC，固定 hostname `i-06888dc1ca88547e1`，防止 Karpenter 扩容。提交时目标节点被
+S4 占满，Pod `minwm-s3-post-nsys-h200-20260807-08-swlsq` 自然 Pending；调度事件为目标
+节点 `Insufficient nvidia.com/gpu`、其余四节点不匹配 selector，且没有 preemption
+victim。此状态未分配 GPU、未启动 client，也未创建或清理其他任务对象。
 
 所有失败、旧契约和 partial attempt 在 PVC 上物理保留：原路径或对应 scope 的
 `invalid/` 下必须有 marker，记录原因、UTC、逐文件路径/大小/SHA256 与可恢复性。
