@@ -157,8 +157,155 @@ run_lane control 0 1 1 1 baseline "${SP1_RESULTS}" \
 run_lane candidate 1 1 1 1 sglang "${SP1_RESULTS}" \
   "${RESULT_ROOT}/layer-probes/candidate" false
 run_lane candidate-replay 1 1 1 1 candidate_replay "${SP1_RESULTS}" "" false
+
+python3 - "${COMPILE_CASES}" "${CASE_ID}" "${SP1_RESULTS}" <<'PY'
+import hashlib
+import json
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+cases_path = Path(sys.argv[1]).resolve()
+case_id = sys.argv[2]
+result_root = Path(sys.argv[3]).resolve()
+manifest = json.loads(cases_path.read_text())
+case = next(case for case in manifest["cases"] if case["id"] == case_id)
+resolved = {**manifest["contract"], **case}
+common = {
+    "case_id": case_id,
+    "case_manifest_path": str(cases_path),
+    "case_manifest_sha256": hashlib.sha256(cases_path.read_bytes()).hexdigest(),
+    "seed": int(resolved["seed"]),
+    "total_chunks": int(resolved["chunks"]),
+    "kv_cache_num_frames": 45,
+    "prompt": resolved["prompt"],
+    "first_frame_source": resolved["first_frame"],
+    "width": int(resolved["width"]),
+    "height": int(resolved["height"]),
+    "fps": int(resolved["fps"]),
+    "generated_pixel_frames": int(resolved["generated_pixel_frames"]),
+    "action_label": resolved["action_label"],
+    "keys": resolved["keys"],
+    "action_weights": resolved["action_weights"],
+    "sp_degree": 1,
+    "tp_size": 1,
+    "ulysses_degree": 1,
+    "ring_degree": 1,
+    "precision": "bf16",
+    "minwm_fused_qkv_projection": "1",
+    "deterministic": True,
+    "num_inference_steps": 4,
+    "guidance_scale": 0.0,
+}
+plans = {
+    "eager_reference": {**common, "compile_enabled": False},
+    "compile": {**common, "compile_enabled": True},
+}
+normalized = {
+    name: {key: value for key, value in plan.items() if key != "compile_enabled"}
+    for name, plan in plans.items()
+}
+if normalized["eager_reference"] != normalized["compile"]:
+    raise AssertionError("compile client plans differ outside compile_enabled")
+if common["total_chunks"] != 2:
+    raise AssertionError(f"compile gate requires total_chunks=2, got {common['total_chunks']}")
+if common["generated_pixel_frames"] + int(resolved["reference_pixel_frames"]) != 33:
+    raise AssertionError("compile gate requires exactly 33 output frames")
+record = {
+    "schema": "minwm-s4-compile-client-contract/v1",
+    "checked_before_generation_utc": datetime.now(timezone.utc).isoformat(),
+    "allowed_execution_difference": ["compile_enabled"],
+    "non_request_artifact_identity_fields": ["engine_name", "output_prefix"],
+    "plans": plans,
+    "normalized_request_metadata_equal": True,
+}
+(result_root / "compile-client-contract.json").write_text(
+    json.dumps(record, indent=2, sort_keys=True) + "\n"
+)
+print(json.dumps(record, indent=2, sort_keys=True))
+PY
+
+run_lane candidate-compile-reference 1 1 1 1 candidate_compile_reference \
+  "${SP1_RESULTS}" "" false "" "${COMPILE_CASES}"
 run_lane candidate-compile 1 1 1 1 candidate_compile "${SP1_RESULTS}" "" true \
   "" "${COMPILE_CASES}"
+
+PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH:-}" python3 - \
+  "${SP1_RESULTS}" "${CASE_ID}" "${SCRIPT_DIR}/thresholds.json" <<'PY'
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+import numpy as np
+
+from compare_results import evaluate, metric_block
+
+root = Path(sys.argv[1])
+case_id = sys.argv[2]
+thresholds = json.loads(Path(sys.argv[3]).read_text())
+profile = thresholds["profiles"]["bf16_backend_candidate"]
+case_dir = root / "cases" / case_id
+reference = np.load(case_dir / "candidate_compile_reference.npy", allow_pickle=False)
+compiled = np.load(case_dir / "candidate_compile.npy", allow_pickle=False)
+reference_record = json.loads(
+    (case_dir / "candidate_compile_reference.json").read_text()
+)
+compiled_record = json.loads((case_dir / "candidate_compile.json").read_text())
+if reference_record["contract"] != compiled_record["contract"]:
+    raise AssertionError("actual compile client contracts differ")
+if reference_record["request"] != compiled_record["request"]:
+    raise AssertionError("actual compile client request metadata differ")
+if reference.shape != compiled.shape:
+    raise AssertionError(
+        f"compile reference shape {reference.shape} != compiled shape {compiled.shape}"
+    )
+metrics = metric_block(reference, compiled)
+passed, failures = evaluate({"generated_frames": metrics}, profile)
+reference_frame_sha256 = [
+    hashlib.sha256(frame.tobytes()).hexdigest() for frame in reference
+]
+compiled_frame_sha256 = [
+    hashlib.sha256(frame.tobytes()).hexdigest() for frame in compiled
+]
+record = {
+    **metrics,
+    "passed": passed,
+    "failures": failures,
+    "actual_contract_equal": True,
+    "actual_request_metadata_equal": True,
+    "frame_count": int(reference.shape[0]),
+    "reference_frame_sha256": reference_frame_sha256,
+    "compiled_frame_sha256": compiled_frame_sha256,
+    "per_frame_sha256_equal": reference_frame_sha256 == compiled_frame_sha256,
+    "reference_npy_sha256": hashlib.sha256(
+        (case_dir / "candidate_compile_reference.npy").read_bytes()
+    ).hexdigest(),
+    "compiled_npy_sha256": hashlib.sha256(
+        (case_dir / "candidate_compile.npy").read_bytes()
+    ).hexdigest(),
+}
+(root / "compile-client-contract-verified.json").write_text(
+    json.dumps(
+        {
+            **json.loads((root / "compile-client-contract.json").read_text()),
+            "actual_contract_equal": True,
+            "actual_request_metadata_equal": True,
+            "checked_after_generation": True,
+        },
+        indent=2,
+        sort_keys=True,
+    )
+    + "\n"
+)
+(root / "compile-compatibility-metrics.json").write_text(
+    json.dumps(record, indent=2, sort_keys=True) + "\n"
+)
+if not passed:
+    raise AssertionError(f"candidate compile quality threshold failed: {failures}")
+print(json.dumps({"candidate_eager_vs_compile": record}, indent=2, sort_keys=True))
+PY
+
 run_tp2_existing_blocker tp2-control 0 tp2_control_blocked "${SP1_RESULTS}"
 run_tp2_existing_blocker tp2-candidate 1 tp2_candidate_blocked "${SP1_RESULTS}"
 run_lane candidate-fp8-fallback 1 1 1 1 candidate_fp8 "${SP1_RESULTS}" "" false fp8
@@ -234,7 +381,7 @@ python3 "${SCRIPT_DIR}/compare_results.py" \
   --profile bf16_backend_candidate
 
 PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH:-}" python3 - \
-  "${RESULT_ROOT}" "${CASE_ID}" "${SCRIPT_DIR}/thresholds.json" <<'PY'
+  "${RESULT_ROOT}" "${CASE_ID}" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -242,15 +389,16 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from compare_results import evaluate, metric_block
+from compare_results import metric_block
 
 root = Path(sys.argv[1])
 case_id = sys.argv[2]
-thresholds_path = Path(sys.argv[3])
-thresholds = json.loads(thresholds_path.read_text())
-fast_lane_profile = thresholds["profiles"]["bf16_backend_candidate"]
 
-comparisons = {}
+comparisons = {
+    "sp1_candidate_eager_vs_compile": json.loads(
+        (root / "sp1" / "compile-compatibility-metrics.json").read_text()
+    )
+}
 for degree in ("sp1", "sp2"):
     case_dir = root / degree / "cases" / case_id
     candidate = np.load(case_dir / "sglang.npy", allow_pickle=False)
@@ -259,21 +407,6 @@ for degree in ("sp1", "sp2"):
     comparisons[f"{degree}_candidate_replay"] = metrics
     if not metrics["bitwise_equal"]:
         raise AssertionError(f"{degree} candidate replay is not bitwise deterministic")
-
-sp1_case = root / "sp1" / "cases" / case_id
-candidate = np.load(sp1_case / "sglang.npy", allow_pickle=False)
-for prefix in ("candidate_compile",):
-    value = np.load(sp1_case / f"{prefix}.npy", allow_pickle=False)
-    reference = candidate[: value.shape[0]]
-    metrics = metric_block(reference, value)
-    passed, failures = evaluate({"generated_frames": metrics}, fast_lane_profile)
-    comparisons[f"sp1_candidate_vs_{prefix}"] = {
-        **metrics,
-        "passed": passed,
-        "failures": failures,
-    }
-    if not passed:
-        raise AssertionError(f"{prefix} quality threshold failed: {failures}")
 
 control_dump = next((root / "layer-probes/control").glob("sglang/sp_01_rank_00"))
 candidate_dump = next((root / "layer-probes/candidate").glob("sglang/sp_01_rank_00"))
@@ -333,6 +466,30 @@ for probe_name in (
 )
 (root / "layer-probe-metrics.json").write_text(
     json.dumps(layer_metrics, indent=2, sort_keys=True) + "\n"
+)
+(root / "s4-qkv-quality-summary.json").write_text(
+    json.dumps(
+        {
+            "compile_gate": {
+                "contract": json.loads(
+                    (
+                        root
+                        / "sp1"
+                        / "compile-client-contract-verified.json"
+                    ).read_text()
+                ),
+                "metrics": comparisons["sp1_candidate_eager_vs_compile"],
+            },
+            "tp2_existing_blocker": json.loads(
+                (root / "sp1" / "tp2-existing-s3-blocker.json").read_text()
+            ),
+            "determinism_and_variants": comparisons,
+            "layer_probe_file_count": len(layer_metrics),
+        },
+        indent=2,
+        sort_keys=True,
+    )
+    + "\n"
 )
 print(json.dumps({
     "determinism": {
