@@ -189,6 +189,21 @@ complete/consume event；统计 input/output A2A 的 launch→wait 距离、wait
 - 决策：修正 comparator 后只读复用同一批 artifact 做逐 rank tensor 验证；不重写或删除
   attempt 01 的失败 marker。
 
+### 2026-08-07：H200 attempt 01 artifact 只读重验
+
+- 命令：CPU-only Job `minwm-async-a2a-quality-reader-20260807-01` 检出
+  `ca3cf1dbfa9787d07ef4b68f50ef041e33f2426c`，在原 PVC 上执行
+  `validate_async_a2a_quality.py --root <attempt-01>/async-a2a-quality --case-id
+  00_forward_080_pottery_720p --sp-degrees 2 4 --output
+  <root>/quality-validation-ca3cf1dbfa.json`；没有重新执行 GPU 推理。
+- 正确性：reader Job `Complete 1/1`。SP2 的 rank0/rank1、SP4 的 rank0-rank3 各逐项
+  比较 `69` 个 baseline tensor probe，全部 shape/dtype 相同且 bitwise exact；两种 SP 的
+  视频 bitwise 状态也均为 `true`。candidate-only 的跨请求 `_001` probes 单列，不作为
+  baseline 缺失或数值差异。
+- 结论：H200 eager 完整模型的 SP2/SP4 720p 5s parity 与候选连续 10 请求稳定性通过。
+  CUDA Graph 当前生产 benchmark 未启用；capture-safe PyNCCL 由前述 H200 standalone
+  graph capture + 3 replay 合同覆盖。正确性门通过不代表性能或 overlap 门通过。
+
 ### 2026-08-07：候选 1——QK A2A 与 V projection 重叠
 
 - 假设：完整 packed-QKV A2A 前没有可移动工作，但 Q/K/V projection 相互独立；将 wire
