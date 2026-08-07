@@ -27,6 +27,7 @@ from measurement import (  # noqa: E402
     validate_measurement,
 )
 from measurement_tool import (  # noqa: E402
+    _is_invalid_result,
     aggregate,
     build_invalid_marker,
     load_aggregate_records,
@@ -432,3 +433,31 @@ def test_invalid_attempt_marker_inventories_files_and_aggregate_excludes_it(
     records, excluded = load_aggregate_records([valid_one, invalid, valid_two])
     assert [record["run_id"] for record in records] == ["valid-one", "valid-two"]
     assert excluded == [invalid]
+
+
+def test_aggregate_excludes_in_place_result_with_sibling_invalid_marker(
+    tmp_path: Path,
+) -> None:
+    measurement_root = tmp_path / "attempt-one" / "s0-measurement"
+    invalid_result = measurement_root / "sp2" / "profiler-off-repeat1.json"
+    invalid_result.parent.mkdir(parents=True)
+    invalid_result.write_text(json.dumps(_record(run_id="partial")), encoding="utf-8")
+    (measurement_root / "invalid-marker-20260807T000000Z.json").write_text(
+        "{}", encoding="utf-8"
+    )
+
+    valid_result = (
+        tmp_path
+        / "attempt-two"
+        / "s0-measurement"
+        / "sp2"
+        / "profiler-off-repeat1.json"
+    )
+    valid_result.parent.mkdir(parents=True)
+    valid_result.write_text(json.dumps(_record(run_id="valid")), encoding="utf-8")
+
+    assert _is_invalid_result(invalid_result) is True
+    assert _is_invalid_result(valid_result) is False
+    records, excluded = load_aggregate_records([invalid_result, valid_result])
+    assert [record["run_id"] for record in records] == ["valid"]
+    assert excluded == [invalid_result]
