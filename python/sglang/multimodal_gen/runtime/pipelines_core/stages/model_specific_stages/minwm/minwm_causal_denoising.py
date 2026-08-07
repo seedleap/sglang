@@ -155,7 +155,7 @@ class _MinWMCudaGraphRunner:
         if self.graph is not None:
             self._copy_inputs(latent, prompt, timestep, action)
             reference = None
-            if self.verify and self.replay_count == 0:
+            if self.verify and self.replay_count < 4:
                 reference = self.capture_forward(
                     self.static_latent,
                     self.static_prompt,
@@ -164,7 +164,7 @@ class _MinWMCudaGraphRunner:
                 ).detach().clone()
             self.graph.replay()
             if reference is not None:
-                self._log_verification("first_replay", reference)
+                self._log_verification(f"replay_{self.replay_count + 1}", reference)
             self.replay_count += 1
             if self.replay_count == 1 or self.replay_count % 100 == 0:
                 logger.info(
