@@ -465,4 +465,136 @@ ABBA GPU 释放后提交独立 Nsight manifest，client/server dry-run 再次通
 固定 SGLang `1e9c11322feb27502a45ec308f3bd30d6d7dc4f8`、同一 minWM/image/checkpoint；
 Nsight Systems 2026.4.1 检查通过，8 张 H200 均可采 GPU metrics。当前从 SP2
 production-no-sync lane 开始，profile window 是 20 precondition + 1 discard + 10 stable；
-profiler 下 FPS 不作 headline。
+profiler 下 FPS 不作 headline。Job 最终 Completed 1/1，Pod exit 0、restart=0，耗时约 18 分钟，
+结果根目录：
+
+```text
+/results/attempts/minwm-p0-trace-sync-nsys-h200-20260807-01-b7kf6/minwm-p0-trace-sync-nsys-h200-20260807-01
+```
+
+该目录共约 5.8 GiB。四个 measurement JSON 的 SHA-256 为：
+
+| lane | SHA-256 |
+| --- | --- |
+| SP2 production-no-sync | `ac15a3194bb50e603cb48a2502655e68e473946eb2aa5e8c42648d09948e51de` |
+| SP2 profiling-optin | `48f7dce3557a25564a43c67ee51a3b1e51b5b319045c7cc9ea43575f974819e6` |
+| SP4 production-no-sync | `8cf6e72a19b005cf069d367ba27065319594a7376b820c9f54999a5da68dd1fd` |
+| SP4 profiling-optin | `af5b8774fbc2511e68865867283a7d310a05f35083c83349c169cf84dbc7abf0` |
+
+ABBA 主/追加 attempt 各约 37 MiB。关键验收文件 SHA-256：主 Job 原始
+`comparison-summary.json` 为
+`88becc19e6d66a0ab38bf07bd52ed9e6b9e755825af85de4574698dedd2e79ec`，修正 CV 后
+`comparison-summary-cv-corrected.json` 为
+`c2de1656f2a66bcc19e7fba9ab79d7fa7b662089e062b9a476f29a920433c2de`；追加 Job
+`comparison-summary.json` 为
+`26b1929708a494ff812ee53a6ed8144bdbfa90928ccfc55c965b77d590c62254`，其 fail-closed
+marker 为 `1e82022009e3811c6b12af80d2d5e50b64e5bad581cf5ab060f68ee07c8cc1b8`。
+
+## Nsight CUDA、launch 与 A2A 归因
+
+所有 lane 的 exact-window、kernel/API/launch、GPU busy、SM/Tensor Active、DRAM validator
+均通过。production-no-sync 刻意允许 component CUDA timing 缺失，但仍严格要求上述设备
+指标；profiling-optin 则严格要求 DiT/VAE CUDA timing，实际通过。production-no-sync 的
+component 状态为 `unavailable/incomplete_trace_metric`，不是静默丢字段，wall source 与禁用
+原因仍在 trace 中。
+
+| lane | DiT/VAE CUDA ms | kernel/launch 每 chunk | CUDA API 每 chunk | GPU busy | SM/Tensor/DRAM Active |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| SP2 no-sync | unavailable | 34608/34608 | 91016.0 | 74.65% | 59.91% / 27.58% / 8.10% |
+| SP2 opt-in | 753.44 / 442.00 | 34608/34608 | 91115.4 | 74.76% | 60.13% / 27.69% / 8.11% |
+| SP4 no-sync | unavailable | 69202/69202 | 184612.8 | 68.43% | 37.53% / 15.88% / 4.40% |
+| SP4 opt-in | 782.42 / 252.05 | 69202/69202 | 184818.5 | 68.45% | 37.88% / 16.01% / 4.43% |
+
+短 kernel 计数（`<10us / 10--50us / 50--100us / >=100us`）分别为：SP2 no-sync
+18447.5/12107.6/1179.8/2873.1，opt-in 18446.8/12098.2/1179.1/2883.9；SP4
+no-sync 49511.3/13043.0/1855.9/4791.8，opt-in
+49511.8/13034.4/1848.5/4807.3。计数变化仅为 profile 采样噪声，没有 kernel/launch
+减少；本改动的归因是移除默认 host-side CUDA event 同步和事件 API，而不是 kernel 优化。
+
+从 stable window 的 CUDA runtime API 逐名查询得到最直接证据：SP2 opt-in 比 no-sync 每
+chunk 多 4 次 `cudaEventSynchronize`，SP4 多 8 次；no-sync 两者均为 0。SP2 的 event
+create/destroy/record 各多 8 次，SP4 各多 16 次；总 CUDA API 分别多约 99.4 与 205.7
+次/chunk。额外 `cudaEventQuery`/stream-capture API 来自 profiling/polling 的连带行为，
+不将它们误报为独立收益。
+
+以 `ncclDevKernel_SendRecv` 作为 Ulysses A2A proxy：SP2 两 lane 都是 864 次/chunk，聚合
+device-duration no-sync/opt-in 为 227.40/221.66 ms；SP4 两 lane都是 1728 次/chunk，
+1149.64/1126.38 ms。AllGather 计数也完全一致（SP2 42、SP4 84 次/chunk）。device-duration
+是跨设备求和而非 wall time，2%--3% 的持续时间差按噪声解释，不能归因给 trace 开关。
+
+profiler 日志中 SP2 no-sync/opt-in 约 12.357/12.391 FPS、SP4 约
+14.240/14.291 FPS，仅用于确认运行活性，按统一口径不作 headline，也不替代 20+200 ABBA。
+
+读取 JSON 时曾用只读 Python 脚本误把 `gpu_metrics` group 当成顶层标量，触发
+`KeyError`；检查实际 schema 后改为读取 group 内 `value/status/reason`，未修改原始产物。
+Nsight reader 第一次同样因 MCS 不匹配（进程 `c237,c482`、卷 `c161,c318`）无权限读取；
+改为同卷 MCS 后，以非 privileged、read-only Pod 成功读取。这个失败和修复均保留，未用
+privileged 绕过卷标签；容器 UID 0 仍受匹配的 SELinux MCS 与 read-only volume 限制。
+
+取证完成后只删除两个临时 reader Pod
+`minwm-p0-trace-sync-artifact-reader-20260807` 与
+`minwm-p0-trace-sync-nsys-artifact-reader-20260807`，复查无同名 Pod；Job、PVC 和产物均
+保留，reader 可由已提交 manifest 恢复。清理前第一次 `custom-columns` 只读检查未给参数加
+引号，zsh 把字段路径的方括号当 glob，报 `no matches found`；删除命令仍成功，随后用带引号
+的只读查询确认结果。
+
+## 同步点审计结论
+
+| 路径 | 默认是否 host-sync | 处置/回退 |
+| --- | --- | --- |
+| `GenerateSession` 默认 realtime trace id | 旧实现是 | trace id 每 session 默认生成并透传，故旧 CUDA span 同步是生产默认，不是仅 debug；现默认只记 wall/status |
+| MinWM denoising span | 否 | 仅 `SGLANG_REALTIME_TRACE_SYNC_CUDA` 显式真值创建/记录/同步 event |
+| VAE encode/decode span | 否 | 同上；unsupported CUDA/device 返回 wall + `unavailable`，安全 fail closed |
+| decoder load/post-decode span | 否 | 原本显式 `sync_cuda=False`，保持 |
+| worker relay/API observability | 否 | wall、source、CUDA status/reason 均透传；opt-in 时额外透传 `cuda_ms` |
+| StageProfiler/GPUWorker profiler | 显式能力 | 只在其 profiling env 打开时同步，不属于默认 realtime trace |
+| disaggregation 生命周期 barrier | 是 | 正确性/资源生命周期同步，不在本任务删除范围 |
+| upscaler/LoRA/sleep/benchmark sync | 路径特定 | 非本 MinWM 默认 trace；不顺手改动 |
+
+环境变量只接受明确真值；未知值 fail closed 为关闭。CPU、无 CUDA、unsupported
+shape/dtype/backend 都保留 eager/wall trace，且不创建 CUDA event。可观测性没有静默丢失：
+默认仍有 span 名、trace id、wall time、source 与 CUDA timing 状态；要 CUDA timing 时必须
+显式 opt-in。
+
+最终收尾复验命令：
+
+```bash
+TORCHDYNAMO_DISABLE=1 PYTHONPATH=python python3.11 -m pytest -q \
+  python/sglang/multimodal_gen/test/unit/realtime/test_realtime_trace.py \
+  python/sglang/multimodal_gen/test/unit/realtime/test_realtime_runtime.py
+python3 -m pytest -q \
+  benchmark/minwm_realtime_parity/test_measurement.py \
+  benchmark/minwm_realtime_parity/test_common.py
+black --check <本任务 8 个 Python 文件>
+ruff check <本任务 8 个 Python 文件>
+bash -n benchmark/minwm_realtime_parity/run_s0_measurement.sh \
+  benchmark/minwm_realtime_parity/run_trace_sync_abba.sh
+python3 -m py_compile <本任务 8 个 Python 文件>
+git diff --check
+kubectl --context codex-minwm-test-phx2 apply --dry-run=client \
+  -f benchmark/minwm_realtime_parity/k8s/minwm_p0_trace_sync_nsys_artifact_reader_20260807.yaml
+kubectl --context codex-minwm-test-phx2 apply --dry-run=server \
+  -f benchmark/minwm_realtime_parity/k8s/minwm_p0_trace_sync_nsys_artifact_reader_20260807.yaml
+```
+
+实际依次为 `51 passed`、`49 passed`、Black 8 files unchanged、Ruff all checks passed、
+shell/py_compile/diff check exit 0，以及 client/server 两次 dry-run 均 `created (dry run)`。
+CUDA/BF16 bitwise 不是用本机 CPU 结果替代，而取自上文两轮 H200 20+200 ABBA 与独立 Nsight。
+
+## 最终 go/no-go
+
+**最终结论：NO-GO，不默认合入/开启；保留本分支作为低复杂度、显式可观测性改造和后续
+复测候选。**
+
+代码与正确性侧已满足：默认 trace 不再 `cudaEventSynchronize`；CUDA timing 显式 opt-in；
+CPU/局部回归通过；两轮 SP2/SP4 共 3520 个 raw RGB chunk digest（各 lane 1760）均 bitwise；
+220-chunk arms 无 rank hang、restart=0，teardown 前 plateau 无持续显存增长；Nsight 精确确认
+默认路径每 chunk 少 4（SP2）/8（SP4）次 event synchronize，kernel/launch 与 A2A 计数不变，
+wall/status/CUDA opt-in 可观测性完整。
+
+但统一 release 门禁不能通过：追加同机 SP2 paired ABBA 的 Client/Scheduler FPS 均回退
+0.43%；两次 SP4 的 chunk wall CV 都超过 3%，四次 pooled SP4 CV 仍超标；而且没有逐 chunk
+KV `data_ptr` 地址采样，不能将“无地址漂移”写成已验收。首轮 SP2 的约 2.42% pooled DiT
+改善与减少 host API 的结果说明它值得保留复测，但不足以覆盖 FPS no-regression、重复性和
+地址证据缺口。下一次 go 判定必须补齐地址采样，并在同一冻结 S0 口径下重跑至少两组
+20+200 SP2 paired run，使 Client/Scheduler 都不回退、关键 CV <=3%；SP4 继续复验。
