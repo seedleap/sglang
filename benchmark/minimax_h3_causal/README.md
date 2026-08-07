@@ -23,7 +23,7 @@
 4. 当前 H3 API 的 `num_inference_steps=N` 生成 N 个 sigma 点，但 denoise loop 实际执行 `N-1` 次 DiT forward。实际 NFE=3 的请求需发送 `num_inference_steps=4`。
 5. 本分支实现的是完整 packed sequence 上与 sliding-KV 等价的稀疏可见性，还没有把 H3 pipeline 改成逐 block 生成并跨 block 持久化 KV。它足以测 attention mask 对整段生成的速度影响，但不等价于已经完成流式 causal pipeline。
 6. 官方模型卡说明 H3 在训练末期使用了 native sparse attention，但初始开源只提供 full-attention inference，稀疏实现将另行发布。本实验的 block-causal mask 是给定规格的独立实现，不能声称复原了官方训练 mask。
-7. 官方发布材料没有定义本实验的 `sink=4/window=20` 单位。当前暂按 latent frames 解释并对齐为 6/21；若单位实际是 block，应改为 4/20 blocks，即 12/60 latent frames，再做 8 卡性能结论。
+7. 官方发布材料没有定义本实验的 `sink=4/window=20` 单位。后续已确认单位是 latent frames；由于不能切开三帧 block，最终有效范围固定为 6/21 latent frames。
 8. 固定的 B300 运行镜像带 FlashInfer cubin/JIT-cache 0.6.14，而当前 main 固定 `flashinfer-python==0.6.15.post1`。editable 安装会升级 Python 包但不会自动替换独立 wheel；0.6.15 没有发布同版 standalone cubin 包，因此入口安装 `jit-cache==0.6.15.post1+cu130`、移除旧的可选 cubin 0.6.14，并在不关闭版本检查的前提下做 import 验证。
 
 ## 重大决策
@@ -81,6 +81,19 @@ python benchmark/minimax_h3_causal/submit_spot_job.py \
   --git-ref <40-char-commit> \
   > /tmp/minimax-h3-probe.json
 kubectl apply --dry-run=server -f /tmp/minimax-h3-probe.json
+```
+
+默认 profile 是 Atlanta Local Zone `use1-atl2`。当该池没有 Spot
+容量时，可显式使用已验证的 `usw2d-sp12` P6 池；`--apply` 会选择对应
+的 kube context，手工 server-side dry-run 也必须指定相同 context：
+
+```bash
+python benchmark/minimax_h3_causal/submit_spot_job.py \
+  --phase attention-probe \
+  --hardware b200 \
+  --cluster-profile usw2d-sp12 \
+  --git-ref <40-char-commit> \
+  | kubectl --context codex-minwm-test-phx2 apply --dry-run=server -f -
 ```
 
 8 卡主测示例；其余拓扑替换 TP/Ulysses，并保持乘积为 8：
@@ -150,7 +163,7 @@ python benchmark/minimax_h3_causal/run_matrix.py \
 | `minimax-h3-b300-probe-r3` | p6-b300 Spot / 1 GPU | `106bafaa1dfe` | 环境失败 | JIT-cache 已升级至 0.6.15.post1，但旧 standalone cubin 0.6.14 的优先级更高；未执行 GPU kernel，改为移除已无同版发布的旧可选 cubin。 |
 | `minimax-h3-b300-probe-r4` | p6-b300 Spot / 1 GPU | `a681be1ab6b2` | 测试夹具失败 | FlashInfer runtime 检查通过；GPU 单测 5/6 通过，包含 BF16 Flex/dense-reference parity。失败项的模拟音频只有 48 个时间步，却固定查询未被音频覆盖的 block 5；独立速度探针因此未执行。修正为覆盖完整模拟视频时域，并显式断言所有目标 block 都有音频 row。 |
 | `minimax-h3-b300-probe-r5` | p6-b300 Spot / 1 GPU | `d2b8c69adafe` | 容量阻塞，已暂停 | 连续 NodeClaim 均被 AWS 以 `UnfulfillableCapacity` 拒绝，Pod 未启动、未执行代码。为避免与 B200 备选同时占用两台整机，保留 Job 记录并设置 `suspend=true`。 |
-| `minimax-h3-b200-probe-r1` | p6-b200 Spot / 1 GPU | `d2b8c69adafe` | 等待容量 | B300 不可用后改投同一固定代码的 B200 最小验证；NodeClaim 同样收到 `UnfulfillableCapacity`，Job 保持 Pending，容量恢复后可继续。 |
+| `minimax-h3-b200-probe-r1` | p6-b200 Spot / 1 GPU | `d2b8c69adafe` | 容量超时失败 | B300 不可用后改投同一固定代码的 B200 最小验证；NodeClaim 同样持续收到 `UnfulfillableCapacity`，Pod 从未启动，最终达到 Job deadline。 |
 
 ## 理解检查问题
 

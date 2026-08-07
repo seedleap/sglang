@@ -17,12 +17,31 @@ _DEFAULT_IMAGE = (
     "8f78575e03ab59a39191a4a6f718bbbe1726fa940f72a86a187a3f1628ada9a7"
 )
 _DEFAULT_MODEL_REVISION = "bfc8ed0353f5a9733be73e6b2c98ec0948195b86"
+_CLUSTER_PROFILES = {
+    "use1-atl2": {
+        "context": "codex-seed-leap-use1",
+        "nodepool": "minwm-test-atl2-p6-spot",
+        "capacity_pool": "minwm-test-atl2-karpenter",
+        "zone": "us-east-1-atl-2a",
+    },
+    "usw2d-sp12": {
+        "context": "codex-minwm-test-phx2",
+        "nodepool": "minwm-sp12-usw2d-p6-spot",
+        "capacity_pool": "minwm-sp12-usw2d-karpenter",
+        "zone": "us-west-2d",
+    },
+}
 
 
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--phase", choices=("attention-probe", "e2e"), required=True)
     parser.add_argument("--hardware", choices=("b200", "b300"), required=True)
+    parser.add_argument(
+        "--cluster-profile",
+        choices=tuple(_CLUSTER_PROFILES),
+        default="use1-atl2",
+    )
     parser.add_argument("--git-ref", required=True, help="Pushed immutable commit SHA")
     parser.add_argument("--tp-size", type=int, default=1)
     parser.add_argument("--ulysses-degree", type=int, default=1)
@@ -84,6 +103,7 @@ def _job(args) -> dict[str, Any]:
         raise ValueError("--job-name must contain at most 63 characters")
 
     instance_type = f"p6-{args.hardware}.48xlarge"
+    cluster_profile = _CLUSTER_PROFILES[args.cluster_profile]
     run_script = r"""
 set -euo pipefail
 repo=/workspace/sglang
@@ -165,6 +185,7 @@ exec bash benchmark/minimax_h3_causal/aws_entrypoint.sh
                 "seedleap.ai/runtime-image": args.image,
                 "seedleap.ai/model-revision": args.model_revision,
                 "seedleap.ai/capacity-type": "spot",
+                "seedleap.ai/cluster-profile": args.cluster_profile,
             },
         },
         "spec": {
@@ -178,16 +199,16 @@ exec bash benchmark/minimax_h3_causal/aws_entrypoint.sh
                     "securityContext": {"seLinuxOptions": {"type": "spc_t"}},
                     "nodeSelector": {
                         "karpenter.sh/capacity-type": "spot",
-                        "karpenter.sh/nodepool": "minwm-test-atl2-p6-spot",
-                        "seedleap.ai/capacity-pool": "minwm-test-atl2-karpenter",
+                        "karpenter.sh/nodepool": cluster_profile["nodepool"],
+                        "seedleap.ai/capacity-pool": cluster_profile["capacity_pool"],
                         "node.kubernetes.io/instance-type": instance_type,
-                        "topology.kubernetes.io/zone": "us-east-1-atl-2a",
+                        "topology.kubernetes.io/zone": cluster_profile["zone"],
                     },
                     "tolerations": [
                         {
                             "key": "seedleap.ai/capacity-pool",
                             "operator": "Equal",
-                            "value": "minwm-test-atl2-karpenter",
+                            "value": cluster_profile["capacity_pool"],
                             "effect": "NoSchedule",
                         }
                     ],
@@ -234,7 +255,14 @@ def main() -> None:
         print(manifest)
         return
     completed = subprocess.run(
-        ["kubectl", "apply", "-f", "-"],
+        [
+            "kubectl",
+            "--context",
+            _CLUSTER_PROFILES[args.cluster_profile]["context"],
+            "apply",
+            "-f",
+            "-",
+        ],
         input=manifest,
         text=True,
         check=False,
