@@ -1,20 +1,20 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: minwm-s2-postproc-trace-h200-phx2-20260807-01
+  name: minwm-s2-postproc-trace-h200-phx2-20260807-02
   namespace: default
   labels:
-    app.kubernetes.io/name: minwm-s2-postproc-trace-h200-phx2-20260807-01
+    app.kubernetes.io/name: minwm-s2-postproc-trace-h200-phx2-20260807-02
     seedleap.ai/owner: chenshengdong
     seedleap.ai/purpose: minwm-s2-postproc-trace
     seedleap.ai/task: minwm-realtime-parity
-    seedleap.ai/run-id: minwm-s2-postproc-trace-h200-phx2-20260807-01
+    seedleap.ai/run-id: minwm-s2-postproc-trace-h200-phx2-20260807-02
   annotations:
     seedleap.ai/capacity-type: spot
     seedleap.ai/repo: seedleap/sglang
-    seedleap.ai/branch: codex/minwm-s2-postproc-s0-test
-    seedleap.ai/commit: "e728e59d9ad7682dec24b97f7d0007fc0cd0b1c8"
-    seedleap.ai/sglang-git-ref: "e728e59d9ad7682dec24b97f7d0007fc0cd0b1c8"
+    seedleap.ai/branch: codex/minwm-postproc-fusions
+    seedleap.ai/commit: "6fcf2bef0e21a95b5ae3ed2b4f44cde8a6c89001"
+    seedleap.ai/sglang-git-ref: "6fcf2bef0e21a95b5ae3ed2b4f44cde8a6c89001"
     seedleap.ai/ttl: 24h
 spec:
   backoffLimit: 0
@@ -23,11 +23,11 @@ spec:
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: minwm-s2-postproc-trace-h200-phx2-20260807-01
+        app.kubernetes.io/name: minwm-s2-postproc-trace-h200-phx2-20260807-02
         seedleap.ai/owner: chenshengdong
         seedleap.ai/purpose: minwm-s2-postproc-trace
         seedleap.ai/task: minwm-realtime-parity
-        seedleap.ai/run-id: minwm-s2-postproc-trace-h200-phx2-20260807-01
+        seedleap.ai/run-id: minwm-s2-postproc-trace-h200-phx2-20260807-02
     spec:
       restartPolicy: Never
       terminationGracePeriodSeconds: 60
@@ -54,7 +54,7 @@ spec:
                   key: token
                   optional: true
             - name: SGLANG_GIT_REF
-              value: "e728e59d9ad7682dec24b97f7d0007fc0cd0b1c8"
+              value: "6fcf2bef0e21a95b5ae3ed2b4f44cde8a6c89001"
             - name: MINWM_SEGMENT_COMPILE
               value: "true"
             - name: TORCHINDUCTOR_CACHE_DIR
