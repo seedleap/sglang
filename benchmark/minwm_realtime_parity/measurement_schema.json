@@ -122,9 +122,9 @@
           "properties": {
             "client_fps": {"$ref": "#/$defs/availability"},
             "scheduler_fps": {"$ref": "#/$defs/availability"},
-            "scheduler_chunk_wall_ms": {"$ref": "#/$defs/availability"},
-            "dit_wall_ms": {"$ref": "#/$defs/availability"},
-            "vae_wall_ms": {"$ref": "#/$defs/availability"}
+            "scheduler_chunk_wall_ms": {"$ref": "#/$defs/latency_metric"},
+            "dit_wall_ms": {"$ref": "#/$defs/latency_metric"},
+            "vae_wall_ms": {"$ref": "#/$defs/latency_metric"}
           }
         },
         "profiler_on": {"type": "null"}
@@ -150,9 +150,25 @@
             "gpu_metrics"
           ],
           "properties": {
-            "observed_wall_with_profiler_overhead": {"type": "object"},
-            "dit_cuda_ms": {"$ref": "#/$defs/availability"},
-            "vae_cuda_ms": {"$ref": "#/$defs/availability"},
+            "observed_wall_with_profiler_overhead": {
+              "type": "object",
+              "required": [
+                "client_fps",
+                "scheduler_fps",
+                "scheduler_chunk_wall_ms",
+                "dit_wall_ms",
+                "vae_wall_ms"
+              ],
+              "properties": {
+                "client_fps": {"$ref": "#/$defs/availability"},
+                "scheduler_fps": {"$ref": "#/$defs/availability"},
+                "scheduler_chunk_wall_ms": {"$ref": "#/$defs/latency_metric"},
+                "dit_wall_ms": {"$ref": "#/$defs/latency_metric"},
+                "vae_wall_ms": {"$ref": "#/$defs/latency_metric"}
+              }
+            },
+            "dit_cuda_ms": {"$ref": "#/$defs/latency_metric"},
+            "vae_cuda_ms": {"$ref": "#/$defs/latency_metric"},
             "kernel_count": {"$ref": "#/$defs/normalized_kernel_count"},
             "cuda_api_count": {"$ref": "#/$defs/normalized_api_count"},
             "kernel_launch_api_count": {"$ref": "#/$defs/normalized_api_count"},
@@ -289,6 +305,33 @@
                     }
                   }
                 }
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "latency_summary": {
+      "type": "object",
+      "required": ["count", "mean", "p50", "p95", "p99", "max"],
+      "properties": {
+        "count": {"type": "integer", "minimum": 1},
+        "mean": {"type": "number"},
+        "p50": {"type": "number"},
+        "p95": {"type": "number"},
+        "p99": {"type": "number"},
+        "max": {"type": "number"}
+      }
+    },
+    "latency_metric": {
+      "oneOf": [
+        {"$ref": "#/$defs/unavailable"},
+        {
+          "allOf": [
+            {"$ref": "#/$defs/available"},
+            {
+              "properties": {
+                "value": {"$ref": "#/$defs/latency_summary"}
               }
             }
           ]
