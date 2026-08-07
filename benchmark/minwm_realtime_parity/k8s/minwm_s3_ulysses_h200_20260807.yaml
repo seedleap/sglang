@@ -17,21 +17,21 @@ spec:
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: minwm-s3-a2a-h200-20260807-03
+  name: minwm-s3-a2a-h200-20260807-04
   namespace: default
   labels:
-    app.kubernetes.io/name: minwm-s3-a2a-h200-20260807-03
+    app.kubernetes.io/name: minwm-s3-a2a-h200-20260807-04
     seedleap.ai/owner: chenshengdong
     seedleap.ai/purpose: minwm-s3-ulysses-measurement
     seedleap.ai/task: minwm-fusedops-s3
-    seedleap.ai/run-id: minwm-s3-a2a-h200-20260807-03
+    seedleap.ai/run-id: minwm-s3-a2a-h200-20260807-04
   annotations:
     seedleap.ai/capacity-type: spot
     seedleap.ai/kube-context: codex-minwm-test-phx2
     seedleap.ai/repo: seedleap/sglang
     seedleap.ai/branch: codex/ulysses-pre-post-a2a-s0-e75
-    seedleap.ai/sglang-git-ref: "88d54943f1d77a0919643fcb35e5961931464bef"
-    seedleap.ai/s0-tool-git-ref: "59aa68a382cb9f481e77f98647644347671561dc"
+    seedleap.ai/sglang-git-ref: "ba119c965829085b88da1bdd77f260337e5d0a66"
+    seedleap.ai/s0-tool-git-ref: "b9240233b2438829cbd72ee3dfbc1d37ed675560"
     seedleap.ai/minwm-git-ref: "2efc6485f65e8fcab506665efde79bc41406385e"
     seedleap.ai/checkpoint-version-id: "wduScksw2f3yPErnG9lBioOuE2AToyAP"
     seedleap.ai/resource-isolation: full 8-GPU H200 node request
@@ -42,17 +42,17 @@ spec:
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: minwm-s3-a2a-h200-20260807-03
+        app.kubernetes.io/name: minwm-s3-a2a-h200-20260807-04
         seedleap.ai/owner: chenshengdong
         seedleap.ai/purpose: minwm-s3-ulysses-measurement
         seedleap.ai/task: minwm-fusedops-s3
-        seedleap.ai/run-id: minwm-s3-a2a-h200-20260807-03
+        seedleap.ai/run-id: minwm-s3-a2a-h200-20260807-04
       annotations:
         seedleap.ai/kube-context: codex-minwm-test-phx2
         seedleap.ai/repo: seedleap/sglang
         seedleap.ai/branch: codex/ulysses-pre-post-a2a-s0-e75
-        seedleap.ai/sglang-git-ref: "88d54943f1d77a0919643fcb35e5961931464bef"
-        seedleap.ai/s0-tool-git-ref: "59aa68a382cb9f481e77f98647644347671561dc"
+        seedleap.ai/sglang-git-ref: "ba119c965829085b88da1bdd77f260337e5d0a66"
+        seedleap.ai/s0-tool-git-ref: "b9240233b2438829cbd72ee3dfbc1d37ed675560"
     spec:
       restartPolicy: Never
       terminationGracePeriodSeconds: 60
@@ -83,7 +83,7 @@ spec:
                   name: github-token
                   key: token
             - name: SGLANG_GIT_REF
-              value: "88d54943f1d77a0919643fcb35e5961931464bef"
+              value: "ba119c965829085b88da1bdd77f260337e5d0a66"
             - name: MINWM_GIT_REF
               value: "2efc6485f65e8fcab506665efde79bc41406385e"
             - name: MINWM_CONTAINER_IMAGE
@@ -91,7 +91,9 @@ spec:
             - name: MINWM_BENCHMARK_MODE
               value: setup_only
             - name: MINWM_RUN_ID
-              value: minwm-s3-a2a-h200-20260807-03
+              value: minwm-s3-a2a-h200-20260807-04
+            - name: MINWM_S3_STOP_BEFORE_FORMAL_AB
+              value: "1"
             - name: MINWM_ALLOCATED_GPU_COUNT
               value: "8"
             - name: MINWM_S0_SP_DEGREES
@@ -167,7 +169,7 @@ spec:
                 echo "zone=us-west-2-phx-2a"
                 echo "nodepool=minwm-test-phx2-p5e-spot"
                 echo "instance_type=p5e.48xlarge"
-                echo "s0_tool_commit=59aa68a382cb9f481e77f98647644347671561dc"
+                echo "s0_tool_commit=b9240233b2438829cbd72ee3dfbc1d37ed675560"
               } | tee "${MINWM_RESULTS_ROOT}/cluster-contract.txt"
               bash /workspace/sglang/benchmark/minwm_realtime_parity/aws_b200_entrypoint.sh
               bash /workspace/sglang/benchmark/minwm_realtime_parity/run_s3_ulysses_measurement.sh
