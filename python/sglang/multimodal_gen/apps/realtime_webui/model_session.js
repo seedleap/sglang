@@ -193,6 +193,8 @@
         } else {
           this.pendingHeader = message;
         }
+      } else if (message.type === "frame_batch_header") {
+        this.pendingHeader = message;
       }
     }
 

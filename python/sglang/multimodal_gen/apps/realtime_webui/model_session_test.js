@@ -85,6 +85,7 @@ async function main() {
   const canvas = fakeCanvas();
   const scheduled = [];
   const states = [];
+  const decodedHeaders = [];
   const session = new RealtimeModelSession({
     key: "lingbot2",
     canvas,
@@ -92,12 +93,15 @@ async function main() {
     unpack: (value) => value,
     WebSocketCtor: FakeSocket,
     PlaybackController: FakePlaybackController,
-    decodeBatch: async (header) => [{
-      image: { width: 640, height: 360, close() {} },
-      chunk: header.chunk_index,
-      receivedAt: 100,
-      decodeMs: 2,
-    }],
+    decodeBatch: async (header) => {
+      decodedHeaders.push(header);
+      return [{
+        image: { width: 640, height: 360, close() {} },
+        chunk: header.chunk_index,
+        receivedAt: 100,
+        decodeMs: 2,
+      }];
+    },
     requestFrame: (callback) => scheduled.push(callback),
     now: () => 125,
     onState: (state) => states.push(state),
@@ -129,6 +133,18 @@ async function main() {
   scheduled.shift()(130);
   assert.equal(canvas.draws.length, 1);
   assert.equal(frames[0].chunk, 3);
+
+  socket.message({
+    type: "frame_batch_header",
+    chunk_index: 4,
+    event_id: 7,
+    num_frames: 1,
+    content_type: "image/webp",
+  });
+  socket.message(new Uint8Array([82, 73, 70, 70]).buffer);
+  await flush();
+  assert.equal(decodedHeaders.at(-1).chunk_index, 4,
+    "split frame_batch_header payloads must be decoded as media, not MsgPack");
 
   const otherCanvas = fakeCanvas();
   const other = new RealtimeModelSession({
