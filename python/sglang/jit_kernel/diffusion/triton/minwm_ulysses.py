@@ -203,6 +203,34 @@ def _minwm_rope_pair(real, imaginary, cos, sin):
 
 
 @triton.jit
+def _write_fresh_key_value(
+    K_ptr,
+    V_ptr,
+    CacheK_ptr,
+    CacheV_ptr,
+    fresh_key_base,
+    fresh_value_base,
+    cache_base,
+    even_features,
+    odd_features,
+    half_mask,
+):
+    key_real = tl.load(K_ptr + fresh_key_base + even_features, mask=half_mask).to(
+        tl.float32
+    )
+    key_imaginary = tl.load(K_ptr + fresh_key_base + odd_features, mask=half_mask).to(
+        tl.float32
+    )
+    tl.store(CacheK_ptr + cache_base + even_features, key_real, mask=half_mask)
+    tl.store(CacheK_ptr + cache_base + odd_features, key_imaginary, mask=half_mask)
+    value_even = tl.load(V_ptr + fresh_value_base + even_features, mask=half_mask)
+    value_odd = tl.load(V_ptr + fresh_value_base + odd_features, mask=half_mask)
+    tl.store(CacheV_ptr + cache_base + even_features, value_even, mask=half_mask)
+    tl.store(CacheV_ptr + cache_base + odd_features, value_odd, mask=half_mask)
+    return key_real, key_imaginary
+
+
+@triton.jit
 def _fused_rope_cache_update_kernel(
     Q_ptr,
     K_ptr,
@@ -278,59 +306,67 @@ def _fused_rope_cache_update_kernel(
 
     if ROTATE_ALL_KEYS:
         key_sequence = sequence
-        fresh_sequence = tl.maximum(sequence - WRITE_START, 0)
         is_fresh = (sequence >= WRITE_START) & (sequence < WRITE_START + S_CURRENT)
-        key_active = sequence < S_VISIBLE
     else:
         key_sequence = WRITE_START + sequence
-        fresh_sequence = sequence
-        is_fresh = sequence < S_CURRENT
-        key_active = sequence < S_CURRENT
 
     cache_base = (
         batch * cache_stride_b + key_sequence * cache_stride_s + head * cache_stride_h
     )
-    fresh_key_base = (
-        batch * k_stride_b + fresh_sequence * k_stride_s + head * k_stride_h
-    )
-    fresh_value_base = (
-        batch * v_stride_b + fresh_sequence * v_stride_s + head * v_stride_h
-    )
-    fresh_mask = half_mask & is_fresh & key_active
-    cached_mask = half_mask & (~is_fresh) & key_active
-    fresh_real = tl.load(
-        K_ptr + fresh_key_base + even_features, mask=fresh_mask, other=0.0
-    ).to(tl.float32)
-    fresh_imaginary = tl.load(
-        K_ptr + fresh_key_base + odd_features, mask=fresh_mask, other=0.0
-    ).to(tl.float32)
-    cached_real = tl.load(
-        CacheK_ptr + cache_base + even_features, mask=cached_mask, other=0.0
-    ).to(tl.float32)
-    cached_imaginary = tl.load(
-        CacheK_ptr + cache_base + odd_features, mask=cached_mask, other=0.0
-    ).to(tl.float32)
-    key_real = tl.where(is_fresh, fresh_real, cached_real)
-    key_imaginary = tl.where(is_fresh, fresh_imaginary, cached_imaginary)
 
-    tl.store(CacheK_ptr + cache_base + even_features, fresh_real, mask=fresh_mask)
-    tl.store(CacheK_ptr + cache_base + odd_features, fresh_imaginary, mask=fresh_mask)
-    value_even = tl.load(
-        V_ptr + fresh_value_base + even_features, mask=fresh_mask, other=0.0
-    )
-    value_odd = tl.load(
-        V_ptr + fresh_value_base + odd_features, mask=fresh_mask, other=0.0
-    )
-    tl.store(CacheV_ptr + cache_base + even_features, value_even, mask=fresh_mask)
-    tl.store(CacheV_ptr + cache_base + odd_features, value_odd, mask=fresh_mask)
+    if ROTATE_ALL_KEYS:
+        if is_fresh:
+            fresh_sequence = sequence - WRITE_START
+            fresh_key_base = (
+                batch * k_stride_b + fresh_sequence * k_stride_s + head * k_stride_h
+            )
+            fresh_value_base = (
+                batch * v_stride_b + fresh_sequence * v_stride_s + head * v_stride_h
+            )
+            key_real, key_imaginary = _write_fresh_key_value(
+                K_ptr,
+                V_ptr,
+                CacheK_ptr,
+                CacheV_ptr,
+                fresh_key_base,
+                fresh_value_base,
+                cache_base,
+                even_features,
+                odd_features,
+                half_mask,
+            )
+        else:
+            key_real = tl.load(
+                CacheK_ptr + cache_base + even_features, mask=half_mask
+            ).to(tl.float32)
+            key_imaginary = tl.load(
+                CacheK_ptr + cache_base + odd_features, mask=half_mask
+            ).to(tl.float32)
+    else:
+        fresh_key_base = batch * k_stride_b + sequence * k_stride_s + head * k_stride_h
+        fresh_value_base = (
+            batch * v_stride_b + sequence * v_stride_s + head * v_stride_h
+        )
+        key_real, key_imaginary = _write_fresh_key_value(
+            K_ptr,
+            V_ptr,
+            CacheK_ptr,
+            CacheV_ptr,
+            fresh_key_base,
+            fresh_value_base,
+            cache_base,
+            even_features,
+            odd_features,
+            half_mask,
+        )
 
     key_cos = tl.load(
         KeyCos_ptr + key_sequence * (D // 2) + half_features,
-        mask=half_mask & key_active,
+        mask=half_mask,
     ).to(tl.float32)
     key_sin = tl.load(
         KeySin_ptr + key_sequence * (D // 2) + half_features,
-        mask=half_mask & key_active,
+        mask=half_mask,
     ).to(tl.float32)
     rotated_real, rotated_imaginary = _minwm_rope_pair(
         key_real, key_imaginary, key_cos, key_sin
@@ -338,12 +374,12 @@ def _fused_rope_cache_update_kernel(
     tl.store(
         RotatedK_ptr + cache_base + even_features,
         rotated_real,
-        mask=half_mask & key_active,
+        mask=half_mask,
     )
     tl.store(
         RotatedK_ptr + cache_base + odd_features,
         rotated_imaginary,
-        mask=half_mask & key_active,
+        mask=half_mask,
     )
 
 

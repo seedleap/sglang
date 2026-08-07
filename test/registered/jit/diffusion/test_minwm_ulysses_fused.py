@@ -169,6 +169,71 @@ def test_fused_rope_cache_update_first_block_is_bit_exact(
     _assert_bitwise_exact(rotated_k, expected_key, "first_rotated_key")
 
 
+def test_fused_rope_cache_update_recompute_is_deterministic():
+    torch.manual_seed(77)
+    current_tokens, visible_tokens, write_start = 3, 7, 4
+    heads, head_dim = 6, 128
+    qkv = torch.randn(
+        1,
+        current_tokens,
+        heads,
+        3 * head_dim,
+        dtype=torch.bfloat16,
+        device="cuda",
+    )
+    query, key, value = qkv.chunk(3, dim=-1)
+    cache_k = torch.randn(
+        1, visible_tokens, heads, head_dim, dtype=query.dtype, device=query.device
+    )
+    cache_v = torch.randn_like(cache_k)
+    rotated_k = torch.randn_like(cache_k)
+    angles = torch.randn(
+        visible_tokens, head_dim // 2, dtype=torch.float32, device=query.device
+    )
+    key_cos, key_sin = angles.cos(), angles.sin()
+    query_cos = key_cos[write_start:].contiguous()
+    query_sin = key_sin[write_start:].contiguous()
+
+    first_cache_k, second_cache_k = cache_k.clone(), cache_k.clone()
+    first_cache_v, second_cache_v = cache_v.clone(), cache_v.clone()
+    first_rotated_k, second_rotated_k = rotated_k.clone(), rotated_k.clone()
+    first = fused_rope_cache_update(
+        query,
+        key,
+        value,
+        first_cache_k,
+        first_cache_v,
+        first_rotated_k,
+        query_cos,
+        query_sin,
+        key_cos,
+        key_sin,
+        write_start,
+        rotate_all_keys=False,
+    )
+    second = fused_rope_cache_update(
+        query,
+        key,
+        value,
+        second_cache_k,
+        second_cache_v,
+        second_rotated_k,
+        query_cos,
+        query_sin,
+        key_cos,
+        key_sin,
+        write_start,
+        rotate_all_keys=False,
+    )
+
+    _assert_bitwise_exact(first, second, "deterministic_query")
+    _assert_bitwise_exact(first_cache_k, second_cache_k, "deterministic_raw_key")
+    _assert_bitwise_exact(first_cache_v, second_cache_v, "deterministic_raw_value")
+    _assert_bitwise_exact(
+        first_rotated_k, second_rotated_k, "deterministic_rotated_key"
+    )
+
+
 def test_fused_rope_cache_update_append_and_recompute_are_bit_exact():
     torch.manual_seed(79)
     old_tokens, current_tokens = 7, 5
