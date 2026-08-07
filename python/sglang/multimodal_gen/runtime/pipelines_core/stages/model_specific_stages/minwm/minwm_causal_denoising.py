@@ -1013,13 +1013,20 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
                 # Replay does not execute Python, so this callable is unused.
                 capture_forward = None
 
-            return runner.run(
-                latent=latent_model_input,
-                prompt=prompt_embeds,
-                timestep=timestep,
-                action=action,
-                capture_forward=capture_forward,
-            )
+            validate_runtime_action = self.transformer.action_in.validate_runtime_action
+            self.transformer.action_in.validate_runtime_action = False
+            try:
+                return runner.run(
+                    latent=latent_model_input,
+                    prompt=prompt_embeds,
+                    timestep=timestep,
+                    action=action,
+                    capture_forward=capture_forward,
+                )
+            finally:
+                self.transformer.action_in.validate_runtime_action = (
+                    validate_runtime_action
+                )
 
     @torch.no_grad()
     def forward(self, batch: Req, server_args: ServerArgs) -> Req:

@@ -126,9 +126,11 @@ def validate_action_weights(
     return result
 
 
-def action_labels_to_primitive_bits(labels: torch.Tensor) -> torch.Tensor:
+def action_labels_to_primitive_bits(
+    labels: torch.Tensor, *, validate: bool = True
+) -> torch.Tensor:
     labels = labels.to(dtype=torch.long)
-    if torch.any((labels < 0) | (labels >= NUM_ACTION_CLASSES)):
+    if validate and torch.any((labels < 0) | (labels >= NUM_ACTION_CLASSES)):
         raise ValueError("MinWM action labels must be in [0, 80]")
     return _LABEL_TO_BITS.to(device=labels.device)[labels]
 
@@ -185,6 +187,7 @@ class PrimitiveTokenResidualActionEncoder(nn.Module):
         )
         self.encode_2 = CausalActionTemporalBlock(hidden_dim, hidden_dim, kernel_size)
         self.proj = nn.Linear(hidden_dim, dim)
+        self.validate_runtime_action = True
 
     @staticmethod
     def _pool(weights: torch.Tensor, embedding: nn.Embedding) -> torch.Tensor:
@@ -196,12 +199,16 @@ class PrimitiveTokenResidualActionEncoder(nn.Module):
 
     def frame_states(self, action: torch.Tensor) -> torch.Tensor:
         if action.ndim == 2:
-            weights = action_labels_to_primitive_bits(action)
+            weights = action_labels_to_primitive_bits(
+                action, validate=self.validate_runtime_action
+            )
         elif action.ndim == 4 and action.shape[-1] == PRIMITIVE_BIT_WIDTH:
             weights = action
-            if not torch.isfinite(weights).all():
+            if self.validate_runtime_action and not torch.isfinite(weights).all():
                 raise ValueError("MinWM action weights must be finite")
-            if torch.any((weights < 0) | (weights > 1)):
+            if self.validate_runtime_action and torch.any(
+                (weights < 0) | (weights > 1)
+            ):
                 raise ValueError("MinWM action weights must be in [0, 1]")
         else:
             raise ValueError(
@@ -274,15 +281,20 @@ class PrimitiveRoPETokenResidualActionEncoder(nn.Module):
         )
         self.encode_2 = CausalActionTemporalBlock(hidden_dim, hidden_dim, kernel_size)
         self.proj = nn.Linear(hidden_dim, dim)
+        self.validate_runtime_action = True
 
     def frame_states(self, action: torch.Tensor) -> torch.Tensor:
         if action.ndim == 2:
-            weights = action_labels_to_primitive_bits(action)
+            weights = action_labels_to_primitive_bits(
+                action, validate=self.validate_runtime_action
+            )
         elif action.ndim == 4 and action.shape[-1] == PRIMITIVE_BIT_WIDTH:
             weights = action
-            if not torch.isfinite(weights).all():
+            if self.validate_runtime_action and not torch.isfinite(weights).all():
                 raise ValueError("MinWM action weights must be finite")
-            if torch.any((weights < 0) | (weights > 1)):
+            if self.validate_runtime_action and torch.any(
+                (weights < 0) | (weights > 1)
+            ):
                 raise ValueError("MinWM action weights must be in [0, 1]")
         else:
             raise ValueError(
