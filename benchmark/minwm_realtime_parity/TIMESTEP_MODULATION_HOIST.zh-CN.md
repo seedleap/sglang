@@ -122,10 +122,11 @@ latency 显式带 count，自定义 validator 强制 count 等于
 本地对 b924 工具边界的回归为：S0 `test_measurement.py + test_common.py` 19 passed；
 S1 额外 count 断言 3 passed，合计 22 passed。
 
-S0 后续审计层 `2f15c29471` 不改变 b924 schema，但规定失败/中止时逐文件记录原路径、
+S0 后续审计层 `b178572f84`（包含 `2f15c29471`）不改变 b924 schema，但规定失败/中止时逐文件记录原路径、
 保留路径、size、SHA256 和 recoverability，并把旧结果移入 attempt 内的 `invalid/`；聚合器
-排除该目录。`-03` 已按 b924 创建后收到此规则，依 S0 指示不热切换：成功结果仍有效；
-若失败则按 2f15 规则后处理且不删除 PVC，新的 retry 才 pin 2f15。
+只在 JSON 最近的 `s0-measurement` 根检查直属 invalid marker，避免污染兄弟 attempt。
+`-03` 已按 b924 创建后收到此规则，依 S0 指示不热切换：成功结果仍有效；若失败则按
+b178 规则后处理且不删除 PVC，新的 retry 才 pin b178。
 
 固定 workload：MinWM 5B step-3200、1248×704、BF16、16 pixel frames/4 latent
 frames per chunk、4 DMD + 1 clean-cache，20 warmup + 200 measured。SP2 是主验收，
