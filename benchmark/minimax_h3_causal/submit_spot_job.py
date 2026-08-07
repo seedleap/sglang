@@ -200,7 +200,6 @@ exec bash benchmark/minimax_h3_causal/aws_entrypoint.sh
                     "nodeSelector": {
                         "karpenter.sh/capacity-type": "spot",
                         "karpenter.sh/nodepool": cluster_profile["nodepool"],
-                        "seedleap.ai/capacity-pool": cluster_profile["capacity_pool"],
                         "node.kubernetes.io/instance-type": instance_type,
                         "topology.kubernetes.io/zone": cluster_profile["zone"],
                     },

@@ -164,6 +164,7 @@ python benchmark/minimax_h3_causal/run_matrix.py \
 | `minimax-h3-b300-probe-r4` | p6-b300 Spot / 1 GPU | `a681be1ab6b2` | 测试夹具失败 | FlashInfer runtime 检查通过；GPU 单测 5/6 通过，包含 BF16 Flex/dense-reference parity。失败项的模拟音频只有 48 个时间步，却固定查询未被音频覆盖的 block 5；独立速度探针因此未执行。修正为覆盖完整模拟视频时域，并显式断言所有目标 block 都有音频 row。 |
 | `minimax-h3-b300-probe-r5` | p6-b300 Spot / 1 GPU | `d2b8c69adafe` | 容量阻塞，已暂停 | 连续 NodeClaim 均被 AWS 以 `UnfulfillableCapacity` 拒绝，Pod 未启动、未执行代码。为避免与 B200 备选同时占用两台整机，保留 Job 记录并设置 `suspend=true`。 |
 | `minimax-h3-b200-probe-r1` | p6-b200 Spot / 1 GPU | `d2b8c69adafe` | 容量超时失败 | B300 不可用后改投同一固定代码的 B200 最小验证；NodeClaim 同样持续收到 `UnfulfillableCapacity`，Pod 从未启动，最终达到 Job deadline。 |
+| `minimax-h3-b300-probe-usw2d-r1` | p6-b300 Spot / 1 GPU | `1cc543eaa90f` | 调度约束失败，已暂停 | `karpenter.sh/nodepool` 已精确指定 `minwm-sp12-usw2d-p6-spot`，但重复要求 NodePool 模板自定义的 `capacity-pool` label 时，EKS Auto Mode 在节点创建前将其判为 unknown value，未创建 NodeClaim。移除冗余 selector，保留同值 taint toleration。 |
 
 ## 理解检查问题
 
