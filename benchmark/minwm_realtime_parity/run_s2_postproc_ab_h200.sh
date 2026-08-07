@@ -147,6 +147,42 @@ run_measurement_lane() {
   MINWM_S0_PROFILE_MEASURED_CHUNKS=10 \
   MINWM_S0_KV_CACHE_NUM_FRAMES=45 \
     bash "${SCRIPT_DIR}/run_s0_measurement.sh"
+
+  python3 - "${MINWM_RESULTS_ROOT}" "${run_id}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1]) / sys.argv[2] / "s0-measurement"
+for degree in (2, 4):
+    lane_root = root / f"sp{degree}"
+    repeats = sorted(lane_root.glob("profiler-off-repeat*.json"))
+    if len(repeats) < 2:
+        raise RuntimeError(f"{lane_root}: expected at least two profiler-off repeats")
+    for result_path in repeats:
+        result = json.loads(result_path.read_text())
+        if result["workload"]["measured_chunks"] != 200:
+            raise RuntimeError(f"{result_path}: measured_chunks != 200")
+        for name in ("dit_wall_ms", "vae_wall_ms"):
+            metric = result["metrics"]["profiler_off"][name]
+            if metric["status"] != "available" or metric["value"].get("count") != 200:
+                raise RuntimeError(
+                    f"{result_path}: {name} must be available with count=200; "
+                    f"observed={metric}"
+                )
+    profile_path = lane_root / "profiler-on/measurement.json"
+    profile = json.loads(profile_path.read_text())
+    if profile["workload"]["measured_chunks"] != 10:
+        raise RuntimeError(f"{profile_path}: measured_chunks != 10")
+    for name in ("dit_cuda_ms", "vae_cuda_ms"):
+        metric = profile["metrics"]["profiler_on"][name]
+        if metric["status"] != "available" or metric["value"].get("count") != 10:
+            raise RuntimeError(
+                f"{profile_path}: {name} must be available with count=10; "
+                f"observed={metric}"
+            )
+print(f"validated exact DiT/VAE counts for {sys.argv[2]}")
+PY
 }
 
 run_measurement_lane "${BASELINE_RUN_ID}" false
