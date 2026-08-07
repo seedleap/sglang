@@ -1158,9 +1158,11 @@ class MinWMCausalTransformer3DModel(CausalWanTransformer3DModel):
             )
         logger.info(
             "MinWM QKV projection mode: %s",
-            "single-gemm-fast-lane"
-            if self.use_fused_qkv_projection
-            else "three-gemm-parity-fallback",
+            (
+                "single-gemm-fast-lane"
+                if self.use_fused_qkv_projection
+                else "three-gemm-parity-fallback"
+            ),
         )
         self.sp_size = get_sp_world_size()
         ulysses_workspace = _MinWMUlyssesWorkspace() if self.sp_size > 1 else None
