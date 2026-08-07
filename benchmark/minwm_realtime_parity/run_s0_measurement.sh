@@ -54,7 +54,7 @@ export CUBLAS_WORKSPACE_CONFIG=:4096:8
 export PYTHONHASHSEED=0
 unset SGLANG_DIFFUSION_TORCH_PROFILER_DIR
 
-GPU_MODEL="$(nvidia-smi --query-gpu=name --format=csv,noheader | head -1 | xargs)"
+GPU_MODEL="$(nvidia-smi --query-gpu=name --format=csv,noheader | sed -n '1p' | xargs)"
 ALLOCATED_GPU_COUNT="${MINWM_ALLOCATED_GPU_COUNT:-$(nvidia-smi -L | wc -l | xargs)}"
 {
   echo "sglang_commit=${SGLANG_GIT_REF}"
@@ -172,7 +172,8 @@ client_common_args() {
     --minwm-commit "${MINWM_GIT_REF}" \
     --container-image "${MINWM_CONTAINER_IMAGE}" \
     --gpu-model "${GPU_MODEL}" \
-    --gpu-count "${ALLOCATED_GPU_COUNT}" \
+    --gpu-count "${degree}" \
+    --allocated-gpu-count "${ALLOCATED_GPU_COUNT}" \
     --sp-degree "${degree}" \
     --precision bf16 \
     --fast-lane \
@@ -289,7 +290,7 @@ run_profiler_on() {
   local gpu_devices
   gpu_devices="$(
     nvidia-smi --query-gpu=index --format=csv,noheader,nounits \
-      | head -n "${degree}" \
+      | awk -v count="${degree}" 'NR <= count' \
       | paste -sd, -
   )"
   [[ -n "${gpu_devices}" ]]

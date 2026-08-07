@@ -29,10 +29,19 @@
         "container_image": {"$ref": "#/$defs/availability"},
         "gpu": {
           "type": "object",
-          "required": ["model", "count"],
+          "required": ["model", "count", "allocated_count"],
           "properties": {
             "model": {"$ref": "#/$defs/availability"},
-            "count": {"type": "integer", "minimum": 1}
+            "count": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Active GPUs used by this workload, not idle GPUs reserved for isolation."
+            },
+            "allocated_count": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "GPUs reserved by the job/allocation, including idle isolation capacity."
+            }
           }
         }
       }

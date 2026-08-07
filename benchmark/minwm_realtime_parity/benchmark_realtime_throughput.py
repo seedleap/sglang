@@ -60,6 +60,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--container-image")
     parser.add_argument("--gpu-model")
     parser.add_argument("--gpu-count", type=int)
+    parser.add_argument("--allocated-gpu-count", type=int)
     parser.add_argument("--sp-degree", type=int, default=1)
     parser.add_argument("--precision", default="bf16")
     parser.add_argument(
@@ -111,6 +112,14 @@ def validate_contract(manifest: dict, args: argparse.Namespace) -> tuple[dict, d
         raise ValueError("precondition-warmup-chunks must be non-negative")
     if args.sp_degree < 1 or (args.gpu_count is not None and args.gpu_count < 1):
         raise ValueError("sp-degree and gpu-count must be positive")
+    if args.allocated_gpu_count is not None and args.allocated_gpu_count < 1:
+        raise ValueError("allocated-gpu-count must be positive")
+    active_gpu_count = args.gpu_count or args.sp_degree
+    if (
+        args.allocated_gpu_count is not None
+        and args.allocated_gpu_count < active_gpu_count
+    ):
+        raise ValueError("allocated-gpu-count cannot be smaller than active gpu-count")
     if args.kv_cache_num_frames is not None and args.kv_cache_num_frames < 1:
         raise ValueError("kv-cache-num-frames must be positive")
     cases = {case["id"]: case for case in manifest["cases"]}
@@ -454,6 +463,9 @@ async def receive_run(args: argparse.Namespace, contract: dict, case: dict) -> d
         container_image=container_image,
         gpu_model=gpu_model,
         gpu_count=args.gpu_count or args.sp_degree,
+        allocated_gpu_count=args.allocated_gpu_count
+        or args.gpu_count
+        or args.sp_degree,
         sp_degree=args.sp_degree,
         checkpoint_id=args.checkpoint_id,
         checkpoint_step=args.checkpoint_step,
