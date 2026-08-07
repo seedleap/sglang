@@ -128,6 +128,12 @@ S0 后续审计层 `b178572f84`（包含 `2f15c29471`）不改变 b924 schema，
 `-03` 已按 b924 创建后收到此规则，依 S0 指示不热切换：成功结果仍有效；若失败则按
 b178 规则后处理且不删除 PVC，新的 retry 才 pin b178。
 
+后续现场审计又明确 marker scope：某 profiler-off lane 已验证后，若 Nsight 或另一 lane
+失败，只在失败 lane 写 marker，不得用 attempt-root marker 作废已合格 headline；只有
+setup、全局质量或 parity 前置失败才使用 root marker。聚合检查当前 JSON parent 到最近
+measurement root，sibling lane marker 不影响。当前 `-03` 继续运行，未来 runner 等 S0
+最终 commit 后再更新。
+
 固定 workload：MinWM 5B step-3200、1248×704、BF16、16 pixel frames/4 latent
 frames per chunk、4 DMD + 1 clean-cache，20 warmup + 200 measured。SP2 是主验收，
 SP4 复验。profiler-off 与 Nsight 分开运行；Nsight 先外部 warmup 20 chunks，capture
@@ -213,6 +219,11 @@ fast-lane、UTC 时间和产物路径。Nsight overhead 下的 FPS 不作为 hea
    `5f92d276c08086db638f05536a46fa5434ecb169`，S0 tool pin 为 `b9240233b2`；
    `backoffLimit=0`，每个 Pod 结果仍写入 `/results/attempts/${HOSTNAME}`。只有 b924
    validator 与 S1 独立 count 断言均通过的结果才可进入表格。
+9. S3/S4 的另一次 H200 运行暴露了源码注册测试在 `PYTHONPATH` 未包含 source tree 时会在
+   collection 阶段失败。S1 `-03` 已通过 H200 CUDA pytest（`1 passed`），因此本次未受
+   影响，也没有在正式测量中热切换 runner。后续 runner `bf41a2098d` 会在模型/client 前
+   显式加入仓库 `python/`，并 import `sglang.test.ci.ci_register`；失败即止损。本地该
+   preflight 已通过。
 
 最终保留或回滚规则：bitwise 不通过则回滚；profiler-off DiT/Client 回退超过 paired
 噪声或默认 1% 且无法解释则回滚；若 headline 落在噪声内但能稳定消除预期 launch、
