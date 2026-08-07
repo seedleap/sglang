@@ -1,0 +1,76 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: minwm-async-a2a-quality-reader-20260807-01
+  namespace: default
+  labels:
+    app.kubernetes.io/name: minwm-async-a2a-quality-reader-20260807-01
+    seedleap.ai/owner: chenshengdong
+    seedleap.ai/task: minwm-async-a2a
+  annotations:
+    seedleap.ai/source-job: minwm-async-a2a-quality-h200-20260807-01
+    seedleap.ai/source-artifacts: /results/attempts/minwm-async-a2a-quality-h200-20260807-01-grpd9/minwm-async-a2a-quality-h200-20260807-01/async-a2a-quality
+    seedleap.ai/sglang-git-ref: ca3cf1dbfa9787d07ef4b68f50ef041e33f2426c
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 1800
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: minwm-async-a2a-quality-reader-20260807-01
+        seedleap.ai/owner: chenshengdong
+        seedleap.ai/task: minwm-async-a2a
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        kubernetes.io/hostname: i-06888dc1ca88547e1
+      tolerations:
+        - key: seedleap.ai/capacity-pool
+          operator: Equal
+          value: minwm-test-phx2-karpenter
+          effect: NoSchedule
+      containers:
+        - name: reader
+          image: 829115578968.dkr.ecr.us-east-2.amazonaws.com/leap-world/minwm-training@sha256:bedc07ea3ba55059a8c1c569c3b177c4d00d41f37d4fa9105375531534ef5f2a
+          imagePullPolicy: IfNotPresent
+          workingDir: /workspace
+          env:
+            - name: GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: github-token
+                  key: token
+            - name: SGLANG_GIT_REF
+              value: ca3cf1dbfa9787d07ef4b68f50ef041e33f2426c
+          command:
+            - /bin/bash
+            - -lc
+            - |
+              set -euo pipefail
+              source_root=/results/attempts/minwm-async-a2a-quality-h200-20260807-01-grpd9/minwm-async-a2a-quality-h200-20260807-01/async-a2a-quality
+              git clone --no-checkout \
+                "https://x-access-token:${GITHUB_TOKEN}@github.com/seedleap/sglang.git" \
+                /workspace/sglang
+              git -C /workspace/sglang checkout --detach "${SGLANG_GIT_REF}"
+              [[ "$(git -C /workspace/sglang rev-parse HEAD)" == "${SGLANG_GIT_REF}" ]]
+              python3 /workspace/sglang/benchmark/minwm_realtime_parity/validate_async_a2a_quality.py \
+                --root "${source_root}" \
+                --case-id 00_forward_080_pottery_720p \
+                --sp-degrees 2 4 \
+                --output "${source_root}/quality-validation-ca3cf1dbfa.json" \
+                | tee "${source_root}/quality-validation-ca3cf1dbfa.log"
+              touch "${source_root}/QUALITY_VALIDATED_CA3CF1DBFA"
+          resources:
+            requests:
+              cpu: "8"
+              memory: 64Gi
+            limits:
+              cpu: "16"
+              memory: 128Gi
+          volumeMounts:
+            - name: results
+              mountPath: /results
+      volumes:
+        - name: results
+          persistentVolumeClaim:
+            claimName: minwm-async-a2a-quality-results-20260807
