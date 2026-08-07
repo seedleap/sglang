@@ -970,6 +970,7 @@ STANDALONE_FILES = {
     "2-gpu": [
         "../single_test_file/test_disagg_server.py",
         "../single_test_file/test_ipc_a2a_2_gpu.py",
+        "../single_test_file/test_minwm_async_a2a_gpu.py",
         "../single_test_file/test_pynccl_a2a_capture_2_gpu.py",
     ],
 }
@@ -987,6 +988,8 @@ STANDALONE_FILE_EST_TIMES = {
         "../single_test_file/test_disagg_server.py": 600.0,
         # no model load; the cost is the one-time JIT build of the sync kernels
         "../single_test_file/test_ipc_a2a_2_gpu.py": 240.0,
+        # repeated event/slot parity plus one captured split-QKV replay sequence
+        "../single_test_file/test_minwm_async_a2a_gpu.py": 180.0,
         # one capture plus three replays on a 32K-element exchange
         "../single_test_file/test_pynccl_a2a_capture_2_gpu.py": 180.0,
     },

@@ -7,8 +7,10 @@ import importlib.util
 import inspect
 import logging
 import os
+from contextlib import contextmanager
 from functools import lru_cache
 from pathlib import Path
+from typing import Callable
 
 import torch
 import torch.nn.functional as F
@@ -35,10 +37,16 @@ from sglang.multimodal_gen.runtime.layers.attention import LocalAttention
 from sglang.multimodal_gen.runtime.layers.layernorm import tensor_parallel_rms_norm
 from sglang.multimodal_gen.runtime.layers.rotary_embedding import NDRotaryEmbedding
 from sglang.multimodal_gen.runtime.layers.usp import (
+    _UlyssesA2AHandle,
+    _usp_async_backend_available,
+    _usp_begin_input_all_to_all_qk,
+    _usp_begin_input_all_to_all_v,
+    _usp_begin_output_all_to_all,
     _usp_input_all_to_all_qkv,
     _usp_input_all_to_all_varlen_qkv,
     _usp_output_all_to_all,
     _usp_output_all_to_all_varlen,
+    _usp_wait_all_to_all,
 )
 from sglang.multimodal_gen.runtime.layers.visual_embedding import (
     PatchEmbed,
@@ -82,7 +90,24 @@ _MINWM_CACHE_ROTATED_K = _env_flag("MINWM_CACHE_ROTATED_K", True)
 _MINWM_PRECOMPUTE_CACHE_ROPE = _env_flag("MINWM_PRECOMPUTE_CACHE_ROPE", True)
 _MINWM_CACHE_PACKED_METADATA = _env_flag("MINWM_CACHE_PACKED_METADATA", True)
 _MINWM_FUSED_POST_A2A_ROPE_CACHE = _env_flag("MINWM_FUSED_POST_A2A_ROPE_CACHE", False)
+_MINWM_ASYNC_A2A = _env_flag("MINWM_ASYNC_A2A", False)
+_MINWM_ASYNC_A2A_OUTPUT = _env_flag("MINWM_ASYNC_A2A_OUTPUT", False)
+_MINWM_ASYNC_A2A_BACKEND = (
+    os.environ.get("MINWM_ASYNC_A2A_BACKEND", "auto").strip().lower()
+)
 _MINWM_ANNOUNCED_ATTENTION_BACKENDS: set[tuple[str, str]] = set()
+
+
+@contextmanager
+def _minwm_nvtx_range(name: str, reference: torch.Tensor):
+    enabled = reference.is_cuda
+    if enabled:
+        torch.cuda.nvtx.range_push(name)
+    try:
+        yield
+    finally:
+        if enabled:
+            torch.cuda.nvtx.range_pop()
 
 
 class _MinWMUlyssesWorkspace:
@@ -90,6 +115,19 @@ class _MinWMUlyssesWorkspace:
 
     def __init__(self) -> None:
         self._buffers: dict[str, torch.Tensor] = {}
+        self._comm_streams: dict[int, torch.cuda.Stream] = {}
+        self._events: dict[
+            tuple[str, int, int],
+            tuple[
+                torch.cuda.Event,
+                torch.cuda.Event,
+                torch.cuda.Event,
+                torch.cuda.Event,
+            ],
+        ] = {}
+        self._next_slots: dict[str, int] = {}
+        self._generations: dict[tuple[str, int], int] = {}
+        self._busy: set[tuple[str, int, int]] = set()
 
     def get(
         self,
@@ -107,6 +145,73 @@ class _MinWMUlyssesWorkspace:
             buffer = reference.new_empty(numel)
             self._buffers[name] = buffer
         return buffer
+
+    def acquire(
+        self,
+        role: str,
+        reference: torch.Tensor,
+        numel: int,
+    ) -> (
+        tuple[
+            torch.Tensor,
+            torch.Tensor,
+            torch.cuda.Stream,
+            tuple[
+                torch.cuda.Event,
+                torch.cuda.Event,
+                torch.cuda.Event,
+                torch.cuda.Event,
+            ],
+            Callable[[], None],
+        ]
+        | None
+    ):
+        """Lease one of two persistent send/receive slots for an async A2A."""
+        if not reference.is_cuda:
+            return None
+        device_index = reference.device.index
+        if device_index is None:
+            device_index = torch.cuda.current_device()
+        slot = self._next_slots.get(role, 0)
+        generation_key = role, slot
+        generation = self._generations.get(generation_key, 0) + 1
+        busy_key = role, slot, generation
+        if any(item[:2] == generation_key for item in self._busy):
+            raise RuntimeError(f"MinWM Ulysses buffer {role}[{slot}] reused too early")
+
+        stream = self._comm_streams.get(device_index)
+        event_key = role, slot, device_index
+        events = self._events.get(event_key)
+        capturing = torch.cuda.is_current_stream_capturing()
+        send_name = f"{role}_send_{slot}"
+        recv_name = f"{role}_recv_{slot}"
+        if capturing and (
+            stream is None
+            or events is None
+            or send_name not in self._buffers
+            or recv_name not in self._buffers
+        ):
+            return None
+        if stream is None:
+            stream = torch.cuda.Stream(device=reference.device)
+            self._comm_streams[device_index] = stream
+        if events is None:
+            events = tuple(torch.cuda.Event(enable_timing=True) for _ in range(4))
+            self._events[event_key] = events
+        send = self.get(send_name, reference, numel)
+        recv = self.get(recv_name, reference, numel)
+        self._busy.add(busy_key)
+        self._next_slots[role] = 1 - slot
+        self._generations[generation_key] = generation
+
+        def release() -> None:
+            if busy_key not in self._busy:
+                raise RuntimeError(
+                    f"MinWM Ulysses buffer {role}[{slot}] released twice"
+                )
+            self._busy.remove(busy_key)
+
+        return send, recv, stream, events, release
 
 
 @torch.compiler.disable
@@ -628,6 +733,52 @@ class MinWMCausalSelfAttention(CausalWanSelfAttention):
             )
         )
 
+    @torch.compiler.disable
+    def begin_input_qk(
+        self, query: torch.Tensor, key: torch.Tensor
+    ) -> _UlyssesA2AHandle | None:
+        """Launch Q/K A2A when the production forward has a legal overlap window."""
+        if not _MINWM_ASYNC_A2A or not query.is_cuda:
+            return None
+        forward_batch = get_forward_context().forward_batch
+        if (
+            forward_batch is None
+            or not getattr(forward_batch, "enable_sequence_shard", False)
+            or get_ulysses_parallel_world_size() <= 1
+        ):
+            return None
+        seq_splits = getattr(forward_batch, "sequence_shard_splits", None)
+        if seq_splits is None or not sequence_splits_are_uniform(list(seq_splits)):
+            return None
+        capturing = torch.cuda.is_current_stream_capturing()
+        backend_available = _usp_async_backend_available(
+            _MINWM_ASYNC_A2A_BACKEND, capturing=capturing
+        )
+        if capturing and not backend_available:
+            raise RuntimeError(
+                "MinWM async A2A capture requires warmed IPC staging or an "
+                "available PyNCCL communicator"
+            )
+        if not backend_available:
+            return None
+        workspace = getattr(self, "ulysses_workspace", None)
+        if workspace is None:
+            return None
+        lease = workspace.acquire("input_qk", query, 2 * query.numel())
+        if lease is None:
+            return None
+        send, recv, comm_stream, events, release = lease
+        return _usp_begin_input_all_to_all_qk(
+            query,
+            key,
+            input_buffer=send,
+            output_buffer=recv,
+            comm_stream=comm_stream,
+            events=events,
+            backend=_MINWM_ASYNC_A2A_BACKEND,
+            release=release,
+        )
+
     def forward(
         self,
         query,
@@ -639,7 +790,10 @@ class MinWMCausalSelfAttention(CausalWanSelfAttention):
         current_start=0,
         cache_start=None,
         qk_already_roped=False,
+        input_qk_handle: _UlyssesA2AHandle | None = None,
     ):
+        if input_qk_handle is not None and kv_cache is None:
+            raise ValueError("async MinWM input A2A requires the inference KV cache")
         if kv_cache is None:
             return super().forward(
                 query,
@@ -676,21 +830,58 @@ class MinWMCausalSelfAttention(CausalWanSelfAttention):
             uniform_seq_splits = sequence_splits_are_uniform(seq_splits)
             workspace = getattr(self, "ulysses_workspace", None)
             if uniform_seq_splits:
-                input_buffer = output_buffer = None
-                if workspace is not None:
-                    packed_numel = 3 * query.numel()
-                    input_buffer = workspace.get("qkv_send", query, packed_numel)
-                    output_buffer = workspace.get("qkv_recv", query, packed_numel)
-                qkv = _usp_input_all_to_all_qkv(
-                    query,
-                    key,
-                    value,
-                    input_buffer=input_buffer,
-                    output_buffer=output_buffer,
-                )
+                if input_qk_handle is None:
+                    input_buffer = output_buffer = None
+                    if workspace is not None:
+                        packed_numel = 3 * query.numel()
+                        input_buffer = workspace.get("qkv_send", query, packed_numel)
+                        output_buffer = workspace.get("qkv_recv", query, packed_numel)
+                    with _minwm_nvtx_range("qkv_pack", query):
+                        qkv = _usp_input_all_to_all_qkv(
+                            query,
+                            key,
+                            value,
+                            input_buffer=input_buffer,
+                            output_buffer=output_buffer,
+                        )
+                    query, key, value = qkv.chunk(3, dim=-1)
+                else:
+                    if workspace is None:
+                        raise RuntimeError("async input A2A lost its workspace")
+                    lease = workspace.acquire("input_v", value, value.numel())
+                    if lease is None:
+                        _usp_wait_all_to_all(input_qk_handle)
+                        raise RuntimeError(
+                            "async V A2A buffers were not warmed before capture"
+                        )
+                    send, recv, comm_stream, events, release = lease
+                    try:
+                        value_handle = _usp_begin_input_all_to_all_v(
+                            value,
+                            input_buffer=send,
+                            output_buffer=recv,
+                            comm_stream=comm_stream,
+                            events=events,
+                            backend=input_qk_handle.backend,
+                            release=release,
+                        )
+                    except Exception:
+                        # QK was already posted on every rank. Retire that
+                        # collective before propagating the V launch failure.
+                        _usp_wait_all_to_all(input_qk_handle)
+                        raise
+                    with _minwm_nvtx_range("input_a2a_wait_qk", query):
+                        qk = _usp_wait_all_to_all(input_qk_handle)
+                    query, key = qk.chunk(2, dim=-1)
+                    with _minwm_nvtx_range("input_a2a_wait_v", value):
+                        value = _usp_wait_all_to_all(value_handle)
             else:
+                if input_qk_handle is not None:
+                    raise RuntimeError(
+                        "async input A2A requires uniform sequence splits"
+                    )
                 qkv = _usp_input_all_to_all_varlen_qkv(query, key, value, seq_splits)
-            query, key, value = qkv.chunk(3, dim=-1)
+                query, key, value = qkv.chunk(3, dim=-1)
 
         cache_head_start = 0 if sequence_shard_enabled else self.head_start
         fused_post_result = None
@@ -770,14 +961,15 @@ class MinWMCausalSelfAttention(CausalWanSelfAttention):
                 attention_key.detach().cpu(),
                 parity_dump_dir / f"self_k_roped_{parity_index:03d}.pt",
             )
-        if _MINWM_ATTENTION_IMPL == "dense":
-            output = (self.ulysses_attn if sequence_shard_enabled else self.attn)(
-                roped_query, attention_key, attention_value
-            )
-        else:
-            output = _minwm_packed_varlen_attention(
-                roped_query, attention_key, attention_value
-            )
+        with _minwm_nvtx_range("attention", roped_query):
+            if _MINWM_ATTENTION_IMPL == "dense":
+                output = (self.ulysses_attn if sequence_shard_enabled else self.attn)(
+                    roped_query, attention_key, attention_value
+                )
+            else:
+                output = _minwm_packed_varlen_attention(
+                    roped_query, attention_key, attention_value
+                )
         if parity_dump_dir is not None:
             if parity_index < 2:
                 torch.save(
@@ -788,15 +980,48 @@ class MinWMCausalSelfAttention(CausalWanSelfAttention):
         if sequence_shard_enabled:
             assert seq_splits is not None
             if uniform_seq_splits:
-                output_buffer = None
                 workspace = getattr(self, "ulysses_workspace", None)
-                if workspace is not None:
-                    output_buffer = workspace.get(
-                        "attention_recv", output, output.numel()
+                use_async_output = (
+                    _MINWM_ASYNC_A2A
+                    and _MINWM_ASYNC_A2A_OUTPUT
+                    and output.is_cuda
+                    and workspace is not None
+                    and _usp_async_backend_available(
+                        _MINWM_ASYNC_A2A_BACKEND,
+                        capturing=torch.cuda.is_current_stream_capturing(),
                     )
-                output = _usp_output_all_to_all(
-                    output, head_dim=2, output_buffer=output_buffer
                 )
+                if use_async_output:
+                    lease = workspace.acquire("output", output, output.numel())
+                    if lease is None:
+                        raise RuntimeError(
+                            "async output A2A buffers were not warmed before capture"
+                        )
+                    send, recv, comm_stream, events, release = lease
+                    output_handle = _usp_begin_output_all_to_all(
+                        output,
+                        head_dim=2,
+                        input_buffer=send,
+                        output_buffer=recv,
+                        comm_stream=comm_stream,
+                        events=events,
+                        backend=_MINWM_ASYNC_A2A_BACKEND,
+                        release=release,
+                    )
+                    # No same-request work is independent of this result. Keep
+                    # begin/consume separate for measurement, but consume now.
+                    with _minwm_nvtx_range("output_a2a_wait", output):
+                        output = _usp_wait_all_to_all(output_handle)
+                else:
+                    output_buffer = None
+                    if workspace is not None:
+                        output_buffer = workspace.get(
+                            "attention_recv", output, output.numel()
+                        )
+                    with _minwm_nvtx_range("output_a2a_launch_wait_sync", output):
+                        output = _usp_output_all_to_all(
+                            output, head_dim=2, output_buffer=output_buffer
+                        )
             else:
                 output = _usp_output_all_to_all_varlen(output, seq_splits, head_dim=2)
         return output
@@ -923,36 +1148,52 @@ class MinWMCausalTransformerBlock(CausalWanTransformerBlock):
             self.norm1.eps,
         )
 
-        query, _ = self.to_q(norm_hidden_states)
-        key, _ = self.to_k(norm_hidden_states)
-        value, _ = self.to_v(norm_hidden_states)
-        if self.tp_rmsnorm:
-            query = tensor_parallel_rms_norm(query, self.norm_q)
-            key = tensor_parallel_rms_norm(key, self.norm_k)
-            query = query.squeeze(1).unflatten(2, (self.local_num_heads, self.dim_head))
-            key = key.squeeze(1).unflatten(2, (self.local_num_heads, self.dim_head))
-            qk_already_roped = False
-        else:
-            qk_op = _minwm_qk_norm_rope_op if kv_cache is None else _minwm_qk_norm_op
-            qk_args = [
-                query.squeeze(1),
-                key.squeeze(1),
-                self.norm_q.weight,
-                self.norm_k.weight,
-                self.norm_q.eps,
-            ]
-            if kv_cache is None:
-                qk_args.append(torch.stack(freqs_cis, dim=-1))
-            qk_args.append(self.local_num_heads)
-            # minWM main's inference/cache path calls qk_norm_op eagerly.
-            # Compiling this reduction changes its BF16 rounding boundary.
-            query, key = _minwm_apply_qk_op(
-                qk_op,
-                qk_args,
-                use_cache=kv_cache is not None,
-                use_compile=query.is_cuda,
-            )
-            qk_already_roped = kv_cache is None
+        use_async_input = _MINWM_ASYNC_A2A and kv_cache is not None
+        with _minwm_nvtx_range("qkv_projection", norm_hidden_states):
+            query, _ = self.to_q(norm_hidden_states)
+            key, _ = self.to_k(norm_hidden_states)
+            value = None
+            if not use_async_input:
+                value, _ = self.to_v(norm_hidden_states)
+        with _minwm_nvtx_range("qk_norm", query):
+            if self.tp_rmsnorm:
+                query = tensor_parallel_rms_norm(query, self.norm_q)
+                key = tensor_parallel_rms_norm(key, self.norm_k)
+                query = query.squeeze(1).unflatten(
+                    2, (self.local_num_heads, self.dim_head)
+                )
+                key = key.squeeze(1).unflatten(2, (self.local_num_heads, self.dim_head))
+                qk_already_roped = False
+            else:
+                qk_op = (
+                    _minwm_qk_norm_rope_op if kv_cache is None else _minwm_qk_norm_op
+                )
+                qk_args = [
+                    query.squeeze(1),
+                    key.squeeze(1),
+                    self.norm_q.weight,
+                    self.norm_k.weight,
+                    self.norm_q.eps,
+                ]
+                if kv_cache is None:
+                    qk_args.append(torch.stack(freqs_cis, dim=-1))
+                qk_args.append(self.local_num_heads)
+                # minWM main's inference/cache path calls qk_norm_op eagerly.
+                # Compiling this reduction changes its BF16 rounding boundary.
+                query, key = _minwm_apply_qk_op(
+                    qk_op,
+                    qk_args,
+                    use_cache=kv_cache is not None,
+                    use_compile=query.is_cuda,
+                )
+                qk_already_roped = kv_cache is None
+
+        input_qk_handle = None
+        if use_async_input:
+            input_qk_handle = self.attn1.begin_input_qk(query, key)
+            with _minwm_nvtx_range("input_a2a_overlap_v_projection", query):
+                value, _ = self.to_v(norm_hidden_states)
+        assert value is not None
         value = value.squeeze(1).unflatten(2, (self.local_num_heads, self.dim_head))
         attn_output = self.attn1(
             query,
@@ -964,8 +1205,10 @@ class MinWMCausalTransformerBlock(CausalWanTransformerBlock):
             current_start,
             cache_start,
             qk_already_roped=qk_already_roped,
+            input_qk_handle=input_qk_handle,
         ).flatten(2)
-        attn_output, _ = self.to_out(attn_output)
+        with _minwm_nvtx_range("output_projection", attn_output):
+            attn_output, _ = self.to_out(attn_output)
         attn_output = attn_output.squeeze(1)
 
         hidden_states = _minwm_adaln(
@@ -1013,7 +1256,8 @@ class MinWMCausalTransformerBlock(CausalWanTransformerBlock):
             r=cross_output,
         )
 
-        ff_output = self.ffn(norm_hidden_states)
+        with _minwm_nvtx_range("ffn", norm_hidden_states):
+            ff_output = self.ffn(norm_hidden_states)
         return _minwm_adaln(
             hidden_states,
             y=ff_output,
@@ -1038,11 +1282,22 @@ class MinWMCausalTransformer3DModel(CausalWanTransformer3DModel):
                 "MINWM_ATTENTION_IMPL must be 'packed' or 'dense', got "
                 f"{_MINWM_ATTENTION_IMPL!r}"
             )
+        if _MINWM_ASYNC_A2A_BACKEND not in {
+            "auto",
+            "process_group",
+            "pynccl",
+            "ipc",
+        }:
+            raise ValueError(
+                "MINWM_ASYNC_A2A_BACKEND must be auto, process_group, "
+                f"pynccl, or ipc; got {_MINWM_ASYNC_A2A_BACKEND!r}"
+            )
         logger.info(
             "MinWM execution profile: attention_impl=%s "
             "packed_deterministic=%s segment_compile=%s cache_rotated_k=%s "
             "precompute_cache_rope=%s cache_packed_metadata=%s "
-            "fused_post_a2a_rope_cache=%s",
+            "fused_post_a2a_rope_cache=%s async_a2a=%s "
+            "async_a2a_output=%s async_a2a_backend=%s",
             _MINWM_ATTENTION_IMPL,
             _MINWM_PACKED_ATTENTION_DETERMINISTIC,
             _MINWM_SEGMENT_COMPILE,
@@ -1050,6 +1305,9 @@ class MinWMCausalTransformer3DModel(CausalWanTransformer3DModel):
             _MINWM_PRECOMPUTE_CACHE_ROPE,
             _MINWM_CACHE_PACKED_METADATA,
             _MINWM_FUSED_POST_A2A_ROPE_CACHE,
+            _MINWM_ASYNC_A2A,
+            _MINWM_ASYNC_A2A_OUTPUT,
+            _MINWM_ASYNC_A2A_BACKEND,
         )
         deterministic = os.environ.get("MINWM_PARITY_DETERMINISTIC", "0")
         if deterministic.strip().lower() not in {"", "0", "false", "no", "off"}:

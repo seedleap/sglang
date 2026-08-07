@@ -1845,6 +1845,54 @@ def test_minwm_ulysses_qkv_peer_first_layout_round_trips_exactly(monkeypatch):
         assert torch.equal(round_trip, qkv_by_rank[active_rank])
 
 
+@pytest.mark.parametrize("world_size", [2, 4])
+def test_minwm_split_qk_v_pack_matches_sync_qkv_exactly(world_size):
+    import sglang.multimodal_gen.runtime.layers.usp as usp_module
+
+    batch_size = 2
+    local_seq = 3
+    global_heads = 8
+    head_dim = 2
+    query = torch.arange(
+        batch_size * local_seq * global_heads * head_dim, dtype=torch.float32
+    ).reshape(batch_size, local_seq, global_heads, head_dim)
+    key = query + 1000
+    value = query + 2000
+    qk_buffer = torch.empty(2 * query.numel())
+    value_buffer = torch.empty(value.numel())
+    qkv_buffer = torch.empty(3 * query.numel())
+
+    split_qk = usp_module._usp_pack_peer_first_qk(query, key, world_size, qk_buffer)
+    split_value = usp_module._usp_pack_peer_first_tensor(
+        value, world_size, value_buffer
+    )
+    sync_qkv = usp_module._usp_pack_peer_first_qkv(
+        query, key, value, world_size, qkv_buffer
+    )
+
+    assert torch.equal(torch.cat((split_qk, split_value), dim=-1), sync_qkv)
+    assert split_qk.data_ptr() == qk_buffer.data_ptr()
+    assert split_value.data_ptr() == value_buffer.data_ptr()
+
+
+def test_minwm_async_a2a_process_group_capture_falls_back(monkeypatch):
+    import sglang.multimodal_gen.runtime.layers.usp as usp_module
+
+    assert usp_module._usp_async_backend_available("process_group", capturing=False)
+    assert not usp_module._usp_async_backend_available("process_group", capturing=True)
+    monkeypatch.setattr(usp_module, "_usp_pynccl_communicator", lambda: None)
+    assert not usp_module._usp_async_backend_available("auto", capturing=True)
+    assert not usp_module._usp_async_backend_available("process_group", capturing=True)
+    monkeypatch.setattr(usp_module, "_usp_pynccl_communicator", object)
+    assert usp_module._usp_async_backend_available("process_group", capturing=True)
+    assert (
+        usp_module._usp_select_async_backend("process_group", capturing=True)
+        == "pynccl"
+    )
+    with pytest.raises(ValueError, match="MINWM_ASYNC_A2A_BACKEND"):
+        usp_module._usp_async_backend_available("unknown", capturing=False)
+
+
 @pytest.mark.parametrize("seq_splits", [(2, 2), (3, 2)])
 def test_minwm_causal_attention_packs_one_ulysses_collective(monkeypatch, seq_splits):
     import sglang.multimodal_gen.runtime.models.dits.minwm as minwm_module

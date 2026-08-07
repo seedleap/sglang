@@ -1,7 +1,8 @@
 # Copied and adapted from: https://github.com/hao-ai-lab/FastVideo
 
 import logging
-from typing import TYPE_CHECKING
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Callable
 
 import torch
 import torch.distributed as dist
@@ -23,6 +24,43 @@ if TYPE_CHECKING:
     )
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class _UlyssesA2AHandle:
+    """A launched A2A whose consumer dependency is inserted by :meth:`wait`."""
+
+    output: torch.Tensor
+    source: torch.Tensor
+    role: str
+    backend: str
+    ready_event: torch.cuda.Event
+    done_event: torch.cuda.Event
+    wait_enter_event: torch.cuda.Event
+    wait_exit_event: torch.cuda.Event
+    comm_stream: torch.cuda.Stream
+    transform: Callable[[torch.Tensor], torch.Tensor]
+    release: Callable[[], None] | None = None
+    work: object | None = None
+    consumed: bool = False
+
+    def wait(self) -> torch.Tensor:
+        if self.consumed:
+            raise RuntimeError(f"Ulysses {self.role} A2A handle was consumed twice")
+        consumer_stream = torch.cuda.current_stream(self.output.device)
+        self.wait_enter_event.record(consumer_stream)
+        consumer_stream.wait_event(self.done_event)
+        self.wait_exit_event.record(consumer_stream)
+        self.output.record_stream(consumer_stream)
+        result = self.transform(self.output)
+        self.consumed = True
+        if self.release is not None:
+            self.release()
+        return result
+
+
+class _UlyssesA2ABackendUnavailable(RuntimeError):
+    pass
 
 
 def _maybe_wait(tensor: torch.Tensor) -> torch.Tensor:
@@ -56,6 +94,176 @@ def _usp_all_to_all_single(
     # immediately, so avoid the extra wrapper overhead of functional collectives.
     torch.distributed.all_to_all_single(output, x, group=ulysses_pg)
     return output.reshape(x_shape)
+
+
+def _usp_pynccl_communicator():
+    """Return the SP PyNCCL communicator only when it exactly matches Ulysses."""
+    try:
+        sp_group = get_sp_group()
+    except AssertionError:
+        return None
+    if sp_group.world_size != get_ulysses_parallel_world_size():
+        return None
+    device_communicator = getattr(sp_group, "device_communicator", None)
+    communicator = getattr(device_communicator, "pynccl_comm", None)
+    if communicator is None or not getattr(communicator, "available", False):
+        return None
+    return communicator
+
+
+def _usp_async_backend_available(backend: str, *, capturing: bool) -> bool:
+    if backend not in {"auto", "process_group", "pynccl", "ipc"}:
+        raise ValueError(
+            "MINWM_ASYNC_A2A_BACKEND must be auto, process_group, pynccl, or ipc"
+        )
+    if backend == "process_group":
+        return not capturing or _usp_pynccl_communicator() is not None
+    if backend == "pynccl":
+        return _usp_pynccl_communicator() is not None
+    if backend == "ipc":
+        return get_ulysses_parallel_world_size() == 2 and _ipc_ready_group() is not None
+    if capturing:
+        return _usp_pynccl_communicator() is not None
+    return True
+
+
+def _usp_select_async_backend(backend: str, *, capturing: bool) -> str:
+    if not _usp_async_backend_available(backend, capturing=capturing):
+        raise _UlyssesA2ABackendUnavailable(
+            f"Ulysses async backend {backend!r} is unavailable"
+        )
+    if capturing and backend in {"auto", "process_group"}:
+        return "pynccl"
+    if backend != "auto":
+        return backend
+    # Keep the default candidate directly comparable with the synchronous
+    # ProcessGroupNCCL baseline. IPC and raw PyNCCL remain explicit experiments.
+    return "process_group"
+
+
+def _usp_launch_ipc_equal_split(packed: torch.Tensor) -> torch.Tensor:
+    """Enqueue a two-rank destination-major A2A on the current CUDA stream."""
+    group = _ipc_ready_group()
+    if group is None:
+        raise _UlyssesA2ABackendUnavailable("IPC A2A is not initialized")
+    from sglang.multimodal_gen.runtime.distributed.device_communicators.ipc_a2a import (
+        IPC_A2A,
+    )
+
+    flat = packed.reshape(-1)
+    if flat.numel() % 2:
+        raise ValueError("two-rank IPC A2A requires an even element count")
+    pair = IPC_A2A.get_staging(flat.numel(), flat.numel(), flat.dtype, group)
+    if pair is None:
+        raise _UlyssesA2ABackendUnavailable(
+            "IPC staging was not warmed before CUDA graph capture"
+        )
+    local, peer = pair
+    slot = IPC_A2A.next_slot()
+    rank = IPC_A2A.rank
+    chunk = flat.numel() // 2
+    output = local[slot].narrow(0, 0, flat.numel())
+    peer_output = peer[slot].narrow(0, 0, flat.numel())
+    peer_rank = 1 - rank
+    peer_output.narrow(0, rank * chunk, chunk).copy_(
+        flat.narrow(0, peer_rank * chunk, chunk), non_blocking=True
+    )
+    IPC_A2A.signal()
+    output.narrow(0, rank * chunk, chunk).copy_(
+        flat.narrow(0, rank * chunk, chunk), non_blocking=True
+    )
+    IPC_A2A.wait()
+    return output.view_as(packed)
+
+
+def _usp_begin_all_to_all_single(
+    packed: torch.Tensor,
+    *,
+    output_buffer: torch.Tensor,
+    comm_stream: torch.cuda.Stream,
+    events: tuple[
+        torch.cuda.Event, torch.cuda.Event, torch.cuda.Event, torch.cuda.Event
+    ],
+    role: str,
+    backend: str,
+    transform: Callable[[torch.Tensor], torch.Tensor],
+    release: Callable[[], None] | None = None,
+) -> _UlyssesA2AHandle:
+    """Launch equal-split A2A without adding a dependency to the compute stream."""
+    if not packed.is_cuda:
+        if release is not None:
+            release()
+        raise _UlyssesA2ABackendUnavailable("async A2A requires CUDA tensors")
+    capturing = torch.cuda.is_current_stream_capturing()
+    try:
+        selected_backend = _usp_select_async_backend(backend, capturing=capturing)
+        if (
+            output_buffer.numel() != packed.numel()
+            or output_buffer.dtype != packed.dtype
+            or output_buffer.device != packed.device
+        ):
+            raise ValueError("async Ulysses output buffer must match its packed input")
+    except Exception:
+        if release is not None:
+            release()
+        raise
+
+    ready_event, done_event, wait_enter_event, wait_exit_event = events
+    producer_stream = torch.cuda.current_stream(packed.device)
+    ready_event.record(producer_stream)
+    work = None
+    output = output_buffer.reshape_as(packed)
+    try:
+        with torch.cuda.stream(comm_stream):
+            comm_stream.wait_event(ready_event)
+            if selected_backend == "process_group":
+                ulysses_pg = get_sp_group().ulysses_group
+                if ulysses_pg is None:
+                    raise _UlyssesA2ABackendUnavailable(
+                        "Ulysses process group is not initialized"
+                    )
+                work = dist.all_to_all_single(
+                    output.reshape(-1),
+                    packed.reshape(-1),
+                    group=ulysses_pg,
+                    async_op=True,
+                )
+                # CUDA Work.wait inserts a stream dependency; it does not make
+                # the producer/consumer compute stream wait for the collective.
+                work.wait()
+            elif selected_backend == "pynccl":
+                communicator = _usp_pynccl_communicator()
+                if communicator is None:
+                    raise _UlyssesA2ABackendUnavailable(
+                        "PyNCCL communicator is unavailable"
+                    )
+                with communicator.change_state(enable=True):
+                    communicator.all_to_all_single(
+                        output.reshape(-1), packed.reshape(-1), stream=comm_stream
+                    )
+            else:
+                output = _usp_launch_ipc_equal_split(packed)
+            done_event.record(comm_stream)
+        packed.record_stream(comm_stream)
+        output.record_stream(comm_stream)
+    except Exception:
+        if release is not None:
+            release()
+        raise
+    return _UlyssesA2AHandle(
+        output=output,
+        source=packed,
+        role=role,
+        backend=selected_backend,
+        ready_event=ready_event,
+        done_event=done_event,
+        wait_enter_event=wait_enter_event,
+        wait_exit_event=wait_exit_event,
+        comm_stream=comm_stream,
+        transform=transform,
+        release=release,
+        work=work,
+    )
 
 
 def _usp_pack_peer_first_qkv(
@@ -101,6 +309,272 @@ def _usp_pack_peer_first_qkv(
     packed = output_buffer.view(packed_shape)
     torch.cat(qkv_peer_first, dim=-1, out=packed)
     return packed
+
+
+def _usp_pack_peer_first_qk(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    world_size: int,
+    output_buffer: torch.Tensor,
+) -> torch.Tensor:
+    h_local = query.shape[2] // world_size
+    packed_shape = (
+        world_size,
+        query.shape[0],
+        query.shape[1],
+        h_local,
+        2 * query.shape[3],
+    )
+    if (
+        query.is_cuda
+        and torch.version.hip is None
+        and query.is_contiguous()
+        and key.is_contiguous()
+    ):
+        try:
+            from sglang.jit_kernel.diffusion.triton.ulysses_qkv_pack import (
+                fused_pack_peer_first_qk,
+            )
+        except ImportError:
+            pass
+        else:
+            return fused_pack_peer_first_qk(query, key, world_size, output_buffer)
+
+    qk_peer_first = (
+        query.unflatten(2, (world_size, h_local)).permute(2, 0, 1, 3, 4),
+        key.unflatten(2, (world_size, h_local)).permute(2, 0, 1, 3, 4),
+    )
+    packed = output_buffer.view(packed_shape)
+    torch.cat(qk_peer_first, dim=-1, out=packed)
+    return packed
+
+
+def _usp_pack_peer_first_tensor(
+    tensor: torch.Tensor,
+    world_size: int,
+    output_buffer: torch.Tensor,
+) -> torch.Tensor:
+    h_local = tensor.shape[2] // world_size
+    packed_shape = (
+        world_size,
+        tensor.shape[0],
+        tensor.shape[1],
+        h_local,
+        tensor.shape[3],
+    )
+    if tensor.is_cuda and torch.version.hip is None and tensor.is_contiguous():
+        try:
+            from sglang.jit_kernel.diffusion.triton.ulysses_qkv_pack import (
+                fused_pack_peer_first_tensor,
+            )
+        except ImportError:
+            pass
+        else:
+            return fused_pack_peer_first_tensor(tensor, world_size, output_buffer)
+
+    packed = output_buffer.view(packed_shape)
+    packed.copy_(tensor.unflatten(2, (world_size, h_local)).permute(2, 0, 1, 3, 4))
+    return packed
+
+
+def _usp_validate_split_input(
+    tensors: tuple[torch.Tensor, ...], output_multiplier: int
+) -> tuple[int, int, int, int, int]:
+    world_size = get_ulysses_parallel_world_size()
+    reference = tensors[0]
+    if world_size <= 1:
+        raise ValueError("split input A2A requires Ulysses world size greater than one")
+    if reference.ndim != 4 or any(t.shape != reference.shape for t in tensors[1:]):
+        raise ValueError("Ulysses inputs must have identical [B, S, H, D] shapes")
+    if reference.shape[2] % world_size:
+        raise ValueError("global head count must be divisible by Ulysses world size")
+    return (
+        world_size,
+        reference.shape[0],
+        reference.shape[1],
+        reference.shape[2] // world_size,
+        output_multiplier * reference.shape[3],
+    )
+
+
+def _usp_begin_input_all_to_all_qk(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    *,
+    input_buffer: torch.Tensor,
+    output_buffer: torch.Tensor,
+    comm_stream: torch.cuda.Stream,
+    events: tuple[
+        torch.cuda.Event, torch.cuda.Event, torch.cuda.Event, torch.cuda.Event
+    ],
+    backend: str,
+    release: Callable[[], None] | None = None,
+) -> _UlyssesA2AHandle:
+    """Pack and launch the Q/K portion of MinWM's input A2A."""
+    world_size, batch, sequence, local_heads, packed_dim = _usp_validate_split_input(
+        (query, key), 2
+    )
+    if input_buffer.numel() != 2 * query.numel():
+        raise ValueError("QK input buffer has the wrong size")
+    if query.is_cuda:
+        torch.cuda.nvtx.range_push("qkv_pack_qk")
+    try:
+        packed = _usp_pack_peer_first_qk(query, key, world_size, input_buffer)
+    except Exception:
+        if release is not None:
+            release()
+        raise
+    finally:
+        if query.is_cuda:
+            torch.cuda.nvtx.range_pop()
+
+    def transform(exchanged: torch.Tensor) -> torch.Tensor:
+        return exchanged.permute(1, 0, 2, 3, 4).reshape(
+            batch, sequence * world_size, local_heads, packed_dim
+        )
+
+    torch.cuda.nvtx.range_push("input_a2a_launch_qk")
+    try:
+        return _usp_begin_all_to_all_single(
+            packed,
+            output_buffer=output_buffer,
+            comm_stream=comm_stream,
+            events=events,
+            role="input_qk",
+            backend=backend,
+            transform=transform,
+            release=release,
+        )
+    finally:
+        torch.cuda.nvtx.range_pop()
+
+
+def _usp_begin_input_all_to_all_v(
+    value: torch.Tensor,
+    *,
+    input_buffer: torch.Tensor,
+    output_buffer: torch.Tensor,
+    comm_stream: torch.cuda.Stream,
+    events: tuple[
+        torch.cuda.Event, torch.cuda.Event, torch.cuda.Event, torch.cuda.Event
+    ],
+    backend: str,
+    release: Callable[[], None] | None = None,
+) -> _UlyssesA2AHandle:
+    """Pack and launch the V portion of MinWM's input A2A."""
+    world_size, batch, sequence, local_heads, packed_dim = _usp_validate_split_input(
+        (value,), 1
+    )
+    if input_buffer.numel() != value.numel():
+        raise ValueError("V input buffer has the wrong size")
+    if value.is_cuda:
+        torch.cuda.nvtx.range_push("qkv_pack_v")
+    try:
+        packed = _usp_pack_peer_first_tensor(value, world_size, input_buffer)
+    except Exception:
+        if release is not None:
+            release()
+        raise
+    finally:
+        if value.is_cuda:
+            torch.cuda.nvtx.range_pop()
+
+    def transform(exchanged: torch.Tensor) -> torch.Tensor:
+        return exchanged.permute(1, 0, 2, 3, 4).reshape(
+            batch, sequence * world_size, local_heads, packed_dim
+        )
+
+    torch.cuda.nvtx.range_push("input_a2a_launch_v")
+    try:
+        return _usp_begin_all_to_all_single(
+            packed,
+            output_buffer=output_buffer,
+            comm_stream=comm_stream,
+            events=events,
+            role="input_v",
+            backend=backend,
+            transform=transform,
+            release=release,
+        )
+    finally:
+        torch.cuda.nvtx.range_pop()
+
+
+def _usp_wait_all_to_all(handle: _UlyssesA2AHandle) -> torch.Tensor:
+    return handle.wait()
+
+
+def _usp_begin_output_all_to_all(
+    tensor: torch.Tensor,
+    *,
+    head_dim: int,
+    input_buffer: torch.Tensor,
+    output_buffer: torch.Tensor,
+    comm_stream: torch.cuda.Stream,
+    events: tuple[
+        torch.cuda.Event, torch.cuda.Event, torch.cuda.Event, torch.cuda.Event
+    ],
+    backend: str,
+    release: Callable[[], None] | None = None,
+) -> _UlyssesA2AHandle:
+    """Pack and launch the inverse Ulysses A2A; consumption remains explicit."""
+    world_size = get_ulysses_parallel_world_size()
+    if world_size <= 1 or tensor.ndim != 4 or head_dim not in (1, 2):
+        raise ValueError("invalid tensor or topology for output A2A")
+    if head_dim == 1:
+        batch, local_heads, global_sequence, head_size = tensor.shape
+        permute_order = 2, 0, 1, 3
+    else:
+        batch, global_sequence, local_heads, head_size = tensor.shape
+        permute_order = 1, 0, 2, 3
+    if global_sequence % world_size:
+        raise ValueError("global sequence length must be divisible by world size")
+    if input_buffer.numel() != tensor.numel():
+        raise ValueError("output A2A input buffer has the wrong size")
+    local_sequence = global_sequence // world_size
+    global_heads = local_heads * world_size
+    packed_shape = global_sequence, batch, local_heads, head_size
+    torch.cuda.nvtx.range_push("output_a2a_pack")
+    try:
+        packed = input_buffer.view(packed_shape)
+        packed.copy_(tensor.permute(permute_order))
+    except Exception:
+        if release is not None:
+            release()
+        raise
+    finally:
+        torch.cuda.nvtx.range_pop()
+
+    def transform(exchanged: torch.Tensor) -> torch.Tensor:
+        exchanged = exchanged.reshape(
+            world_size, local_sequence, batch, local_heads, head_size
+        )
+        if head_dim == 1:
+            return (
+                exchanged.permute(2, 0, 3, 1, 4)
+                .contiguous()
+                .reshape(batch, global_heads, local_sequence, head_size)
+            )
+        return (
+            exchanged.permute(2, 1, 0, 3, 4)
+            .contiguous()
+            .reshape(batch, local_sequence, global_heads, head_size)
+        )
+
+    torch.cuda.nvtx.range_push("output_a2a_launch")
+    try:
+        return _usp_begin_all_to_all_single(
+            packed,
+            output_buffer=output_buffer,
+            comm_stream=comm_stream,
+            events=events,
+            role="output",
+            backend=backend,
+            transform=transform,
+            release=release,
+        )
+    finally:
+        torch.cuda.nvtx.range_pop()
 
 
 def _usp_input_all_to_all_qkv(
@@ -414,9 +888,9 @@ def _usp_input_all_to_all(x: torch.Tensor, head_dim: int = 1) -> torch.Tensor:
         # Shape transition: [b, s_local, h_global, d] -> [h_global, b, s_local, d]
         permute_order = (2, 0, 1, 3)
 
-    assert (
-        h_global % world_size == 0
-    ), f"h_global ({h_global}) must be divisible by world_size ({world_size})"
+    assert h_global % world_size == 0, (
+        f"h_global ({h_global}) must be divisible by world_size ({world_size})"
+    )
 
     h_local, s_global = h_global // world_size, s_local * world_size
 
@@ -468,9 +942,9 @@ def _usp_input_all_to_all_varlen(
 
     assert x.ndim == 4, f"x must have 4 dimensions, got {x.ndim}"
     assert head_dim in (1, 2), f"head_dim must be 1 or 2, got {head_dim}"
-    assert (
-        len(seq_lens) == world_size
-    ), f"seq_lens must have length {world_size}, got {len(seq_lens)}"
+    assert len(seq_lens) == world_size, (
+        f"seq_lens must have length {world_size}, got {len(seq_lens)}"
+    )
 
     rank = get_ulysses_parallel_rank()
 
@@ -484,12 +958,12 @@ def _usp_input_all_to_all_varlen(
         # Shape transition: [b, s_local, h_global, d] -> [h_global, b, s_local, d]
         permute_order = (2, 0, 1, 3)
 
-    assert (
-        s_local == seq_lens[rank]
-    ), f"s_local ({s_local}) must equal seq_lens[{rank}] ({seq_lens[rank]})"
-    assert (
-        h_global % world_size == 0
-    ), f"h_global ({h_global}) must be divisible by world_size ({world_size})"
+    assert s_local == seq_lens[rank], (
+        f"s_local ({s_local}) must equal seq_lens[{rank}] ({seq_lens[rank]})"
+    )
+    assert h_global % world_size == 0, (
+        f"h_global ({h_global}) must be divisible by world_size ({world_size})"
+    )
 
     h_local = h_global // world_size
 
@@ -562,9 +1036,9 @@ def _usp_output_all_to_all(
         # Shape transition: [b, s_global, h_local, d] -> [s_global, b, h_local, d]
         permute_order = (1, 0, 2, 3)
 
-    assert (
-        s_global % world_size == 0
-    ), f"s_global ({s_global}) must be divisible by world_size ({world_size})"
+    assert s_global % world_size == 0, (
+        f"s_global ({s_global}) must be divisible by world_size ({world_size})"
+    )
 
     s_local, h_global = s_global // world_size, h_local * world_size
 
@@ -616,9 +1090,9 @@ def _usp_output_all_to_all_varlen(
 
     assert x.ndim == 4, f"x must have 4 dimensions, got {x.ndim}"
     assert head_dim in (1, 2), f"head_dim must be 1 or 2, got {head_dim}"
-    assert (
-        len(seq_lens) == world_size
-    ), f"seq_lens must have length {world_size}, got {len(seq_lens)}"
+    assert len(seq_lens) == world_size, (
+        f"seq_lens must have length {world_size}, got {len(seq_lens)}"
+    )
 
     rank = get_ulysses_parallel_rank()
 
@@ -632,9 +1106,9 @@ def _usp_output_all_to_all_varlen(
         # Shape transition: [b, s_global, h_local, d] -> [h_local, b, s_global, d]
         permute_order = (2, 0, 1, 3)
 
-    assert s_global == sum(
-        seq_lens
-    ), f"s_global ({s_global}) must equal sum(seq_lens) ({sum(seq_lens)})"
+    assert s_global == sum(seq_lens), (
+        f"s_global ({s_global}) must equal sum(seq_lens) ({sum(seq_lens)})"
+    )
 
     s_local = seq_lens[rank]
 

@@ -61,6 +61,12 @@ Q/K/V projection
 | packed-QKV input A2A | 同一 block 内仅限不读取 A2A 输出且不修改其 source/storage 的工作；候选包括已准备好的 cache metadata/position bookkeeping，或不同 request/chunk 的独立计算 | 单请求层内窗口预计很小；必须在 trace 中看到通信与具体 compute kernel 时间相交，CPU bookkeeping 不算 GPU overlap |
 | reverse output A2A | 同一 block 内 output projection/residual/FFN 都依赖结果，不能提前；候选主要是不同 request/chunk 的独立计算或显式流水 | 若 scheduler 只有一个 in-flight chunk，单纯拆 API 不会产生收益，需评估跨 request/chunk 双缓冲且保持 cache 隔离 |
 
+首个候选把 input collective 按最后一维拆成 `QK` 与 `V` 两段：先计算并归一化 Q/K，
+launch QK A2A；compute stream 随即执行独立的 V projection，再 launch V A2A，随后才 consume
+QK/V。这样增加一次 collective launch，但通信字节数不变，并给 QK A2A 一个真实的 V GEMM
+窗口。是否有净收益由真机决定；不得用依赖图推断替代 trace。reverse output 当前只有
+begin/consume 观测接口，默认关闭且立即 consume，因为层内没有合法工作可插入。
+
 首轮代码前先量化真实 forward 中可移动的独立 GPU 工作。若 launch→wait 间没有合法 compute，
 立即把结果写入“偏离原认知”，不把接口异步化当作完成；再评估跨 request/chunk pipeline。
 
@@ -76,8 +82,12 @@ Q/K/V projection
   开关关闭时回到同步基线。fallback 不得掩盖半完成 collective 或跨 rank 分歧。
 - eager 和 CUDA Graph 分开验证。任何 backend 在 capture 中不安全时必须一致回退，不能让
   不同 rank 选择不同路径。
-- 预定总开关：`MINWM_ASYNC_A2A=0` 回滚到同步基线；更细的 input/output/backend 开关待最小
-  实现后记录最终名称和默认值。
+- 总开关：`MINWM_ASYNC_A2A=0`（默认）回滚到同步 packed-QKV 基线；开启后 input 使用
+  QK/V split。`MINWM_ASYNC_A2A_OUTPUT=0` 默认保持 reverse output 同步，设为 `1` 只用于
+  测量立即 begin/consume。`MINWM_ASYNC_A2A_BACKEND=auto|process_group|pynccl|ipc`，默认
+  `auto`：eager 与同步基线同用 ProcessGroupNCCL，capture 强制选择 PyNCCL；显式 IPC 仅限
+  SP2 且要求 staging 已 warm。capture 无安全 backend 时 fail-fast，不能静默进入可能挂死的
+  ProcessGroupNCCL graph。
 
 ## NVTX 与统计合同
 
@@ -118,6 +128,27 @@ complete/consume event；统计 input/output A2A 的 launch→wait 距离、wait
   不通过。
 
 ## 按时间追加的实验日志
+
+### 2026-08-07：候选 1——QK A2A 与 V projection 重叠
+
+- 假设：完整 packed-QKV A2A 前没有可移动工作，但 Q/K/V projection 相互独立；将 wire
+  payload 拆成 QK 与 V 后，可以用 V GEMM 隐藏 QK A2A 的 exposed time，并克服新增一次
+  collective launch 的代价。
+- 修改：新增显式 comm stream、ready/done/wait-enter/wait-exit CUDA events、无
+  device-wide synchronize 的 begin/consume handle；workspace 对 input-QK、input-V、output
+  分角色使用两个 slot、generation/busy 检查与 `record_stream` lifetime；新增 QK/V Triton
+  peer-first pack。ProcessGroup eager launch 使用 `async_op=True`，只在 comm stream 上用
+  CUDA Work dependency 建立 completion event，consumer compute stream 仅等待该 event；
+  PyNCCL/IPC 直接在 comm stream enqueue。异常只能在 collective 未发出前 fallback；若 QK
+  已发出而 V launch 失败，先 retire QK 再报错。
+- 正确性：本地执行完整
+  `PYTHONPATH=python TORCHDYNAMO_DISABLE=1 /opt/homebrew/bin/python3.11 -m pytest -q python/sglang/multimodal_gen/test/unit/test_ipc_a2a_lifecycle.py python/sglang/multimodal_gen/test/unit/realtime/test_minwm_realtime.py`，
+  结果 `123 passed`。新增 CPU 合同证明 SP2/SP4 split pack 与同步 packed-QKV bitwise exact，
+  并覆盖 capture backend fallback。新增真 GPU 入口
+  `test_minwm_async_a2a_gpu.py`，待 B200 运行 process-group 连续 12 轮、双缓冲、output parity
+  与 PyNCCL graph 三次 replay。
+- wall/FPS、Nsight：尚未运行，因此候选 1 **尚未验收**。
+- 结论：进入真机小规模合同测试；只有其通过才跑 checkpoint parity 与 A/B。
 
 ### 2026-08-07：基线与历史分支审计
 
@@ -162,6 +193,20 @@ complete/consume event；统计 input/output A2A 的 launch→wait 距离、wait
 - 决策：中止未完成的 `a5888c9` cherry-pick，保留 MinWM 等价实现；只引入实际缺失的 IPC
   与 capture-safe PyNCCL。后续测试显式证明 packed round-trip 与 buffer reuse，不把“提交
   存在”替代行为验证。
+
+### 2026-08-07：完整 packed-QKV 的层内窗口实际为零
+
+- 原认知：也许可在现有 packed-QKV `launch→wait` 之间移动 cache metadata、RoPE 或其他
+  GPU 工作，而不改变 collective 结构。
+- 实际证据：当前 model forward 已在 block loop 前预计算 cache plan 与 RoPE；block 内
+  cache ownership update、Q/K RoPE 和 attention 全部消费 input A2A 结果，reverse A2A 后的
+  output projection/residual/FFN 也全部消费其结果。单请求中不存在可合法插入完整 input 或
+  output A2A 窗口的 GPU kernel。
+- 根因：MinWM 每个 block 串行持有单请求 causal cache，且 Ulysses 在 A2A 前后改变 sequence/
+  head ownership。
+- 决策：不提交只有 async API 的伪优化；input 改为 QK/V split 以创造 V projection 窗口，
+  output 仅提供可量化 begin/consume 并默认关闭。若真机净收益不足，再评估跨 request/chunk
+  cache 隔离流水，而不是错误越过 residual/cache 边界。
 
 ### 2026-08-07：通信基线移植与本地回归
 
