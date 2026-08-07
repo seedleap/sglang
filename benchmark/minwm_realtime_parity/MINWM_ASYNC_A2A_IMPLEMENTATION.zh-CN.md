@@ -12,7 +12,7 @@
 | MinWM 逻辑基线 | `0e30671cf8a00622fd138c71af3faa93353b5425`（`codex/ulysses-pre-post-a2a-fusion`；失败的 pre-A2A QK-norm 已删除，post-A2A parity 路径默认关闭） |
 | upstream 通信基线 | 已 cherry-pick `754b692afc29`（本分支 `4202d2a043`，SP2 IPC）、`bfce378e5fbc`（本分支 `36066c3d44`，capture-safe PyNCCL A2A）、`f829fb30d3d3`（本分支 `35a313e616`，IPC lifecycle/reset）和 `44bde391d0b1`（本分支 `ed152d6c48`，真实 peer CUDA ordinal）；`a5888c956f90` 的 packed QKV + reusable staging 与 MinWM 现有同名但不同返回合同的实现重复，未强行合并 |
 | 实现分支 | `codex/minwm-async-a2a-overlap` |
-| 候选提交 | 核心实现 `dad5de09f1b644074cb3d977fdad11ffd18772bf`；GPU 测试隔离修复 `0a975bac14e20660e6a31744bf864c8d51d99aff`。完整模型任务继续使用每次已推送的不可变 SHA，并在对应实验条目固定 |
+| 候选提交 | 核心实现 `dad5de09f1b644074cb3d977fdad11ffd18772bf`；GPU 测试隔离修复 `0a975bac14e20660e6a31744bf864c8d51d99aff`；精确 Nsight chunk 窗口与 forward 标记整合至 `c6309c3004`。完整模型任务继续使用每次已推送的不可变 SHA，并在对应实验条目固定 |
 | 主硬件 | B200/B300 同节点 Spot；若容量不可得，H200 只用于诊断，不能冒充最终硬件结论 |
 | 软件 | 首轮 H200 transport 合同实测为 PyTorch `2.12.1+cu130`、CUDA `13.0`、NCCL `2.29.7`；完整模型与正式 B200/B300 各自继续保存 runtime provenance。Nsight Systems 目标版本为 `2026.4.1` |
 | checkpoint | 预定沿用 canonical MinWM 5B DMD checkpoint；精确 S3 URI、VersionId、ETag/CRC64/SHA256 在任务 dry-run 与 provenance 中固定 |
@@ -209,6 +209,30 @@ time、与 compute kernel 的区间交集及 buffer slot/generation。
   CUDA Graph 当前生产 benchmark 未启用；capture-safe PyNCCL 由前述 H200 standalone
   graph capture + 3 replay 合同覆盖。正确性门通过不代表性能或 overlap 门通过。
 
+### 2026-08-07：H200 SP2 profiler-off 四位置预检
+
+- 假设：若 QK A2A 与 V projection 的窗口足以抵消第二个 collective，短 ABBA 预检应至少
+  显示 DiT/chunk wall 同向，不必等待正式 6+6 样本就可排除明显失败方案。
+- 命令与资源：Job `minwm-async-a2a-perf-preflight-h200-20260807-01`，固定节点
+  `i-06888dc1ca88547e1`、4 张 H200、SP2、1248×704、ProcessGroupNCCL、
+  `SGLANG_REALTIME_TRACE_SYNC_CUDA=0`，顺序 `candidate baseline baseline candidate`；每个位置
+  重启同配置 server，预热 5 chunks 后测 20 chunks。SGLang
+  `59fd1050805e87966e9d3fec65601f6276078a1d`，minWM `2efc6485f65e8fcab506665efde79bc41406385e`，
+  PyTorch `2.11.0+cu130`、CUDA `13.0`、NCCL `2.28.9`。结果路径
+  `/results/attempts/minwm-async-a2a-perf-preflight-h200-20260807-01-krsh9/minwm-async-a2a-perf-preflight-h200-20260807-01/async-a2a-abba`，PVC
+  `minwm-async-a2a-perf-results-20260807`。
+- 正确性：该轮只做已过完整质量门候选的 profiler-off 性能预检；每个位置 20/20 chunk
+  latency 完整，无 hang。
+- wall/FPS：baseline 两位置 Client FPS 为 `13.0718, 12.9135`，median `12.9927`；candidate
+  为 `12.6935, 12.8333`，median `12.7634`，即 `-1.765%`。candidate DiT wall median
+  `744.332 ms` 对 baseline `712.588 ms`，性能 `-4.455%`；scheduler chunk wall median
+  `1303.675 ms` 对 `1258.350 ms`，性能 `-3.602%`。两 lane Client FPS CV 分别
+  `0.861%` 与 `0.774%`。
+- Nsight：本轮严格关闭 profiler，不能说明是否已有部分 QK/V overlap；下一步使用精确外层
+  chunk NVTX 窗口采 baseline/candidate 同机 trace，分解第二个 collective 与实际隐藏量。
+- 结论：候选 1 的当前 ProcessGroup 实现明确低于 `+3%` 保留门槛，短预检即为负结果；不把
+  它扩成正式 6+6 性能验收。保留代码开关用于机制 trace 和下一轮定向修改，默认继续关闭。
+
 ### 2026-08-07：候选 1——QK A2A 与 V projection 重叠
 
 - 假设：完整 packed-QKV A2A 前没有可移动工作，但 Q/K/V projection 相互独立；将 wire
@@ -283,6 +307,19 @@ time、与 compute kernel 的区间交集及 buffer slot/generation。
 - 根因：容量块节点已满载，不是调度器或 manifest 错误。
 - 决策：不删除、不抢占他人任务；先用空闲 H200 完成诊断与淘汰明显失败方案，正式
   PASS/FAIL 仍等待 B200/B300 同节点资源，且不会把 H200 结果冒充主验收。
+
+### 2026-08-07：真实 V projection 窗口未抵消 split collective 成本
+
+- 原认知：V projection GEMM 的独立窗口可能足以隐藏 QK A2A，并抵消把一个 packed-QKV
+  collective 拆为 QK 与 V 两个 collective 的启动和协议成本。
+- 实际证据：H200 SP2 profiler-off 四位置预检中 Client FPS `-1.765%`、DiT wall
+  `-4.455%`、scheduler chunk wall `-3.602%`；各 lane 变异低于 `1%`（chunk wall 的
+  candidate CV 为 `2.319%`），方向稳定且三项关键指标一致变差。
+- 根因：profiler-off 只能确认净效应为负，尚不能在无 trace 情况下区分 V GEMM 窗口不足、
+  第二个 collective 固定成本、ProcessGroup Work/stream 依赖或新增 pack 的占比。
+- 决策：不运行该形态的正式 6+6 主验收，也不宣称 async 已获益；先采同机精确窗口 Nsight，
+  若 trace 证实 QK 有 overlap 但总 exposed time 上升，则淘汰 split-collective 设计，转向保持
+  单 packed collective 的跨 request/chunk 双缓冲或减少 V A2A 暴露的可执行设计。
 
 ### 2026-08-07：MinWM origin 与 upstream 通信提交不在同一条主线
 
