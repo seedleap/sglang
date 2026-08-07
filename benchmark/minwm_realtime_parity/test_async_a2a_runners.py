@@ -48,6 +48,11 @@ def test_async_a2a_quality_covers_sp2_sp4_long_run_and_tensor_parity() -> None:
     assert "cases_720p_5s.json" in runner
     assert "MINWM_ASYNC_A2A_SP_DEGREES:-2 4" in runner
     assert "MINWM_ASYNC_A2A_STABILITY_REQUESTS:-10" in runner
+    assert "MINWM_ASYNC_A2A_EXPERIMENT:-input_split" in runner
+    assert 'A2A_EXPERIMENT}" == "output_tiled"' in runner
+    assert 'MINWM_ASYNC_A2A="${input_a2a_flag}"' in runner
+    assert 'MINWM_ASYNC_A2A_OUTPUT="${output_a2a_flag}"' in runner
+    assert 'MINWM_ASYNC_A2A_OUTPUT_TILES="${OUTPUT_TILES}"' in runner
     assert '--profile bitwise' in runner
     assert 'MINWM_PARITY_DUMP_DIR="${dump_dir}"' in runner
     assert "missing_candidate = baseline_names - candidate_names" in validator

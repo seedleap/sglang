@@ -14,6 +14,8 @@ CASES="${MINWM_CASES_PATH:-${SCRIPT_DIR}/cases_720p_5s.json}"
 CASE_ID="${MINWM_CASE_ID:-00_forward_080_pottery_720p}"
 SP_DEGREES="${MINWM_ASYNC_A2A_SP_DEGREES:-2 4}"
 A2A_BACKEND="${MINWM_ASYNC_A2A_BENCH_BACKEND:-process_group}"
+A2A_EXPERIMENT="${MINWM_ASYNC_A2A_EXPERIMENT:-input_split}"
+OUTPUT_TILES="${MINWM_ASYNC_A2A_OUTPUT_TILES:-1}"
 STABILITY_REQUESTS="${MINWM_ASYNC_A2A_STABILITY_REQUESTS:-10}"
 server_pid=""
 invalid_scope="${RESULT_ROOT}"
@@ -21,8 +23,18 @@ invalid_scope="${RESULT_ROOT}"
 [[ -f "${MODEL_DIR}/minwm_conversion_manifest.json" ]]
 [[ -f "${CASES}" ]]
 [[ "$(git -C /workspace/sglang rev-parse HEAD)" == "${SGLANG_GIT_REF}" ]]
-if ! [[ "${STABILITY_REQUESTS}" =~ ^[1-9][0-9]*$ ]]; then
-  echo "MINWM_ASYNC_A2A_STABILITY_REQUESTS must be positive" >&2
+if ! [[ "${STABILITY_REQUESTS}" =~ ^[1-9][0-9]*$ \
+  && "${OUTPUT_TILES}" =~ ^[1-9][0-9]*$ ]]; then
+  echo "Stability requests and output tiles must be positive" >&2
+  exit 2
+fi
+if [[ "${A2A_EXPERIMENT}" != "input_split" \
+  && "${A2A_EXPERIMENT}" != "output_tiled" ]]; then
+  echo "MINWM_ASYNC_A2A_EXPERIMENT must be input_split or output_tiled" >&2
+  exit 2
+fi
+if [[ "${A2A_EXPERIMENT}" == "output_tiled" && "${OUTPUT_TILES}" == "1" ]]; then
+  echo "output_tiled experiment requires MINWM_ASYNC_A2A_OUTPUT_TILES > 1" >&2
   exit 2
 fi
 if [[ -e "${RESULT_ROOT}" ]]; then
@@ -47,6 +59,8 @@ unset SGLANG_DIFFUSION_TORCH_PROFILER_DIR
   echo "case_id=${CASE_ID}"
   echo "sp_degrees=${SP_DEGREES}"
   echo "a2a_backend=${A2A_BACKEND}"
+  echo "a2a_experiment=${A2A_EXPERIMENT}"
+  echo "output_tiles=${OUTPUT_TILES}"
   echo "candidate_stability_requests=${STABILITY_REQUESTS}"
   echo "resolution=1248x704"
   echo "chunks=8"
@@ -115,13 +129,22 @@ trap 'exit 143' TERM
 run_lane() {
   local degree="$1" lane="$2" async_flag="$3" output_prefix="$4"
   local warmup_runs="$5" result_dir="$6" dump_dir="$7"
+  local input_a2a_flag=0 output_a2a_flag=0
+  if [[ "${async_flag}" == "1" ]]; then
+    if [[ "${A2A_EXPERIMENT}" == "input_split" ]]; then
+      input_a2a_flag=1
+    else
+      output_a2a_flag=1
+    fi
+  fi
   local log_path="${result_dir}/${output_prefix}-server.log"
   invalid_scope="${result_dir}/${lane}"
   mkdir -p "${result_dir}" "${invalid_scope}"
   {
     echo "lane=${lane}"
-    echo "MINWM_ASYNC_A2A=${async_flag}"
-    echo "MINWM_ASYNC_A2A_OUTPUT=0"
+    echo "MINWM_ASYNC_A2A=${input_a2a_flag}"
+    echo "MINWM_ASYNC_A2A_OUTPUT=${output_a2a_flag}"
+    echo "MINWM_ASYNC_A2A_OUTPUT_TILES=${OUTPUT_TILES}"
     echo "MINWM_ASYNC_A2A_BACKEND=${A2A_BACKEND}"
     echo "sp_degree=${degree}"
     echo "warmup_runs=${warmup_runs}"
@@ -131,8 +154,9 @@ run_lane() {
   MINWM_PACKED_ATTENTION_DETERMINISTIC=true \
   MINWM_NATIVE_COMPONENTS=text_encoder,vae \
   MINWM_VAE_LANE=parallel \
-  MINWM_ASYNC_A2A="${async_flag}" \
-  MINWM_ASYNC_A2A_OUTPUT=0 \
+  MINWM_ASYNC_A2A="${input_a2a_flag}" \
+  MINWM_ASYNC_A2A_OUTPUT="${output_a2a_flag}" \
+  MINWM_ASYNC_A2A_OUTPUT_TILES="${OUTPUT_TILES}" \
   MINWM_ASYNC_A2A_BACKEND="${A2A_BACKEND}" \
   MINWM_PARITY_DUMP_DIR="${dump_dir}" \
   sglang serve \

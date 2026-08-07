@@ -378,7 +378,15 @@ time、与 compute kernel 的区间交集及 buffer slot/generation。
 - 下一修改：按语义 role（`output_tile_0..3`）而非仅 shape 隔离 IPC staging ring；每个 tile
   独享双 slot。产品路径每个 block 下一次复用同 role 前必须先完成同步 packed input
   ProcessGroup rendezvous，而该 rendezvous 位于上一 block output consume 之后，因此不存在
-  跨两个 block 的未消费覆盖。合同还需重新证明 eager 12 轮与 graph replay。
+  跨两个 block 的未消费覆盖。
+- 修复/结果：提交 `13565f994f` 将 IPC staging key 扩展为 `(role, shape, dtype)`，tiled launch
+  使用 `output_tile_0..3`，仍保持四个 tile 全部可在途；本地结果 `126 passed, 1 skipped`。
+  同节点 `minwm-async-a2a-contract-tiled-h200-20260807-03` 在 H200×4 上完成：SP2
+  ProcessGroup/IPC 各 12 轮、buffer reuse、IPC capture + 3 replay 全部 exact；SP4
+  ProcessGroup 12 轮 exact；两项 pytest 均 PASS。结果目录：
+  `/results/minwm-async-a2a-contract-tiled-h200-20260807-03/`（PVC
+  `minwm-async-a2a-contract-results-20260807`）。transport/lifetime 门禁通过，但完整模型 parity、
+  wall/FPS 与 Nsight 尚未验收。
 
 ### 2026-08-07：候选 1——QK A2A 与 V projection 重叠
 
