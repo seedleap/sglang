@@ -11,6 +11,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 WORK_ROOT="/work/minwm-realtime/${MINWM_RUN_ID}"
 MODEL_DIR="${WORK_ROOT}/sglang-model"
 RESULT_ROOT="${MINWM_RESULTS_ROOT%/}/${MINWM_RUN_ID}/s0-measurement"
+RESULT_PARENT="${MINWM_RESULTS_ROOT%/}/${MINWM_RUN_ID}"
 CASES="${MINWM_CASES_PATH:-${SCRIPT_DIR}/cases_720p_compile_smoke.json}"
 CASE_ID="${MINWM_CASE_ID:-00_forward_080_pottery_720p}"
 SP_DEGREES="${MINWM_S0_SP_DEGREES:-2 4}"
@@ -43,6 +44,25 @@ if [[ -n "${SGLANG_DIFFUSION_TORCH_PROFILER_DIR:-}" ]]; then
   echo "SGLANG_DIFFUSION_TORCH_PROFILER_DIR must be unset during Nsight capture" >&2
   exit 2
 fi
+
+archive_preexisting_results() {
+  if [[ ! -d "${RESULT_ROOT}" ]] \
+    || [[ -z "$(find "${RESULT_ROOT}" -mindepth 1 -print -quit)" ]]; then
+    return
+  fi
+  local timestamp archive_root
+  timestamp="$(date --utc +%Y%m%dT%H%M%S%NZ)"
+  archive_root="${RESULT_PARENT}/invalid/preexisting-${timestamp}/s0-measurement"
+  python3 "${SCRIPT_DIR}/measurement_tool.py" mark-invalid \
+    --root "${RESULT_ROOT}" \
+    --reason "runner refused to overwrite a pre-existing result root" \
+    --marker "${RESULT_ROOT}/invalid-marker-${timestamp}.json" \
+    --preserved-root "${archive_root}"
+  mkdir -p "$(dirname "${archive_root}")"
+  mv -- "${RESULT_ROOT}" "${archive_root}"
+}
+
+archive_preexisting_results
 mkdir -p "${RESULT_ROOT}"
 
 export MINWM_PARITY_DETERMINISTIC=1
@@ -112,7 +132,33 @@ cleanup() {
   fi
   stop_server
 }
-trap cleanup EXIT INT TERM
+
+mark_failed_attempt() {
+  local status="$1"
+  local timestamp
+  if [[ ! -d "${RESULT_ROOT}" ]]; then
+    return
+  fi
+  timestamp="$(date --utc +%Y%m%dT%H%M%S%NZ)"
+  python3 "${SCRIPT_DIR}/measurement_tool.py" mark-invalid \
+    --root "${RESULT_ROOT}" \
+    --reason "runner exited non-zero (status=${status}); artifacts preserved in place" \
+    --marker "${RESULT_ROOT}/invalid-marker-${timestamp}.json" || true
+}
+
+on_exit() {
+  local status="$?"
+  trap - EXIT INT TERM
+  cleanup
+  if (( status != 0 )); then
+    mark_failed_attempt "${status}"
+  fi
+  exit "${status}"
+}
+
+trap on_exit EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 server_args() {
   local degree="$1"
@@ -265,7 +311,10 @@ run_profiler_on() {
   local status_log="${profile_dir}/nsys-capture-status.log"
   mkdir -p "${profile_dir}"
   read_server_args "${degree}"
-  rm -f "${report}" "${sqlite}"
+  if [[ -e "${report}" || -e "${sqlite}" ]]; then
+    echo "Refusing to overwrite pre-existing Nsight artifacts in ${profile_dir}" >&2
+    return 1
+  fi
 
   MINWM_ATTENTION_IMPL=packed \
   MINWM_PACKED_ATTENTION_DETERMINISTIC=true \
@@ -330,7 +379,6 @@ run_profiler_on() {
   nsys export \
     --type=sqlite \
     --output="${sqlite}" \
-    --force-overwrite=true \
     "${report}"
   python3 "${SCRIPT_DIR}/measurement_tool.py" merge-nsys \
     --result "${profile_dir}/client.json" \
