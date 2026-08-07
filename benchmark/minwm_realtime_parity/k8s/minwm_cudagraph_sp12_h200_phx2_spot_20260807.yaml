@@ -17,14 +17,14 @@ spec:
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: minwm-cudagraph-sp12-h200-phx2-20260807-13
+  name: minwm-cudagraph-sp12-h200-phx2-20260807-14
   namespace: default
   labels:
-    app.kubernetes.io/name: minwm-cudagraph-sp12-h200-phx2-20260807-13
+    app.kubernetes.io/name: minwm-cudagraph-sp12-h200-phx2-20260807-14
     seedleap.ai/owner: chenshengdong
     seedleap.ai/purpose: minwm-cuda-graph-perf
     seedleap.ai/task: minwm-realtime-parity
-    seedleap.ai/run-id: minwm-cudagraph-sp12-h200-phx2-20260807-13
+    seedleap.ai/run-id: minwm-cudagraph-sp12-h200-phx2-20260807-14
   annotations:
     seedleap.ai/capacity-type: spot
     seedleap.ai/repo: seedleap/sglang
@@ -41,11 +41,11 @@ spec:
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: minwm-cudagraph-sp12-h200-phx2-20260807-13
+        app.kubernetes.io/name: minwm-cudagraph-sp12-h200-phx2-20260807-14
         seedleap.ai/owner: chenshengdong
         seedleap.ai/purpose: minwm-cuda-graph-perf
         seedleap.ai/task: minwm-realtime-parity
-        seedleap.ai/run-id: minwm-cudagraph-sp12-h200-phx2-20260807-13
+        seedleap.ai/run-id: minwm-cudagraph-sp12-h200-phx2-20260807-14
       annotations:
         seedleap.ai/repo: seedleap/sglang
         seedleap.ai/branch: codex/minwm-cuda-graph
@@ -81,7 +81,7 @@ spec:
             - name: MINWM_BENCHMARK_MODE
               value: cudagraphmatrix
             - name: MINWM_RUN_ID
-              value: minwm-cudagraph-sp12-h200-phx2-20260807-13
+              value: minwm-cudagraph-sp12-h200-phx2-20260807-14
             - name: MINWM_CASES_PATH
               value: /workspace/sglang/benchmark/minwm_realtime_parity/cases.json
             - name: MINWM_CUDA_GRAPH_CASE
@@ -91,7 +91,7 @@ spec:
             - name: MINWM_CUDA_GRAPH_WARMUP_CHUNKS
               value: "4"
             - name: MINWM_CUDA_GRAPH_MEASURED_CHUNKS
-              value: "8"
+              value: "12"
             - name: MINWM_SEGMENT_COMPILE
               value: "false"
             - name: MINWM_CUDA_GRAPH_KV_FRAMES
