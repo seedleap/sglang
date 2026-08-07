@@ -172,7 +172,8 @@ python benchmark/minimax_h3_causal/run_matrix.py \
 | `minimax-h3-b200-probe-r1` | p6-b200 Spot / 1 GPU | `d2b8c69adafe` | 容量超时失败 | B300 不可用后改投同一固定代码的 B200 最小验证；NodeClaim 同样持续收到 `UnfulfillableCapacity`，Pod 从未启动，最终达到 Job deadline。 |
 | `minimax-h3-b300-probe-usw2d-r1` | p6-b300 Spot / 1 GPU | `1cc543eaa90f` | 调度约束失败，已暂停 | `karpenter.sh/nodepool` 已精确指定 `minwm-sp12-usw2d-p6-spot`，但重复要求 NodePool 模板自定义的 `capacity-pool` label 时，EKS Auto Mode 在节点创建前将其判为 unknown value，未创建 NodeClaim。移除冗余 selector，保留同值 taint toleration。 |
 | `minimax-h3-b300-probe-usw2d-r2` | p6-b300 Spot / 1 GPU | `6b411f12e7fd` | 无调度候选，已暂停 | 修正 selector 后不再出现 unknown-value 冲突，但 `us-west-2d` 池没有为 B300 创建 NodeClaim；Pod 未启动，切换同池 B200 验证。 |
-| `minimax-h3-b200-probe-usw2d-r3` | p6-b200 Spot / 1 GPU | `6b411f12e7fd` | 容量阻塞 | 同池 B200 成功创建 NodeClaim，随后 AWS 返回 `UnfulfillableCapacity`；证明 profile 和调度约束有效，等待期间未启动 Pod。 |
+| `minimax-h3-b200-probe-usw2d-r3` | p6-b200 Spot / 1 GPU | `6b411f12e7fd` | 容量阻塞，已暂停 | 同池 B200 成功创建 NodeClaim，随后 AWS 返回 `UnfulfillableCapacity`；证明 profile 和调度约束有效，切换多 AZ 备选前暂停，Pod 未启动。 |
+| `minimax-h3-b200-probe-use2-r1` | p6-b200 Spot / 1 GPU | `cd49a3e02094` | 等待容量 | 标准 Karpenter `minwm-test-b200-spot` 跨 `us-east-2a/2b/2c` 创建 NodeClaim，AWS Spot fleet 仍返回 `UnfulfillableCapacity`；保留为唯一活跃申请并等待自动重试。 |
 
 ## 理解检查问题
 
