@@ -163,9 +163,7 @@ class _MinWMCudaGraphRunner:
 
         self.graph = torch.cuda.CUDAGraph()
         self.pool = torch.cuda.graph_pool_handle()
-        with torch.cuda.graph(
-            self.graph, pool=self.pool, stream=self.capture_stream
-        ):
+        with torch.cuda.graph(self.graph, pool=self.pool, stream=self.capture_stream):
             self.output = capture_forward(
                 self.static_latent,
                 self.static_prompt,
@@ -984,6 +982,10 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
             action = pos_cond_kwargs["action"]
 
             if runner.graph is None:
+                # Non-checkpoint action buffers start on CPU so meta-device model
+                # loading can materialize successfully. Move them before entering
+                # the capture context; replay then sees a stable GPU pointer.
+                self.transformer.action_in.prepare_label_table(action.device)
                 attention_plan = self.transformer.prepare_causal_attention_plan(
                     latent_model_input,
                     kv_cache=kv_cache,

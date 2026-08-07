@@ -193,12 +193,14 @@ class PrimitiveTokenResidualActionEncoder(nn.Module):
         )
         self.encode_2 = CausalActionTemporalBlock(hidden_dim, hidden_dim, kernel_size)
         self.proj = nn.Linear(hidden_dim, dim)
-        self.register_buffer(
-            "_label_to_bits",
-            _LABEL_TO_BITS.to(device=self.proj.weight.device, copy=True),
-            persistent=False,
-        )
+        # Keep non-checkpoint buffers concrete while the model is initialized on
+        # meta; the loader only materializes parameters present in the state dict.
+        self.register_buffer("_label_to_bits", _LABEL_TO_BITS.clone(), persistent=False)
         self.validate_runtime_action = True
+
+    def prepare_label_table(self, device: torch.device) -> None:
+        if self._label_to_bits.device != device:
+            self._label_to_bits = self._label_to_bits.to(device=device)
 
     @staticmethod
     def _pool(weights: torch.Tensor, embedding: nn.Embedding) -> torch.Tensor:
@@ -210,6 +212,7 @@ class PrimitiveTokenResidualActionEncoder(nn.Module):
 
     def frame_states(self, action: torch.Tensor) -> torch.Tensor:
         if action.ndim == 2:
+            self.prepare_label_table(action.device)
             weights = action_labels_to_primitive_bits(
                 action,
                 validate=self.validate_runtime_action,
@@ -294,15 +297,18 @@ class PrimitiveRoPETokenResidualActionEncoder(nn.Module):
         )
         self.encode_2 = CausalActionTemporalBlock(hidden_dim, hidden_dim, kernel_size)
         self.proj = nn.Linear(hidden_dim, dim)
-        self.register_buffer(
-            "_label_to_bits",
-            _LABEL_TO_BITS.to(device=self.proj.weight.device, copy=True),
-            persistent=False,
-        )
+        # Keep non-checkpoint buffers concrete while the model is initialized on
+        # meta; the loader only materializes parameters present in the state dict.
+        self.register_buffer("_label_to_bits", _LABEL_TO_BITS.clone(), persistent=False)
         self.validate_runtime_action = True
+
+    def prepare_label_table(self, device: torch.device) -> None:
+        if self._label_to_bits.device != device:
+            self._label_to_bits = self._label_to_bits.to(device=device)
 
     def frame_states(self, action: torch.Tensor) -> torch.Tensor:
         if action.ndim == 2:
+            self.prepare_label_table(action.device)
             weights = action_labels_to_primitive_bits(
                 action,
                 validate=self.validate_runtime_action,

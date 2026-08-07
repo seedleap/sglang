@@ -178,7 +178,8 @@ def test_minwm_action_label_table_is_a_nonpersistent_model_buffer(encoder_cls):
 
     with torch.device("meta"):
         meta_encoder = encoder_cls(dim=24, embed_dim=8, hidden_dim=16, kernel_size=3)
-    assert meta_encoder._label_to_bits.device == meta_encoder.proj.weight.device
+    assert meta_encoder.proj.weight.device.type == "meta"
+    assert meta_encoder._label_to_bits.device.type == "cpu"
 
 
 @pytest.mark.parametrize(
