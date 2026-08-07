@@ -9,6 +9,12 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from benchmark_realtime_throughput import (  # noqa: E402
+    missing_required_stage_trace,
+    record_required_stage_trace,
+    required_stage_trace_chunks,
+    required_stage_trace_is_complete,
+)
 from measurement import (  # noqa: E402
     MeasurementValidationError,
     available,
@@ -19,12 +25,6 @@ from measurement import (  # noqa: E402
 )
 from measurement_tool import aggregate  # noqa: E402
 from nsys_metrics import merge_nsys_metrics  # noqa: E402
-from benchmark_realtime_throughput import (  # noqa: E402
-    missing_required_stage_trace,
-    record_required_stage_trace,
-    required_stage_trace_is_complete,
-    required_stage_trace_chunks,
-)
 
 
 def _latency(value: float) -> dict:
@@ -226,8 +226,7 @@ def _create_nsys_fixture(
             "INSERT INTO CUPTI_ACTIVITY_KIND_RUNTIME VALUES (2, 2, 3);"
         )
     )
-    connection.executescript(
-        f"""
+    connection.executescript(f"""
         CREATE TABLE StringIds (id INTEGER PRIMARY KEY, value TEXT);
         CREATE TABLE CUPTI_ACTIVITY_KIND_RUNTIME (nameId INTEGER, start INTEGER, end INTEGER{process_column});
         CREATE TABLE CUPTI_ACTIVITY_KIND_KERNEL (deviceId INTEGER, start INTEGER, end INTEGER);
@@ -240,11 +239,9 @@ def _create_nsys_fixture(
         INSERT INTO CUPTI_ACTIVITY_KIND_KERNEL VALUES (1, 0, 5000);
         INSERT INTO CUPTI_ACTIVITY_KIND_KERNEL VALUES (1, 10000, 30000);
         INSERT INTO CUPTI_ACTIVITY_KIND_KERNEL VALUES (1, 25000, 100000);
-        """
-    )
+        """)
     if include_gpu_metrics:
-        connection.executescript(
-            """
+        connection.executescript("""
             CREATE TABLE TARGET_INFO_GPU_METRICS (metricId INTEGER, metricName TEXT);
             CREATE TABLE GPU_METRICS (typeId INTEGER, metricId INTEGER, value REAL);
             INSERT INTO TARGET_INFO_GPU_METRICS VALUES (3, 'SM Active');
@@ -254,8 +251,7 @@ def _create_nsys_fixture(
             INSERT INTO GPU_METRICS VALUES (0, 3, 82.0);
             INSERT INTO GPU_METRICS VALUES (0, 5, 55.0);
             INSERT INTO GPU_METRICS VALUES (0, 18, 40.0);
-            """
-        )
+            """)
     connection.commit()
     connection.close()
 
