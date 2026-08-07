@@ -152,12 +152,6 @@ run_tp2_existing_blocker() {
 }
 
 SP1_RESULTS="${RESULT_ROOT}/sp1"
-run_lane control 0 1 1 1 baseline "${SP1_RESULTS}" \
-  "${RESULT_ROOT}/layer-probes/control" false
-run_lane candidate 1 1 1 1 sglang "${SP1_RESULTS}" \
-  "${RESULT_ROOT}/layer-probes/candidate" false
-run_lane candidate-replay 1 1 1 1 candidate_replay "${SP1_RESULTS}" "" false
-
 python3 - "${COMPILE_CASES}" "${CASE_ID}" "${SP1_RESULTS}" <<'PY'
 import hashlib
 import json
@@ -192,32 +186,61 @@ common = {
     "ulysses_degree": 1,
     "ring_degree": 1,
     "precision": "bf16",
-    "minwm_fused_qkv_projection": "1",
     "deterministic": True,
     "num_inference_steps": 4,
     "guidance_scale": 0.0,
 }
 plans = {
-    "eager_reference": {**common, "compile_enabled": False},
-    "compile": {**common, "compile_enabled": True},
+    "control_eager": {
+        **common,
+        "compile_enabled": False,
+        "minwm_fused_qkv_projection": "0",
+    },
+    "control_compile": {
+        **common,
+        "compile_enabled": True,
+        "minwm_fused_qkv_projection": "0",
+    },
+    "qkv_eager": {
+        **common,
+        "compile_enabled": False,
+        "minwm_fused_qkv_projection": "1",
+    },
+    "qkv_compile": {
+        **common,
+        "compile_enabled": True,
+        "minwm_fused_qkv_projection": "1",
+    },
 }
-normalized = {
-    name: {key: value for key, value in plan.items() if key != "compile_enabled"}
-    for name, plan in plans.items()
+expected_differences = {
+    "control_eager__control_compile": ["compile_enabled"],
+    "qkv_eager__qkv_compile": ["compile_enabled"],
+    "control_eager__qkv_eager": ["minwm_fused_qkv_projection"],
+    "control_compile__qkv_compile": ["minwm_fused_qkv_projection"],
 }
-if normalized["eager_reference"] != normalized["compile"]:
-    raise AssertionError("compile client plans differ outside compile_enabled")
+observed_differences = {}
+for pair_name, allowed in expected_differences.items():
+    left_name, right_name = pair_name.split("__")
+    left = plans[left_name]
+    right = plans[right_name]
+    differences = sorted(key for key in left if left[key] != right[key])
+    if differences != allowed:
+        raise AssertionError(
+            f"{pair_name} differs in {differences}; expected exactly {allowed}"
+        )
+    observed_differences[pair_name] = differences
 if common["total_chunks"] != 2:
     raise AssertionError(f"compile gate requires total_chunks=2, got {common['total_chunks']}")
 if common["generated_pixel_frames"] + int(resolved["reference_pixel_frames"]) != 33:
     raise AssertionError("compile gate requires exactly 33 output frames")
 record = {
-    "schema": "minwm-s4-compile-client-contract/v1",
+    "schema": "minwm-s4-compile-four-corner-contract/v1",
     "checked_before_generation_utc": datetime.now(timezone.utc).isoformat(),
-    "allowed_execution_difference": ["compile_enabled"],
+    "expected_execution_differences": expected_differences,
+    "observed_execution_differences": observed_differences,
     "non_request_artifact_identity_fields": ["engine_name", "output_prefix"],
     "plans": plans,
-    "normalized_request_metadata_equal": True,
+    "preflight_passed": True,
 }
 (result_root / "compile-client-contract.json").write_text(
     json.dumps(record, indent=2, sort_keys=True) + "\n"
@@ -225,9 +248,13 @@ record = {
 print(json.dumps(record, indent=2, sort_keys=True))
 PY
 
-run_lane candidate-compile-reference 1 1 1 1 candidate_compile_reference \
+run_lane control-compile-reference 0 1 1 1 control_compile_reference \
   "${SP1_RESULTS}" "" false "" "${COMPILE_CASES}"
-run_lane candidate-compile 1 1 1 1 candidate_compile "${SP1_RESULTS}" "" true \
+run_lane qkv-compile-reference 1 1 1 1 qkv_compile_reference \
+  "${SP1_RESULTS}" "" false "" "${COMPILE_CASES}"
+run_lane control-compile 0 1 1 1 control_compile "${SP1_RESULTS}" "" true \
+  "" "${COMPILE_CASES}"
+run_lane qkv-compile 1 1 1 1 qkv_compile "${SP1_RESULTS}" "" true \
   "" "${COMPILE_CASES}"
 
 PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH:-}" python3 - \
@@ -246,51 +273,173 @@ case_id = sys.argv[2]
 thresholds = json.loads(Path(sys.argv[3]).read_text())
 profile = thresholds["profiles"]["bf16_backend_candidate"]
 case_dir = root / "cases" / case_id
-reference = np.load(case_dir / "candidate_compile_reference.npy", allow_pickle=False)
-compiled = np.load(case_dir / "candidate_compile.npy", allow_pickle=False)
-reference_record = json.loads(
-    (case_dir / "candidate_compile_reference.json").read_text()
+lane_files = {
+    "control_eager": "control_compile_reference",
+    "control_compile": "control_compile",
+    "qkv_eager": "qkv_compile_reference",
+    "qkv_compile": "qkv_compile",
+}
+arrays = {
+    name: np.load(case_dir / f"{prefix}.npy", allow_pickle=False)
+    for name, prefix in lane_files.items()
+}
+client_records = {
+    name: json.loads((case_dir / f"{prefix}.json").read_text())
+    for name, prefix in lane_files.items()
+}
+reference_shape = arrays["control_eager"].shape
+for name, value in arrays.items():
+    if value.shape != reference_shape:
+        raise AssertionError(f"{name} shape {value.shape} != {reference_shape}")
+if reference_shape[0] != 33:
+    raise AssertionError(f"compile gate requires 33 frames, got {reference_shape[0]}")
+for field in ("contract", "request"):
+    expected = client_records["control_eager"][field]
+    for name, record in client_records.items():
+        if record[field] != expected:
+            raise AssertionError(f"actual {field} differs for {name}")
+
+
+def sha256_bytes(value):
+    return hashlib.sha256(value).hexdigest()
+
+
+def compare_pair(left_name, right_name):
+    left = arrays[left_name]
+    right = arrays[right_name]
+    metrics = metric_block(left, right)
+    passed, failures = evaluate({"generated_frames": metrics}, profile)
+    frames = []
+    for frame_index, (left_frame, right_frame) in enumerate(zip(left, right)):
+        different = np.argwhere(left_frame != right_frame)
+        if different.size:
+            first_index = tuple(int(value) for value in different[0])
+            left_value = left_frame[first_index].item()
+            right_value = right_frame[first_index].item()
+        else:
+            first_index = None
+            left_value = None
+            right_value = None
+        frames.append(
+            {
+                "frame_index": frame_index,
+                "left_sha256": sha256_bytes(left_frame.tobytes()),
+                "right_sha256": sha256_bytes(right_frame.tobytes()),
+                "sha256_equal": not different.size,
+                "first_difference_index": first_index,
+                "left_value_at_first_difference": left_value,
+                "right_value_at_first_difference": right_value,
+            }
+        )
+    left_prefix = lane_files[left_name]
+    right_prefix = lane_files[right_name]
+    return {
+        **metrics,
+        "passed": passed,
+        "failures": failures,
+        "left_lane": left_name,
+        "right_lane": right_name,
+        "frame_count": int(left.shape[0]),
+        "first_different_frame": next(
+            (frame["frame_index"] for frame in frames if not frame["sha256_equal"]),
+            None,
+        ),
+        "per_frame": frames,
+        "per_frame_sha256_equal": all(frame["sha256_equal"] for frame in frames),
+        "left_npy_sha256": sha256_bytes(
+            (case_dir / f"{left_prefix}.npy").read_bytes()
+        ),
+        "right_npy_sha256": sha256_bytes(
+            (case_dir / f"{right_prefix}.npy").read_bytes()
+        ),
+    }
+
+
+comparisons = {
+    "control_eager_vs_control_compile": compare_pair(
+        "control_eager", "control_compile"
+    ),
+    "qkv_eager_vs_qkv_compile": compare_pair("qkv_eager", "qkv_compile"),
+    "control_eager_vs_qkv_eager": compare_pair("control_eager", "qkv_eager"),
+    "control_compile_vs_qkv_compile": compare_pair(
+        "control_compile", "qkv_compile"
+    ),
+}
+control_compile_drift = comparisons["control_eager_vs_control_compile"]
+qkv_compile_drift = comparisons["qkv_eager_vs_qkv_compile"]
+compiled_cross = comparisons["control_compile_vs_qkv_compile"]
+eager_cross = comparisons["control_eager_vs_qkv_eager"]
+
+
+def same_order(left, right):
+    ratios = {}
+    for name, left_value, right_value in (
+        ("max_abs", left["max_abs"], right["max_abs"]),
+        ("rmse", left["rmse"], right["rmse"]),
+        (
+            "ssim_deficit",
+            None if left["ssim"] is None else 1.0 - left["ssim"],
+            None if right["ssim"] is None else 1.0 - right["ssim"],
+        ),
+    ):
+        if left_value is None or right_value is None:
+            ratios[name] = None
+        elif left_value == 0.0 and right_value == 0.0:
+            ratios[name] = 1.0
+        elif left_value == 0.0 or right_value == 0.0:
+            ratios[name] = None
+        else:
+            ratios[name] = float(right_value / left_value)
+    return all(value is not None and 0.5 <= value <= 2.0 for value in ratios.values()), ratios
+
+
+compile_drifts_same_order, drift_ratios = same_order(
+    control_compile_drift, qkv_compile_drift
 )
-compiled_record = json.loads((case_dir / "candidate_compile.json").read_text())
-if reference_record["contract"] != compiled_record["contract"]:
-    raise AssertionError("actual compile client contracts differ")
-if reference_record["request"] != compiled_record["request"]:
-    raise AssertionError("actual compile client request metadata differ")
-if reference.shape != compiled.shape:
-    raise AssertionError(
-        f"compile reference shape {reference.shape} != compiled shape {compiled.shape}"
-    )
-metrics = metric_block(reference, compiled)
-passed, failures = evaluate({"generated_frames": metrics}, profile)
-reference_frame_sha256 = [
-    hashlib.sha256(frame.tobytes()).hexdigest() for frame in reference
-]
-compiled_frame_sha256 = [
-    hashlib.sha256(frame.tobytes()).hexdigest() for frame in compiled
-]
+if not eager_cross["bitwise_equal"]:
+    classification = "qkv_eager_parity_failure"
+    continuation_allowed = False
+elif (
+    control_compile_drift["passed"]
+    and qkv_compile_drift["passed"]
+    and compiled_cross["passed"]
+):
+    classification = "compile_compatible"
+    continuation_allowed = True
+elif (
+    not control_compile_drift["passed"]
+    and not qkv_compile_drift["passed"]
+    and compiled_cross["passed"]
+    and compile_drifts_same_order
+):
+    classification = "existing_whole_model_compile_blocker"
+    continuation_allowed = True
+elif not qkv_compile_drift["passed"] and (
+    control_compile_drift["passed"] or not compiled_cross["passed"]
+):
+    classification = "qkv_compile_additional_regression"
+    continuation_allowed = False
+else:
+    classification = "compile_isolation_inconclusive"
+    continuation_allowed = False
+
 record = {
-    **metrics,
-    "passed": passed,
-    "failures": failures,
-    "actual_contract_equal": True,
-    "actual_request_metadata_equal": True,
-    "frame_count": int(reference.shape[0]),
-    "reference_frame_sha256": reference_frame_sha256,
-    "compiled_frame_sha256": compiled_frame_sha256,
-    "per_frame_sha256_equal": reference_frame_sha256 == compiled_frame_sha256,
-    "reference_npy_sha256": hashlib.sha256(
-        (case_dir / "candidate_compile_reference.npy").read_bytes()
-    ).hexdigest(),
-    "compiled_npy_sha256": hashlib.sha256(
-        (case_dir / "candidate_compile.npy").read_bytes()
-    ).hexdigest(),
+    "schema": "minwm-s4-compile-four-corner-result/v1",
+    "actual_contract_equal_across_all_lanes": True,
+    "actual_request_metadata_equal_across_all_lanes": True,
+    "frame_shape": list(reference_shape),
+    "comparisons": comparisons,
+    "compile_drift_ratios_qkv_over_control": drift_ratios,
+    "compile_drifts_same_order": compile_drifts_same_order,
+    "classification": classification,
+    "compile_off_continuation_allowed": continuation_allowed,
 }
 (root / "compile-client-contract-verified.json").write_text(
     json.dumps(
         {
             **json.loads((root / "compile-client-contract.json").read_text()),
-            "actual_contract_equal": True,
-            "actual_request_metadata_equal": True,
+            "actual_contract_equal_across_all_lanes": True,
+            "actual_request_metadata_equal_across_all_lanes": True,
             "checked_after_generation": True,
         },
         indent=2,
@@ -298,13 +447,19 @@ record = {
     )
     + "\n"
 )
-(root / "compile-compatibility-metrics.json").write_text(
+(root / "compile-four-corner-summary.json").write_text(
     json.dumps(record, indent=2, sort_keys=True) + "\n"
 )
-if not passed:
-    raise AssertionError(f"candidate compile quality threshold failed: {failures}")
-print(json.dumps({"candidate_eager_vs_compile": record}, indent=2, sort_keys=True))
+if not continuation_allowed:
+    raise AssertionError(f"compile four-corner gate failed: {classification}")
+print(json.dumps(record, indent=2, sort_keys=True))
 PY
+
+run_lane control 0 1 1 1 baseline "${SP1_RESULTS}" \
+  "${RESULT_ROOT}/layer-probes/control" false
+run_lane candidate 1 1 1 1 sglang "${SP1_RESULTS}" \
+  "${RESULT_ROOT}/layer-probes/candidate" false
+run_lane candidate-replay 1 1 1 1 candidate_replay "${SP1_RESULTS}" "" false
 
 run_tp2_existing_blocker tp2-control 0 tp2_control_blocked "${SP1_RESULTS}"
 run_tp2_existing_blocker tp2-candidate 1 tp2_candidate_blocked "${SP1_RESULTS}"
@@ -395,8 +550,8 @@ root = Path(sys.argv[1])
 case_id = sys.argv[2]
 
 comparisons = {
-    "sp1_candidate_eager_vs_compile": json.loads(
-        (root / "sp1" / "compile-compatibility-metrics.json").read_text()
+    "compile_four_corner": json.loads(
+        (root / "sp1" / "compile-four-corner-summary.json").read_text()
     )
 }
 for degree in ("sp1", "sp2"):
@@ -478,7 +633,7 @@ for probe_name in (
                         / "compile-client-contract-verified.json"
                     ).read_text()
                 ),
-                "metrics": comparisons["sp1_candidate_eager_vs_compile"],
+                "four_corner": comparisons["compile_four_corner"],
             },
             "tp2_existing_blocker": json.loads(
                 (root / "sp1" / "tp2-existing-s3-blocker.json").read_text()
