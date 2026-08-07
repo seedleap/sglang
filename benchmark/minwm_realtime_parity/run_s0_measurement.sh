@@ -44,6 +44,10 @@ if [[ -n "${SGLANG_DIFFUSION_TORCH_PROFILER_DIR:-}" ]]; then
   echo "SGLANG_DIFFUSION_TORCH_PROFILER_DIR must be unset during Nsight capture" >&2
   exit 2
 fi
+if [[ -e "${RESULT_ROOT}" ]]; then
+  echo "Refusing to overwrite existing S4 measurement attempt: ${RESULT_ROOT}" >&2
+  exit 2
+fi
 mkdir -p "${RESULT_ROOT}"
 
 export MINWM_PARITY_DETERMINISTIC=1
@@ -71,6 +75,7 @@ ALLOCATED_GPU_COUNT="${MINWM_ALLOCATED_GPU_COUNT:-$(nvidia-smi -L | wc -l | xarg
   echo "nsys_window=${PROFILE_PRECONDITION_CHUNKS} precondition + ${PROFILE_DISCARD_CHUNKS} discarded + ${PROFILE_MEASURED_CHUNKS} stable"
   echo "kv_cache_num_frames=${KV_CACHE_NUM_FRAMES}"
   echo "torch_profiler_concurrent=false"
+  echo "invalid_attempt_policy=preserve-in-place-with-path-size-sha256-marker"
   echo "started_utc=$(date --utc +%Y-%m-%dT%H:%M:%SZ)"
 } | tee "${RESULT_ROOT}/contract.txt"
 nvidia-smi -q > "${RESULT_ROOT}/nvidia-smi-q.txt"
@@ -111,14 +116,70 @@ stop_server() {
   fi
 }
 
+mark_invalid_attempt() {
+  local status="$1"
+  python3 - "${RESULT_ROOT}" "${status}" <<'PY'
+import hashlib
+import json
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+root = Path(sys.argv[1]).resolve()
+status = int(sys.argv[2])
+invalid_dir = root / "invalid"
+invalid_dir.mkdir(parents=True, exist_ok=True)
+artifacts = []
+for path in sorted(root.rglob("*")):
+    if not path.is_file() or invalid_dir in path.parents:
+        continue
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(8 * 1024 * 1024), b""):
+            digest.update(chunk)
+    artifacts.append(
+        {
+            "path": str(path.relative_to(root)),
+            "size_bytes": path.stat().st_size,
+            "sha256": digest.hexdigest(),
+        }
+    )
+marker = {
+    "reason": f"runner_exit_status_{status}",
+    "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+    "attempt_root": str(root),
+    "artifacts": artifacts,
+    "recoverability": (
+        "All partial evidence remains in place under this attempt root; "
+        "aggregators must exclude directories containing invalid/."
+    ),
+}
+(invalid_dir / "attempt-invalid.json").write_text(
+    json.dumps(marker, indent=2, sort_keys=True) + "\n"
+)
+PY
+}
+
 cleanup() {
+  local status="${1:-0}"
+  set +e
   if [[ -n "${nsys_session}" ]]; then
     nsys stop --session="${nsys_session}" 2>/dev/null || true
     nsys_session=""
   fi
   stop_server
+  if (( status != 0 )); then
+    mark_invalid_attempt "${status}"
+  fi
 }
-trap cleanup EXIT INT TERM
+
+on_exit() {
+  local status=$?
+  cleanup "${status}"
+}
+trap on_exit EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 server_args() {
   local degree="$1"
@@ -304,7 +365,10 @@ run_profiler_on() {
   mkdir -p "${profile_dir}"
   read_server_args "${degree}"
   SERVER_ARGS+=(--enable-layerwise-nvtx-marker)
-  rm -f "${report}" "${sqlite}"
+  if [[ -e "${report}" || -e "${sqlite}" ]]; then
+    echo "Refusing to overwrite existing Nsight evidence in ${profile_dir}" >&2
+    exit 2
+  fi
 
   MINWM_ATTENTION_IMPL=packed \
   MINWM_PACKED_ATTENTION_DETERMINISTIC=true \
