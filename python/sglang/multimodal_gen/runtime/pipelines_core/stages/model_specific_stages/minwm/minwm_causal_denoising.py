@@ -9,7 +9,6 @@ from pathlib import Path
 from typing import Any
 
 import torch
-
 from sglang.multimodal_gen.configs.pipeline_configs.minwm import (
     MINWM_ACTION_LABELS_CONDITION,
     MINWM_ACTION_WEIGHTS_CONDITION,
@@ -460,7 +459,7 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
                 getattr(arch_config, "scene_cut_sink_enabled", False)
             ),
         }
-        if self._minwm_cuda_graph_enabled:
+        if getattr(self, "_minwm_cuda_graph_enabled", False):
             if cache_kwargs["allow_growth"]:
                 raise ValueError(
                     "MinWM CUDA graph requires a bounded realtime KV window. "
@@ -861,7 +860,7 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
         attn_metadata,
     ) -> tuple | None:
         if (
-            not self._minwm_cuda_graph_enabled
+            not getattr(self, "_minwm_cuda_graph_enabled", False)
             or current_timestep == 0
             or attn_metadata is not None
             or image_kwargs
@@ -1243,16 +1242,6 @@ class MinWMCausalVaeDecodingStage(CausalVaeDecodingStage):
                 batch.block_idx = 0
         try:
             result = super().forward(batch, server_args)
-            if getattr(result, "remote_vae_request", None) is not None:
-                result.remote_vae_request["output_block_idx"] = original_block_idx
-                result.realtime_output_chunk_index_start = original_block_idx
-                result.realtime_output_event_id = batch.realtime_event_id
-                if (
-                    original_block_idx == 1
-                    and batch.latents.shape[2] > generated_latents.shape[2]
-                ):
-                    result.remote_vae_request["trim_leading_frames"] = 1
-                return result
             if (
                 original_block_idx == 1
                 and batch.latents.shape[2] > generated_latents.shape[2]
