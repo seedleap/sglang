@@ -33,6 +33,9 @@ from sglang.multimodal_gen.runtime.models.dits.minwm_action import (
     validate_action_labels,
     validate_action_weights,
 )
+from sglang.multimodal_gen.runtime.models.dits.minwm import (
+    set_minwm_cuda_graph_active,
+)
 from sglang.multimodal_gen.runtime.models.dits.minwm_kv_cache import (
     MinWMCausalSelfAttentionKVCache,
 )
@@ -1059,6 +1062,7 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
         self._minwm_cuda_graph_enabled = bool(
             getattr(server_args, "enable_cuda_graph", False)
         )
+        set_minwm_cuda_graph_active(self._minwm_cuda_graph_enabled)
         if self._minwm_cuda_graph_enabled and bool(
             getattr(server_args, "enable_torch_compile", False)
         ):

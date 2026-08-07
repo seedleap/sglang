@@ -79,6 +79,7 @@ _MINWM_PACKED_ATTENTION_DETERMINISTIC = _env_flag(
     "MINWM_PACKED_ATTENTION_DETERMINISTIC", True
 )
 _MINWM_SEGMENT_COMPILE = _env_flag("MINWM_SEGMENT_COMPILE", True)
+_MINWM_CUDA_GRAPH_ACTIVE = False
 _MINWM_CACHE_ROTATED_K = _env_flag("MINWM_CACHE_ROTATED_K", True)
 _MINWM_PRECOMPUTE_CACHE_ROPE = _env_flag("MINWM_PRECOMPUTE_CACHE_ROPE", True)
 _MINWM_CACHE_PACKED_METADATA = _env_flag("MINWM_CACHE_PACKED_METADATA", True)
@@ -193,7 +194,11 @@ class _MinWMSegmentCompile:
 
     @classmethod
     def get(cls, function, use_compile: bool):
-        if not use_compile or not _MINWM_SEGMENT_COMPILE:
+        if (
+            not use_compile
+            or not _MINWM_SEGMENT_COMPILE
+            or _MINWM_CUDA_GRAPH_ACTIVE
+        ):
             return function
         if function not in cls._compiled:
             kwargs = {}
@@ -205,6 +210,19 @@ class _MinWMSegmentCompile:
                 function, dynamic=True, mode=None, **kwargs
             )
         return cls._compiled[function]
+
+
+def set_minwm_cuda_graph_active(enabled: bool) -> None:
+    """Keep segment-level Inductor graphs out of the manual DiT graph."""
+    global _MINWM_CUDA_GRAPH_ACTIVE
+    enabled = bool(enabled)
+    if enabled == _MINWM_CUDA_GRAPH_ACTIVE:
+        return
+    _MINWM_CUDA_GRAPH_ACTIVE = enabled
+    if enabled and _MINWM_SEGMENT_COMPILE:
+        logger.info(
+            "MinWM CUDA graph disables nested segment torch.compile for parity"
+        )
 
 
 def apply_minwm_rotary_embedding(

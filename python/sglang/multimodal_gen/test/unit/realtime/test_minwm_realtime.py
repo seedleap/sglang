@@ -2182,7 +2182,6 @@ def test_minwm_cache_qk_norm_stays_eager(monkeypatch):
         == 3
     )
     assert compile_calls == []
-
     assert (
         _minwm_apply_qk_op(
             operation,
@@ -2193,6 +2192,22 @@ def test_minwm_cache_qk_norm_stays_eager(monkeypatch):
         == 3
     )
     assert compile_calls == [True]
+
+
+def test_minwm_cuda_graph_disables_segment_compile(monkeypatch):
+    import sglang.multimodal_gen.runtime.models.dits.minwm as minwm_module
+
+    def operation(value):
+        return value
+
+    monkeypatch.setattr(minwm_module, "_MINWM_SEGMENT_COMPILE", True)
+    monkeypatch.setattr(minwm_module, "_MINWM_CUDA_GRAPH_ACTIVE", False)
+    monkeypatch.setattr(minwm_module._MinWMSegmentCompile, "_compiled", {})
+
+    minwm_module.set_minwm_cuda_graph_active(True)
+
+    assert minwm_module._MinWMSegmentCompile.get(operation, True) is operation
+    assert minwm_module._MinWMSegmentCompile._compiled == {}
 
 
 def test_minwm_rotary_embedding_matches_main_explicit_formula():
