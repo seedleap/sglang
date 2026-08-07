@@ -4,12 +4,12 @@ import pytest
 import torch
 from torch import nn
 
+from sglang.multimodal_gen.runtime.layers.linear import ReplicatedLinear
+from sglang.multimodal_gen.runtime.layers.usp import _usp_pack_peer_first_qkv
 from sglang.multimodal_gen.runtime.loader.utils import (
     get_param_names_mapping,
     hf_to_custom_state_dict,
 )
-from sglang.multimodal_gen.runtime.layers.linear import ReplicatedLinear
-from sglang.multimodal_gen.runtime.layers.usp import _usp_pack_peer_first_qkv
 from sglang.multimodal_gen.runtime.models.dits import (
     causal_wanvideo as causal_wanvideo_module,
 )
