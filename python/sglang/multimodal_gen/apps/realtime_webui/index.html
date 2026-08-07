@@ -151,11 +151,25 @@
             <span class="stage-stat">action <b id="actionStateText">-</b></span>
             <span class="stage-stat">buffer <b id="stageLatencyText">-</b></span>
           </div>
-          <div class="preview-frame">
-            <canvas id="viewport" width="1280" height="720" tabindex="0"></canvas>
-            <div id="previewOverlay" class="preview-overlay" aria-hidden="true">
-              <span class="preview-loader"></span>
-            </div>
+          <div class="model-player-grid" aria-label="Model comparison">
+            <article class="model-player" data-model-key="minwm">
+              <header class="model-player-title"><strong>MinWM</strong></header>
+              <div class="preview-frame">
+                <canvas id="minwmViewport" width="1280" height="720" tabindex="0"></canvas>
+                <div id="minwmPreviewOverlay" class="preview-overlay" aria-hidden="true">
+                  <span class="preview-loader"></span>
+                </div>
+              </div>
+            </article>
+            <article class="model-player" data-model-key="lingbot2">
+              <header class="model-player-title"><strong>LingBot2</strong></header>
+              <div class="preview-frame">
+                <canvas id="lingbot2Viewport" width="1280" height="720" tabindex="0"></canvas>
+                <div id="lingbot2PreviewOverlay" class="preview-overlay" aria-hidden="true">
+                  <span class="preview-loader"></span>
+                </div>
+              </div>
+            </article>
           </div>
           <div class="stage-controls" aria-label="Camera controls">
             <div class="control-cluster" aria-label="Move camera">
@@ -240,6 +254,8 @@
     </main>
   <script src="./runtime-config.js"></script>
   <script src="./playback_controller.js?v=realtime-playback-v28"></script>
+  <script src="./model_session.js?v=dual-model-v1"></script>
+  <script src="./dual_model_controller.js?v=dual-model-v1"></script>
   <script src="./trace_topology.js?v=realtime-trace-topology-v6"></script>
   <script src="./trace_transport.js?v=realtime-trace-http-v2"></script>
   <script src="./app.js?v=realtime-production-gateway-v17"></script>

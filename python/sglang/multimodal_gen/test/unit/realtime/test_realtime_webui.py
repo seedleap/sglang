@@ -3,6 +3,32 @@
 from pathlib import Path
 
 
+def test_realtime_webui_routes_named_model_backends(monkeypatch):
+    from sglang.multimodal_gen.apps.realtime_webui import server
+
+    monkeypatch.setenv("MINWM_UPSTREAM_HTTP", "http://minwm:30000")
+    monkeypatch.setenv("MINWM_UPSTREAM_WS", "ws://minwm:30000")
+    monkeypatch.setenv("LINGBOT2_UPSTREAM_HTTP", "http://lingbot2:30000")
+    monkeypatch.setenv("LINGBOT2_UPSTREAM_WS", "ws://lingbot2:30000")
+
+    assert (
+        server._backend_upstream("minwm", "http", "/v1/health", "?verbose=1")
+        == "http://minwm:30000/v1/health?verbose=1"
+    )
+    assert (
+        server._backend_upstream(
+            "lingbot2", "ws", "/v1/realtime_video/generate", ""
+        )
+        == "ws://lingbot2:30000/v1/realtime_video/generate"
+    )
+    try:
+        server._backend_upstream("unknown", "http", "/v1/health", "")
+    except KeyError:
+        pass
+    else:
+        raise AssertionError("unknown backend names must fail closed")
+
+
 def test_realtime_webui_uses_same_origin_server_by_default():
     repo_root = Path(__file__).resolve().parents[6]
     app_js = (
@@ -12,7 +38,12 @@ def test_realtime_webui_uses_same_origin_server_by_default():
         repo_root / "python/sglang/multimodal_gen/apps/realtime_webui/server.py"
     ).read_text()
 
-    assert "`${protocol}//${window.location.host}/v1/realtime_video/generate`" in app_js
+    assert (
+        "`${protocol}//${window.location.host}/backends/minwm/v1/realtime_video/generate`"
+        in app_js
+    )
+    assert '"/backends/{backend}/v1/realtime_video/generate"' in proxy_server
+    assert '"*", "/backends/{backend}/v1/{path:.*}"' in proxy_server
     assert 'app.router.add_get("/v1/realtime_video/generate"' in proxy_server
     assert 'app.router.add_route("*", "/v1/{path:.*}"' in proxy_server
 
@@ -99,7 +130,8 @@ def test_realtime_webui_presets_do_not_emit_camera_scripts():
     assert 'id="upscalingScale"' in index_html
     assert 'class="workspace"' in index_html
     assert 'class="preview-frame"' in index_html
-    assert 'id="previewOverlay" class="preview-overlay"' in index_html
+    assert 'id="minwmPreviewOverlay" class="preview-overlay"' in index_html
+    assert 'id="lingbot2PreviewOverlay" class="preview-overlay"' in index_html
     assert 'id="previewScale" type="range" min="80" max="170" value="100"' in index_html
     assert 'id="previewScaleText"' in index_html
     assert 'id="outputSizeText"' in index_html
@@ -136,7 +168,7 @@ def test_realtime_webui_presets_do_not_emit_camera_scripts():
     assert "stage.dataset.previewState = state" in app_js
     assert "previewProgressSpin" in styles_css
     assert "previewDotPulse" not in styles_css
-    assert 'document.querySelector(".preview-frame")' in app_js
+    assert 'document.querySelector(".model-player-grid")' in app_js
     assert 'previewFrame.style.setProperty("--preview-scale"' in app_js
     assert "cancelAnimationFrame(previewScaleFrame)" in app_js
     assert "enable_frame_interpolation: true" in app_js

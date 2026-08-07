@@ -6,6 +6,8 @@ const WEBP_FRAME_CONTENT_TYPE = "image/webp";
 const JPEG_FRAME_CONTENT_TYPE = "image/jpeg";
 const DECODER_WORKER_URL = "./decoder_worker.js?v=rgb-worker-v10";
 const UI_CONFIG = Object.freeze(globalThis.SGLANG_REALTIME_UI_CONFIG || {});
+const DUAL_MODEL_CONFIG = Object.freeze(UI_CONFIG.dualModels || {});
+const DEFAULT_LINGBOT2_MODEL = "robbyant/lingbot-world-v2-14b-causal-fast-diffusers";
 const SESSION_ARTIFACT_SCHEMA_VERSION = 1;
 const SESSION_ARTIFACT_EVENT_LIMIT = 20000;
 const MAX_EMBEDDED_REFERENCE_IMAGE_BYTES = 2 * 1024 * 1024;
@@ -384,7 +386,6 @@ let pendingDecodeBatches = 0;
 let droppedDecodeFrames = 0;
 let lastDecodeDropAt = 0;
 let lastDecodeDropCount = 0;
-let nextEventId = 1;
 let lastRawRgbFrame = null;
 let decoderWorker = null;
 let decodeWorkerUnavailable = false;
@@ -445,9 +446,10 @@ let activeWorkspaceView = "preview";
 let traceRenderFrame = 0;
 
 const stage = document.querySelector(".stage");
-const previewFrame = document.querySelector(".preview-frame");
-const canvas = $("viewport");
+const previewFrame = document.querySelector(".model-player-grid");
+const canvas = $("minwmViewport");
 const ctx = canvas.getContext("2d", { alpha: false });
+const lingbot2Canvas = $("lingbot2Viewport");
 const scratchCanvas = document.createElement("canvas");
 const scratchCtx = scratchCanvas.getContext("2d", { alpha: false });
 const recordingCanvas = document.createElement("canvas");
@@ -470,6 +472,63 @@ const playbackController = new RealtimePlaybackController({
   maxResumeLeadMs: 900,
   maxDeliveryLeadBoostMs: 360,
   deliveryStallExpectedMultiplier: 1.8,
+});
+const lingbot2Session = new RealtimeModelSession({
+  key: "lingbot2",
+  canvas: lingbot2Canvas,
+  overlay: $("lingbot2PreviewOverlay"),
+  root: document.querySelector('[data-model-key="lingbot2"]'),
+  pack,
+  unpack,
+  workerUrl: DECODER_WORKER_URL,
+  onState: (state, details) => {
+    if (state === "error") {
+      setStatus("LingBot2 error", "error");
+      addHistory(`LingBot2 error · ${details.message || details.reason || "unknown"}`);
+    }
+  },
+  onStats: (stats) => {
+    const root = document.querySelector('[data-model-key="lingbot2"]');
+    if (!root) return;
+    root.dataset.chunk = stats.lastChunk ?? "";
+    root.dataset.frames = String(stats.frames || 0);
+  },
+  onError: (error) => {
+    addHistory(`LingBot2 session failed · ${error.message || "unknown"}`);
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      abortCurrentSession("LingBot2 peer failed", { expectedClose: false });
+    }
+  },
+});
+const primarySessionAdapter = {
+  connect: (init, url) => openPrimarySession(init, url),
+  sendEvent: (envelope) => sendPrimaryEventEnvelope(envelope),
+  close: (reason) => abortCurrentSession(reason, { expectedClose: true }),
+};
+const dualModelController = new DualModelController({
+  sessions: {
+    minwm: primarySessionAdapter,
+    lingbot2: lingbot2Session,
+  },
+  backends: {
+    minwm: {
+      model: () => String(
+        DUAL_MODEL_CONFIG.minwm?.model
+        || UI_CONFIG.minwmModel
+        || $("model").value
+        || "minwm"
+      ),
+      wsUrl: (init) => backendWebSocketUrl("minwm", init.trace_id),
+    },
+    lingbot2: {
+      model: String(
+        DUAL_MODEL_CONFIG.lingbot2?.model
+        || UI_CONFIG.lingbot2Model
+        || DEFAULT_LINGBOT2_MODEL
+      ),
+      wsUrl: (init) => backendWebSocketUrl("lingbot2", init.trace_id),
+    },
+  },
 });
 
 function setStatus(text, kind = "") {
@@ -535,6 +594,23 @@ function traceWebSocketUrl(baseUrl) {
       ? `trace_id=${encodeURIComponent(currentTrace.traceId)}&`
       : "";
     return `${baseUrl}${separator}${trace}user_id=${encodeURIComponent(browserUserId)}`;
+  }
+}
+
+function backendWebSocketUrl(key, traceId) {
+  const configuredUrl = DUAL_MODEL_CONFIG[key]?.wsUrl;
+  const baseUrl = configuredUrl || $("serverUrl").value;
+  try {
+    const url = new URL(baseUrl, window.location.href);
+    if (!configuredUrl) {
+      url.pathname = `/backends/${key}/v1/realtime_video/generate`;
+      url.search = "";
+    }
+    if (traceId) url.searchParams.set("trace_id", traceId);
+    url.searchParams.set("user_id", browserUserId);
+    return url.toString();
+  } catch {
+    return baseUrl;
   }
 }
 
@@ -793,6 +869,13 @@ function drawIdle() {
   renderedPreviewFrames = 0;
   ctx.fillStyle = "#11140f";
   ctx.fillRect(0, 0, w, h);
+  if (lingbot2Canvas.width !== w || lingbot2Canvas.height !== h) {
+    lingbot2Canvas.width = w;
+    lingbot2Canvas.height = h;
+  }
+  const lingbot2Context = lingbot2Canvas.getContext("2d", { alpha: false });
+  lingbot2Context.fillStyle = "#11140f";
+  lingbot2Context.fillRect(0, 0, w, h);
 }
 
 function resetStreamStats() {
@@ -1014,7 +1097,9 @@ function previewPlaybackTargetFps() {
 }
 
 function syncPlaybackTargetFps() {
-  playbackController.setTargetFps(previewPlaybackTargetFps());
+  const targetFps = previewPlaybackTargetFps();
+  playbackController.setTargetFps(targetFps);
+  lingbot2Session.configure({ targetFps });
   updateStats();
 }
 
@@ -1027,6 +1112,7 @@ function selectedPlaybackMode() {
 function syncPlaybackMode({ addToHistory = true } = {}) {
   const mode = selectedPlaybackMode();
   playbackController.setMode(mode);
+  lingbot2Session.configure({ mode });
   if (addToHistory) {
     const historyText =
       mode === "timeline"
@@ -1545,16 +1631,14 @@ function createRecordingFrame(image, timestamp, duration) {
 
 function drawRecordingStageFrame(image) {
   ensureRecordingStageCanvas();
-  const source = recordingDrawableSource(image || canvas);
-  const sourceWidth = source.width || canvas.width || 1280;
-  const sourceHeight = source.height || canvas.height || 720;
+  const minwmSource = recordingDrawableSource(image || canvas);
   recordingCtx.save();
   recordingCtx.imageSmoothingEnabled = true;
   recordingCtx.imageSmoothingQuality = "medium";
   recordingCtx.fillStyle = "#11140f";
   recordingCtx.fillRect(0, 0, RECORDING_STAGE_WIDTH, RECORDING_STAGE_HEIGHT);
   drawRecordingTopbar();
-  drawRecordingPreview(source, sourceWidth, sourceHeight);
+  drawRecordingComparisonPreview(minwmSource, lingbot2Canvas);
   drawRecordingControls();
   drawRecordingTimeline();
   drawRecordingTelemetry();
@@ -1645,15 +1729,36 @@ function drawRecordingTopbarStatRight(text, right, y) {
   return right - width - 24;
 }
 
-function drawRecordingPreview(source, sourceWidth, sourceHeight) {
+function drawRecordingComparisonPreview(minwmSource, lingbot2Source) {
   const y = RECORDING_STAGE_TOPBAR_HEIGHT;
   fillRecordingRect(0, y, RECORDING_STAGE_WIDTH, RECORDING_STAGE_PREVIEW_HEIGHT, "#11140f");
-  const previewRect = {
-    x: 118,
-    y,
-    width: RECORDING_STAGE_WIDTH - 236,
-    height: RECORDING_STAGE_PREVIEW_HEIGHT,
-  };
+  const gap = 12;
+  const inset = 24;
+  const titleHeight = 34;
+  const width = (RECORDING_STAGE_WIDTH - inset * 2 - gap) / 2;
+  const height = RECORDING_STAGE_PREVIEW_HEIGHT - titleHeight;
+  const players = [
+    { label: "MinWM", source: minwmSource, x: inset },
+    { label: "LingBot2", source: lingbot2Source, x: inset + width + gap },
+  ];
+  for (const player of players) {
+    drawRecordingLabel(player.label, player.x + 4, y + 24, {
+      color: "#fffdf7",
+      font: "600 16px ui-sans-serif, system-ui, sans-serif",
+      maxWidth: width - 8,
+    });
+    drawRecordingFittedSource(player.source, {
+      x: player.x,
+      y: y + titleHeight,
+      width,
+      height,
+    });
+  }
+}
+
+function drawRecordingFittedSource(source, previewRect) {
+  const sourceWidth = source?.width || 1280;
+  const sourceHeight = source?.height || 720;
   const scale = Math.min(
     previewRect.width / Math.max(1, sourceWidth),
     previewRect.height / Math.max(1, sourceHeight),
@@ -1663,7 +1768,9 @@ function drawRecordingPreview(source, sourceWidth, sourceHeight) {
   const drawX = Math.round(previewRect.x + (previewRect.width - drawWidth) / 2);
   const drawY = Math.round(previewRect.y + (previewRect.height - drawHeight) / 2);
   fillRecordingRect(previewRect.x, previewRect.y, previewRect.width, previewRect.height, "#151912");
-  recordingCtx.drawImage(source, drawX, drawY, drawWidth, drawHeight);
+  if (sourceWidth > 0 && sourceHeight > 0) {
+    recordingCtx.drawImage(source, drawX, drawY, drawWidth, drawHeight);
+  }
 }
 
 function drawRecordingControls() {
@@ -3210,7 +3317,8 @@ function abortCurrentSession(reason = "session closed by client", {
 }
 
 function closeSession(reason = "session closed by client", clearFrames = true) {
-  abortCurrentSession(reason, { clearFrames, expectedClose: true });
+  clearQueueOnClose = clearFrames;
+  dualModelController.close(reason);
 }
 
 function waitForSocketClose(socket, timeoutMs = RECONNECT_CLOSE_TIMEOUT_MS) {
@@ -3305,18 +3413,34 @@ async function connect() {
     document.activeElement?.blur?.();
     canvas.tabIndex = 0;
     canvas.focus();
-    const socket = new WebSocket(traceWebSocketUrl($("serverUrl").value));
+    await dualModelController.connect(init);
+    if (epoch !== streamEpoch) return;
+    setStatus("Live", "live");
+  } catch (error) {
+    $("connectBtn").disabled = false;
+    setStatus("Init failed", "error");
+    if (!renderedPreviewFrames) setPreviewState("idle");
+    addHistory(error.message || "init failed");
+  }
+}
+
+function openPrimarySession(init, url) {
+  const epoch = streamEpoch;
+  const generationMode = init.generation_mode;
+  const referenceImage = currentSessionArtifact?.reference_image || null;
+  return new Promise((resolve, reject) => {
+    const socket = new WebSocket(url);
     ws = socket;
     socket.binaryType = "arraybuffer";
     socketHadError = false;
     socketCloseExpected = false;
     socketServerError = "";
+    let opened = false;
     socket.onopen = () => {
       if (epoch !== streamEpoch) return;
-      markClientTrace("client.ws_open", {
-        url: traceWebSocketUrl($("serverUrl").value),
-      });
-      recordTrajectoryEvent("socket_open", { url: traceWebSocketUrl($("serverUrl").value) });
+      opened = true;
+      markClientTrace("client.ws_open", { url });
+      recordTrajectoryEvent("socket_open", { url });
       const initPayload = pack(init);
       socket.send(initPayload);
       markClientTrace("client.init_sent", {
@@ -3332,9 +3456,10 @@ async function connect() {
       });
       setStatus("Starting", "live");
       const source = generationMode === "t2v"
-        ? `${numFrames} frames from text`
+        ? `${init.num_frames || "continuous"} frames from text`
         : selectedReferenceLabel || "uploaded reference";
-      addHistory(`${generationMode.toUpperCase()} session started · ${source}`);
+      addHistory(`${generationMode.toUpperCase()} dual session started · ${source}`);
+      resolve();
     };
     socket.onclose = (event) => {
       if (epoch !== streamEpoch) return;
@@ -3350,7 +3475,7 @@ async function connect() {
       }
       clearQueueOnClose = false;
       const reason = event.reason ? ` · ${event.reason}` : "";
-      const closeText = `socket closed code=${event.code}${reason}`;
+      const closeText = `MinWM socket closed code=${event.code}${reason}`;
       const normalClose = event.code === 1000 || event.code === 1001;
       if (socketServerError) {
         setStatus("Server closed", "error");
@@ -3363,6 +3488,7 @@ async function connect() {
         addHistory(closeText);
       }
       recordTrajectoryEvent("socket_close", {
+        backend: "minwm",
         code: event.code,
         reason: event.reason || "",
         normal_close: normalClose,
@@ -3370,16 +3496,21 @@ async function connect() {
       });
       void traceHttpClient?.flushClientEvents().catch(() => {});
       if (!renderedPreviewFrames) setPreviewState("idle");
+      if (!normalClose && !socketCloseExpected) {
+        lingbot2Session.close("MinWM peer failed");
+      }
+      if (!opened) reject(new Error(`MinWM closed before startup (${event.code})`));
       socketCloseExpected = false;
     };
     socket.onerror = () => {
       if (epoch !== streamEpoch) return;
       markClientTrace("client.ws_error");
-      recordTrajectoryEvent("socket_error", { ready_state: socket.readyState });
+      recordTrajectoryEvent("socket_error", { backend: "minwm", ready_state: socket.readyState });
       if (!socketCloseExpected) {
         socketHadError = true;
         $("connectBtn").disabled = false;
       }
+      if (!opened) reject(new Error("MinWM websocket transport error"));
     };
     socket.onmessage = (event) => {
       if (epoch !== streamEpoch) return;
@@ -3389,18 +3520,20 @@ async function connect() {
         handleReceiveError(error, epoch);
       }
     };
-  } catch (error) {
-    $("connectBtn").disabled = false;
-    setStatus("Init failed", "error");
-    if (!renderedPreviewFrames) setPreviewState("idle");
-    addHistory(error.message || "init failed");
-  }
+  });
+}
+
+function sendPrimaryEventEnvelope(envelope) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+  ws.send(pack({ ...envelope, trace_id: currentTrace?.traceId }));
+  return true;
 }
 
 function handleReceiveError(error, epoch) {
   if (epoch !== streamEpoch) return;
   setStatus("Receive failed", "error");
   addHistory(error.message || "receive failed");
+  lingbot2Session.close("MinWM receive failed");
   abortCurrentSession(error.message || "receive failed", {
     clearFrames: false,
     expectedClose: false,
@@ -3420,6 +3553,7 @@ function receive(data, epoch) {
       setStatus(socketServerError, "error");
       addHistory(`server error: ${socketServerError}`);
       recordTrajectoryEvent("server_error", { content: socketServerError });
+      lingbot2Session.close("MinWM server error");
       if (ws && ws.readyState === WebSocket.OPEN) {
         socketCloseExpected = true;
         ws.close(1000, socketServerError.slice(0, 120));
@@ -3579,18 +3713,8 @@ function sendEvent(kind, payload, historyText = null) {
     });
     return null;
   }
-  const eventId = nextEventId++;
+  const eventId = dualModelController.sendEvent(kind, payload);
   const clientSentPerfMs = performance.now();
-  const clientSentEpochMs = Date.now();
-  ws.send(pack({
-    type: "event",
-    kind,
-    payload,
-    event_id: eventId,
-    trace_id: currentTrace?.traceId,
-    client_sent_perf_ms: roundTraceNumber(clientSentPerfMs),
-    client_sent_epoch_ms: clientSentEpochMs,
-  }));
   markClientTrace("client.event_sent", {
     kind,
     event_id: eventId,
@@ -3697,7 +3821,8 @@ function modelsUrlFromServerUrl(serverUrl) {
   const url = new URL(serverUrl, window.location.href);
   if (url.protocol === "ws:") url.protocol = "http:";
   if (url.protocol === "wss:") url.protocol = "https:";
-  url.pathname = "/v1/models";
+  const backendPrefix = url.pathname.match(/^\/backends\/[^/]+/)?.[0] || "";
+  url.pathname = `${backendPrefix}/v1/models`;
   url.search = "";
   url.hash = "";
   return url.toString();
@@ -3709,7 +3834,7 @@ function realtimeServerUrlFromLocation() {
     return "";
   }
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-  return `${protocol}//${window.location.host}/v1/realtime_video/generate`;
+  return `${protocol}//${window.location.host}/backends/minwm/v1/realtime_video/generate`;
 }
 
 function applyDefaultServerUrl() {
@@ -4188,6 +4313,7 @@ $("frameInterpolation").addEventListener("change", () => {
 $("superResolution").addEventListener("change", tunePreviewQualityForPostprocess);
 $("previewScale").addEventListener("input", () => setPreviewScale($("previewScale").value));
 canvas.addEventListener("pointerdown", () => canvas.focus({ preventScroll: true }));
+lingbot2Canvas.addEventListener("pointerdown", () => canvas.focus({ preventScroll: true }));
 $("serverUrl").addEventListener("change", () => {
   queryServerModelInfo({ applyPresetForModel: true }).catch(showError);
 });
@@ -4362,18 +4488,9 @@ controlStateController = new ControlStateController();
 updateControlDebugText();
 window.setInterval(() => {
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
-  const eventId = nextEventId++;
-  ws.send(pack({
-    type: "event",
-    kind: "heartbeat",
-    payload: {
-      active_actions: Array.from(controlStateController.activeActions).sort(),
-    },
-    event_id: eventId,
-    trace_id: currentTrace?.traceId,
-    client_sent_perf_ms: roundTraceNumber(performance.now()),
-    client_sent_epoch_ms: Date.now(),
-  }));
+  dualModelController.sendEvent("heartbeat", {
+    active_actions: Array.from(controlStateController.activeActions).sort(),
+  });
 }, SESSION_HEARTBEAT_MS);
 
 document.addEventListener("keydown", (event) => {

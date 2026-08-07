@@ -21,8 +21,8 @@ assert.match(
 );
 assert.match(
   appJs,
-  /kind: "heartbeat"/,
-  "idle connected clients should keep their lease alive explicitly",
+  /dualModelController\.sendEvent\("heartbeat"/,
+  "idle connected clients should keep both model leases alive explicitly",
 );
 
 console.log("realtime multi-user lifecycle ok");

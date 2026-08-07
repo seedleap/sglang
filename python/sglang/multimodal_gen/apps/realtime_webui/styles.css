@@ -299,6 +299,34 @@ button:focus-visible {
   isolation: isolate;
 }
 
+.model-player-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1px;
+  min-width: 0;
+  background: rgba(232, 234, 223, 0.12);
+}
+
+.model-player {
+  display: grid;
+  grid-template-rows: 32px minmax(0, 1fr);
+  min-width: 0;
+  background: #11140f;
+}
+
+.model-player-title {
+  display: flex;
+  align-items: center;
+  padding: 0 14px;
+  color: #fffdf7;
+  background: #151912;
+  font-size: 12px;
+}
+
+.model-player .preview-frame {
+  width: 100%;
+}
+
 .preview-frame::before {
   content: "";
   position: absolute;
@@ -507,7 +535,8 @@ button:focus-visible {
 .dot.live { background: #8ecf9d; box-shadow: 0 0 0 4px rgba(142, 207, 157, 0.14); }
 .dot.error { background: var(--accent); }
 
-#viewport {
+#minwmViewport,
+#lingbot2Viewport {
   position: relative;
   z-index: 1;
   display: block;
@@ -518,6 +547,12 @@ button:focus-visible {
   object-fit: contain;
   image-rendering: auto;
   transform: translateZ(0);
+}
+
+@media (max-width: 900px) {
+  .model-player-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 .preview-overlay {
