@@ -551,11 +551,34 @@ class MiniMaxH3DenoisingStage(DenoisingStage):
                 device,
                 placement_managed=placement_managed,
             )
+            from sglang.multimodal_gen.runtime.models.dits.minimax_h3_causal import (
+                MiniMaxH3CausalAttentionSpec,
+            )
+
+            causal_attention_spec = (
+                MiniMaxH3CausalAttentionSpec.from_attention_backend_config(
+                    server_args.attention_backend_config
+                )
+            )
+            if causal_attention_spec.enabled:
+                logger.info(
+                    "MiniMax H3 causal attention experiment: mode=%s "
+                    "block_frames=%d sink_frames=%d (effective=%d) "
+                    "window_frames=%d (effective=%d) cache_block_mask=%s",
+                    causal_attention_spec.mode,
+                    causal_attention_spec.block_frames,
+                    causal_attention_spec.sink_frames,
+                    causal_attention_spec.effective_sink_frames,
+                    causal_attention_spec.window_frames,
+                    causal_attention_spec.effective_window_frames,
+                    causal_attention_spec.cache_block_mask,
+                )
             positive = MiniMaxH3DenoiseBranch(
                 packed=packed,
                 text_embeddings=emb["hidden_states"],
                 token_tags=tags,
                 device=device,
+                causal_attention_spec=causal_attention_spec,
             )
             _precompute_refined_prompt_embeds(
                 model,

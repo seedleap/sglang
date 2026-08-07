@@ -109,6 +109,7 @@ _FORWARD_SUPPORTED_KWARGS = frozenset(
         "text_pos_info",
         "img_pos_for_infer_output_info",
         "local_embedding_layout",
+        "causal_attention_plan",
         "packed_seq_params",
         "refiner_packed_seq_params",
     }
@@ -464,6 +465,7 @@ def _minimax_h3_attention_core_impl(
     cu_seqlens_host: tuple[int, ...] | None,
     max_seqlen: int,
     ulysses_active: bool,
+    causal_attention_plan=None,
 ) -> torch.Tensor:
     """Dynamic varlen attention and Ulysses collectives.
 
@@ -480,22 +482,50 @@ def _minimax_h3_attention_core_impl(
 
         q, k, v = _usp_input_all_to_all_packed_qkv(q, k, v)
 
-    if attention._attention_impl is None:
-        attention._set_attention_backend(
-            get_attn_backend(
-                attention.head_dim,
-                q.dtype,
-                supported_attention_backends=attention._supported_attention_backends,
-            )
+    if causal_attention_plan is not None:
+        from sglang.multimodal_gen.runtime.models.dits.minimax_h3_causal import (
+            minimax_h3_flex_causal_attention,
+            minimax_h3_reference_causal_attention,
         )
-    out = attention._attention_impl.forward_varlen(
-        q,
-        k,
-        v,
-        cu_seqlens=cu_seqlens,
-        max_seqlen=max_seqlen,
-        cu_seqlens_host=cu_seqlens_host,
-    )
+
+        if causal_attention_plan.spec.mode == "flex":
+            out = minimax_h3_flex_causal_attention(
+                q,
+                k,
+                v,
+                plan=causal_attention_plan,
+                softmax_scale=attention.softmax_scale,
+            )
+        elif causal_attention_plan.spec.mode == "reference":
+            out = minimax_h3_reference_causal_attention(
+                q,
+                k,
+                v,
+                plan=causal_attention_plan,
+                softmax_scale=attention.softmax_scale,
+            )
+        else:
+            raise ValueError(
+                "unexpected MiniMax H3 causal attention mode "
+                f"{causal_attention_plan.spec.mode!r}"
+            )
+    else:
+        if attention._attention_impl is None:
+            attention._set_attention_backend(
+                get_attn_backend(
+                    attention.head_dim,
+                    q.dtype,
+                    supported_attention_backends=attention._supported_attention_backends,
+                )
+            )
+        out = attention._attention_impl.forward_varlen(
+            q,
+            k,
+            v,
+            cu_seqlens=cu_seqlens,
+            max_seqlen=max_seqlen,
+            cu_seqlens_host=cu_seqlens_host,
+        )
     if ulysses_active:
         out = _usp_output_all_to_all(out[None], head_dim=2)[0]
     return out
@@ -618,11 +648,15 @@ class MiniMaxH3Attention(nn.Module):
         cu_seqlens_host: tuple[int, ...] | None = None,
         max_seqlen: int,
         ulysses_active: bool = False,
+        causal_attention_plan=None,
     ) -> torch.Tensor:
         """x: [T, hidden] packed thd rows -> [T, hidden].
 
         Operation order: fused qkv projection -> per-head q/k RMSNorm -> RoPE
-        on q/k -> variable-length non-causal flash attention -> output projection.
+        on q/k -> configured packed attention -> output projection. The released
+        checkpoint uses variable-length non-causal attention by default; the
+        experimental MiniMax H3 plan switches only this core to block-causal
+        reference or FlexAttention semantics.
 
         With Ulysses sequence parallelism, x holds this rank's row shard;
         qkv/norm/RoPE run locally, an all-to-all trades sequence for heads.
@@ -684,6 +718,7 @@ class MiniMaxH3Attention(nn.Module):
             cu_seqlens_host=cu_seqlens_host,
             max_seqlen=max_seqlen,
             ulysses_active=ulysses_active,
+            causal_attention_plan=causal_attention_plan,
         )
         out = out.reshape(total, self.num_heads * self.head_dim)
         out, _ = self.out_proj(out)
@@ -904,6 +939,7 @@ class MiniMaxH3DiTBlock(nn.Module):
         max_seqlen: int,
         ulysses_active: bool = False,
         adaln_params: tuple[torch.Tensor, ...] | None = None,
+        causal_attention_plan=None,
     ) -> torch.Tensor:
         """x: [T, H]; adaln_input: [M, t_dim]; combined_indices: [T]
         (= inverse_indices * modality_num + token_tags.clamp(min=0)).
@@ -928,6 +964,7 @@ class MiniMaxH3DiTBlock(nn.Module):
             cu_seqlens_host=cu_seqlens_host,
             max_seqlen=max_seqlen,
             ulysses_active=ulysses_active,
+            causal_attention_plan=causal_attention_plan,
         )
         x = _modulate_gate(residual, gate_msa, h, combined_indices, dtype=_BF16_DTYPE)
 
@@ -1610,6 +1647,16 @@ class MiniMaxH3DiTModel(BaseDiT, LayerwiseOffloadableModuleMixin):
             )
 
         hidden = decoder_input
+        causal_attention_plan = kwargs.get("causal_attention_plan")
+        if (
+            causal_attention_plan is not None
+            and causal_attention_plan.block_ids.numel() != seq_len
+        ):
+            raise ValueError(
+                "MiniMax H3 causal attention plan must cover the full packed "
+                f"sequence ({seq_len}), got "
+                f"{causal_attention_plan.block_ids.numel()}."
+            )
         cu_seqlens = cu_seqlens.to(device)
         block_adaln_params = None
         if self._can_batch_block_adaln():
@@ -1637,6 +1684,7 @@ class MiniMaxH3DiTModel(BaseDiT, LayerwiseOffloadableModuleMixin):
                 adaln_params=(
                     None if block_adaln_params is None else block_adaln_params[index]
                 ),
+                causal_attention_plan=causal_attention_plan,
             )
         video_logits, audio_logits = self.final_layer(
             hidden,

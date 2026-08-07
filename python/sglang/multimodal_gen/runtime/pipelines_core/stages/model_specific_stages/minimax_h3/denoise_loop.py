@@ -113,6 +113,7 @@ class MiniMaxH3DenoiseBranch:
         text_embeddings: torch.Tensor,
         token_tags: torch.Tensor,
         device: torch.device,
+        causal_attention_spec=None,
     ) -> None:
         seq_len = int(packed["seq_len"])
         self.seq_len = seq_len
@@ -227,6 +228,17 @@ class MiniMaxH3DenoiseBranch:
                 "max_seqlen_q": text_len,
             },
         }
+        if causal_attention_spec is not None and causal_attention_spec.enabled:
+            from sglang.multimodal_gen.runtime.models.dits.minimax_h3_causal import (
+                minimax_h3_build_causal_attention_plan,
+            )
+
+            self.static_kwargs["causal_attention_plan"] = (
+                minimax_h3_build_causal_attention_plan(
+                    packed,
+                    causal_attention_spec,
+                )
+            )
 
     def forward_kwargs(
         self,
