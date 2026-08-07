@@ -19,6 +19,7 @@ from nsys_metrics import (
     _api_metrics,
     _gpu_metrics,
     _kernel_metrics,
+    _kernel_process_coverage,
     _tables,
 )
 
@@ -672,11 +673,26 @@ def analyze(
         general_kernel, captured_devices = _kernel_metrics(
             connection, tables, intervals, active_gpu_count
         )
+        kernel_process_ids, kernel_processes_by_device = _kernel_process_coverage(
+            connection, tables, intervals
+        )
         general_api, coverage = _api_metrics(
-            connection, tables, intervals, active_gpu_count, captured_devices
+            connection,
+            tables,
+            intervals,
+            active_gpu_count,
+            captured_devices,
+            kernel_process_ids,
+            kernel_processes_by_device,
         )
         gpu_metrics = _gpu_metrics(
-            connection, tables, intervals, active_gpu_count, evidence
+            connection,
+            tables,
+            intervals,
+            active_gpu_count,
+            int(client["provenance"]["gpu"]["allocated_count"]),
+            captured_devices,
+            evidence,
         )
     finally:
         connection.close()

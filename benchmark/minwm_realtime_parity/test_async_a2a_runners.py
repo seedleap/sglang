@@ -5,6 +5,7 @@ ROOT = Path(__file__).resolve().parents[2]
 MEASUREMENT_RUNNER = Path(__file__).with_name("run_async_a2a_measurement.sh")
 QUALITY_RUNNER = Path(__file__).with_name("run_async_a2a_quality.sh")
 QUALITY_VALIDATOR = Path(__file__).with_name("validate_async_a2a_quality.py")
+NSYS_RUNNER = Path(__file__).with_name("run_async_a2a_nsys.sh")
 MINWM_MODEL = ROOT / "python/sglang/multimodal_gen/runtime/models/dits/minwm.py"
 
 
@@ -63,3 +64,23 @@ def test_async_a2a_quality_covers_sp2_sp4_long_run_and_tensor_parity() -> None:
         assert probe.removesuffix("_000.pt") in model
     assert 'block_name = f"block{block_index}"' in model
     assert '"output_proj": self.proj_out' in model
+
+
+def test_async_a2a_nsys_uses_exact_stable_window_without_torch_profiler() -> None:
+    runner = NSYS_RUNNER.read_text(encoding="utf-8")
+
+    assert "nsys launch" in runner
+    assert "--trace=cuda,nvtx" in runner
+    assert "--trace-fork-before-exec=true" in runner
+    assert "--cuda-graph-trace=node" in runner
+    assert "nsys start" in runner
+    assert "--gpu-metrics-devices=all" in runner
+    assert "--gpu-metrics-frequency=10000" in runner
+    assert "SGLANG_REALTIME_TRACE_SYNC_CUDA=0" in runner
+    assert "SGLANG_DIFFUSION_TORCH_PROFILER_DIR must be unset" in runner
+    assert "SGLANG_REALTIME_NSYS_WARMUP_CHUNKS" in runner
+    assert "SGLANG_REALTIME_NSYS_MEASURED_CHUNKS" in runner
+    assert "profiler_wall_headline_eligible=false" in runner
+    assert runner.index("nsys export") < runner.index("nsys stats")
+    assert 'async_a2a_nsys_metrics.py" analyze' in runner
+    assert 'async_a2a_nsys_metrics.py" compare' in runner
