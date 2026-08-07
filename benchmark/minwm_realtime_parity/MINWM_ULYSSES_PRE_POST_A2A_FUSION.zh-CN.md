@@ -4,7 +4,7 @@
 
 基线为 `origin/main@9a9dc59cd1`，实现分支为
 `codex/ulysses-pre-post-a2a-fusion`。统一测量契约来自 S0
-`411d9b9ec40b2fca2a7d85e17a05c11a4723750e`；S0 未合并前，它只叠加到临时 H200 测量分支，不进入本 PR 对 main 的
+`e75e9e24b5682361fea0c5d1987691b168833dbe`；S0 未合并前，它只叠加到临时 H200 测量分支，不进入本 PR 对 main 的
 实现 diff。
 
 ## 假设与预期
@@ -81,7 +81,10 @@ plan 不要求淘汰重排就不依赖 source shard 是否均匀。错误 prepar
 ## H200 A/B 与 Nsight 待填表
 
 每个 profiler-off lane 使用 20 warmup + 200 measured，至少两次重复并由 S0 工具计算
-CV；SP2 为主验收，SP4 复验。headline 只取 profiler-off。
+CV；SP2 为主验收，SP4 复验。headline 只取 profiler-off。所有 baseline/candidate
+固定 `MINWM_S0_KV_CACHE_NUM_FRAMES=45`（等价 client
+`--kv-cache-num-frames 45`），不随 `max_chunks` 扩张；这是 rolling-window steady-state
+contract，20 个 warmup chunk 后必须已进入窗口淘汰态。
 
 | SP | lane | Client FPS | Scheduler FPS | chunk wall | DiT wall/CUDA | VAE wall/CUDA | parity | 状态 |
 | ---: | --- | ---: | ---: | ---: | --- | --- | --- | --- |
@@ -95,6 +98,12 @@ Nsight 稳态至少 10 chunks，单独记录 A2A 前后 kernel/launch、短 kern
 SendRecv 时间与次数、两侧 idle gap、GPU kernel busy、SM Active、Tensor Active，以及
 可得时的 DRAM。若 GPU metrics 因权限不可用，按 S0 schema 填 `unavailable`、原因和
 采集证据，不留空。
+
+正确性另跑两组：短程无淘汰用例覆盖首块、growth、append 与同一 active
+chunk 的 DMD/clean-cache recompute；45-frame 固定窗口用例覆盖稳态淘汰与 fallback
+parity。当前 post fast lane 在 eviction plan 上主动 fallback，因此若 45-frame 稳态不命中、
+wall 无改善，这就是必须记录的 critical-path/覆盖证据，不得用短程数据替代
+headline。
 
 ## 与预期不符处
 
@@ -143,10 +152,11 @@ TORCH_COMPILE_DISABLE=1 TORCHDYNAMO_DISABLE=1 PYTHONPATH=python \
   -k 'fused_post_a2a'
 ```
 
-H200 测量临时叠加 S0 `411d9b9ec40b2fca2a7d85e17a05c11a4723750e`，产物必须通过
+H200 测量临时叠加 S0 `e75e9e24b5682361fea0c5d1987691b168833dbe`，产物必须通过
 `benchmark/minwm_realtime_parity/measurement_tool.py validate`；正式 PR 不包含 S0
 基础设施。最终 JSON 记录实际 checkout SHA，`gpu.count` 按 active GPUs、
-`gpu.allocated_count` 单列，Nsight kernel/launch 按 per-chunk/per-device 归一化。具体
+`gpu.allocated_count` 单列；Nsight/API 统一使用 `raw_total`、`total_per_chunk`、
+`per_rank_per_chunk`，其中 per-rank 只在 coverage 检查通过时采用。具体
 Job 名与产物路径在创建后补入，且只清理带本任务唯一前缀的资源。
 
 ## 给负责人掌握代码的检查题
