@@ -886,40 +886,44 @@ class MinWMCausalSelfAttention(CausalWanSelfAttention):
         cache_head_start = 0 if sequence_shard_enabled else self.head_start
         fused_post_result = None
         if _MINWM_FUSED_POST_A2A_ROPE_CACHE and sequence_shard_enabled:
-            fused_post_result = _minwm_try_fused_post_a2a_rope_cache(
-                kv_cache,
-                query=query,
-                key=key,
-                value=value,
-                current_chunk_start=current_start,
-                cache_head_start=cache_head_start,
-                rotary_embedding=self._minwm_rotary_emb,
-            )
+            with _minwm_nvtx_range("post_input_a2a_cache_rope", query):
+                fused_post_result = _minwm_try_fused_post_a2a_rope_cache(
+                    kv_cache,
+                    query=query,
+                    key=key,
+                    value=value,
+                    current_chunk_start=current_start,
+                    cache_head_start=cache_head_start,
+                    rotary_embedding=self._minwm_rotary_emb,
+                )
         if fused_post_result is None:
-            cache_view = _minwm_update_and_get_attention_kv(
-                kv_cache,
-                key=key,
-                value=value,
-                current_chunk_start=current_start,
-                cache_head_start=cache_head_start,
-            )
+            with _minwm_nvtx_range("post_input_a2a_cache_rope", key):
+                cache_view = _minwm_update_and_get_attention_kv(
+                    kv_cache,
+                    key=key,
+                    value=value,
+                    current_chunk_start=current_start,
+                    cache_head_start=cache_head_start,
+                )
             if cache_view.query_cos is None or cache_view.query_sin is None:
                 query_cos, query_sin = self._minwm_rotary_emb.forward_uncached(
                     cache_view.query_position_ids
                 )
             else:
                 query_cos, query_sin = cache_view.query_cos, cache_view.query_sin
-            roped_query = apply_minwm_rotary_embedding(
-                query, query_cos, query_sin
-            ).type_as(value)
+            with _minwm_nvtx_range("post_input_a2a_cache_rope", query):
+                roped_query = apply_minwm_rotary_embedding(
+                    query, query_cos, query_sin
+                ).type_as(value)
             if (
                 _MINWM_CACHE_ROTATED_K
                 and cache_view.rotated_k_is_valid
                 and cache_view.is_recompute
             ):
-                rotated_current_key = apply_minwm_rotary_embedding(
-                    key, query_cos, query_sin
-                ).type_as(value)
+                with _minwm_nvtx_range("post_input_a2a_cache_rope", key):
+                    rotated_current_key = apply_minwm_rotary_embedding(
+                        key, query_cos, query_sin
+                    ).type_as(value)
                 cache_view.rotated_k[
                     :, cache_view.current_local_start : cache_view.current_local_end
                 ].copy_(rotated_current_key)
@@ -931,12 +935,13 @@ class MinWMCausalSelfAttention(CausalWanSelfAttention):
                     )
                 else:
                     key_cos, key_sin = cache_view.key_cos, cache_view.key_sin
-                attention_key = apply_minwm_rotary_embedding(
-                    cache_view.k, key_cos, key_sin
-                ).type_as(value)
-                if _MINWM_CACHE_ROTATED_K:
-                    cache_view.rotated_k.copy_(attention_key)
-                    kv_cache.rotated_k_is_valid = True
+                with _minwm_nvtx_range("post_input_a2a_cache_rope", key):
+                    attention_key = apply_minwm_rotary_embedding(
+                        cache_view.k, key_cos, key_sin
+                    ).type_as(value)
+                    if _MINWM_CACHE_ROTATED_K:
+                        cache_view.rotated_k.copy_(attention_key)
+                        kv_cache.rotated_k_is_valid = True
         else:
             cache_view, roped_query = fused_post_result
             attention_key = cache_view.rotated_k
