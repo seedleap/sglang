@@ -4,7 +4,7 @@
 
 基线为 `origin/main@9a9dc59cd1`，实现分支为
 `codex/ulysses-pre-post-a2a-fusion`。统一测量契约来自 S0
-`25cc42ef8c58709957e089b6e58f35b3af7ee63a`；S0 未合并前，它只叠加到临时 H200 测量分支，不进入本 PR 对 main 的
+`59aa68a382cb9f481e77f98647644347671561dc`；S0 未合并前，它只叠加到临时 H200 测量分支，不进入本 PR 对 main 的
 实现 diff。
 
 ## 假设与预期
@@ -152,13 +152,19 @@ TORCH_COMPILE_DISABLE=1 TORCHDYNAMO_DISABLE=1 PYTHONPATH=python \
   -k 'fused_post_a2a'
 ```
 
-H200 测量临时叠加 S0 `25cc42ef8c58709957e089b6e58f35b3af7ee63a`，产物必须通过
+H200 测量临时叠加 S0 `59aa68a382cb9f481e77f98647644347671561dc`，产物必须通过
 `benchmark/minwm_realtime_parity/measurement_tool.py validate`；正式 PR 不包含 S0
 基础设施。最终 JSON 记录实际 checkout SHA，`gpu.count` 按 active GPUs、
 `gpu.allocated_count` 单列；Nsight/API 统一使用 `raw_total`、`total_per_chunk`、
 `per_rank_per_chunk`，其中 per-rank 只在 coverage 检查通过时采用；最终 JSON 再用
-25cc 的 jsonschema validator 复验。具体
+59aa 的 jsonschema validator 复验。profiler-off/on 的 DiT/VAE wall 只有在
+`expected_indices=0..N-1` 完整、两者均为 `status=available`，且 profiler-off count=200
+时才保留；否则重跑对应 lane。具体
 Job 名与产物路径在创建后补入，且只清理带本任务唯一前缀的资源。
+
+首次 `minwm-s3-a2a-h200-20260807-01` 在 setup/staging 阶段收到 59aa pin 更新，
+尚未进入 kernel/parity/A/B client 即删除该精确 Job，保留本任务 PVC；不保留任何
+25cc 测量数据。重提 Job 为 `minwm-s3-a2a-h200-20260807-02`。
 
 ## 给负责人掌握代码的检查题
 
