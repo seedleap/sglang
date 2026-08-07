@@ -13,7 +13,8 @@
 - exact-window / trace-drain canonical：`e4d6d67c76`
 - 真机 Nsight 2026.4 schema canonical：`401e4ec8a1`
 - 跨进程 component CUDA timing relay canonical：`839f312c3b4622c8e04c5c76620d22d6c2497fa0`
-- Nsight SQLite export/stats 顺序 canonical：`f1b047942d86715297ca79a9a3c5e7fae1e4a306`（`-07` 固定此 SHA）
+- Nsight SQLite export/stats 顺序 canonical：`f1b047942d86715297ca79a9a3c5e7fae1e4a306`
+- Nsight active CUDA→PerfWorks target 映射 canonical：`900b5f279b65b2afcfbe6cc9b36cfa4496b41bc3`
 - base：`main`。`main` 的 `9a9dc59cd1` 已完整包含 MinWM realtime API、causal Ulysses、Parallel VAE 和历史 benchmark；`codex/minwm-realtime-api` 还叠加了量化与性能实验，不适合作为 S0 的独立 review base。
 
 ## 假设与预期
@@ -93,7 +94,22 @@ active rank 完全一致时才提供 `per_rank_per_chunk`。2026.4 真机 runtim
 再与 kernel `globalPid` 交叉验证。所有正式归一化的
 `capture_scope=union of exact measured outer chunk NVTX ranges`。
 
-GPU metrics 不使用固定 metric id。解析器读取 `TARGET_INFO_GPU_METRICS.metricName` 动态匹配；权限不足或指标不存在时输出：
+GPU metrics 不使用固定 metric id。SM Active 只接受规范化后的精确别名
+`SM Active` 和真机 `SMs Active [Throughput %]`；`SM Issue`、
+`Unallocated Warps in Active SMs`、Tensor Active 等名称不会因宽泛 substring
+被误命中。解析器仍保留 raw metric name、全 capture/stable sample count、
+nonzero/min/p50/max、每 device/typeId×chunk 覆盖。
+
+整机隔离 Job 用 `--gpu-metrics-devices=all` 采集 allocated 8 张卡，再按 Nsight
+导出的真实映射筛选 active SP 卡：stable-window kernel 的
+`CUPTI_ACTIVITY_KIND_KERNEL.deviceId` 是 CUDA logical device；
+`TARGET_INFO_GPU.cuDevice -> pwGpuId` 给出 PerfWorks ID；GPU metrics composite
+`typeId & 0xFF` 得到同一个 GPU ID。正式值只汇总这 SP2/SP4 个 active typeId，
+并记录 `collected_target_count=8`、`active_target_count=2/4`、
+`allocated_target_count=8` 和逐卡 bus/UUID 映射。该位域定义及 0–100 整数百分比
+见 NVIDIA [Nsight Systems User Guide](https://docs.nvidia.com/nsight-systems/UserGuide/index.html#gpu-metrics)。
+
+权限不足、target 覆盖不完整或指标不存在时输出：
 
 ```json
 {
@@ -105,7 +121,10 @@ GPU metrics 不使用固定 metric id。解析器读取 `TARGET_INFO_GPU_METRICS
 
 不允许用空值、0 或推测值代替不可得指标。正式
 `--require-complete-stable-nsys` 还要求 SM Active、Tensor Active 都 available，
-且每个 active `typeId × 10 chunks` 均有样本；无 GPU metrics 的 fallback report
+且每个 active CUDA device/typeId × 10 chunks 均有样本；collected target 必须覆盖
+全部 8 张 allocated GPU。若 stable-window CUDA kernel 覆盖所有 active device，
+但 SM Active 的所有 active 样本仍为 0，解析器以
+`gpu_metric_all_zero_under_kernel_load` fail closed。无 GPU metrics 的 fallback report
 只能作为 invalid lane 诊断。DRAM 仅在 Nsight raw metric names 确实未暴露匹配项
 时允许 `metric_not_exposed`。
 
@@ -116,7 +135,7 @@ runner 使用：
 ```text
 nsys launch --trace=cuda,nvtx --trace-fork-before-exec=true --cuda-graph-trace=node
 20 chunk 前置 warmup（未 start）
-nsys start --gpu-metrics-devices=... --gpu-metrics-frequency=10000 --sample=none
+nsys start --gpu-metrics-devices=all --gpu-metrics-frequency=10000 --sample=none
 1 chunk 丢弃 + 10 chunk measured
 nsys stop
 ```
@@ -133,15 +152,17 @@ torch.profiler 不同时运行。
 `-05` 证明 exact-window outer marker 与 GPU metrics 能启动，但暴露出 worker
 component timing 不能经进程内 sink 到达 API 的结构性缺口，其 SP2 profiler-on lane
 同样只保留 invalid 诊断。`-06` 验证跨进程 relay 生效，但在导出后处理阶段发现
-`nsys stats` 会隐式创建 SQLite；该 lane 仍只保留 invalid 诊断。修复后的
-profiler-on 与 SP4 由 `minwm-s0-fusedops-h200-20260807-07` 补齐。
+`nsys stats` 会隐式创建 SQLite；严格只读复查又发现旧 runner 采错 PerfWorks target，
+该 lane 仍只保留 invalid 诊断。`-07` 尚未启动即按审计要求精确删除控制对象，
+没有产生新 artifact。修复后的 profiler-on 与 SP4 由
+`minwm-s0-fusedops-h200-20260807-08` 补齐。
 旧 H200/B300 表以及 `-01/-02/-03` 失败诊断只用于背景与异常证据。
 
 ### 运行来源
 
 | 项 | 实际值 |
 | --- | --- |
-| SGLang | SP2 profiler-off source=`b9240233b2`；exact-window schema=`401e4ec8a1`；component relay=`839f312c3b`；runner=`f1b047942d` |
+| SGLang | SP2 profiler-off source=`b9240233b2`；exact-window schema=`401e4ec8a1`；component relay=`839f312c3b`；active GPU metrics mapping=`900b5f279b` |
 | MinWM | `2efc6485f65e8fcab506665efde79bc41406385e` |
 | 镜像 | `minwm-training@sha256:bedc07ea...f5f2a` |
 | GPU | NVIDIA H200；`gpu.count` 是 active 2/4 卡；`allocated_count=8` 是整机隔离预留 |
@@ -187,8 +208,10 @@ profiler-on 与 SP4 由 `minwm-s0-fusedops-h200-20260807-07` 补齐。
 - `-04/sp2/profiler-on/invalid-marker-20260807T045715060254120Z.json` 原地保留 7 个文件、40,487,575 bytes 的逐文件 SHA；聚合验证该 marker 只排除 profiler-on，两个 sibling profiler-off run 均保留。
 - `-05` 的 GPU metrics start 成功，Nsight 2026.4 report 为 37,589,254 bytes；同一正式 trace id 在 server.log 中有 worker DiT/VAE component 各 11 条、API scheduler-result wall 各 11 条，但客户端 component selector 各缺 0–10。原因是 `_notify_realtime_trace_sinks` 只在当前进程有效，并非 256 条队列溢出；该 lane 的 marker 保留 7 个文件及逐文件 SHA。
 - 对 `-05` 产物实测 lane-scoped 审计：profiler-on report 为 invalid，两个 sibling profiler-off JSON 均非 invalid；聚合接受两个 run，`excluded=[]`。
-- `-06` 客户端首次完整收到 profiler-on 的 1 discard + 10 measured payload/stats/wall/component trace，生成 9,695-byte `client.json`、38,148,535-byte report 和 205,168,640-byte SQLite；GPU metrics start 成功。随后显式 `nsys export` 发现同名 SQLite 已被前置 `nsys stats` 隐式创建而拒绝覆盖，strict merge 尚未执行；runner 已对该 lane 写 marker，不能把现有 SQLite 绕过 marker 用作正式结果。
-- SP4 与 exact-window profiler-on 仍待 `-07` 真机结果；完成前 PR 保持 draft。
+- `-06` 客户端首次完整收到 profiler-on 的 1 discard + 10 measured payload/stats/wall/component trace，生成 9,695-byte `client.json`、38,148,535-byte report 和 205,168,640-byte SQLite；GPU metrics start 成功。随后显式 `nsys export` 发现同名 SQLite 已被前置 `nsys stats` 隐式创建而拒绝覆盖，runner 对该 lane 写 marker。
+- 对 `-06` invalid lane 使用 canonical `900b5f279b` 只读诊断：merge 成功，exact measured indices 1–10、DiT/VAE CUDA count=10（mean 746.727/440.882 ms）、kernel=346,080、CUDA API=910,877、launch=346,080、kernel busy=76.315%，process/device coverage 全部 available；formal validator 只因三项 GPU metrics 的 target coverage 失败。SQLite 的 CUDA device 0/1 映射到 `pwGpuId` 2/3，但旧 capture 只有 typeId 低位 0/1；全 capture 的 SM/Tensor 两个 target 均 0，证实是采到闲卡而非缩放或窗口错误。
+- canonical 诊断保存在 `.../-06/.../sp2/profiler-on/diagnostic-20260807T060700Z/`，含 `measurement.json`、完整 validator log、raw metric×target×chunk summary、输入/输出 SHA。`merge_status=0`、`validate_status=1` 是预期；lane marker 未解除，任何数据均未进入 baseline。
+- SP4 与正式 exact-window profiler-on 仍待 `-08` 真机结果；完成前 PR 保持 draft。
 
 ## 证据与决策过程
 
@@ -211,11 +234,14 @@ profiler-on 与 SP4 由 `minwm-s0-fusedops-h200-20260807-07` 补齐。
 17. **lane 粒度审计与恢复**：marker 从结果文件父目录逐层检查到最近 `s0-measurement`；profiler-on marker 不影响 sibling off。`-05` 从 `-04` source lane 重新校验并复制 SP2 off 到新 attempt，SP4 则正常重测，所有目标路径均拒绝覆盖。
 18. **component timing 跨进程传输**：`-05` server.log 证明 worker 侧 component/CUDA trace 和 API 侧 wall trace 都完整，但前者只通知 worker 进程内 sink。没有放大队列或放宽完整性门；`839f312c3b` 将 `event/component/duration_ms/cuda_ms/chunk/request` 的纯标量记录附在 `RequestMetrics` 上，随 `result.metrics/metrics_list` 序列化返回 API，再以 `source=scheduler_result_component_timing` 重发。相同 identity 的相同记录去重，冲突记录 fail-closed；缺 `cuda_ms` 仍可保留 wall 证据，但正式 CUDA metric 会因 count 不足失败。
 19. **SQLite 不覆盖**：`-06` 证明 2026.4 的 `nsys stats REPORT` 会在 report 同目录隐式生成 SQLite，导致后续显式 export 与“不覆盖已有 Nsight 产物”冲突。没有加 `--force-overwrite`；`f1b047942d` 改为先显式 export 到确认不存在的目标，再运行 stats 复用该 SQLite，并加静态回归测试锁定顺序。
+20. **GPU logical ordinal 不能当物理 metrics ID**：旧 runner 从 `nvidia-smi index` 取 0/1 传给 Nsight，但 `-06` 的 `TARGET_INFO_GPU` 明确显示 CUDA logical 0/1 实际对应 PerfWorks 2/3。没有继续猜 ordinal 或只改成 2/3；新 runner 在整机隔离下采集 all 8，再由 SQLite 位域和 `cuDevice/pwGpuId` 映射筛 active target，兼容 SP4 非连续映射。
+21. **SM 全零不是合法“可用值”**：NVIDIA schema 的 `GPU_METRICS.value` 已是 0–100 整数百分比，无需浮点缩放。稳定窗口 kernel busy 76.315% 时 SM Active 全 capture 仍全 0，只能说明 target/采集错误；新增 parser 与 custom validator 双重 all-zero gate，禁止这种记录通过 formal acceptance。
 
 ## 风险与回滚
 
 - 风险：Spot reclaim。补救：`backoffLimit=0` 先停住并保留 attempt，核查后用新 Job 名安全重跑；不删除其他任务释放容量。
 - 风险：Nsight GPU metrics 权限不足。补救：保留 `nsys status -e` 和 fallback report，但正式 lane 失败；SM/Tensor 不允许权限降级后通过，DRAM 只允许 `metric_not_exposed`。
+- 风险：容器 CUDA ordinal 与 Nsight/PerfWorks ID 顺序不同。补救：采集 all allocated target，依据 SQLite 的 `deviceId/cuDevice/pwGpuId/typeId&0xFF` 现场映射；collected/active/allocated 数量与每 device×chunk coverage 由 schema 强制。
 - 风险：realtime trace 队列或跨进程 relay 丢事件。补救：每个 stage metric 必须恰好覆盖 measured chunk 数；worker component timing 仅传输 pickle-safe 标量，API 对 metrics/metrics_list 去重并拒绝冲突，缺失或缺 CUDA 时字段标记 `incomplete_trace_metric`，验收失败。
 - 风险：失败重试覆盖审计证据。补救：runner 不删除旧文件；非零退出写逐文件 checksum marker，同路径重跑先移动到 `invalid/`，聚合排除 invalid；只能删除精确 Job/Pod 控制对象止损，不能删除 PVC。
 - 风险：Nsight 开销污染 FPS。补救：schema 从结构上禁止 profiler-on 结果成为 headline。
@@ -274,7 +300,7 @@ kubectl --context codex-minwm-test-phx2 apply \
 PVC：`minwm-s0-fusedops-h200-results-20260807`。每次尝试的根目录：
 
 ```text
-/results/attempts/<pod-name>/minwm-s0-fusedops-h200-20260807-07/s0-measurement/
+/results/attempts/<pod-name>/minwm-s0-fusedops-h200-20260807-08/s0-measurement/
 ├── baseline-summary.json
 ├── contract.txt
 ├── sp2/
@@ -302,7 +328,7 @@ PVC：`minwm-s0-fusedops-h200-results-20260807`。每次尝试的根目录：
 7. **两次重复 CV 超标后 runner 做什么，哪些指标决定验收？**
    - 参考：自动补第三次；Client FPS、Scheduler FPS、DiT wall、VAE wall 四项决定 `passes_cv_target`，scheduler chunk wall 仍报告但不决定该门槛。
 8. **为什么 S0 Job 请求 8 卡，却仍分别记录 SP2/SP4？**
-   - 参考：8 卡是云端资源隔离；`workload.sp_degree` 与 `provenance.gpu.count` 都是 active 2/4，`provenance.gpu.allocated_count=8` 才是预留数，Nsight 只选实际 lane 使用的设备。
+   - 参考：8 卡是云端资源隔离；`workload.sp_degree` 与 `provenance.gpu.count` 都是 active 2/4，`provenance.gpu.allocated_count=8` 才是预留数。Nsight 采 all 8，但 `nsys_metrics.py::_gpu_metrics` 只汇总由 stable kernel `deviceId -> TARGET_INFO_GPU.cuDevice/pwGpuId -> typeId&0xFF` 映射出的 active 2/4 卡。
 9. **一个 Spot attempt 失败后，为什么不会覆盖下一次的证据？**
    - 参考：manifest 用 `/results/attempts/${HOSTNAME}`；最终 `backoffLimit=0` 会失败即停，诊断后用新 Job 名手动安全重跑，每个 Pod 名与 attempt 目录都不同。
 10. **2026.4 runtime 只有 `globalTid` 时，如何证明 API 覆盖了全部 rank？**
