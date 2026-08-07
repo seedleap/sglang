@@ -224,8 +224,8 @@ for probe_name in (
     "self_q_output_000.pt",
     "self_k_output_000.pt",
     "self_v_output_000.pt",
-    "self_norm_q_output_000.pt",
-    "self_norm_k_output_000.pt",
+    "self_q_norm_000.pt",
+    "self_k_norm_000.pt",
     "block0_output_000.pt",
     "output_proj_output_000.pt",
 ):
