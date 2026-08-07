@@ -75,7 +75,7 @@ ALLOCATED_GPU_COUNT="${MINWM_ALLOCATED_GPU_COUNT:-$(nvidia-smi -L | wc -l | xarg
   echo "nsys_window=${PROFILE_PRECONDITION_CHUNKS} precondition + ${PROFILE_DISCARD_CHUNKS} discarded + ${PROFILE_MEASURED_CHUNKS} stable"
   echo "kv_cache_num_frames=${KV_CACHE_NUM_FRAMES}"
   echo "torch_profiler_concurrent=false"
-  echo "invalid_attempt_policy=preserve-in-place-with-path-size-sha256-marker"
+  echo "invalid_attempt_policy=preserve-in-place-with-scoped-path-size-sha256-marker"
   echo "started_utc=$(date --utc +%Y-%m-%dT%H:%M:%SZ)"
 } | tee "${RESULT_ROOT}/contract.txt"
 nvidia-smi -q > "${RESULT_ROOT}/nvidia-smi-q.txt"
@@ -85,6 +85,7 @@ monitor_pid=""
 nsys_session=""
 qkv_lane=""
 qkv_fused_flag=""
+invalid_scope="${RESULT_ROOT}"
 
 wait_for_server() {
   local pid="$1" log_path="$2"
@@ -116,9 +117,9 @@ stop_server() {
   fi
 }
 
-mark_invalid_attempt() {
+mark_invalid_scope() {
   local status="$1"
-  python3 - "${RESULT_ROOT}" "${status}" <<'PY'
+  python3 - "${invalid_scope}" "${status}" <<'PY'
 import hashlib
 import json
 import sys
@@ -127,11 +128,11 @@ from pathlib import Path
 
 root = Path(sys.argv[1]).resolve()
 status = int(sys.argv[2])
-invalid_dir = root / "invalid"
-invalid_dir.mkdir(parents=True, exist_ok=True)
+root.mkdir(parents=True, exist_ok=True)
+marker_path = root / "invalid-marker.json"
 artifacts = []
 for path in sorted(root.rglob("*")):
-    if not path.is_file() or invalid_dir in path.parents:
+    if not path.is_file() or path.name.startswith("invalid-marker"):
         continue
     digest = hashlib.sha256()
     with path.open("rb") as source:
@@ -147,16 +148,15 @@ for path in sorted(root.rglob("*")):
 marker = {
     "reason": f"runner_exit_status_{status}",
     "timestamp_utc": datetime.now(timezone.utc).isoformat(),
-    "attempt_root": str(root),
+    "scope_root": str(root),
     "artifacts": artifacts,
     "recoverability": (
-        "All partial evidence remains in place under this attempt root; "
-        "aggregators must exclude directories containing invalid/."
+        "All partial evidence remains in place under this failure scope; "
+        "aggregators must exclude this scope without invalidating sibling lanes."
     ),
 }
-(invalid_dir / "attempt-invalid.json").write_text(
-    json.dumps(marker, indent=2, sort_keys=True) + "\n"
-)
+with marker_path.open("x") as output:
+    output.write(json.dumps(marker, indent=2, sort_keys=True) + "\n")
 PY
 }
 
@@ -169,7 +169,7 @@ cleanup() {
   fi
   stop_server
   if (( status != 0 )); then
-    mark_invalid_attempt "${status}"
+    mark_invalid_scope "${status}"
   fi
 }
 
@@ -434,7 +434,6 @@ run_profiler_on() {
   nsys export \
     --type=sqlite \
     --output="${sqlite}" \
-    --force-overwrite=true \
     "${report}"
   python3 "${SCRIPT_DIR}/measurement_tool.py" merge-nsys \
     --result "${profile_dir}/client.json" \
@@ -463,6 +462,7 @@ for degree in "${degrees[@]}"; do
         ;;
     esac
     lane_dir="${RESULT_ROOT}/${qkv_lane}/sp${degree}"
+    invalid_scope="${lane_dir}"
     mkdir -p "${lane_dir}"
     {
       echo "qkv_lane=${qkv_lane}"
@@ -470,10 +470,12 @@ for degree in "${degrees[@]}"; do
       echo "sp_degree=${degree}"
     } > "${lane_dir}/qkv-contract.txt"
     run_profiler_off "${degree}" "${lane_dir}"
+    invalid_scope="${lane_dir}/profiler-on"
     run_profiler_on "${degree}" "${lane_dir}"
   done
 done
 
+invalid_scope="${RESULT_ROOT}/summary"
 python3 - "${RESULT_ROOT}" <<'PY'
 import json
 import sys
