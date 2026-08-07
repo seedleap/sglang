@@ -15,6 +15,7 @@
 - 跨进程 component CUDA timing relay canonical：`839f312c3b4622c8e04c5c76620d22d6c2497fa0`
 - Nsight SQLite export/stats 顺序 canonical：`f1b047942d86715297ca79a9a3c5e7fae1e4a306`
 - Nsight active CUDA→PerfWorks target 映射 canonical：`900b5f279b65b2afcfbe6cc9b36cfa4496b41bc3`
+- API 边界归属与有界 GPU metrics 聚合 canonical：`d5b25227d4487d113e62c86a0fb572a62d6bcc5b`
 - base：`main`。`main` 的 `9a9dc59cd1` 已完整包含 MinWM realtime API、causal Ulysses、Parallel VAE 和历史 benchmark；`codex/minwm-realtime-api` 还叠加了量化与性能实验，不适合作为 S0 的独立 review base。
 
 ## 假设与预期
@@ -81,10 +82,14 @@ Nsight 记录以下字段：
 `excluded_raw_total`。客户端给请求设置唯一 `trace_id`，服务端在
 `process_generation_batch` 外发出包含 trace/request/chunk/role 的 outer NVTX
 range。解析器必须恰好看到 discard index 0 一次、measured indices 1–10 各一次，
-且 request id 唯一、时间顺序一致、区间不重叠。Kernel/runtime 行只有完全落入
-单个 measured range 才计数；跨边界 event 会让该类 normalized metric
-`unavailable`。GPU samples 用同一 range union 的 `[start,end)` 过滤，range
-间隙、discard、outside 和 sibling trace 均不计入。
+且 request id 唯一、时间顺序一致、区间不重叠。CUDA runtime API 与 launch
+是离散计数，按 event `start_ns` 归属唯一半开 measured range `[start,end)`：
+起点在 range 内即只计一次，即使调用跨过 range 末端；起点在所有 range 外就不计，
+即使 duration 与 range 有交集。输出保留 `boundary_spanning_count`、按 start
+纳入/排除数，以及 raw API name、process、start/end、owner range 和 overlap ranges
+证据。Kernel count、短 kernel duration 分桶和 busy 仍要求 kernel 完全落入单个
+range；GPU samples 用同一 range union 的 `[start,end)` 过滤。任何 duration/busy
+都没有因 API start 规则扩大，range 间隙、discard、outside 和 sibling trace 均不计入。
 
 Kernel 与短 kernel 分桶按稳定窗口内 `deviceId` 展开；GPU kernel busy 的分母
 是 10 个 range 时长之和，而不是首尾 kernel span。API/launch 提供
@@ -98,7 +103,13 @@ GPU metrics 不使用固定 metric id。SM Active 只接受规范化后的精确
 `SM Active` 和真机 `SMs Active [Throughput %]`；`SM Issue`、
 `Unallocated Warps in Active SMs`、Tensor Active 等名称不会因宽泛 substring
 被误命中。解析器仍保留 raw metric name、全 capture/stable sample count、
-nonzero/min/p50/max、每 device/typeId×chunk 覆盖。
+nonzero/min/p50/p95/max、每 device/typeId×chunk 覆盖。
+
+GPU_METRICS 解析只流式扫描选中的 SM/Tensor/DRAM metricId，用
+metric×typeId×chunk 计数器和 0–100 native value 直方图计算统计量，不再把 8 卡
+全表样本装入 Python list。`aggregation_mode` 写入 schema；真实 1.47 GB SQLite
+上与旧解析器的 count/min/max/mean/p50/device/chunk/raw name 逐字段相等，新增 p95
+也与直接从 SQLite 原始值列表重算相等。
 
 整机隔离 Job 用 `--gpu-metrics-devices=all` 采集 allocated 8 张卡，再按 Nsight
 导出的真实映射筛选 active SP 卡：stable-window kernel 的
@@ -154,22 +165,25 @@ component timing 不能经进程内 sink 到达 API 的结构性缺口，其 SP2
 同样只保留 invalid 诊断。`-06` 验证跨进程 relay 生效，但在导出后处理阶段发现
 `nsys stats` 会隐式创建 SQLite；严格只读复查又发现旧 runner 采错 PerfWorks target，
 该 lane 仍只保留 invalid 诊断。`-07` 尚未启动即按审计要求精确删除控制对象，
-没有产生新 artifact。修复后的 profiler-on 与 SP4 由
-`minwm-s0-fusedops-h200-20260807-08` 补齐。
+没有产生新 artifact。`-08` 首次拿到 exact-window、8-target GPU metrics 和完整
+component CUDA trace，但旧严格 containment 门因一条跨 marker 边界的
+`cudaEventQuery_v3020` 正确拒绝该 lane；原产物继续标 invalid。`d5b25227d4`
+已在该 invalid SQLite 上离线严格通过，正式 profiler-on 与 SP4 改由新名
+`minwm-s0-fusedops-h200-20260807-09` 补齐。
 旧 H200/B300 表以及 `-01/-02/-03` 失败诊断只用于背景与异常证据。
 
 ### 运行来源
 
 | 项 | 实际值 |
 | --- | --- |
-| SGLang | SP2 profiler-off source=`b9240233b2`；exact-window schema=`401e4ec8a1`；component relay=`839f312c3b`；active GPU metrics mapping=`900b5f279b` |
+| SGLang | SP2 profiler-off source=`b9240233b2`；exact-window schema=`401e4ec8a1`；component relay=`839f312c3b`；active GPU metrics mapping=`900b5f279b`；API start attribution / bounded GPU parser=`d5b25227d4` |
 | MinWM | `2efc6485f65e8fcab506665efde79bc41406385e` |
 | 镜像 | `minwm-training@sha256:bedc07ea...f5f2a` |
 | GPU | NVIDIA H200；`gpu.count` 是 active 2/4 卡；`allocated_count=8` 是整机隔离预留 |
 | kube context | `codex-minwm-test-phx2`；所有命令显式传 `--context`，未切换全局 current-context |
 | region / zone | AWS `us-west-2` / `us-west-2-phx-2a` |
 | NodePool | `minwm-test-phx2-p5e-spot`（共享的既有 NodePool，S0 未创建或删除） |
-| 实例 | `p5e.48xlarge` Spot；`-05` 节点 `i-01a57ab8567279852`；`-06` 节点 `i-06888dc1ca88547e1` |
+| 实例 | `p5e.48xlarge` Spot；`-05` 节点 `i-01a57ab8567279852`；`-06/-08` 节点 `i-06888dc1ca88547e1` |
 | 资源隔离 | Job 请求完整 8 GPU；不与 CUDA Graph 或 S1–S4 Job 共用 GPU 节点 |
 
 ### profiler-off 重复
@@ -200,6 +214,18 @@ component timing 不能经进程内 sink 到达 API 的结构性缺口，其 SP2
 | 2 | 采集中 | 采集中 | 采集中 | 采集中 |
 | 4 | 采集中 | 采集中 | 采集中 | 采集中 |
 
+下表是 `-08/sp2/profiler-on` 的 **invalid capture 离线诊断**，只用于证明
+`d5b25227d4` 的解析/闸门，不是正式 baseline，也不解除 lane marker：
+
+| exact ranges | DiT CUDA | VAE CUDA | kernels | CUDA APIs | launch APIs | SM / Tensor / DRAM |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| indices 1–10 | 745.092 ms（count=10） | 443.259 ms（count=10） | 346,080 | 910,469 | 346,080 | 61.637% / 28.327% / 8.297% |
+
+CUDA API capture 总数为 1,035,461，按 start 纳入 910,469、排除 124,992。
+唯一 boundary-spanning event 是 `cudaEventQuery_v3020`：start=`9599599814`、
+end=`9599602724`，起点在全部 measured ranges 外，尾部进入 chunk 7，故明确
+排除；launch boundary count=0，launch count 与 kernel count 同为 346,080。
+
 ## 与预期不符合的地方
 
 - SP2 profiler-off 两次重复的四个验收 CV 均小于 0.16%，优于默认 3% 门槛。
@@ -211,7 +237,10 @@ component timing 不能经进程内 sink 到达 API 的结构性缺口，其 SP2
 - `-06` 客户端首次完整收到 profiler-on 的 1 discard + 10 measured payload/stats/wall/component trace，生成 9,695-byte `client.json`、38,148,535-byte report 和 205,168,640-byte SQLite；GPU metrics start 成功。随后显式 `nsys export` 发现同名 SQLite 已被前置 `nsys stats` 隐式创建而拒绝覆盖，runner 对该 lane 写 marker。
 - 对 `-06` invalid lane 使用 canonical `900b5f279b` 只读诊断：merge 成功，exact measured indices 1–10、DiT/VAE CUDA count=10（mean 746.727/440.882 ms）、kernel=346,080、CUDA API=910,877、launch=346,080、kernel busy=76.315%，process/device coverage 全部 available；formal validator 只因三项 GPU metrics 的 target coverage 失败。SQLite 的 CUDA device 0/1 映射到 `pwGpuId` 2/3，但旧 capture 只有 typeId 低位 0/1；全 capture 的 SM/Tensor 两个 target 均 0，证实是采到闲卡而非缩放或窗口错误。
 - canonical 诊断保存在 `.../-06/.../sp2/profiler-on/diagnostic-20260807T060700Z/`，含 `measurement.json`、完整 validator log、raw metric×target×chunk summary、输入/输出 SHA。`merge_status=0`、`validate_status=1` 是预期；lane marker 未解除，任何数据均未进入 baseline。
-- SP4 与正式 exact-window profiler-on 仍待 `-08` 真机结果；完成前 PR 保持 draft。
+- `-08` 的 55,231,110-byte report 与 1,473,888,256-byte SQLite 覆盖 8 个 GPU metrics target；SM/Tensor/DRAM 对 active PerfWorks 2/3 均为 available，typeId×10 chunks 完整。正式 merge 只因一条 2,910 ns `cudaEventQuery_v3020` 从 measured range 外进入 chunk 7 而失败，runner 在 `sp2/profiler-on` 原地写 lane marker，sibling SP2 profiler-off 仍有效。
+- canonical `d5b25227d4` 的离线诊断保存在 `.../-08/.../sp2/profiler-on/diagnostic-20260807T070200Z-canonical-d5b25227d4/`：严格 validator exit=0，measurement 与上一版逐字节相同；解析耗时 17.662 s、峰值 RSS 326,196 KiB、SQLite 1,473,888,256 bytes。旧全量 list 解析现场峰值约 8,909,528 KiB，故流式方案将最低诊断 Pod 内存需求降到远低于当前 16 GiB limit。
+- 等价证据在同 lane 的 `diagnostic-20260807T065300Z-boundary-bounded-v4/equivalence-report-v2.json`：除有意更新的 attribution-policy 文案外，window、DiT/VAE CUDA、kernel/bucket/busy、capture coverage 及三项 GPU 的旧字段全相等；p95/每 chunk count 与 raw SQLite 独立重算全相等。原始 v1 false 报告和两次计时失败日志也保留，未覆盖。
+- SP4 与正式 exact-window profiler-on 仍待 `-09` 真机结果；完成前 PR 保持 draft。
 
 ## 证据与决策过程
 
@@ -236,6 +265,8 @@ component timing 不能经进程内 sink 到达 API 的结构性缺口，其 SP2
 19. **SQLite 不覆盖**：`-06` 证明 2026.4 的 `nsys stats REPORT` 会在 report 同目录隐式生成 SQLite，导致后续显式 export 与“不覆盖已有 Nsight 产物”冲突。没有加 `--force-overwrite`；`f1b047942d` 改为先显式 export 到确认不存在的目标，再运行 stats 复用该 SQLite，并加静态回归测试锁定顺序。
 20. **GPU logical ordinal 不能当物理 metrics ID**：旧 runner 从 `nvidia-smi index` 取 0/1 传给 Nsight，但 `-06` 的 `TARGET_INFO_GPU` 明确显示 CUDA logical 0/1 实际对应 PerfWorks 2/3。没有继续猜 ordinal 或只改成 2/3；新 runner 在整机隔离下采集 all 8，再由 SQLite 位域和 `cuDevice/pwGpuId` 映射筛 active target，兼容 SP4 非连续映射。
 21. **SM 全零不是合法“可用值”**：NVIDIA schema 的 `GPU_METRICS.value` 已是 0–100 整数百分比，无需浮点缩放。稳定窗口 kernel busy 76.315% 时 SM Active 全 capture 仍全 0，只能说明 target/采集错误；新增 parser 与 custom validator 双重 all-zero gate，禁止这种记录通过 formal acceptance。
+22. **API 边界按 start 唯一归属**：`-08` 的真实 crossing 是正常 generation 中高频轮询的 `cudaEventQuery_v3020`，进程属于已验证 rank，起点在 measured union 外、结束后 360 ns 落入 chunk 7；它不是 teardown、launch 或 marker 乱序。采用半开 start 规则后明确排除且保留 raw evidence；launch 仍与 kernel 346,080 一致。Kernel duration/busy 没有借此放宽。
+23. **GPU metrics 有界聚合**：旧实现把全表所有 metric/target 样本装入 list，8-target SQLite 现场峰值约 8.50 GiB。新实现只扫描三个选中 metricId，并用小型 counter/histogram 保留所有验收字段；在相同 invalid SQLite 上做旧/新与 raw reference 三方等价后，才允许 `-09` 使用该 canonical。
 
 ## 风险与回滚
 
@@ -246,6 +277,7 @@ component timing 不能经进程内 sink 到达 API 的结构性缺口，其 SP2
 - 风险：失败重试覆盖审计证据。补救：runner 不删除旧文件；非零退出写逐文件 checksum marker，同路径重跑先移动到 `invalid/`，聚合排除 invalid；只能删除精确 Job/Pod 控制对象止损，不能删除 PVC。
 - 风险：Nsight 开销污染 FPS。补救：schema 从结构上禁止 profiler-on 结果成为 headline。
 - 风险：schema 影响现有 summary。补救：新 JSON 仍保留顶层 `profile_name`、`server`、`client`、`warmup_chunks` 等兼容字段。
+- 风险：8-target GPU_METRICS 导出很大，离线解析 OOM。补救：流式 selected-metric 聚合；真实 1.47 GB SQLite 的峰值约 318 MiB，reader/diagnostic 仍保留至少 8 GiB request / 16 GiB limit，并把 elapsed/RSS/size 写入诊断证据。
 - 回滚：删除本 PR 新增的 benchmark/schema/doc 文件，并恢复 `benchmark_realtime_throughput.py`；没有模型实现或 checkpoint 格式迁移需要回滚。
 
 ## 复现命令与产物路径
@@ -300,7 +332,7 @@ kubectl --context codex-minwm-test-phx2 apply \
 PVC：`minwm-s0-fusedops-h200-results-20260807`。每次尝试的根目录：
 
 ```text
-/results/attempts/<pod-name>/minwm-s0-fusedops-h200-20260807-08/s0-measurement/
+/results/attempts/<pod-name>/minwm-s0-fusedops-h200-20260807-09/s0-measurement/
 ├── baseline-summary.json
 ├── contract.txt
 ├── sp2/
@@ -331,5 +363,5 @@ PVC：`minwm-s0-fusedops-h200-results-20260807`。每次尝试的根目录：
    - 参考：8 卡是云端资源隔离；`workload.sp_degree` 与 `provenance.gpu.count` 都是 active 2/4，`provenance.gpu.allocated_count=8` 才是预留数。Nsight 采 all 8，但 `nsys_metrics.py::_gpu_metrics` 只汇总由 stable kernel `deviceId -> TARGET_INFO_GPU.cuDevice/pwGpuId -> typeId&0xFF` 映射出的 active 2/4 卡。
 9. **一个 Spot attempt 失败后，为什么不会覆盖下一次的证据？**
    - 参考：manifest 用 `/results/attempts/${HOSTNAME}`；最终 `backoffLimit=0` 会失败即停，诊断后用新 Job 名手动安全重跑，每个 Pod 名与 attempt 目录都不同。
-10. **2026.4 runtime 只有 `globalTid` 时，如何证明 API 覆盖了全部 rank？**
-   - 参考：`_api_metrics` 清除低 24-bit thread id 后要求命中 `PROCESSES.globalPid`；`_kernel_process_coverage` 再验证每个 `deviceId` 恰有一个 kernel `globalPid`，两组 process id 必须完全相等 active rank 数。
+10. **一个 CUDA API 从 measured range 外开始、结束时进入 chunk，应不应该计数？如何审计？**
+   - 参考：不计。`nsys_metrics.py::_discrete_event_start_attribution` 只用 `start_ns` 在半开 `[start,end)` 中唯一归属；`boundary_event_examples` 保留 raw name、globalPid、start/end、owner 和 overlap chunks。若 start 在 range 内但跨 end，只计一次；API rank coverage 仍由 `globalTid -> PROCESSES.globalPid` 与 kernel device/process 交叉验证。
