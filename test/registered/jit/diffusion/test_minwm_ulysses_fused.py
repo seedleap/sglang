@@ -4,18 +4,12 @@ import pytest
 import torch
 
 from sglang.jit_kernel.diffusion.triton.minwm_ulysses import (
-    fused_qk_rmsnorm_pack_peer_first,
+    can_fuse_rope_cache_update,
     fused_rope_cache_update,
 )
 from sglang.test.ci.ci_register import register_cuda_ci
 
 register_cuda_ci(est_time=20, stage="base-b-kernel-unit", runner_config="1-gpu-large")
-
-
-def _reference_rms_norm(x, weight, eps):
-    x_float = x.float()
-    normalized = x_float * torch.rsqrt(x_float.pow(2).mean(dim=-1, keepdim=True) + eps)
-    return normalized.type_as(x) * weight
 
 
 def _reference_rope(x, cos, sin):
@@ -32,55 +26,6 @@ def _reference_rope(x, cos, sin):
         .flatten(-2)
         .type_as(x)
     )
-
-
-@pytest.mark.parametrize(
-    ("shape", "world_size"),
-    [
-        ((1, 17, 24, 128), 2),
-        ((1, 5, 24, 128), 4),
-    ],
-)
-def test_fused_qk_rmsnorm_pack_peer_first_is_bit_exact(shape, world_size):
-    torch.manual_seed(71)
-    query = torch.randn(shape, dtype=torch.bfloat16, device="cuda")
-    key = torch.randn_like(query)
-    value = torch.randn_like(query)
-    hidden_size = shape[2] * shape[3]
-    query_weight = torch.randn(hidden_size, dtype=query.dtype, device=query.device)
-    key_weight = torch.randn_like(query_weight)
-
-    output = fused_qk_rmsnorm_pack_peer_first(
-        query,
-        key,
-        value,
-        query_weight,
-        key_weight,
-        1e-5,
-        world_size,
-    )
-
-    batch, sequence, global_heads, head_dim = shape
-    local_heads = global_heads // world_size
-    normalized_query = _reference_rms_norm(query.flatten(2), query_weight, 1e-5).view(
-        shape
-    )
-    normalized_key = _reference_rms_norm(key.flatten(2), key_weight, 1e-5).view(shape)
-    expected = torch.cat(
-        tuple(
-            tensor.unflatten(2, (world_size, local_heads)).permute(2, 0, 1, 3, 4)
-            for tensor in (normalized_query, normalized_key, value)
-        ),
-        dim=-1,
-    )
-    assert output.shape == (
-        world_size,
-        batch,
-        sequence,
-        local_heads,
-        3 * head_dim,
-    )
-    assert torch.equal(output, expected)
 
 
 @pytest.mark.parametrize(
@@ -283,3 +228,102 @@ def test_fused_rope_cache_update_append_and_recompute_are_bit_exact():
     assert torch.equal(cache_k, expected_cache_k)
     assert torch.equal(cache_v, expected_cache_v)
     assert torch.equal(rotated_k, expected_rotated)
+
+
+def test_fused_rope_cache_update_nonzero_positions_are_bit_exact():
+    torch.manual_seed(83)
+    current_tokens, visible_tokens, write_start = 3, 8, 5
+    heads, head_dim = 6, 128
+    qkv = torch.randn(
+        1,
+        current_tokens,
+        heads,
+        3 * head_dim,
+        dtype=torch.bfloat16,
+        device="cuda",
+    )
+    query, key, value = qkv.chunk(3, dim=-1)
+    cache_k = torch.randn(
+        1, visible_tokens, heads, head_dim, dtype=query.dtype, device=query.device
+    )
+    cache_v = torch.randn_like(cache_k)
+    rotated_k = torch.empty_like(cache_k)
+    angles = torch.randn(
+        visible_tokens, head_dim // 2, dtype=torch.float32, device=query.device
+    )
+    key_cos, key_sin = angles.cos(), angles.sin()
+    query_cos = key_cos[write_start:].contiguous()
+    query_sin = key_sin[write_start:].contiguous()
+    expected_k = cache_k.clone()
+    expected_v = cache_v.clone()
+    expected_k[:, write_start:] = key
+    expected_v[:, write_start:] = value
+
+    output = fused_rope_cache_update(
+        query,
+        key,
+        value,
+        cache_k,
+        cache_v,
+        rotated_k,
+        query_cos,
+        query_sin,
+        key_cos,
+        key_sin,
+        write_start,
+        rotate_all_keys=True,
+    )
+
+    _assert_bitwise_exact(
+        output,
+        _reference_rope(query, query_cos, query_sin),
+        "offset_query",
+    )
+    _assert_bitwise_exact(cache_k, expected_k, "offset_raw_key")
+    _assert_bitwise_exact(cache_v, expected_v, "offset_raw_value")
+    _assert_bitwise_exact(
+        rotated_k,
+        _reference_rope(expected_k, key_cos, key_sin),
+        "offset_rotated_key",
+    )
+
+
+def test_fused_rope_cache_update_rejects_unsupported_strides():
+    torch.manual_seed(89)
+    current_tokens, visible_tokens = 3, 5
+    heads, head_dim = 6, 128
+    qkv_storage = torch.randn(
+        1,
+        current_tokens,
+        heads,
+        6 * head_dim,
+        dtype=torch.bfloat16,
+        device="cuda",
+    )
+    query, key, value = qkv_storage[..., ::2].chunk(3, dim=-1)
+    cache_k = torch.randn(
+        1, visible_tokens, heads, head_dim, dtype=query.dtype, device=query.device
+    )
+    cache_v = torch.randn_like(cache_k)
+    rotated_k = torch.empty_like(cache_k)
+    angles = torch.randn(
+        visible_tokens, head_dim // 2, dtype=torch.float32, device=query.device
+    )
+    key_cos, key_sin = angles.cos(), angles.sin()
+    query_cos = key_cos[:current_tokens].contiguous()
+    query_sin = key_sin[:current_tokens].contiguous()
+
+    assert query.stride(-1) == 2
+    assert not can_fuse_rope_cache_update(
+        query,
+        key,
+        value,
+        cache_k,
+        cache_v,
+        rotated_k,
+        query_cos,
+        query_sin,
+        key_cos,
+        key_sin,
+        0,
+    )
