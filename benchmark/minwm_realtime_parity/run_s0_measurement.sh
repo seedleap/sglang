@@ -199,6 +199,37 @@ run_client() {
   python3 "${SCRIPT_DIR}/benchmark_realtime_throughput.py" \
     "${CLIENT_ARGS[@]}" "$@" | tee "${output%.json}.log"
   python3 "${SCRIPT_DIR}/measurement_tool.py" validate "${output}"
+  python3 - "${output}" <<'PY'
+import json
+import sys
+
+record = json.load(open(sys.argv[1]))
+expected = record["workload"]["measured_chunks"]
+if record["mode"] == "profiler_off":
+    container = record["metrics"]["profiler_off"]
+    paths = {
+        "scheduler_chunk_wall_ms": container["scheduler_chunk_wall_ms"],
+        "dit_wall_ms": container["dit_wall_ms"],
+        "vae_wall_ms": container["vae_wall_ms"],
+    }
+else:
+    profiler_on = record["metrics"]["profiler_on"]
+    observed = profiler_on["observed_wall_with_profiler_overhead"]
+    paths = {
+        "observed.scheduler_chunk_wall_ms": observed["scheduler_chunk_wall_ms"],
+        "observed.dit_wall_ms": observed["dit_wall_ms"],
+        "observed.vae_wall_ms": observed["vae_wall_ms"],
+        "dit_cuda_ms": profiler_on["dit_cuda_ms"],
+        "vae_cuda_ms": profiler_on["vae_cuda_ms"],
+    }
+for name, metric in paths.items():
+    if metric.get("status") != "available":
+        raise AssertionError(f"{name} must be available: {metric}")
+    count = metric.get("value", {}).get("count")
+    if count != expected:
+        raise AssertionError(f"{name} count={count}, expected {expected}")
+print(f"complete latency counts: mode={record['mode']} count={expected}")
+PY
 }
 
 aggregate_repeats() {
