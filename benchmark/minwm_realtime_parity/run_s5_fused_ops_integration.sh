@@ -183,6 +183,9 @@ run_headline_lane() {
   python3 "${SCRIPT_DIR}/measurement_tool.py" validate \
     "${lane}/profiler-off-repeat1.json"
   assert_execution_profile "${lane}/profiler-off-server.log" "${config}"
+  if [[ "${run_bitwise}" == "1" ]]; then
+    assert_execution_profile "${lane}/correctness-server.log" "${config}"
+  fi
   CURRENT_LANE_DIR="${RUN_ROOT}"
 }
 

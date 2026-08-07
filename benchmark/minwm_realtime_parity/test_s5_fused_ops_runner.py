@@ -68,6 +68,9 @@ def test_s0_runner_modes_keep_profiler_off_and_nsys_isolated():
     assert 'if [[ "${NSYS_ONLY}" == "1" && "${PROFILER_OFF_ONLY}" == "1" ]]' in runner
     assert 'if [[ "${PROFILER_OFF_ONLY}" != "1" ]]; then\n  install_nsys\nfi' in runner
     assert runner.count("assert_no_nsys_processes") >= 4
+    assert '"${lane_dir}/correctness-server.log"' in runner
+    assert "MINWM_S0_PARITY_DUMP_DIR= \\\n" in runner
+    assert '"${lane_dir}/profiler-off-server.log"' in runner
 
 
 def test_triple_interaction_residual_uses_all_three_singletons():

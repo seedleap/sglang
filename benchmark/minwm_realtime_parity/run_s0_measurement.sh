@@ -326,11 +326,11 @@ install_nsys() {
 run_profiler_off() {
   local degree="$1" lane_dir="$2"
   assert_no_nsys_processes
-  start_server \
-    "${degree}" \
-    "${lane_dir}/profiler-off-server.log" \
-    "${lane_dir}/profiler-off-gpu-telemetry.csv"
   if [[ "${RUN_BITWISE}" == "1" ]]; then
+    start_server \
+      "${degree}" \
+      "${lane_dir}/correctness-server.log" \
+      "${lane_dir}/correctness-gpu-telemetry.csv"
     mkdir -p "${BITWISE_RESULTS_ROOT}"
     python3 "${SCRIPT_DIR}/run_sglang_api.py" \
       --cases "${CASES}" \
@@ -339,7 +339,15 @@ run_profiler_off() {
       --output-prefix "${BITWISE_OUTPUT_PREFIX}" \
       --engine-name "sglang-minwm-${RUN_LABEL}" \
       --kv-cache-num-frames "${KV_CACHE_NUM_FRAMES}"
+    stop_server
+    assert_no_nsys_processes
   fi
+  MINWM_S0_PARITY_DUMP_DIR= \
+  MINWM_S0_PARITY_DUMP_ALL_BLOCKS=0 \
+    start_server \
+      "${degree}" \
+      "${lane_dir}/profiler-off-server.log" \
+      "${lane_dir}/profiler-off-gpu-telemetry.csv"
   local repeat_paths=()
   for repeat in $(seq 1 "${OFF_REPEAT_COUNT}"); do
     local output="${lane_dir}/profiler-off-repeat${repeat}.json"
