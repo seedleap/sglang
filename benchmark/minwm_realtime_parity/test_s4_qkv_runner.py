@@ -2,6 +2,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 QUALITY_RUNNER = Path(__file__).with_name("run_s4_qkv_quality.sh")
+MEASUREMENT_RUNNER = Path(__file__).with_name("run_s0_measurement.sh")
 MINWM_MODEL = ROOT / "python/sglang/multimodal_gen/runtime/models/dits/minwm.py"
 
 
@@ -77,3 +78,31 @@ def test_qkv_quality_runner_scopes_existing_tp2_blocker() -> None:
     assert "MinWMRMSNorm' object has no attribute 'variance_epsilon" in runner
     assert "candidate[: value.shape[0]]" not in runner
     assert "candidate_tp2.npy" not in runner
+
+
+def test_qkv_abba_runner_restarts_server_at_every_position() -> None:
+    runner = MEASUREMENT_RUNNER.read_text()
+    position_start = runner.index("run_profiler_off_position()")
+    position_end = runner.index("run_abba_measurements()")
+    position = runner[position_start:position_end]
+
+    expected_order = [
+        'record_compile_cache_state "${position_dir}/compile-cache-before.json"',
+        "start_server \\",
+        "run_client \\",
+        "stop_server",
+        "assert_server_stopped",
+        'record_compile_cache_state "${position_dir}/compile-cache-after.json"',
+    ]
+    offsets = [position.index(statement) for statement in expected_order]
+    assert offsets == sorted(offsets)
+    assert 'invalid_scope="${position_dir}"' in position
+    assert 'local output="${position_dir}/profiler-off.json"' in position
+
+    assert '"${abba_lanes[*]}" != "candidate control control candidate"' in runner
+    assert "position-${position}-${lane}" in runner
+    assert "server_restart_per_position" in runner
+    assert "compile_cache_policy" in runner
+    assert runner.index('if [[ -n "${ABBA_SEQUENCE}" ]]') < runner.index(
+        'for qkv_lane in "${qkv_lanes[@]}"'
+    )
