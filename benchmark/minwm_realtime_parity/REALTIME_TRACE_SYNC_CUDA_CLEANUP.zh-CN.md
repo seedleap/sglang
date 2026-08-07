@@ -2,7 +2,7 @@
 
 ## 状态、目标与非目标
 
-- 状态：实现与 CPU/fake-CUDA 单测完成；704p SP2/SP4 ABBA 和独立 Nsight 尚未提交，当前结论为 **no-go（真机证据未完成）**。
+- 状态：实现与 CPU/fake-CUDA 单测完成；704p SP2/SP4 ABBA Job 已提交并等待新 Spot 节点，独立 Nsight 尚未提交，当前结论为 **no-go（真机证据未完成）**。
 - 本任务分支：`codex/minwm-trace-sync-cleanup`。
 - 安全复用来源：从 S0 冻结分支 `codex/minwm-fused-ops-s0` 的 `6c79fdfa63263814dc4e698b7bd808c6313b655c` 创建，没有从其他 worktree 复制文件或直接修改其他 worktree。
 - 目标：默认 realtime trace 只保留 host wall，可选 CUDA event timing 改为显式 opt-in；默认 span 结束不等待 CUDA；保留 worker→API 的 wall/CUDA 状态可观测性；提供 bitwise 与同机 paired A/B 工具。
@@ -221,5 +221,36 @@ Black 首次指出 comparator 与 measurement test 需格式化；运行 Black �
    A2A、GPU busy、SM/Tensor Active、DRAM。Nsight FPS 不作 headline。
 5. 832×480 只作 prompt switch/scene cut/eviction 回归；不替代 704p。
 
-当前没有正式 P0 Job、没有 P0 真机 JSON/SQLite，因此相关栏位是“未测”，不是 0。
+当前 P0 Job 已提交但尚未产生 P0 真机 JSON/SQLite，因此相关栏位是“未测”，不是 0。
 在 bitwise、两次同机 paired A/B、CV、SP4 复验与 Nsight 归因完成前保持 **no-go**。
+
+## P0 ABBA Job 提交记录
+
+安全实现 commit 为 `39065138b377d0117e2313983020e80666f70c24`，已推送到
+`origin/codex/minwm-trace-sync-cleanup`，并用 `git ls-remote` 复核远端 ref 精确命中该
+SHA。Job manifest 是
+`k8s/minwm_p0_trace_sync_h200_20260807.yaml`，固定该 SHA 和 S0 镜像/checkpoint。
+
+```bash
+kubectl --context codex-minwm-test-phx2 apply --dry-run=client \
+  -f benchmark/minwm_realtime_parity/k8s/minwm_p0_trace_sync_h200_20260807.yaml
+kubectl --context codex-minwm-test-phx2 apply --dry-run=server \
+  -f benchmark/minwm_realtime_parity/k8s/minwm_p0_trace_sync_h200_20260807.yaml
+kubectl --context codex-minwm-test-phx2 apply \
+  -f benchmark/minwm_realtime_parity/k8s/minwm_p0_trace_sync_h200_20260807.yaml
+```
+
+两种 dry-run 均显示 PVC/Job `created (dry run)`；正式 apply 创建：
+
+| 项 | 值 |
+| --- | --- |
+| Job | `minwm-p0-trace-sync-h200-20260807-01` |
+| Pod | `minwm-p0-trace-sync-h200-20260807-01-7p95f` |
+| PVC | `minwm-p0-trace-sync-h200-results-20260807`，50 GiB |
+| 资源 | H200 `p5e.48xlarge` Spot，完整 8 GPU，64/128 CPU，400/800 GiB memory |
+| 保护 | `backoffLimit=0`，`activeDeadlineSeconds=21600`，独立结果路径 |
+| 初始调度 | `Pending`；现有节点 `Insufficient nvidia.com/gpu`，没有抢占/清理其他任务 |
+| 新 NodeClaim | `minwm-test-phx2-p5e-spot-msk8k`，已 Launched，provider `i-0973db0dc2a8448d1`，尚待 Registered/Ready |
+
+截至本次记录更新，Pod 仍 Pending，未产生 A/B 数值。Karpenter 已正常提名并启动新实例，
+不是 rank hang；继续监控 Node register、Pod checkout 和 runner 日志。
