@@ -29,7 +29,7 @@ grep -q -- '--require-complete-stage-trace' "${SCRIPT_DIR}/run_s0_measurement.sh
 mkdir -p "${QUALITY_ROOT}"
 {
   echo "sglang_commit=${SGLANG_GIT_REF}"
-  echo "s0_tooling_commit=59aa68a382"
+  echo "s0_tooling_commit=b9240233b2438829cbd72ee3dfbc1d37ed675560"
   echo "minwm_commit=${MINWM_GIT_REF}"
   echo "container_image=${MINWM_CONTAINER_IMAGE}"
   echo "stage_run_id=${STAGE_RUN_ID}"
