@@ -13,9 +13,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-import math
 import os
-import statistics
 import subprocess
 import time
 from datetime import datetime, timezone
@@ -33,6 +31,7 @@ from common import (
 from measurement import (
     available,
     build_measurement,
+    latency_summary,
     stage_trace_values,
     unavailable,
 )
@@ -131,24 +130,6 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--timeout", type=float, default=1800.0)
     return parser.parse_args()
-
-
-def percentile(values: list[float], quantile: float) -> float:
-    ordered = sorted(values)
-    index = min(len(ordered) - 1, math.ceil(quantile * len(ordered)) - 1)
-    return ordered[max(index, 0)]
-
-
-def latency_summary(values: list[float]) -> dict[str, float]:
-    if not values:
-        raise ValueError("latency summary requires at least one value")
-    return {
-        "mean": statistics.fmean(values),
-        "p50": statistics.median(values),
-        "p95": percentile(values, 0.95),
-        "p99": percentile(values, 0.99),
-        "max": max(values),
-    }
 
 
 def validate_contract(manifest: dict, args: argparse.Namespace) -> tuple[dict, dict]:
