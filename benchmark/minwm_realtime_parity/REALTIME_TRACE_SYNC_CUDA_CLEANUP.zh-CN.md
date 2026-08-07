@@ -278,3 +278,9 @@ launch、busy、SM/Tensor/DRAM，却没有把 `dit_cuda_ms`、`vae_cuda_ms` 加�
 对应单测构造同一份完整 Nsight record，验证默认对缺 component CUDA fail closed，而显式
 diagnostic override 仅放宽这两个字段。`run_s0_measurement.sh` 的默认行为不变；新增的
 skip-profiler-off、result root、trace-sync 和 session-label 控制都必须显式设置。
+
+首次起草 Nsight manifest 时根据短 SHA 手工补成了不存在的
+`1e9c11322fb8e6f58f5d0372d1496153160574bc`。在任何 dry-run/apply 前用
+`git rev-parse 1e9c11322f` 发现真实 SHA 是
+`1e9c11322feb27502a45ec308f3bd30d6d7dc4f8`，立即修正 manifest 三处 pin。错误 SHA
+从未提交到集群，也没有产生 Job/PVC；保留这条记录，后续仍需 `git ls-remote` 再校验。
