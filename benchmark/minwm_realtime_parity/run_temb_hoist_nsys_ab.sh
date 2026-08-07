@@ -144,6 +144,25 @@ python3 -m pytest -q \
   "${SOURCE_ROOT}/python/sglang/multimodal_gen/test/unit/realtime/test_minwm_realtime.py" \
   -k 'hoisted_timestep_modulation_matches_compiled_cuda_index'
 
+validate_profile_result() {
+  local variant="$1" measurement="$2"
+  python3 - "${SCRIPT_DIR}" "${measurement}" "${variant}" <<'PY'
+import sys
+from pathlib import Path
+
+script_dir = Path(sys.argv[1])
+measurement = Path(sys.argv[2])
+variant = sys.argv[3]
+sys.path.insert(0, str(script_dir))
+
+from compare_temb_hoist_nsys import _assert_contract, _load_record
+
+record = _load_record(measurement)
+_assert_contract(record)
+print(f"validated exact formal Nsight result: variant={variant} path={measurement}")
+PY
+}
+
 run_variant() {
   local variant="$1" hoist="$2" source_root="$3"
   local variant_run_id="${BASE_RUN_ID}-${variant}"
@@ -171,6 +190,7 @@ run_variant() {
   python3 "${SCRIPT_DIR}/measurement_tool.py" validate \
     "${profile_dir}/measurement.json" \
     --require-complete-stable-nsys
+  validate_profile_result "${variant}" "${profile_dir}/measurement.json"
   if pgrep -x nsys >/dev/null; then
     echo "${variant}: nsys remained alive after completed capture" >&2
     pgrep -a -x nsys >&2 || true

@@ -38,6 +38,9 @@ def test_wrapper_keeps_post_validation_failure_lane_scoped() -> None:
     assert start < run_position
     assert 'mkdir -p "${CURRENT_LANE_DIR}"' not in text[start:run_position]
     assert run_position < text.index(validate, start)
+    formal_validate = 'validate_profile_result "${variant}"'
+    assert text.index(validate, start) < text.index(formal_validate, start)
+    assert text.index(formal_validate, start) < text.index(clear, start)
     assert text.index(validate, start) < text.index(clear, start)
     preflight = 'CURRENT_LANE_DIR="${preflight_dir}"'
     assert text.index(preflight) < text.index(scoped)
@@ -102,3 +105,16 @@ def test_canonical_runner_collects_all_targets_and_fails_closed() -> None:
     assert "_discrete_event_start_attribution" in metrics
     assert "boundary_event_examples" in metrics
     assert "streaming selected metricId rows" in metrics
+
+
+def test_wrapper_asserts_formal_stage_window_and_gpu_target_contract() -> None:
+    wrapper = WRAPPER.read_text()
+    comparator = (ROOT / "compare_temb_hoist_nsys.py").read_text()
+    assert "validate_profile_result" in wrapper
+    assert "_assert_contract(record)" in wrapper
+    for name in ("dit_wall_ms", "vae_wall_ms", "dit_cuda_ms", "vae_cuda_ms"):
+        assert name in comparator
+    assert 'value["count"] != 10' in comparator
+    assert 'expected_stable_chunk_indices"] != list(range(1, 11))' in comparator
+    assert 'value["collected_target_count"] != 8' in comparator
+    assert 'value["active_target_count"] != 2' in comparator

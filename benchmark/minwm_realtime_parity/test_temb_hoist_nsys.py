@@ -90,6 +90,8 @@ def test_metric_summary_preserves_api_boundary_evidence() -> None:
     record = {
         "metrics": {
             "profiler_on": {
+                "dit_wall_ms": available({"count": 10, "mean": 0.9}),
+                "vae_wall_ms": available({"count": 10, "mean": 1.9}),
                 "dit_cuda_ms": available({"mean": 1.0}),
                 "vae_cuda_ms": available({"mean": 2.0}),
                 "kernel_count": available({"per_stable_chunk": 3.0}),

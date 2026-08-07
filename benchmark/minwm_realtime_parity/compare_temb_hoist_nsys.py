@@ -59,9 +59,11 @@ def _assert_contract(record: dict[str, Any]) -> None:
         raise ValueError(f"expected active/allocated GPUs 2/8, got {gpu}")
 
     on = record["metrics"]["profiler_on"]
+    for name in ("dit_wall_ms", "vae_wall_ms", "dit_cuda_ms", "vae_cuda_ms"):
+        value = _available_value(on[name], name)
+        if value["count"] != 10:
+            raise ValueError(f"{name}: expected 10 complete stage samples")
     for name in (
-        "dit_cuda_ms",
-        "vae_cuda_ms",
         "kernel_count",
         "cuda_api_count",
         "kernel_launch_api_count",
@@ -202,6 +204,8 @@ def _metric_summary(record: dict[str, Any]) -> dict[str, Any]:
         on["kernel_launch_api_count"], "kernel_launch_api_count"
     )
     return {
+        "dit_wall_ms": _available_value(on["dit_wall_ms"], "dit_wall_ms")["mean"],
+        "vae_wall_ms": _available_value(on["vae_wall_ms"], "vae_wall_ms")["mean"],
         "dit_cuda_ms": _available_value(on["dit_cuda_ms"], "dit_cuda_ms")["mean"],
         "vae_cuda_ms": _available_value(on["vae_cuda_ms"], "vae_cuda_ms")["mean"],
         "kernel_per_chunk": _available_value(on["kernel_count"], "kernel_count")[
@@ -276,6 +280,8 @@ def compare(
     legacy_metrics = _metric_summary(legacy_record)
     candidate_metrics = _metric_summary(candidate_record)
     scalar_names = (
+        "dit_wall_ms",
+        "vae_wall_ms",
         "dit_cuda_ms",
         "vae_cuda_ms",
         "kernel_per_chunk",
