@@ -1,7 +1,11 @@
 # MinWM timestep modulation pass 内复用
 
-状态：实现与 CPU 回归已完成；H200 CUDA compile smoke 已通过。正式 BF16 output
-bitwise、A/B 和 Nsight 已按修正后的测量契约重新提交，尚未形成可验收数据。
+状态：实现、CPU 回归、H200 CUDA compile smoke、BF16 output bitwise 与正式
+profiler-off A/B 已完成。SP4 采用 A1(candidate)→B1(legacy)→B2(legacy)→A2(candidate)
+反向顺序 ABBA 后，正式 headline 为 Client/Scheduler 约 `+0.5%`、DiT wall 改善
+`0.67%`，均低于默认 1% 噪声门槛。Nsight 必须使用 S0 exact-window canonical
+`900b5f279b65b2afcfbe6cc9b36cfa4496b41bc3` 重测，最终保留/回滚尚待 kernel/launch
+证据。
 
 ## 目标与边界
 
@@ -99,46 +103,53 @@ H200 镜像已运行 CUDA-only smoke：BF16、非均匀 SP frame index 下，pas
 `1 passed`。正式 SP2/SP4 workload 按 MinWM 现有约束关闭 whole-DiT compile；该 smoke
 只证明编译消费者兼容性，不作为 headline 性能数据，也不能据此声称 compile 已消除重复。
 
-H200 数值验收将同时保存旧/新 lossless latent/frame 校验；若出现任何差异，默认不放宽
-阈值，先定位第一个不同的 block 输入和 modulation stride，并回退默认开关。
+H200 正式 bitwise 结果已通过：旧/新路径输出 shape 都是
+`[129, 704, 1248, 3]`，`array_equal=true`、最大绝对差为 0；两者 frames SHA256 均为
+`38e7ef07cffb7e8df2e59323dcbd9dacda92d31ab4a268d1276b554b7f3e833b`。该结果覆盖正式
+BF16 causal workload 的 4 DMD + 1 clean-cache/recompute 路径。若后续变更出现任何差异，
+仍不放宽阈值：先定位第一个不同的 block 输入和 modulation stride，并回退默认开关。
 
 ## 统一测量契约
 
-测量工具来自 S0 canonical commit
-`b9240233b2438829cbd72ee3dfbc1d37ed675560`（PR #19）：
+正式 profiler-off 结果由 S0 commit
+`b9240233b2438829cbd72ee3dfbc1d37ed675560`（PR #19）生成；S0 后续更新不改变这些
+结果的语义。正式 profiler-on/Nsight 必须改用 exact-window / GPU-target canonical
+`900b5f279b65b2afcfbe6cc9b36cfa4496b41bc3`：
 
 - schema：`benchmark/minwm_realtime_parity/measurement_schema.json`
 - profiler-off：`benchmark_realtime_throughput.py`
 - validate/CV/Nsight merge：`measurement_tool.py`
 - Nsight SQL 指标：`nsys_metrics.py`
 
-该 pin 包含 `59aa68a382` 的完整 stage-trace 等待，并修复 59aa runner 重复实现
+profiler-off pin 包含 `59aa68a382` 的完整 stage-trace 等待，并修复 59aa runner 重复实现
 `latency_summary` 时漏写 `value.count` 的问题。schema 现在要求所有可用 wall/CUDA
 latency 显式带 count，自定义 validator 强制 count 等于
 `workload.measured_chunks`（profiler-off 为 200，profiler-on 为 10）。临时 S1 runner
 还会独立递归断言所有 `ms_per_chunk` 指标的 count。S0 未合并前，只在临时测量分支
 叠加该工具；S1 最终对 main 的实现 diff 不复制 S0 基础设施。
 
+`900b` 的 Nsight 硬门是：capture target 覆盖全部 8 个 GPU/进程，但汇总只纳入 active
+`pwGpuId`；每条正式结果必须恰好覆盖 10 个 steady ranges，并同时给出 DiT/VAE CUDA、
+kernel、CUDA API/launch、短 kernel 分桶、SM Active、Tensor Active 与 target coverage。
+任何 coverage 或 range-count 不完整的结果只作诊断，不进入 kernel/launch 结论。
+
 本地对 b924 工具边界的回归为：S0 `test_measurement.py + test_common.py` 19 passed；
 S1 额外 count 断言 3 passed，合计 22 passed。
 
-S0 后续审计层 `b178572f84`（包含 `2f15c29471`）不改变 b924 schema，但规定失败/中止时逐文件记录原路径、
-保留路径、size、SHA256 和 recoverability，并把旧结果移入 attempt 内的 `invalid/`；聚合器
-只在 JSON 最近的 `s0-measurement` 根检查直属 invalid marker，避免污染兄弟 attempt。
-`-03` 已按 b924 创建后收到此规则，依 S0 指示不热切换：成功结果仍有效；若失败则按
-b178 规则后处理且不删除 PVC，新的 retry 才 pin b178。
+S0 后续审计层 `b178572f84`（包含 `2f15c29471`）不改变 b924 schema，但规定失败/中止时
+逐文件记录原路径、保留路径、size、SHA256 和 recoverability；聚合器按当前 JSON 的
+parent 到最近 measurement root 检查 marker，避免污染兄弟 attempt。
 
 后续现场审计又明确 marker scope：某 profiler-off lane 已验证后，若 Nsight 或另一 lane
 失败，只在失败 lane 写 marker，不得用 attempt-root marker 作废已合格 headline；只有
-setup、全局质量或 parity 前置失败才使用 root marker。聚合检查当前 JSON parent 到最近
-measurement root，sibling lane marker 不影响。当前 `-03` 继续运行，未来 runner 等 S0
-最终 commit 后再更新。
+setup、全局质量或 parity 前置失败才使用 root marker。ABBA runner 把
+`CURRENT_LANE_DIR` 精确设为 `${label}/sp4`：position JSON 直接位于该目录，post-run
+validate/count 失败只作废当前 position，已完成 sibling 不受影响。
 
 固定 workload：MinWM 5B step-3200、1248×704、BF16、16 pixel frames/4 latent
 frames per chunk、4 DMD + 1 clean-cache，20 warmup + 200 measured。SP2 是主验收，
-SP4 复验。profiler-off 与 Nsight 分开运行；Nsight 先外部 warmup 20 chunks，capture
-丢弃 1 个 session 首 chunk后保留至少 10 个 steady chunks，不同时启用
-`torch.profiler`。
+SP4 复验。profiler-off 与 Nsight 分开运行；Nsight 先外部 warmup 20 chunks，exact-window
+capture 必须得到恰好 10 个 steady ranges，不同时启用 `torch.profiler`。
 
 吞吐 A/B 显式固定 `realtime_causal_kv_cache_num_frames=45`。这是 rolling-window
 steady-state contract：避免 220 chunks 的 full-history 序列/显存增长使小算子 A/B
@@ -147,45 +158,103 @@ variable chunk 与无淘汰 cache growth 的语义由独立数值测试覆盖。
 
 ## 实际 A/B
 
-以下表格只填写 S0 schema 校验通过的同机 paired run。`待测` 不是零，也不代表不可得。
+以下 profiler-off 数据都通过 S0 schema、完整 stage trace 和 `count=200` 断言。正式 SP4
+headline 使用同一 Pod、每个 position 重启 server 的 ABBA；旧的 legacy→candidate 同序
+结果只保留为诊断，不能作为实现收益。
 
 采集 provenance：kube context `codex-minwm-test-phx2`，AWS region `us-west-2`，NodePool
 `minwm-test-phx2-p5e-spot`，实例 `p5e.48xlarge` / NVIDIA H200；整机隔离申请 8 GPU，
 JSON 中 active GPU 严格记 SP2=2、SP4=4，`allocated_count=8`。镜像 digest 为
 `sha256:bedc07ea3ba55059a8c1c569c3b177c4d00d41f37d4fa9105375531534ef5f2a`，MinWM commit 为
-`2efc6485f65e8fcab506665efde79bc41406385e`，checkpoint step 3200。
+`2efc6485f65e8fcab506665efde79bc41406385e`，SGLang commit 为
+`5f92d276c08086db638f05536a46fa5434ecb169`，checkpoint step 3200。
 
 ### Profiler-off headline
 
-| SP | 路径 | repeat | Client FPS | Scheduler FPS | chunk wall | DiT wall | VAE wall | 峰值显存 | CV/结论 |
+| SP | 路径/ABBA position | repeat | Client FPS | Scheduler FPS | chunk wall ms | DiT wall ms | VAE wall ms | active GPU 显存采样 max MiB | 必需指标 CV |
 | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
-| 2 | 旧，每层物化 | 1/2 | 待测 | 待测 | 待测 | 待测 | 待测 | 待测 | 待测 |
-| 2 | 新，pass 内复用 | 1/2 | 待测 | 待测 | 待测 | 待测 | 待测 | 待测 | 待测 |
-| 4 | 旧，每层物化 | 1/2 | 待测 | 待测 | 待测 | 待测 | 待测 | 待测 | 待测 |
-| 4 | 新，pass 内复用 | 1/2 | 待测 | 待测 | 待测 | 待测 | 待测 | 待测 | 待测 |
+| 4 | 旧，每层物化（B1/B2） | 2 | 14.63745 | 14.65011 | 1159.115 | 753.6245 | 232.4127 | 41045 | 0.482% / 0.484% / 0.112% / 0.071% |
+| 4 | 新，pass 内复用（A1/A2） | 2 | 14.71123 | 14.72657 | 1152.950 | 748.5860 | 232.8149 | 41049 | 1.869% / 1.860% / 0.440% / 0.061% |
+| 4 | **正式 improvement** | ABBA mean | **+0.504%** | **+0.522%** | **+0.532%** | **+0.669%** | **-0.173%** | +4 MiB（采样噪声） | 必需 CV 均 ≤3%；端到端 <1% |
+
+CV 顺序为 Client/Scheduler/DiT/VAE。candidate 的非必需 `chunk wall` CV 是 4.738%，未过
+3%；legacy 为 0.164%。由于 Client/Scheduler/DiT/VAE 四个必需指标均过 CV 门，ABBA
+headline 可用，但 chunk-wall 只能作为带位置漂移的辅助证据。显存列是 `nvidia-smi`
+系统采样，不是 `torch.cuda.max_memory_allocated`；4 MiB 差异不能证明 allocator 精确相等，
+只说明没有可见的长期大 tensor 增长或 OOM。
+
+各 position 原始值解释顺序效应：
+
+| position | 路径 | Client FPS | Scheduler FPS | DiT wall ms | 首 payload ms |
+| --- | --- | ---: | ---: | ---: | ---: |
+| A1 | 新 | 14.51685 | 14.53284 | 750.9149 | 20679.7 |
+| B1 | 旧 | 14.58756 | 14.59994 | 753.0291 | 10235.1 |
+| B2 | 旧 | 14.68734 | 14.70028 | 754.2200 | 10017.7 |
+| A2 | 新 | 14.90560 | 14.92029 | 746.2572 | 9864.7 |
+
+四次都记录 `enable_torch_compile=false`、`warmup_mode=off`，但 execution profile 都是
+`segment_compile=True`，并打印同一个 TorchInductor/Triton disk cache 目录。A1 首 payload
+约为其余位置的两倍，且 Client 从 A1 到 A2 持续上升，因此单向 legacy→candidate 会把
+热态/位置收益误算给实现；ABBA 首尾对称平均才是正式口径。
+
+SP2 主验收由 `-03` legacy 与 `-04` candidate 的同契约 profiler-off 支撑，但跨 attempt，
+所以只作为“无回退”证据：Client `-0.028%`、Scheduler `-0.030%`、chunk wall improvement
+`-0.073%`、DiT wall improvement `-0.111%`、VAE wall improvement `+1.668%`。Client 与 DiT
+均在 1% 噪声内。旧 `-04` 同序 SP4 曾显示 Client `+2.487%`、Scheduler `+2.480%`、
+chunk `+5.206%`、DiT `+3.235%`；它与 ABBA 冲突，现明确降级为顺序/热态诊断数据，
+不得出现在收益 headline。
+
+### Telemetry 与产物审计
+
+| position | clock mean / p50 / p95 MHz | power mean W | util mean | temp max | P-state / samples |
+| --- | --- | ---: | ---: | ---: | --- |
+| A1 新 | 1976.16 / 1980 / 1980 | 398.86 | 68.58% | 71°C | P0 / 860 |
+| B1 旧 | 1976.18 / 1980 / 1980 | 413.32 | 69.31% | 71°C | P0 / 820 |
+| B2 旧 | 1976.05 / 1980 / 1980 | 416.38 | 70.37% | 71°C | P0 / 812 |
+| A2 新 | 1975.95 / 1980 / 1980 | 417.46 | 70.59% | 71°C | P0 / 804 |
+
+所有 active GPU 样本都是 P0，四个 position 的 clock p50/p95 都是 1980 MHz；启动审计中
+HW thermal slowdown、HW slowdown 与 HW power-brake slowdown 均未激活。power/util 随
+position 逐步上升而不是按 variant 分组，与 A1 cold start 和时间顺序一致，不能解释为
+hoist 本身的耗电或加速。
+
+成功 attempt 为 `minwm-s1-temb-abba-h200-20260807-06-p6l6b`，Job exit 0、
+`backoffLimit=0`；结果根为 PVC
+`/results/attempts/minwm-s1-temb-abba-h200-20260807-06-p6l6b/minwm-s1-temb-abba-20260807-06`。
+没有 invalid marker、`.nsys-rep`
+或 SQLite。aggregate SHA256 为
+`3053998de2f461237bc0ce2425406a1c80646b3e56cab7a574dd2254648f8a16`，candidate/legacy
+repeat-summary SHA256 分别为 `b992bc9b6b71631cd1b2756aff99c1d8916b2b42ff0d190d61d65dced6ccd206`
+和 `9f1186724b3730e5d20c3b8f3d9b253a31b8393e6fb1ee8802eab6b39597e0b2`；PVC 保留。
 
 ### Nsight steady-state
 
 | SP | 路径 | DiT CUDA | VAE CUDA | kernel 数 | launch/API 数 | 短 kernel 分桶 | GPU busy | SM Active | Tensor Active | DRAM | indexing 归因 |
 | ---: | --- | ---: | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: | --- |
-| 2 | 旧 | 待测 | 待测 | 待测 | 待测 | 待测 | 待测 | 待测 | 待测 | 待测 | 待测 |
-| 2 | 新 | 待测 | 待测 | 待测 | 待测 | 待测 | 待测 | 待测 | 待测 | 待测 | 待测 |
-| 4 | 旧/新复验 | 待测 | 待测 | 待测 | 待测 | 待测 | 待测 | 待测 | 待测 | 待测 | 待测 |
+| 2 | 旧 | 待 900b exact-window | 待测 | 待测 | 待测 | 待测 | 待测 | 待测 | 待测 | 待测 | 待测 |
+| 2 | 新 | 待 900b exact-window | 待测 | 待测 | 待测 | 待测 | 待测 | 待测 | 待测 | 待测 | 待测 |
+| 4 | 旧/新复验 | SP2 归因后决定 | 待测 | 待测 | 待测 | 待测 | 待测 | 待测 | 待测 | 待测 | 待测 |
 
 每次 run 还必须记录：SGLang commit、MinWM commit、镜像、GPU 型号/数量、SP、精度、
 fast-lane、UTC 时间和产物路径。Nsight overhead 下的 FPS 不作为 headline。
 
 ## 与预期不符处
 
-待实测后填写。重点检查：
-
-- 若 indexing kernel 没有减少：确认 whole-DiT compile 是否已经融合，或 kernel 名是否被
-  Inductor/Triton 改写；用调用次数和 bytes 辅助归因。
-- 若 kernel 减少但 DiT wall 不降：检查 saved launch 是否被 GEMM/collective 隐藏，以及
-  pass-local tensor 长生命周期是否增加 allocator 压力。
-- 若 Client/Scheduler 不随 DiT 变化：检查 VAE/output/transport 串行瓶颈。
-- 若 SP2 有收益而 SP4 没有：按 local sequence size、all-to-all 和 gather bytes 解释，
-  不能把 SP degree 差异归因给同一个索引 kernel。
+1. 静态上限暗示每 chunk 最多可少 145 次 block 内物化，但正式 SP4 ABBA 的 Client 只有
+   `+0.504%`、DiT wall 只有 `+0.669%`，都低于 1%。这与“索引只是 5B DiT 中的小算子，
+   主体由 GEMM/attention/collective 主导”的保守预期一致，但不足以单凭吞吐证明优化有效。
+2. 旧同序 SP4 的 `+2.487%` Client / `+3.235%` DiT 与 ABBA 明显冲突。A1 首 payload
+   20.68 s，而后三个位置约 9.86–10.24 s；power/util 也随时间上升，表明位置和共享
+   compile cache 是显著混淆。决策是用 ABBA `+0.5%` 替换旧数字作为正式 headline。
+3. candidate Client/Scheduler repeat CV 约 1.87%，高于 legacy 的约 0.48%；candidate
+   chunk-wall CV 4.74% 甚至未过 3%。虽然必需指标 CV 均通过，仍不能把 A2 对 B2 的局部
+   `>1%` 当作实现收益。
+4. SP2 Client/DiT 近乎中性，而 SP4 ABBA 略正，不支持“local sequence 越大收益越大”的
+   简单模型；可能是 saved launch 被 SP collective 和其他算子隐藏。必须等 900b Nsight
+   直接数 indexing/materialization kernel 与 launch，而不是继续从 wall time 反推。
+5. `nvidia-smi` active-GPU 显存最大值只差 4 MiB，没有看到长生命周期 tensor 导致的
+   material regression，但未采到精确 allocator peak。因此当前结论是“系统层未见增长”，
+   不是“严格零字节增加”。
 
 ## 证据与决策过程
 
@@ -215,20 +284,36 @@ fast-lane、UTC 时间和产物路径。Nsight overhead 下的 FPS 不作为 hea
    1,688,485 B，SHA256 `52f1fd75f9b1e371a512dc13bd11d1295b66feb7c1a4e383441367c73ed7104d`。
    invalid marker、原路径/大小/hash 与其余 attempt 证据继续保留，最终聚合不扫描该
    attempt。
-8. 修正后的 Job 为 `minwm-s1-temb-ab-h200-20260807-03`，S1 runner commit
-   `5f92d276c08086db638f05536a46fa5434ecb169`，S0 tool pin 为 `b9240233b2`；
-   `backoffLimit=0`，每个 Pod 结果仍写入 `/results/attempts/${HOSTNAME}`。只有 b924
-   validator 与 S1 独立 count 断言均通过的结果才可进入表格。
-9. S3/S4 的另一次 H200 运行暴露了源码注册测试在 `PYTHONPATH` 未包含 source tree 时会在
-   collection 阶段失败。S1 `-03` 已通过 H200 CUDA pytest（`1 passed`），因此本次未受
-   影响，也没有在正式测量中热切换 runner。后续 runner `bf41a2098d` 会在模型/client 前
-   显式加入仓库 `python/`，并 import `sglang.test.ci.ci_register`；失败即止损。本地该
-   preflight 已通过。
+8. `-03` 在 legacy SP2 两次 profiler-off 与 repeat-summary 完成后，按 S0 exact-window
+   缺口在第一次 `nsys start` 前精确止损；capture 从未启动。已验证的 legacy SP2 保留，
+   profiler-on lane 单独标 invalid，不用 attempt-root marker。
+9. `-04` 是物理无 Nsight 的 off-only resume：完成 candidate SP2、legacy/candidate SP4、
+   bitwise/quality 与 aggregate。SP2 基本中性；SP4 同序出现 `+2.49%` Client 后，结合
+   telemetry 与 compile-cache 热态，决定不直接收尾，而设计反向 ABBA。
+10. S3/S4 的另一次 H200 运行暴露源码注册测试在 `PYTHONPATH` 未包含 source tree 时会在
+    collection 阶段失败。S1 runner 因而在测试/model/client 前显式加入仓库 `python/` 并
+    import `sglang.test.ci.ci_register`，失败即止损。
+11. 第一次 ABBA Job `minwm-s1-temb-abba-h200-20260807-05` 把上述 import 放在依赖安装前，
+    16 秒内因缺 `orjson` exit 1；没有 model/client/Nsight，GPU 显存为 0。该全局 preflight
+    失败在唯一 attempt 根写 marker
+    `invalid-marker-s1-preflight-orjson-20260807T053630Z.json`，原地保留 4453 B
+    `pod-exit-diagnostic.txt`（SHA256
+    `9ad150768adca8b2c16c9546db161b91a76b597203132121871b1f4a35a44cc7`）；PVC 未删。
+12. 修正后的不可变 manifest commit 是
+    `2aaa3b51773f99840c3e8ed3136b7cddf6cd1898`，顺序为 setup-only 依赖安装 → source
+    import → 无 Nsight/ABBA 静态检查 → registered CUDA test → server/client。新 Job `-06`
+    为 `backoffLimit=0`，H200 registered test `1 passed, 123 deselected`，四个 position
+    都通过 schema/count，且没有 marker/Nsight 产物。
+13. ABBA 对称均值将旧同序 `+2.49%` 修正为正式 Client `+0.504%`、DiT `+0.669%`。
+    这满足“profiler-off 不回退超过 1%”，但收益落在噪声内。当前决策是暂时保留实现与
+    parity fallback，不转 ready；只有 900b Nsight 能证明 indexing/materialization kernel
+    和 launch 有可解释下降时才保留，否则回滚，不用静态 145 次上限代替实测。
 
-最终保留或回滚规则：bitwise 不通过则回滚；profiler-off DiT/Client 回退超过 paired
-噪声或默认 1% 且无法解释则回滚；若 headline 落在噪声内但能稳定消除预期 launch、
-不增峰值显存且代码复杂度低，可以保留并明确“launch 优化、端到端中性”。若 compile 已
-完全吞掉重复且 eager 也无可解释 kernel 下降，则删除实现而不以理论估算充当收益。
+最终保留或回滚规则：bitwise 已通过；profiler-off ABBA 已证明不回退超过默认 1%。下一硬
+门是 900b Nsight：若 headline 落在噪声内但能稳定消除预期 indexing/materialization
+launch、不增可见峰值显存且代码复杂度低，可以保留并明确“launch 优化、端到端中性”。若
+segment compile 已吞掉重复，或 eager 也无可解释 kernel/launch 下降，则删除实现，不以
+理论估算充当收益。
 
 ## 尝试后放弃的方案
 
@@ -262,6 +347,9 @@ PYTHONPATH=python TORCHDYNAMO_DISABLE=1 python -m pytest -q \
 
 真机命令以 S0 `measurement_tool.py` 生成/校验的 JSON 为准；旧路径服务进程设置
 `MINWM_HOIST_TIMESTEP_MODULATION=0`，新路径设置为 `1`，其他参数和容器保持一致。
+profiler-off 复现使用 b924 schema；新的 Nsight runner 临时 pin 900b，必须在依赖安装后、
+model/client 前完成 source-tree import 与无并发 profiler 检查，并保留 exact 10-range 和
+all-target coverage 证据。产品 PR 不带任何 S0 runner/tool diff。
 
 ## 给负责人掌握代码的检查题
 
@@ -289,3 +377,11 @@ PYTHONPATH=python TORCHDYNAMO_DISABLE=1 python -m pytest -q \
 8. **怎样一键恢复旧路径，恢复后数值门槛是什么？**
    参考：设置 `MINWM_HOIST_TIMESTEP_MODULATION=0` 并重启；两条路径目标都是 bitwise
    exact，不能因性能优化放宽 parity 阈值。
+9. **为什么旧 SP4 `+2.49%` 不能写成实现收益，ABBA 如何修正？**
+   参考：A1 首 payload 是 20.68 s，后三个约 10 s，且 power/util 随位置升高；看
+   `temb-hoist-sp4-abba-summary.json` 的 A1/B1/B2/A2 首尾对称均值，正式 Client 只有
+   `+0.504%`。
+10. **post-run validate 失败时 marker 为什么放 `${label}/sp4`，Nsight 又要过哪些门？**
+    参考：position JSON 的直接父目录就是 `sp4`，S0 聚合器从 JSON parent 向上查 marker，
+    因此不会误伤 sibling；900b Nsight 还要求 all-8 target coverage、active `pwGpuId`、
+    exact 10 ranges、DiT/VAE CUDA、kernel/API/launch 与 SM/Tensor 指标齐全。
