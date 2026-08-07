@@ -78,7 +78,7 @@ _MINWM_PACKED_ATTENTION_DETERMINISTIC = _env_flag(
     "MINWM_PACKED_ATTENTION_DETERMINISTIC", True
 )
 _MINWM_SEGMENT_COMPILE = _env_flag("MINWM_SEGMENT_COMPILE", True)
-_MINWM_FUSE_SELF_ATTN_POST = _env_flag("MINWM_FUSE_SELF_ATTN_POST", False)
+_MINWM_FUSE_SELF_ATTN_POST_FAST = _env_flag("MINWM_FUSE_SELF_ATTN_POST_FAST", False)
 _MINWM_CACHE_ROTATED_K = _env_flag("MINWM_CACHE_ROTATED_K", True)
 _MINWM_PRECOMPUTE_CACHE_ROPE = _env_flag("MINWM_PRECOMPUTE_CACHE_ROPE", True)
 _MINWM_CACHE_PACKED_METADATA = _env_flag("MINWM_CACHE_PACKED_METADATA", True)
@@ -928,7 +928,7 @@ class MinWMCausalTransformerBlock(CausalWanTransformerBlock):
         attn_output = attn_output.squeeze(1)
 
         affine_norm = self.self_attn_residual_norm.norm
-        if _MINWM_FUSE_SELF_ATTN_POST:
+        if _MINWM_FUSE_SELF_ATTN_POST_FAST:
             hidden_states, norm_hidden_states = _minwm_self_attn_post(
                 hidden_states,
                 attn_output,
@@ -1011,12 +1011,12 @@ class MinWMCausalTransformer3DModel(CausalWanTransformer3DModel):
         logger.info(
             "MinWM execution profile: attention_impl=%s "
             "packed_deterministic=%s segment_compile=%s "
-            "fuse_self_attn_post=%s cache_rotated_k=%s "
+            "fuse_self_attn_post_fast=%s cache_rotated_k=%s "
             "precompute_cache_rope=%s cache_packed_metadata=%s",
             _MINWM_ATTENTION_IMPL,
             _MINWM_PACKED_ATTENTION_DETERMINISTIC,
             _MINWM_SEGMENT_COMPILE,
-            _MINWM_FUSE_SELF_ATTN_POST,
+            _MINWM_FUSE_SELF_ATTN_POST_FAST,
             _MINWM_CACHE_ROTATED_K,
             _MINWM_PRECOMPUTE_CACHE_ROPE,
             _MINWM_CACHE_PACKED_METADATA,

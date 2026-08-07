@@ -2145,7 +2145,8 @@ def test_minwm_self_attn_post_is_bitwise_exact_for_shards_and_gate_shapes(
 
     if sequence > 1 and hidden_size > 1:
         assert not hidden.is_contiguous()
-    assert not timestep_gate.is_contiguous()
+    if sequence > 1:
+        assert not timestep_gate.is_contiguous()
     torch.testing.assert_close(actual_hidden, expected_hidden, rtol=0, atol=0)
     torch.testing.assert_close(actual_norm, expected_norm, rtol=0, atol=0)
 
@@ -2165,7 +2166,7 @@ def test_minwm_self_attn_post_is_bitwise_exact_for_shards_and_gate_shapes(
 @pytest.mark.parametrize("autocast_enabled", [False, True])
 @pytest.mark.parametrize("segment_compile", [False, True])
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
-def test_minwm_self_attn_post_cuda_compile_and_autocast_fallback(
+def test_minwm_self_attn_post_cuda_compile_and_autocast_contract(
     monkeypatch, autocast_enabled, segment_compile
 ):
     from sglang.multimodal_gen.runtime.models.dits import minwm as minwm_module
@@ -2223,7 +2224,37 @@ def test_minwm_self_attn_post_cuda_compile_and_autocast_fallback(
         )
 
     torch.testing.assert_close(actual_hidden, expected_hidden, rtol=0, atol=0)
-    torch.testing.assert_close(actual_norm, expected_norm, rtol=0, atol=0)
+    if segment_compile:
+        assert torch.isfinite(actual_norm).all()
+        difference = (actual_norm.float() - expected_norm.float()).abs()
+        changed_fraction = torch.count_nonzero(difference).item() / difference.numel()
+        positive_inf = torch.full_like(expected_norm, float("inf"))
+        negative_inf = torch.full_like(expected_norm, float("-inf"))
+        upper_ulp = (
+            torch.nextafter(expected_norm, positive_inf).float() - expected_norm.float()
+        ).abs()
+        lower_ulp = (
+            expected_norm.float() - torch.nextafter(expected_norm, negative_inf).float()
+        ).abs()
+        allowed_ulp = torch.maximum(upper_ulp, lower_ulp)
+        max_abs = difference.max().item()
+        max_allowed_ulp = allowed_ulp.max().item()
+        print(
+            "self-attn-post-fast "
+            f"autocast={autocast_enabled} max_abs={max_abs} "
+            f"max_allowed_bf16_ulp={max_allowed_ulp} "
+            f"changed_fraction={changed_fraction}"
+        )
+        assert torch.all(difference <= allowed_ulp), (
+            f"fast segment exceeded one BF16 ULP: max_abs={max_abs}, "
+            f"max_allowed_bf16_ulp={max_allowed_ulp}"
+        )
+        # The first H200 calibration observed 8.7% and 9.7% changed elements
+        # with autocast off/on.  Keep a separate 12.5% regression guardrail;
+        # end-to-end latent/frame metrics decide whether the fast lane ships.
+        assert changed_fraction <= 0.125
+    else:
+        torch.testing.assert_close(actual_norm, expected_norm, rtol=0, atol=0)
 
 
 def test_minwm_cache_qk_norm_stays_eager(monkeypatch):

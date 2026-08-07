@@ -10,11 +10,13 @@
 2. cross-attention 的 residual 与 AdaLN；
 3. FFN 的 residual/gate。
 
-当前实现只改动候选 1，并由 `MINWM_FUSE_SELF_ATTN_POST` 独立控制，默认关闭。
-候选 2 和 3 在 CUDA 生成代码与 launch 证据完成前不改代码。统一性能记录固定使用 S0
-canonical 工具 commit `25cc42ef8c`（包含 `e75e9e24b5` 的 active/allocated GPU 与
-Nsight per-chunk 口径，并增加机器可校验的 JSON Schema）；S0 合并前只在临时测试
-分支叠加其提交链，本任务对 `main` 的实现 diff 不复制测量基础设施。
+当前实现只改动候选 1，并由 `MINWM_FUSE_SELF_ATTN_POST_FAST` 独立控制，默认关闭。
+候选 2 和 3 的 H200 生成代码已确认各自是单 Triton kernel/单 launch，因此不新增等价
+融合层。候选 1 的单 kernel 会改变 LayerNorm reduction，只能作为显式 fast lane，
+不能成为 parity 默认路径。统一性能记录固定使用 S0 canonical 工具 commit
+`59aa68a382`（包含 `25cc42ef8c` 的机器可校验 JSON Schema，并等待完整的 DiT/VAE
+stage trace indices，避免最后一条 199/200 竞态）；S0 合并前只在临时测试分支叠加其
+提交链，本任务对 `main` 的实现 diff 不复制测量基础设施。
 
 ## 调用链与数值合同
 
@@ -41,11 +43,11 @@ Nsight per-chunk 口径，并增加机器可校验的 JSON Schema）；S0 合并
 
 ## 假设与预期
 
-| 候选 | 审计前假设 | 当前预期 |
+| 候选 | 审计前假设 | CUDA 取证结论 |
 | --- | --- | --- |
-| self residual/gate → affine LN | 两个独立 segment，中间有 BF16 materialization 和一次 launch gap | 合成一个编译段后应从两个 Triton kernel 降到一个，同时保持 bitwise |
-| cross residual/AdaLN | 可能仍有 residual 与 norm/modulation 边界 | 源码已在一次 `_minwm_adaln` 调用内；若生成代码也是单 kernel，则不新增实现 |
-| FFN residual/gate | 可能是若干 eager pointwise launch | 源码已在一次 `_minwm_adaln` 调用内；若生成代码也是单 kernel，则不新增实现 |
+| self residual/gate → affine LN | 两个独立 segment，中间有 BF16 materialization 和一次 launch gap | 2→1 kernel 成立，但 reduction 非 bitwise；只保留待验收 fast lane |
+| cross residual/AdaLN | 可能仍有 residual 与 norm/modulation 边界 | 已是一个 reduction Triton kernel；不新增实现 |
+| FFN residual/gate | 可能是若干 eager pointwise launch | 已是一个 pointwise Triton kernel；不新增实现 |
 
 性能预期必须由 H200 profiler-off 和独立 Nsight 稳态窗口验证。即使 microbenchmark
 减少一个 launch，也不能预设端到端一定提升；kernel 变大、寄存器压力、编译 cache 或
@@ -53,8 +55,12 @@ Nsight per-chunk 口径，并增加机器可校验的 JSON Schema）；S0 合并
 
 ## 测试矩阵
 
-本地/CI 测试直接比较新算子与旧的 `_minwm_adaln_op` +
-`_minwm_layer_norm_op`，要求 `rtol=0, atol=0`：
+CPU、compile-off 与安全 fallback 直接比较新算子和旧的 `_minwm_adaln_op` +
+`_minwm_layer_norm_op`，要求 `rtol=0, atol=0`。CUDA compile-on 比较真实旧双 compiled
+segment 与新单 compiled segment：residual 必须 bitwise；LayerNorm fast 输出逐元素最多
+偏离旧基线 1 个该位置的 BF16 ULP，并同时记录 `max_abs` 与 changed fraction。changed
+fraction 的 12.5% regression guardrail 来自 H200 autocast off/on 的 8.7%/9.7% 首次观测
+并预留约 29% 相对幅度；它只是微算子回归界，不替代端到端质量验收。
 
 - batch/sequence 边界：`B1/S1`、`B2/S7`；
 - 1248×704、4 latent frames 的 SP2/SP4 local sequence：6864/3432 tokens；
@@ -68,7 +74,7 @@ Nsight per-chunk 口径，并增加机器可校验的 JSON Schema）；S0 合并
 
 ## 实际 A/B
 
-以下表格只接受通过 S0 canonical `25cc42ef8c` validator 的
+以下表格只接受通过 S0 canonical `59aa68a382` validator 的
 `minwm-realtime-measurement/v1` 产物。
 profiler-off headline 使用 20 warmup + 200 measured；Nsight 在外部完成 20 warmup 后
 抓至少 10 个 steady chunks，且不同时启用 `torch.profiler`。baseline/candidate 都固定
@@ -83,15 +89,26 @@ headline 性能窗口。
 | 4 | self off | 待测 | 待测 | 待测 | 待测 | 待测 | 待测 | 复验 |
 | 4 | self on | 待测 | 待测 | 待测 | 待测 | 待测 | 待测 | 复验 |
 
-cross/FFN 将分别记录其现有 compiled segment 与关闭全局 segment compile 的生成代码
-证据，但在确认它们已经是单 kernel 时，不用“关闭已有优化”的退化结果冒充本 PR 收益。
+H200 SP2（`S=6864,D=3072,BF16`）micro trace 只用于解释结构；节点上有其他微任务，
+以下时间不作为 headline：
+
+| 候选 | kernel 名 | launch | profiler CUDA | 10 次循环均值 | 对 eager |
+| --- | --- | ---: | ---: | ---: | --- |
+| self baseline | `triton_poi_fused__to_copy_add_mul_0` + `triton_red_fused__to_copy_native_layer_norm_0` | 2 | 65.152 + 95.455 µs | 0.238882 ms | max_abs 0.015625 |
+| self fast | `triton_red_fused__to_copy_add_mul_native_layer_norm_0` | 1 | 136.095 µs | 0.160144 ms | max_abs 0.125 |
+| cross 现状 | `triton_red_fused__to_copy_add_mul_native_layer_norm_0` | 1 | 133.471 µs | 0.169013 ms | max_abs 0.125 |
+| FFN 现状 | `triton_poi_fused__to_copy_add_mul_0` | 1 | 66.015 µs | 0.144963 ms | bitwise |
+
+cross/FFN 已确认是单 kernel，不用“关闭已有优化”的退化结果冒充本 PR 收益；因此三项
+独立消融中，这两项是中性审计结论，组合候选也只等于 self fast 开关。
 
 ## 与预期不符处
 
-- 源码审计已经与“需要分别实现三个新融合”的初始预期不符：cross 与 FFN 候选看起来
-  已由 `_minwm_adaln` 覆盖。最终结论等待 CUDA 生成代码和 kernel launch 名确认。
-- self 融合是否能在保持 BF16 rounding boundary 的同时生成单 kernel，等待 H200
-  `TORCH_LOGS=output_code,kernel_code` 证据。
+- 源码审计与“需要分别实现三个新融合”的初始预期不符；CUDA 进一步确认 cross 与
+  FFN 已分别是单 kernel/单 launch，不需要新代码。
+- self 保留了显式 BF16 materialization 语义，但 Inductor 合并后的 LayerNorm Welford
+  reduction schedule 仍发生变化。旧双 compiled segment 与新单 segment 在小形状 H200
+  上有 8.7%/9.7% 元素非 bitwise，最大差 0.03125；因此不能做 parity lane。
 - 第一次 H200 trace Job `minwm-s2-postproc-trace-h200-phx2-20260807-01` 在执行测试前
   checkout 失败：manifest 把临时 cherry-pick `e728e59d9a` 错写成不存在的完整 SHA
   `e728e59d9ad7682dec24b97f7d0007fc0cd0b1c8`。该次没有 CUDA/kernel 结果，不能算作
@@ -99,6 +116,14 @@ cross/FFN 将分别记录其现有 compiled segment 与关闭全局 segment comp
 - `...-02` 在 H200 上正确 checkout 后，pytest 收集阶段发现镜像未安装 `orjson`，仍未
   进入候选 kernel。`...-03` 复用 S0 已验证的 Python runtime 依赖集合后重跑；没有
   模型 staging、checkpoint 转换或 sglang-kernel 构建。
+- `...-03` 的测试如实暴露两类问题：`B1/S1` 的 singleton transpose 可以仍为
+  contiguous，旧断言错误；以及 compile-on fast LayerNorm 相对 eager 非 bitwise。
+  当次在 pytest 失败后由 `set -e` 停止，没有候选 trace。
+- `...-04` 把 CUDA 语义对照改为真实“旧双 compiled segment vs 新单 segment”，并保存
+  pytest 状态后继续 trace。四个候选都有唯一 BEGIN/END、结果行和 `cuLaunchKernel`
+  profiler 行；容器最后按 `test_status=1` 执行 `exit 1`，所以 Job 正确显示 Failed。
+  这是测试暴露 fast lane 非 bitwise，不是上传或基础设施失败；证据完整，不做第五次
+  micro trace。
 - 提交 `...-02` 时发现桌面默认 kube context 漂移到了 `codex-seed-leap-use1`：该集群
   中对象始终 Pending、未启动容器或占 GPU，随后只按完整 Job 名精确删除。之后所有
   read/dry-run/apply/logs/delete 均显式指定 `--context codex-minwm-test-phx2`。正式记录
@@ -111,8 +136,9 @@ cross/FFN 将分别记录其现有 compiled segment 与关闭全局 segment comp
 2. cross residual、LayerNorm、shift/scale 位于同一次 `_minwm_adaln_op`；FFN
    residual/gate 也位于同一函数的另一 specialization。
 3. 因此先只实现 self 组合段，避免为 cross/FFN 再包一层等价函数。
-4. 开关先默认关闭；只有 bitwise、单 kernel/launch 证据与组合 profiler-off 不回退
-   超过 1% 后，才考虑改为默认开启。
+4. self 的 2→1 launch 已证实，但 bitwise 未通过，所以环境变量显式命名为 `_FAST` 且
+   永远默认关闭。只有 59aa profiler-off/Nsight 有显著收益、端到端 latent/视频通过
+   既有 fast-lane 质量合同，才保留 opt-in 实现；否则删除实现，只保留负结论文档。
 
 ## 尝试后放弃的方案
 
@@ -125,11 +151,13 @@ cross/FFN 将分别记录其现有 compiled segment 与关闭全局 segment comp
 ## 风险、回滚与复现
 
 风险包括：Inductor 对动态/non-contiguous stride 重编译；合并 reduction 后寄存器压力
-增加；不同 SP local sequence 选择不同 Triton config；bitwise micro parity 仍可能在
-30 blocks × 5 forwards 的 causal rollout 中放大为视频差异。
+增加；不同 SP local sequence 选择不同 Triton config；已观测的 micro 非 bitwise 可能在
+30 blocks ×（4 DMD + 1 clean-cache）forwards 的 causal rollout 中放大为
+latent/视频差异。
 
-回滚只需保持 `MINWM_FUSE_SELF_ATTN_POST=false`；该值当前也是默认值。若最终默认
-开启，可用同一环境变量即时回到 main 的双 segment 路径。
+回滚只需保持 `MINWM_FUSE_SELF_ATTN_POST_FAST=false` 或不设置；该值当前也是默认值，
+会即时回到 main 的双 segment 路径。若正式 A/B 或质量验收不成立，PR 会直接删除 fast
+实现而不是依赖用户记住关闭开关。
 
 本地检查：
 
@@ -141,7 +169,7 @@ ruff format --check python/sglang/multimodal_gen/runtime/models/dits/minwm.py \
 ```
 
 真机测量命令和产物路径将在任务专用 `minwm-s2-postproc-*` Job dry-run 后补充；clean
-runner checkout 固定 S0 canonical `25cc42ef8c`，稳态固定 KV cache 45 帧。不复用或
+runner checkout 固定 S0 canonical `59aa68a382`，稳态固定 KV cache 45 帧。不复用或
 清理 CUDA Graph/S0 任务的 Job、Pod、PVC。所有 Kubernetes 命令显式固定
 `--context codex-minwm-test-phx2`，不依赖或切换桌面的 global current-context。
 
@@ -169,17 +197,21 @@ TORCH_LOGS=output_code,kernel_code python \
 4. **timestep gate 为什么专门测试非连续 stride？** 参考答案：真实调用来自
    `[B,S,6,D].select(-2, 2)`，token stride 保留 `6*D`；只测 contiguous 会漏掉编译
    specialization 和错误索引风险。
-5. **cross 候选为何可能不需要新实现？** 参考答案：`r=cross_output`、LayerNorm 和
-   shift/scale 已在一次 `_minwm_adaln_op` specialization 中；要用生成代码确认是否
-   单 Triton kernel。
+5. **cross 候选为何不需要新实现？** 参考答案：`r=cross_output`、LayerNorm 和
+   shift/scale 已在一次 `_minwm_adaln_op` specialization 中；H200 生成代码确认它是
+   `triton_red_fused__to_copy_add_mul_native_layer_norm_0` 单 kernel/单 launch。
 6. **FFN 候选的 gate accumulation dtype 是什么？** 参考答案：hidden、FFN output、
    两个 gate 都先提升到 FP32，完成乘加后再 `type_as(hidden_states)`。
 7. **减少一个 kernel 为什么不等于端到端变快？** 参考答案：DiT 还受 GEMM、attention、
    Ulysses 通信与编译 config 影响；融合 kernel 的寄存器/访存变化也可能抵消 launch
    节省，必须看 S0 profiler-off wall/FPS 和独立 Nsight。
-8. **何时允许默认开启 self 融合？** 参考答案：单测和端到端无正确性回退，有明确
-   kernel/launch 或 wall 证据，SP2 主验收和 SP4 复验完成，组合 profiler-off 回退
-   不超过 1%；否则保持默认关闭并在本文记录弃用决定。
+8. **为什么 self fast 即使变快也不能默认开启？** 参考答案：真实旧 compiled 基线与
+   单 segment 的 LayerNorm 已确认非 bitwise；它只能在显式 `_FAST` 开关、端到端质量
+   通过时 opt-in，默认始终走旧双 segment parity 路径。
 9. **为什么 20+200 测量不能把 KV cache 窗口同步扩到 200 chunks？** 参考答案：正式
    契约要测固定 45 帧 rolling window 下的稳态淘汰成本；随测量长度扩窗会混入增长期
    并改变 baseline/candidate workload。短程首块和 append/recompute 正确性另测。
+10. **CUDA 微单测为何同时看 ULP 与 changed fraction？** 参考答案：`max_abs` 会随
+    LayerNorm weight/bias 的数值尺度变化；逐元素 1 BF16 ULP 是 scale-aware 误差界，
+    changed fraction 则防止“每个元素只差一点但几乎全变”的回退。两者仍不能替代
+    causal rollout 的 latent/无损 uint8 视频指标。
