@@ -267,3 +267,54 @@ def test_gateway_routes_control_and_direct_vae_media_and_queries_trace_over_http
         assert coordinator.released_at - denoiser_close_started_at >= 0.045
 
     asyncio.run(run())
+
+
+def test_gateway_proxies_named_lingbot2_websocket_without_coordinator_admission():
+    async def run():
+        gateway_port = _free_port()
+        lingbot2_port = _free_port()
+        received = []
+
+        async def lingbot2(connection):
+            received.append(
+                {
+                    "query": parse_qs(urlsplit(connection.request.path).query),
+                    "payload": await connection.recv(),
+                }
+            )
+            await connection.send(received[-1]["payload"])
+
+        coordinator = _Coordinator("ws://unused.example/generate")
+        app = create_app(
+            coordinator,
+            model_revision="minwm-r1",
+            vae_fingerprint="taew2_2",
+            internal_output_url=(
+                f"ws://127.0.0.1:{gateway_port}/v1/internal/realtime_output"
+            ),
+            lingbot2_upstream_url=(
+                f"ws://127.0.0.1:{lingbot2_port}/v1/realtime_video/generate"
+            ),
+            release_grace_s=0,
+        )
+
+        async with serve(lingbot2, "127.0.0.1", lingbot2_port):
+            server, server_task = await _run_gateway(app, gateway_port)
+            try:
+                url = (
+                    f"ws://127.0.0.1:{gateway_port}"
+                    "/backends/lingbot2/v1/realtime_video/generate"
+                    "?user_id=user-a&trace_id=trace-a"
+                )
+                payload = encode_message("camera_actions", event_id=7, actions=["w"])
+                async with connect(url, max_size=None, compression=None) as browser:
+                    await browser.send(payload)
+                    assert await browser.recv() == payload
+                assert coordinator.admitted == []
+                assert received[0]["query"]["trace_id"] == ["trace-a"]
+                assert decode_message(received[0]["payload"])["event_id"] == 7
+            finally:
+                server.should_exit = True
+                await server_task
+
+    asyncio.run(run())

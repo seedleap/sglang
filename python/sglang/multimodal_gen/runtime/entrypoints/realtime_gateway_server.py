@@ -264,6 +264,8 @@ def create_app(
     model_revision: str,
     vae_fingerprint: str,
     internal_output_url: str,
+    lingbot2_upstream_url: str | None = None,
+    lingbot2_model_revision: str = "robbyant/lingbot-world-v2-14b-causal-fast-diffusers",
     output_queue_depth: int = 2,
     output_enqueue_timeout_s: float = 1.0,
     output_drain_timeout_s: float = 5.0,
@@ -311,9 +313,14 @@ def create_app(
             ) from exc
         return {"status": "ready"}
 
+    @app.get("/backends/minwm/v1/models")
     @app.get("/v1/models")
     async def models():
         return {"object": "list", "data": [{"id": model_revision}]}
+
+    @app.get("/backends/lingbot2/v1/models")
+    async def lingbot2_models():
+        return {"object": "list", "data": [{"id": lingbot2_model_revision}]}
 
     @app.get("/v1/realtime_video/traces/{trace_id}")
     async def get_trace(trace_id: str, after: int = 0, limit: int = 220):
@@ -414,6 +421,72 @@ def create_app(
                     session_id, generation_id, token=output_token
                 )
 
+    @app.websocket("/backends/lingbot2/v1/realtime_video/generate")
+    async def generate_lingbot2(websocket: WebSocket):
+        await websocket.accept()
+        if not lingbot2_upstream_url:
+            await websocket.close(code=1011, reason="LingBot2 backend is not configured")
+            return
+
+        query = str(websocket.url.query)
+        separator = "&" if "?" in lingbot2_upstream_url else "?"
+        upstream_url = (
+            f"{lingbot2_upstream_url}{separator}{query}"
+            if query
+            else lingbot2_upstream_url
+        )
+        upstream = None
+        tasks: set[asyncio.Task] = set()
+        try:
+            upstream = await connect_factory(
+                upstream_url,
+                max_size=None,
+                compression=None,
+                open_timeout=10,
+                close_timeout=2,
+                ping_interval=20,
+                ping_timeout=20,
+            )
+
+            async def browser_to_lingbot2():
+                while True:
+                    await upstream.send(await _receive_browser(websocket))
+
+            async def lingbot2_to_browser():
+                while True:
+                    payload = await upstream.recv()
+                    if isinstance(payload, bytes):
+                        await websocket.send_bytes(payload)
+                    else:
+                        await websocket.send_text(payload)
+
+            tasks = {
+                asyncio.create_task(browser_to_lingbot2()),
+                asyncio.create_task(lingbot2_to_browser()),
+            }
+            done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            for task in done:
+                exception = task.exception()
+                if exception is not None:
+                    raise exception
+        except (ConnectionClosedOK, WebSocketDisconnect):
+            pass
+        except Exception as exc:
+            logger.exception("LingBot2 proxy session failed")
+            try:
+                await websocket.close(code=1011, reason=str(exc).splitlines()[0][:120])
+            except Exception:
+                pass
+        finally:
+            await _cancel_tasks(tasks)
+            if upstream is not None:
+                await upstream.close()
+            try:
+                await websocket.close(code=1000)
+            except Exception:
+                pass
+
+    @app.websocket("/backends/minwm/v1/realtime_video/generate")
     @app.websocket("/v1/realtime_video/generate")
     async def generate(websocket: WebSocket):
         await websocket.accept()
@@ -664,6 +737,17 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--port", type=int, default=18080)
     parser.add_argument("--coordinator-url", required=True)
     parser.add_argument("--model-revision", required=True)
+    parser.add_argument(
+        "--lingbot2-upstream-url",
+        default=os.environ.get("LINGBOT2_UPSTREAM_WS"),
+    )
+    parser.add_argument(
+        "--lingbot2-model-revision",
+        default=os.environ.get(
+            "LINGBOT2_MODEL_REVISION",
+            "robbyant/lingbot-world-v2-14b-causal-fast-diffusers",
+        ),
+    )
     parser.add_argument("--vae-fingerprint", default="taew2_2")
     parser.add_argument(
         "--internal-output-url",
@@ -710,6 +794,8 @@ def main() -> None:
         model_revision=args.model_revision,
         vae_fingerprint=args.vae_fingerprint,
         internal_output_url=args.internal_output_url,
+        lingbot2_upstream_url=args.lingbot2_upstream_url,
+        lingbot2_model_revision=args.lingbot2_model_revision,
         output_queue_depth=args.output_queue_depth,
         output_enqueue_timeout_s=args.output_enqueue_timeout_s,
         output_drain_timeout_s=args.output_drain_timeout_s,

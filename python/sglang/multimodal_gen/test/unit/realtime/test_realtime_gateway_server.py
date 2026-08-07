@@ -59,6 +59,31 @@ def test_gateway_parses_ui_config_for_the_served_webui():
     }
 
 
+def test_gateway_exposes_named_minwm_and_lingbot2_backends():
+    app = create_app(
+        _Coordinator(),
+        model_revision="minwm-r1",
+        vae_fingerprint="taew2_2",
+        internal_output_url="ws://gateway/v1/internal/realtime_output",
+        lingbot2_upstream_url="ws://lingbot2:30000/v1/realtime_video/generate",
+        lingbot2_model_revision="lingbot2-r1",
+    )
+
+    routes = {route.path for route in app.routes}
+    assert "/backends/minwm/v1/realtime_video/generate" in routes
+    assert "/backends/lingbot2/v1/realtime_video/generate" in routes
+    assert "/backends/minwm/v1/models" in routes
+    assert "/backends/lingbot2/v1/models" in routes
+
+    client = TestClient(app)
+    assert client.get("/backends/minwm/v1/models").json()["data"][0]["id"] == (
+        "minwm-r1"
+    )
+    assert client.get("/backends/lingbot2/v1/models").json()["data"][0]["id"] == (
+        "lingbot2-r1"
+    )
+
+
 def test_gateway_trace_events_use_the_independent_otlp_log_plane():
     source = inspect.getsource(realtime_gateway_server)
 
