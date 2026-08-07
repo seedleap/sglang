@@ -17,19 +17,19 @@ spec:
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: minwm-s0-fusedops-h200-20260807-01
+  name: minwm-s0-fusedops-h200-20260807-02
   namespace: default
   labels:
-    app.kubernetes.io/name: minwm-s0-fusedops-h200-20260807-01
+    app.kubernetes.io/name: minwm-s0-fusedops-h200-20260807-02
     seedleap.ai/owner: chenshengdong
     seedleap.ai/purpose: minwm-s0-fusedops-measurement
     seedleap.ai/task: minwm-fusedops-s0
-    seedleap.ai/run-id: minwm-s0-fusedops-h200-20260807-01
+    seedleap.ai/run-id: minwm-s0-fusedops-h200-20260807-02
   annotations:
     seedleap.ai/capacity-type: spot
     seedleap.ai/repo: seedleap/sglang
     seedleap.ai/branch: codex/minwm-fused-ops-s0
-    seedleap.ai/sglang-git-ref: "fe98d765f063b2c64037fef95081daf3bf171664"
+    seedleap.ai/sglang-git-ref: "411d9b9ec40b2fca2a7d85e17a05c11a4723750e"
     seedleap.ai/minwm-git-ref: "2efc6485f65e8fcab506665efde79bc41406385e"
     seedleap.ai/checkpoint-version-id: "wduScksw2f3yPErnG9lBioOuE2AToyAP"
     seedleap.ai/resource-isolation: full 8-GPU H200 node request
@@ -39,15 +39,15 @@ spec:
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: minwm-s0-fusedops-h200-20260807-01
+        app.kubernetes.io/name: minwm-s0-fusedops-h200-20260807-02
         seedleap.ai/owner: chenshengdong
         seedleap.ai/purpose: minwm-s0-fusedops-measurement
         seedleap.ai/task: minwm-fusedops-s0
-        seedleap.ai/run-id: minwm-s0-fusedops-h200-20260807-01
+        seedleap.ai/run-id: minwm-s0-fusedops-h200-20260807-02
       annotations:
         seedleap.ai/repo: seedleap/sglang
         seedleap.ai/branch: codex/minwm-fused-ops-s0
-        seedleap.ai/sglang-git-ref: "fe98d765f063b2c64037fef95081daf3bf171664"
+        seedleap.ai/sglang-git-ref: "411d9b9ec40b2fca2a7d85e17a05c11a4723750e"
     spec:
       restartPolicy: Never
       terminationGracePeriodSeconds: 60
@@ -78,7 +78,7 @@ spec:
                   name: github-token
                   key: token
             - name: SGLANG_GIT_REF
-              value: "fe98d765f063b2c64037fef95081daf3bf171664"
+              value: "411d9b9ec40b2fca2a7d85e17a05c11a4723750e"
             - name: MINWM_GIT_REF
               value: "2efc6485f65e8fcab506665efde79bc41406385e"
             - name: MINWM_CONTAINER_IMAGE
@@ -86,7 +86,7 @@ spec:
             - name: MINWM_BENCHMARK_MODE
               value: setup_only
             - name: MINWM_RUN_ID
-              value: minwm-s0-fusedops-h200-20260807-01
+              value: minwm-s0-fusedops-h200-20260807-02
             - name: MINWM_ALLOCATED_GPU_COUNT
               value: "8"
             - name: MINWM_S0_SP_DEGREES
