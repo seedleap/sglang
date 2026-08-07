@@ -10,7 +10,7 @@
 | --- | --- |
 | 上游 MinWM 集成 | `9a9dc59cd1d9bf33842378f75fa0f46c41e07b7e` |
 | MinWM 逻辑基线 | `0e30671cf8a00622fd138c71af3faa93353b5425`（`codex/ulysses-pre-post-a2a-fusion`；失败的 pre-A2A QK-norm 已删除，post-A2A parity 路径默认关闭） |
-| upstream 通信基线 | 待在本分支整合 `754b692afc29`（SP2 IPC）、`a5888c956f90`（packed QKV + reusable staging）、`bfce378e5fbc`（capture-safe PyNCCL A2A）；三项整合与回归通过后的 SHA 才是正式同步 baseline |
+| upstream 通信基线 | 已 cherry-pick `754b692afc29`（本分支 `4202d2a043`，SP2 IPC）、`bfce378e5fbc`（本分支 `36066c3d44`，capture-safe PyNCCL A2A）、`f829fb30d3d3`（本分支 `35a313e616`，IPC lifecycle/reset）和 `44bde391d0b1`（本分支 `ed152d6c48`，真实 peer CUDA ordinal）；`a5888c956f90` 的 packed QKV + reusable staging 与 MinWM 现有同名但不同返回合同的实现重复，未强行合并 |
 | 实现分支 | `codex/minwm-async-a2a-overlap` |
 | 候选提交 | 待实现后固定；真机任务只使用已推送的不可变 SHA |
 | 主硬件 | B200/B300 同节点 Spot；若容量不可得，H200 只用于诊断，不能冒充最终硬件结论 |
@@ -149,6 +149,32 @@ complete/consume event；统计 input/output A2A 的 launch→wait 距离、wait
 - 决策：保留 MinWM/post-parity 逻辑基线，只 cherry-pick 三个已合入 upstream 的目标提交
   并解决局部冲突；不把整个 upstream main 合并进来，避免无关大范围升级。整合后的回归
   与真机 provenance 决定正式同步 baseline SHA。
+
+### 2026-08-07：upstream packed-QKV 提交不能原样 cherry-pick 到 MinWM
+
+- 原认知：三项 upstream 通信提交可按顺序无语义冲突地 cherry-pick。
+- 实际证据：`a5888c9` 定义的 `_usp_input_all_to_all_qkv` 返回 contiguous `(q,k,v)`，而
+  MinWM 已有同名 API，返回共享 receive buffer 上的 packed tensor 并由 causal attention
+  `chunk(3)`；MinWM 还已有跨 30 blocks 共享的 `qkv_send/qkv_recv/attention_recv` workspace
+  和专用 `ulysses_qkv_pack.py`。原样合并会破坏已通过 parity 的调用合同，并复活当前树已
+  删除的旧 kernel/Minimax 测试路径。
+- 根因：MinWM 独立集成已提前实现了同一优化族，但 API 与 upstream 通用路径演化不同。
+- 决策：中止未完成的 `a5888c9` cherry-pick，保留 MinWM 等价实现；只引入实际缺失的 IPC
+  与 capture-safe PyNCCL。后续测试显式证明 packed round-trip 与 buffer reuse，不把“提交
+  存在”替代行为验证。
+
+### 2026-08-07：通信基线移植与本地回归
+
+- 假设：IPC lifecycle/peer-device 修复和 capture-safe PyNCCL 可独立移植，且不会改变
+  MinWM packed-QKV 的数值合同。
+- 修改：整合上表四个 upstream 通信提交；`_ipc_ready_group()` 在 layout-only、未初始化
+  process group 的 CPU 测试中显式回退，而不是因伪造的 SP size 触发断言。
+- 正确性：
+  `PYTHONPATH=python TORCHDYNAMO_DISABLE=1 /opt/homebrew/bin/python3.11 -m pytest -q python/sglang/multimodal_gen/test/unit/test_ipc_a2a_lifecycle.py python/sglang/multimodal_gen/test/unit/realtime/test_minwm_realtime.py -k 'ipc_a2a_lifecycle or ulysses or fused_post_a2a'`
+  结果为 `15 passed, 105 deselected`。
+- wall/FPS、Nsight：尚未启动真机；此处仅建立同步行为基线，不能用于性能结论。
+- 结论：通信依赖可作为 async 候选的共同基线；下一步先实现可观测 begin/wait，再只在
+  input A2A 上引入合法的 V projection overlap。
 
 ### 2026-08-07：已有 post-A2A fusion 对 SP2 无客户端收益
 

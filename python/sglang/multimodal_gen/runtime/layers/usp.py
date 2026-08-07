@@ -222,7 +222,12 @@ def _ipc_ready_group():
         ipc_a2a_ready,
     )
 
-    group = get_sp_group().ulysses_group
+    try:
+        group = get_sp_group().ulysses_group
+    except AssertionError:
+        # Layout-only tests and non-distributed fallbacks can override the
+        # reported Ulysses size without constructing a process group.
+        return None
     return group if ipc_a2a_ready(group) else None
 
 
