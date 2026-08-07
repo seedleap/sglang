@@ -254,10 +254,17 @@ def can_fuse_rope_cache_update(
     write_start: int,
 ) -> bool:
     """Return whether the post-A2A RoPE/cache layout is supported."""
-    if query.ndim != 4 or query.shape != key.shape or query.shape != value.shape:
+    if (
+        query.ndim != 4
+        or query.shape != key.shape
+        or query.shape != value.shape
+        or cache_k.ndim != 4
+        or cache_v.ndim != 4
+        or rotated_k.ndim != 4
+    ):
         return False
     batch, current_tokens, heads, head_dim = query.shape
-    visible_tokens = cache_k.shape[1] if cache_k.ndim == 4 else -1
+    visible_tokens = cache_k.shape[1]
     return bool(
         query.is_cuda
         and torch.version.hip is None
