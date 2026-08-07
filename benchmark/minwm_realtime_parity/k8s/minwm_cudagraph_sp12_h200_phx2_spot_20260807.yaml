@@ -17,14 +17,14 @@ spec:
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: minwm-cudagraph-sp12-h200-phx2-20260807-21
+  name: minwm-cudagraph-sp12-704p-h200-phx2-20260807-22
   namespace: default
   labels:
-    app.kubernetes.io/name: minwm-cudagraph-sp12-h200-phx2-20260807-21
+    app.kubernetes.io/name: minwm-cudagraph-sp12-704p-h200-phx2-20260807-22
     seedleap.ai/owner: chenshengdong
     seedleap.ai/purpose: minwm-cuda-graph-perf
     seedleap.ai/task: minwm-realtime-parity
-    seedleap.ai/run-id: minwm-cudagraph-sp12-h200-phx2-20260807-21
+    seedleap.ai/run-id: minwm-cudagraph-sp12-704p-h200-phx2-20260807-22
   annotations:
     seedleap.ai/capacity-type: spot
     seedleap.ai/repo: seedleap/sglang
@@ -41,11 +41,11 @@ spec:
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: minwm-cudagraph-sp12-h200-phx2-20260807-21
+        app.kubernetes.io/name: minwm-cudagraph-sp12-704p-h200-phx2-20260807-22
         seedleap.ai/owner: chenshengdong
         seedleap.ai/purpose: minwm-cuda-graph-perf
         seedleap.ai/task: minwm-realtime-parity
-        seedleap.ai/run-id: minwm-cudagraph-sp12-h200-phx2-20260807-21
+        seedleap.ai/run-id: minwm-cudagraph-sp12-704p-h200-phx2-20260807-22
       annotations:
         seedleap.ai/repo: seedleap/sglang
         seedleap.ai/branch: codex/minwm-cuda-graph
@@ -81,11 +81,11 @@ spec:
             - name: MINWM_BENCHMARK_MODE
               value: cudagraphmatrix
             - name: MINWM_RUN_ID
-              value: minwm-cudagraph-sp12-h200-phx2-20260807-21
+              value: minwm-cudagraph-sp12-704p-h200-phx2-20260807-22
             - name: MINWM_CASES_PATH
-              value: /workspace/sglang/benchmark/minwm_realtime_parity/cases.json
+              value: /workspace/sglang/benchmark/minwm_realtime_parity/cases_720p_compile_smoke.json
             - name: MINWM_CUDA_GRAPH_CASE
-              value: 00_forward_pottery
+              value: 00_forward_080_pottery_720p
             - name: MINWM_CUDA_GRAPH_SP_DEGREES
               value: "1 2"
             - name: MINWM_CUDA_GRAPH_WARMUP_CHUNKS
