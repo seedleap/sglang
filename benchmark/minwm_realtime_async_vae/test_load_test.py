@@ -6,6 +6,7 @@ from load_test import (
     aggregate_measurement_seconds,
     chunk_stats_from_trace,
     collect_trace_events,
+    completion_chunk,
     derive_trace_http_url,
     final_frame_batch_chunk,
     init_request,
@@ -40,6 +41,8 @@ def test_init_request_supports_i2v_reference_bytes():
         fps=24,
         generation_mode="i2v",
         first_frame_bytes=b"reference-image",
+        sink=9,
+        window=18,
     )
 
     request = init_request(args, total_chunks=3, trace_id="trace-i2v")
@@ -47,6 +50,8 @@ def test_init_request_supports_i2v_reference_bytes():
     assert request["generation_mode"] == "i2v"
     assert request["first_frame"] == b"reference-image"
     assert request["max_chunks"] == 3
+    assert request["realtime_causal_sink_size"] == 9
+    assert request["realtime_causal_kv_cache_num_frames"] == 18
     assert "num_frames" not in request
 
 
@@ -72,6 +77,26 @@ def test_final_frame_batch_is_the_media_websocket_completion_signal():
             "is_final_frame_batch": True,
         }
     ) == 3
+
+
+def test_monolithic_ordered_output_can_complete_on_chunk_stats_after_frames():
+    stats = {"type": "chunk_stats", "chunk_index": 4}
+
+    assert completion_chunk(
+        stats,
+        completion_signal="chunk-stats",
+        frame_counts={4: 9},
+    ) == 4
+    assert completion_chunk(
+        stats,
+        completion_signal="chunk-stats",
+        frame_counts={},
+    ) is None
+    assert completion_chunk(
+        stats,
+        completion_signal="final-frame",
+        frame_counts={4: 9},
+    ) is None
     assert final_frame_batch_chunk(
         {
             "type": "frame_batch",

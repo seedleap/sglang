@@ -33,18 +33,38 @@ async function main() {
     sessions: { minwm, lingbot2 },
     backends: {
       minwm: { model: "minwm-model", wsUrl: "/backends/minwm/generate" },
-      lingbot2: { model: "lingbot2-model", wsUrl: "/backends/lingbot2/generate" },
+      lingbot2: {
+        model: "lingbot2-model",
+        wsUrl: "/backends/lingbot2/generate",
+        transformInit: (init) => ({
+          ...init,
+          size: init.size === "1280x704" ? "1280x720" : init.size,
+          realtime_causal_sink_size: 3,
+          realtime_causal_kv_cache_num_frames: 12,
+        }),
+      },
     },
     now: () => 1234,
   });
 
-  await controller.connect({ prompt: "shared prompt", size: "1280x704", trace_id: "trace" });
+  await controller.connect({
+    prompt: "shared prompt",
+    size: "1280x704",
+    realtime_causal_sink_size: 9,
+    realtime_causal_kv_cache_num_frames: 18,
+    trace_id: "trace",
+  });
   assert.equal(minwm.connectCalls.length, 1);
   assert.equal(lingbot2.connectCalls.length, 1);
   assert.equal(minwm.connectCalls[0].init.model, "minwm-model");
   assert.equal(lingbot2.connectCalls[0].init.model, "lingbot2-model");
   assert.equal(minwm.connectCalls[0].init.prompt, "shared prompt");
-  assert.equal(lingbot2.connectCalls[0].init.size, "1280x704");
+  assert.equal(minwm.connectCalls[0].init.size, "1280x704");
+  assert.equal(minwm.connectCalls[0].init.realtime_causal_sink_size, 9);
+  assert.equal(minwm.connectCalls[0].init.realtime_causal_kv_cache_num_frames, 18);
+  assert.equal(lingbot2.connectCalls[0].init.size, "1280x720");
+  assert.equal(lingbot2.connectCalls[0].init.realtime_causal_sink_size, 3);
+  assert.equal(lingbot2.connectCalls[0].init.realtime_causal_kv_cache_num_frames, 12);
   assert.equal(minwm.connectCalls[0].url, "/backends/minwm/generate");
   assert.equal(lingbot2.connectCalls[0].url, "/backends/lingbot2/generate");
   assert.notEqual(

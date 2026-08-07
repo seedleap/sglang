@@ -39,6 +39,17 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--size", default="832x480")
     parser.add_argument("--fps", type=int, default=24)
+    parser.add_argument("--sink", type=int, default=9)
+    parser.add_argument("--window", type=int, default=18)
+    parser.add_argument(
+        "--completion-signal",
+        choices=("final-frame", "chunk-stats"),
+        default="final-frame",
+        help=(
+            "Use chunk-stats only for monolithic backends that send frames and "
+            "stats in-order on the same WebSocket."
+        ),
+    )
     parser.add_argument("--timeout-s", type=float, default=300.0)
     parser.add_argument(
         "--trace-http-url",
@@ -191,6 +202,8 @@ def init_request(args: argparse.Namespace, *, total_chunks: int, trace_id: str) 
         "realtime_preview_max_width": 560,
         "realtime_output_pacing": False,
         "output_compression": 55,
+        "realtime_causal_sink_size": getattr(args, "sink", 9),
+        "realtime_causal_kv_cache_num_frames": getattr(args, "window", 18),
         "trace_id": trace_id,
     }
     if generation_mode == "i2v":
@@ -319,6 +332,23 @@ def final_frame_batch_chunk(message: dict) -> int | None:
         return None
     chunk_index = int(message.get("chunk_index", -1))
     return chunk_index if chunk_index >= 0 else None
+
+
+def completion_chunk(
+    message: dict,
+    *,
+    completion_signal: str,
+    frame_counts: dict[int, int],
+) -> int | None:
+    chunk_index = final_frame_batch_chunk(message)
+    if chunk_index is not None or completion_signal != "chunk-stats":
+        return chunk_index
+    if message.get("type") != "chunk_stats":
+        return None
+    chunk_index = int(message.get("chunk_index", -1))
+    if chunk_index < 0 or frame_counts.get(chunk_index, 0) <= 0:
+        return None
+    return chunk_index
 
 
 def chunk_stats_from_trace(trace_events: list[dict]) -> dict[int, dict]:
@@ -474,7 +504,11 @@ async def run_session(args: argparse.Namespace, concurrency: int, index: int) ->
 
     def mark_chunk_complete(message: dict, observed_at: float) -> None:
         nonlocal measured_started_at, measured_completed_at
-        chunk = final_frame_batch_chunk(message)
+        chunk = completion_chunk(
+            message,
+            completion_signal=getattr(args, "completion_signal", "final-frame"),
+            frame_counts=frame_counts,
+        )
         if chunk is None or chunk in completed_chunk_at:
             return
         completed_chunk_at[chunk] = observed_at
@@ -559,6 +593,7 @@ async def run_session(args: argparse.Namespace, concurrency: int, index: int) ->
                 chunk = int(message["chunk_index"])
                 observed_at = time.perf_counter()
                 stats[chunk] = dict(message)
+                mark_chunk_complete(message, observed_at)
                 record_action_latency(
                     message,
                     first_frame_at=first_frame_at,
@@ -742,6 +777,9 @@ async def async_main(args: argparse.Namespace) -> None:
             "first_frame": str(args.first_frame) if args.first_frame else None,
             "size": args.size,
             "fps": args.fps,
+            "sink": args.sink,
+            "window": args.window,
+            "completion_signal": args.completion_signal,
             "steps": 4,
             "warmup_chunks": args.warmup_chunks,
             "measured_chunks": args.measured_chunks,

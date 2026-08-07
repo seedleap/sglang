@@ -17,11 +17,14 @@
         const model = typeof backend.model === "function"
           ? backend.model(baseInit, key)
           : backend.model;
-        const init = {
+        let init = {
           ...baseInit,
           model,
           trace_id: key === "minwm" ? traceBase : `${traceBase}:${key}`,
         };
+        if (typeof backend.transformInit === "function") {
+          init = backend.transformInit(init, key);
+        }
         const wsUrl = typeof backend.wsUrl === "function"
           ? backend.wsUrl(init, key)
           : backend.wsUrl;

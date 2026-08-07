@@ -526,6 +526,16 @@ const dualModelController = new DualModelController({
         || UI_CONFIG.lingbot2Model
         || DEFAULT_LINGBOT2_MODEL
       ),
+      transformInit: (init) => {
+        const is720p = init.size === "1280x704" || init.size === "1280x720";
+        if (!is720p) return init;
+        return {
+          ...init,
+          size: "1280x720",
+          realtime_causal_sink_size: 3,
+          realtime_causal_kv_cache_num_frames: 12,
+        };
+      },
       wsUrl: (init) => backendWebSocketUrl("lingbot2", init.trace_id),
     },
   },
