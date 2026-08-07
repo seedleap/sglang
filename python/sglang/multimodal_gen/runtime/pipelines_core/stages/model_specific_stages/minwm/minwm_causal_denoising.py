@@ -987,6 +987,9 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
                 self._minwm_cuda_graph_runner = _MinWMCudaGraphRunner(graph_key)
             runner = self._minwm_cuda_graph_runner
             action = pos_cond_kwargs["action"]
+            verify_graph = os.environ.get(
+                "MINWM_CUDA_GRAPH_VERIFY_EAGER", "0"
+            ).strip().lower() not in {"", "0", "false", "no", "off"}
 
             if runner.graph is None:
                 # Non-checkpoint action buffers start on CPU so meta-device model
@@ -1021,17 +1024,55 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
             else:
                 # Replay does not execute Python, so this callable is unused.
                 capture_forward = None
+                if verify_graph:
+                    attention_plan = self.transformer.prepare_causal_attention_plan(
+                        latent_model_input,
+                        kv_cache=kv_cache,
+                        current_start=current_start_tokens,
+                        start_frame=start_frame,
+                    )
 
             validate_runtime_action = self.transformer.action_in.validate_runtime_action
             self.transformer.action_in.validate_runtime_action = False
             try:
-                return runner.run(
+                graph_output = runner.run(
                     latent=latent_model_input,
                     prompt=prompt_embeds,
                     timestep=timestep,
                     action=action,
                     capture_forward=capture_forward,
                 )
+                if not verify_graph:
+                    return graph_output
+
+                # Keep the static graph output intact while a current-plan eager
+                # recompute verifies this replay and restores the same cache slot.
+                graph_output = graph_output.clone()
+                reference_output = self.transformer(
+                    latent_model_input,
+                    prompt_embeds,
+                    timestep,
+                    kv_cache=kv_cache,
+                    crossattn_cache=crossattn_cache,
+                    current_start=current_start_tokens,
+                    start_frame=start_frame,
+                    action=action,
+                    precomputed_attention_plan=attention_plan,
+                )
+                difference = (graph_output.float() - reference_output.float()).abs()
+                torch.cuda.synchronize(graph_output.device)
+                logger.warning(
+                    "MinWM CUDA graph eager verification rank=%d block=%d "
+                    "step=%d replay=%d mean_abs=%g max_abs=%g exact=%s",
+                    get_sp_parallel_rank(),
+                    int(batch.block_idx),
+                    current_timestep,
+                    runner.replay_count,
+                    difference.mean().item(),
+                    difference.max().item(),
+                    bool(torch.equal(graph_output, reference_output)),
+                )
+                return graph_output
             finally:
                 self.transformer.action_in.validate_runtime_action = (
                     validate_runtime_action
