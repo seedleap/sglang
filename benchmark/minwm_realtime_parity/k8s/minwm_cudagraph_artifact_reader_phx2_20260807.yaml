@@ -49,7 +49,7 @@ spec:
           find /results -path '*/cuda-graph-matrix/*/server.log' -type f -print0 \
             | sort -z \
             | xargs -0 grep -H -E \
-              'CUDA graph eager verification|CUDA graph verification|Captured MinWM|CUDA graph replay' \
+              'CUDA graph block verification|CUDA graph first difference|CUDA graph eager verification|CUDA graph verification|Captured MinWM|CUDA graph replay' \
             || true
       resources:
         requests:
