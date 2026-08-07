@@ -1,20 +1,20 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: minwm-s2-postproc-trace-h200-phx2-20260807-03
+  name: minwm-s2-postproc-trace-h200-phx2-20260807-04
   namespace: default
   labels:
-    app.kubernetes.io/name: minwm-s2-postproc-trace-h200-phx2-20260807-03
+    app.kubernetes.io/name: minwm-s2-postproc-trace-h200-phx2-20260807-04
     seedleap.ai/owner: chenshengdong
     seedleap.ai/purpose: minwm-s2-postproc-trace
     seedleap.ai/task: minwm-realtime-parity
-    seedleap.ai/run-id: minwm-s2-postproc-trace-h200-phx2-20260807-03
+    seedleap.ai/run-id: minwm-s2-postproc-trace-h200-phx2-20260807-04
   annotations:
     seedleap.ai/capacity-type: spot
     seedleap.ai/repo: seedleap/sglang
     seedleap.ai/branch: codex/minwm-postproc-fusions
-    seedleap.ai/commit: "6fcf2bef0e21a95b5ae3ed2b4f44cde8a6c89001"
-    seedleap.ai/sglang-git-ref: "6fcf2bef0e21a95b5ae3ed2b4f44cde8a6c89001"
+    seedleap.ai/commit: "c092370c1b158de4d92670cd2b05819c28f19592"
+    seedleap.ai/sglang-git-ref: "c092370c1b158de4d92670cd2b05819c28f19592"
     seedleap.ai/ttl: 24h
 spec:
   backoffLimit: 0
@@ -23,11 +23,11 @@ spec:
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: minwm-s2-postproc-trace-h200-phx2-20260807-03
+        app.kubernetes.io/name: minwm-s2-postproc-trace-h200-phx2-20260807-04
         seedleap.ai/owner: chenshengdong
         seedleap.ai/purpose: minwm-s2-postproc-trace
         seedleap.ai/task: minwm-realtime-parity
-        seedleap.ai/run-id: minwm-s2-postproc-trace-h200-phx2-20260807-03
+        seedleap.ai/run-id: minwm-s2-postproc-trace-h200-phx2-20260807-04
     spec:
       restartPolicy: Never
       terminationGracePeriodSeconds: 60
@@ -54,7 +54,7 @@ spec:
                   key: token
                   optional: true
             - name: SGLANG_GIT_REF
-              value: "6fcf2bef0e21a95b5ae3ed2b4f44cde8a6c89001"
+              value: "c092370c1b158de4d92670cd2b05819c28f19592"
             - name: MINWM_SEGMENT_COMPILE
               value: "true"
             - name: TORCHINDUCTOR_CACHE_DIR
@@ -112,9 +112,13 @@ spec:
               print("cuda", torch.version.cuda)
               print("device", torch.cuda.get_device_name(0))
               PY
+              set +e
               python -m pytest -q \
                 python/sglang/multimodal_gen/test/unit/realtime/test_minwm_realtime.py \
                 -k self_attn_post
+              test_status=$?
+              set -e
+              echo "MINWM_S2_TEST_STATUS=${test_status}"
               for candidate in self-baseline self-fused cross ffn; do
                 echo "MINWM_S2_TRACE_BEGIN candidate=${candidate}"
                 candidate_cache="/work/torchinductor/${candidate}"
@@ -130,6 +134,7 @@ spec:
                     --profile-kernels
                 echo "MINWM_S2_TRACE_END candidate=${candidate}"
               done
+              exit "${test_status}"
           resources:
             limits:
               cpu: "32"
