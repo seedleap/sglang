@@ -1,41 +1,44 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: minwm-s1-temb-nsys-h200-20260807-08
+  name: minwm-s1-temb-nsys-h200-20260807-09
   namespace: default
   labels:
-    app.kubernetes.io/name: minwm-s1-temb-nsys-h200-20260807-08
+    app.kubernetes.io/name: minwm-s1-temb-nsys-h200-20260807-09
     seedleap.ai/owner: chenshengdong
     seedleap.ai/purpose: minwm-s1-temb-hoist-nsys
     seedleap.ai/task: minwm-temb-index-hoist-s1
-    seedleap.ai/run-id: minwm-s1-temb-nsys-20260807-08
+    seedleap.ai/run-id: minwm-s1-temb-nsys-20260807-09
   annotations:
     seedleap.ai/capacity-type: spot
     seedleap.ai/repo: seedleap/sglang
     seedleap.ai/branch: codex/minwm-s1-temb-nsys-d5b-20260807
-    seedleap.ai/runner-git-ref: "ff107d64fe036e5ca5d615b41a966a4ea6b492c3"
+    seedleap.ai/runner-git-ref: "6df4bf280eab4d180486d4ede3bd3d4006fed3a4"
     seedleap.ai/sglang-git-ref: "bdbb38369d93f38b52d3fff77d662cc0f0d3d84f"
+    seedleap.ai/profiler-off-sglang-git-ref: "5f92d276c08086db638f05536a46fa5434ecb169"
+    seedleap.ai/legacy-off-runner-git-ref: "5f92d276c08086db638f05536a46fa5434ecb169"
+    seedleap.ai/candidate-off-runner-git-ref: "1f0b240d27356744711b2ba8317a2047bef20c16"
     seedleap.ai/s0-tool-ref: "d5b25227d4487d113e62c86a0fb572a62d6bcc5b"
     seedleap.ai/minwm-git-ref: "2efc6485f65e8fcab506665efde79bc41406385e"
     seedleap.ai/checkpoint-version-id: "wduScksw2f3yPErnG9lBioOuE2AToyAP"
     seedleap.ai/resource-isolation: full 8-GPU H200 node request
     seedleap.ai/measurement-plan: sp2-nsys-only-legacy-then-candidate-exact-10
-    seedleap.ai/supersedes-invalid-attempt: minwm-s1-temb-nsys-h200-20260807-07
+    seedleap.ai/supersedes-invalid-attempts: minwm-s1-temb-nsys-h200-20260807-07,minwm-s1-temb-nsys-h200-20260807-08
 spec:
   backoffLimit: 0
   activeDeadlineSeconds: 28800
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: minwm-s1-temb-nsys-h200-20260807-08
+        app.kubernetes.io/name: minwm-s1-temb-nsys-h200-20260807-09
         seedleap.ai/owner: chenshengdong
         seedleap.ai/purpose: minwm-s1-temb-hoist-nsys
         seedleap.ai/task: minwm-temb-index-hoist-s1
-        seedleap.ai/run-id: minwm-s1-temb-nsys-20260807-08
+        seedleap.ai/run-id: minwm-s1-temb-nsys-20260807-09
       annotations:
         seedleap.ai/repo: seedleap/sglang
         seedleap.ai/branch: codex/minwm-s1-temb-nsys-d5b-20260807
-        seedleap.ai/runner-git-ref: "ff107d64fe036e5ca5d615b41a966a4ea6b492c3"
+        seedleap.ai/runner-git-ref: "6df4bf280eab4d180486d4ede3bd3d4006fed3a4"
         seedleap.ai/sglang-git-ref: "bdbb38369d93f38b52d3fff77d662cc0f0d3d84f"
         seedleap.ai/s0-tool-ref: "d5b25227d4487d113e62c86a0fb572a62d6bcc5b"
     spec:
@@ -70,7 +73,7 @@ spec:
             - name: SGLANG_GIT_REF
               value: "bdbb38369d93f38b52d3fff77d662cc0f0d3d84f"
             - name: S1_RUNNER_REF
-              value: "ff107d64fe036e5ca5d615b41a966a4ea6b492c3"
+              value: "6df4bf280eab4d180486d4ede3bd3d4006fed3a4"
             - name: MINWM_S0_TOOL_REF
               value: "d5b25227d4487d113e62c86a0fb572a62d6bcc5b"
             - name: MINWM_GIT_REF
@@ -80,7 +83,7 @@ spec:
             - name: MINWM_BENCHMARK_MODE
               value: setup_only
             - name: MINWM_RUN_ID
-              value: minwm-s1-temb-nsys-20260807-08
+              value: minwm-s1-temb-nsys-20260807-09
             - name: MINWM_ALLOCATED_GPU_COUNT
               value: "8"
             - name: MINWM_S0_SP_DEGREES
@@ -97,6 +100,12 @@ spec:
               value: /results/attempts/minwm-s1-temb-ab-h200-20260807-03-z6f2p/minwm-s1-temb-ab-20260807-03/temb-hoist-legacy
             - name: MINWM_S1_CANDIDATE_OFF_ROOT
               value: /results/attempts/minwm-s1-temb-ab-h200-20260807-04-hwfrk/minwm-s1-temb-ab-20260807-04/temb-hoist-candidate
+            - name: MINWM_S1_PROFILER_OFF_GIT_REF
+              value: "5f92d276c08086db638f05536a46fa5434ecb169"
+            - name: MINWM_S1_LEGACY_OFF_RUNNER_REF
+              value: "5f92d276c08086db638f05536a46fa5434ecb169"
+            - name: MINWM_S1_CANDIDATE_OFF_RUNNER_REF
+              value: "1f0b240d27356744711b2ba8317a2047bef20c16"
             - name: MINWM_STAGE_FROM_MOUNT
               value: "1"
             - name: MINWM_CHECKPOINT_MOUNT_PATH
@@ -214,6 +223,9 @@ spec:
                 echo "measurement_plan=sp2-nsys-only-legacy-then-candidate-exact-10"
                 echo "legacy_off_root=${MINWM_S1_LEGACY_OFF_ROOT}"
                 echo "candidate_off_root=${MINWM_S1_CANDIDATE_OFF_ROOT}"
+                echo "profiler_off_sglang_ref=${MINWM_S1_PROFILER_OFF_GIT_REF}"
+                echo "legacy_off_runner_ref=${MINWM_S1_LEGACY_OFF_RUNNER_REF}"
+                echo "candidate_off_runner_ref=${MINWM_S1_CANDIDATE_OFF_RUNNER_REF}"
               } | tee "${ATTEMPT_ROOT}/provenance.txt"
               bash /workspace/sglang/benchmark/minwm_realtime_parity/aws_b200_entrypoint.sh
               # setup_only installs runtime dependencies. Run every Python import
