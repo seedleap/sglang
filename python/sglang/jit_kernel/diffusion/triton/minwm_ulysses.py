@@ -151,6 +151,58 @@ def fused_qk_rmsnorm_pack_peer_first(
 
 
 @triton.jit
+def _fp32_mul_rn(left, right):
+    """Match one eager CUDA FP32 multiply without FMA contraction."""
+    return tl.inline_asm_elementwise(
+        "mul.rn.f32 $0, $1, $2;",
+        "=f,f,f",
+        args=[left, right],
+        dtype=tl.float32,
+        is_pure=True,
+        pack=1,
+    )
+
+
+@triton.jit
+def _fp32_add_rn(left, right):
+    """Match one eager CUDA FP32 add without FMA contraction."""
+    return tl.inline_asm_elementwise(
+        "add.rn.f32 $0, $1, $2;",
+        "=f,f,f",
+        args=[left, right],
+        dtype=tl.float32,
+        is_pure=True,
+        pack=1,
+    )
+
+
+@triton.jit
+def _fp32_sub_rn(left, right):
+    """Match one eager CUDA FP32 subtract without FMA contraction."""
+    return tl.inline_asm_elementwise(
+        "sub.rn.f32 $0, $1, $2;",
+        "=f,f,f",
+        args=[left, right],
+        dtype=tl.float32,
+        is_pure=True,
+        pack=1,
+    )
+
+
+@triton.jit
+def _minwm_rope_pair(real, imaginary, cos, sin):
+    """Preserve the four eager pointwise arithmetic rounding boundaries."""
+    real_cos = _fp32_mul_rn(real, cos)
+    imaginary_sin = _fp32_mul_rn(imaginary, sin)
+    real_sin = _fp32_mul_rn(real, sin)
+    imaginary_cos = _fp32_mul_rn(imaginary, cos)
+    return (
+        _fp32_sub_rn(real_cos, imaginary_sin),
+        _fp32_add_rn(real_sin, imaginary_cos),
+    )
+
+
+@triton.jit
 def _fused_rope_cache_update_kernel(
     Q_ptr,
     K_ptr,
@@ -212,14 +264,15 @@ def _fused_rope_cache_update_kernel(
         output_base = (
             batch * out_stride_b + sequence * out_stride_s + head * out_stride_h
         )
+        output_real, output_imaginary = _minwm_rope_pair(real, imaginary, cos, sin)
         tl.store(
             QueryOut_ptr + output_base + even_features,
-            real * cos - imaginary * sin,
+            output_real,
             mask=half_mask,
         )
         tl.store(
             QueryOut_ptr + output_base + odd_features,
-            real * sin + imaginary * cos,
+            output_imaginary,
             mask=half_mask,
         )
 
@@ -257,8 +310,8 @@ def _fused_rope_cache_update_kernel(
     cached_imaginary = tl.load(
         CacheK_ptr + cache_base + odd_features, mask=cached_mask, other=0.0
     ).to(tl.float32)
-    key_real = fresh_real + cached_real
-    key_imaginary = fresh_imaginary + cached_imaginary
+    key_real = tl.where(is_fresh, fresh_real, cached_real)
+    key_imaginary = tl.where(is_fresh, fresh_imaginary, cached_imaginary)
 
     tl.store(CacheK_ptr + cache_base + even_features, fresh_real, mask=fresh_mask)
     tl.store(CacheK_ptr + cache_base + odd_features, fresh_imaginary, mask=fresh_mask)
@@ -279,14 +332,17 @@ def _fused_rope_cache_update_kernel(
         KeySin_ptr + key_sequence * (D // 2) + half_features,
         mask=half_mask & key_active,
     ).to(tl.float32)
+    rotated_real, rotated_imaginary = _minwm_rope_pair(
+        key_real, key_imaginary, key_cos, key_sin
+    )
     tl.store(
         RotatedK_ptr + cache_base + even_features,
-        key_real * key_cos - key_imaginary * key_sin,
+        rotated_real,
         mask=half_mask & key_active,
     )
     tl.store(
         RotatedK_ptr + cache_base + odd_features,
-        key_real * key_sin + key_imaginary * key_cos,
+        rotated_imaginary,
         mask=half_mask & key_active,
     )
 
