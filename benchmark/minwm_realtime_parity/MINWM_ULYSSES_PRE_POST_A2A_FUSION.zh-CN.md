@@ -2,13 +2,16 @@
 
 状态：pre-A2A 候选已因真实端到端 parity 失败从产品实现和开关中删除；只在本节文档与
 benchmark 证据中保留负结论。post-A2A 候选已通过 H200 CUDA exact gate，以及 SP2/SP4
-short 与 KV45 eviction 的逐帧 SHA parity；post-only profiler-off A/B 尚未完成。Nsight
-因 S0 b924 的 discarded/stable window 归一化缺陷暂停，等待 exact-window canonical commit。
+short 与 KV45 eviction 的逐帧 SHA parity；post-only profiler-off A/B 已完成。SP2 headline
+近零，SP4 约 +4.95%，但 v06 固定 baseline-first，尚不能排除顺序/cache 偏差；独立 SP4
+ABBA 已排队复验。Nsight 使用 S0 exact-window/GPU-target canonical 后另跑。
 
 基线为 `origin/main@9a9dc59cd1`，实现分支为
 `codex/ulysses-pre-post-a2a-fusion`。统一测量契约来自 S0
-`b9240233b2438829cbd72ee3dfbc1d37ed675560`；S0 未合并前，它只叠加到临时 H200 测量分支，不进入本 PR 对 main 的
-实现 diff。
+`b9240233b2438829cbd72ee3dfbc1d37ed675560`，v06 profiler-off 结果在该合同下有效；后续
+ABBA/Nsight 临时 runner 更新到
+`900b5f279b65b2afcfbe6cc9b36cfa4496b41bc3`。S0 未合并前，它们只叠加到临时 H200
+测量分支，不进入本 PR 对 main 的实现 diff。
 
 ## 假设与预期
 
@@ -77,7 +80,10 @@ prepared metadata 仍抛出原有异常，不以 fallback 隐藏状态错误。
 | v05 CUDA/Triton BF16 bitwise | 同上，commit `8fee184e47` | 当时注册的 6 项全部 exact；产品修剪与 predicate 加固后改为 7 项 post-only CUDA/回归 gate |
 | v05 SP2/SP4 post-only E2E | 1248×704、short 129 frames、KV45 eviction 241 frames | lane01 对 lane00 四项 `.npy` SHA 与逐元素比较均 bitwise exact |
 | v05 SP2/SP4 pre-enabled E2E | 同上 | lane10/11 四项均 SHA 偏离；pre 验收失败并从产品代码删除 |
-| profiler-off / Nsight | 本机无 NVIDIA GPU/Nsight | 未测，不能用历史结果代替 |
+| v06 post-only CUDA gate | H200、runner `52cc450575` | 7/7 exact，含 nonzero position、unsupported stride 与 malformed cache rank fallback |
+| v06 post-only E2E | SP2/SP4、short 129 frames、KV45 eviction 241 frames | lane01 对 lane00 四项逐帧 SHA bitwise exact |
+| v06 profiler-off | H200、每 lane 2×(20+200)、KV45 | 四 lane JSON 均通过 b924 schema、count=200 与 CV gate；见下表 |
+| Nsight | 等待单独 attempt | b924 capture window 有归一化缺陷；正式采集只允许 900b |
 
 本地系统默认 Python 3.9.6，无法解析仓库的现代 union type；改用已安装的
 `/opt/homebrew/bin/python3.11`。为避免修改仓库或全局环境，测试使用一次性
@@ -105,7 +111,7 @@ post 候选是偏差来源。
 baseline/pre 的第一个 Q/K norm、RoPE、attention 与 block latent，报告首个 mismatch、
 max abs/ULP。该诊断只服务负结论，不会把 pre 实现带回产品 diff 或 post-only v06。
 
-## H200 A/B 与 Nsight 待填表
+## H200 A/B 与 Nsight
 
 每个 profiler-off lane 使用 20 warmup + 200 measured，至少两次重复并由 S0 工具计算
 CV；SP2 为主验收，SP4 复验。headline 只取 profiler-off。所有 baseline/candidate
@@ -113,18 +119,48 @@ CV；SP2 为主验收，SP4 复验。headline 只取 profiler-off。所有 basel
 `--kv-cache-num-frames 45`），不随 `max_chunks` 扩张；这是 rolling-window steady-state
 contract，20 个 warmup chunk 后必须已进入窗口淘汰态。
 
-| SP | lane | Client FPS | Scheduler FPS | chunk wall | DiT wall/CUDA | VAE wall/CUDA | parity | 状态 |
+| SP | lane | Client FPS | Scheduler FPS | chunk wall ms | DiT wall/CUDA ms | VAE wall/CUDA ms | parity | 状态 |
 | ---: | --- | ---: | ---: | ---: | --- | --- | --- | --- |
-| 2 | `00` baseline | — | — | — | — | — | — | 待测 |
-| 2 | `01` post | — | — | — | — | — | — | 待测 |
-| 4 | `00/01` | — | — | — | — | — | post quality exact | 待测 |
+| 2 | `00` baseline | 12.8208 | 12.8318 | 1311.595 | 744.737 / 744.314 | 419.754 / 419.204 | exact | 2 repeats，CV pass |
+| 2 | `01` post | 12.7889 | 12.7997 | 1311.308 | 720.054 / 719.641 | 420.169 / 419.602 | exact | 2 repeats，CV pass |
+| 4 | `00` baseline | 14.9448 | 14.9594 | 1154.905 | 745.494 / 745.011 | 231.196 / 230.636 | exact | 2 repeats，CV pass |
+| 4 | `01` post | 15.6844 | 15.7001 | 1095.115 | 705.839 / 705.410 | 231.232 / 230.675 | exact | 2 repeats，CV pass；待 ABBA |
+
+表中 FPS/wall 是两个 canonical JSON 的算术平均；CUDA 是同一 200-chunk stage trace 中
+`component=minwm_denoising/vae_decoder` 的 CUDA event 补充汇总。b924 的 profiler-off
+schema只把 wall 写入 headline JSON，因此 CUDA 数值来自保留的完整 server trace，不与
+Nsight device 汇总混用。SP2 candidate 相对 baseline 为 Client `-0.249%`、Scheduler
+`-0.250%`、chunk wall `-0.022%`；满足“不回退超过 1%”，但没有端到端收益。SP4 为
+Client `+4.949%`、Scheduler `+4.951%`、chunk wall `-5.177%`；由于 v06 顺序固定
+baseline→candidate，先视为待复验信号，不直接作为最终收益。
+
+真实 session window 审计没有发现 baseline 降频：SP4 四次均全程 P0，active GPU SM
+clock 均值为 baseline `1971.67/1971.65 MHz`、candidate `1971.10/1969.99 MHz`，温度最高
+`72/73°C` 对 `73/74°C`。平均功耗反而是 candidate 更高（baseline
+`438.87/441.27 W`，candidate `450.87/454.92 W`），与低频/热限速造成假收益不符。
+repeat1 首 payload 为 baseline `9.831s`、candidate `9.479s`；同 server repeat2 为
+`1.538s/1.561s`，首次 segment compile/cache 与热态也基本对称。启动时
+`nvidia-smi -q` 的 HW thermal/power braking 计数为零；v06 没有保存每个 session 前后的
+限速计数，所以不能把该项表述为完整历史证明，ABBA 为每个 position 新增 before/after
+快照。
+
+阶段证据显示差异集中在 DiT。SP4 DiT wall/CUDA 均约 `-5.32%`，VAE 约 `+0.02%`；
+SP2 DiT 也约 `-3.31%`，但 scheduler 中未归入 DiT/VAE 的部分增加约 `27.4ms`，抵消
+`24.7ms` DiT 缩短。SP4 未归类部分反而减少约 `10.8ms`。telemetry 与 stage trace
+无法解释这个 SP 依赖和 baseline-first 顺序效应，故新增 SP4 off-only ABBA：
+candidate A1→baseline B1→baseline B2→candidate A2，每个 position 独立 server、
+20+200/KV45、独立 telemetry/marker/限速快照。Job
+`minwm-s3-post-sp4-abba-20260807-07` 固定已有 S0 节点，在 S0 -08 释放前只自然 Pending；
+预计约 30 分钟，整机 8×H200 预留约 4 GPU·小时，实际 active 4 卡约 2 GPU·小时。
 
 Nsight 稳态至少 10 chunks，单独记录 A2A 后 kernel/launch、短 kernel 分桶、NCCL
 SendRecv 时间与次数、两侧 idle gap、GPU kernel busy、SM Active、Tensor Active，以及
 可得时的 DRAM。若 GPU metrics 因权限不可用，按 S0 schema 填 `unavailable`、原因和
 采集证据，不留空。b924 的 raw capture 实际覆盖 1 discarded + 10 stable，却用 10
-归一化，故任何 b924 Nsight 正式结果均无效；v06 runner 物理不含 Nsight 路径，等 S0
-exact-window commit 后另建唯一 profiler-on attempt。
+归一化，故任何 b924 Nsight 正式结果均无效；v06 与 ABBA runner 物理不含 Nsight
+路径。正式 profiler-on 只允许临时 pin 900b：采集 all 8 target 后只汇总 active
+`pwGpuId`，并要求 exact 10 ranges、DiT/VAE CUDA、kernel/API/launch、SM/Tensor 与 target
+coverage 全部通过。
 
 正确性另跑两组：短程无淘汰用例覆盖首块、growth、append 与同一 active
 chunk 的 DMD/clean-cache recompute；45-frame 固定窗口用例覆盖稳态淘汰与 fallback
@@ -168,7 +204,8 @@ headline。
 - 修改 Q/K/V GEMM 数量或合并 projection：属于 S4，明确不做。
 - 保留 pre fast lane 并放宽 tolerance：真实 decoded frame 已大面积分叉，与 bitwise
   合同冲突，放弃并删除。
-- 默认开启 post fast lane：profiler-off A/B 尚未完成，当前不具备性能证据。
+- 默认开启 post fast lane：SP2 headline 近零、SP4 baseline-first 信号尚待 ABBA，且正式
+  Nsight 还未完成；当前证据不足以改变默认关闭。
 
 ## 风险、回滚与复现
 
@@ -186,7 +223,9 @@ TORCH_COMPILE_DISABLE=1 TORCHDYNAMO_DISABLE=1 PYTHONPATH=python \
   -k 'fused_post_a2a'
 ```
 
-H200 测量临时叠加 S0 `b9240233b2438829cbd72ee3dfbc1d37ed675560`，产物必须通过
+v06 profiler-off 临时叠加 S0 `b9240233b2438829cbd72ee3dfbc1d37ed675560`；其结果仍
+有效。后续 ABBA/Nsight runner 临时叠加 S0
+`900b5f279b65b2afcfbe6cc9b36cfa4496b41bc3`，产物必须通过
 `benchmark/minwm_realtime_parity/measurement_tool.py validate`；正式 PR 不包含 S0
 基础设施。最终 JSON 记录实际 checkout SHA，`gpu.count` 按 active GPUs、
 `gpu.allocated_count` 单列；Nsight/API 统一使用 `raw_total`、`total_per_chunk`、
@@ -229,6 +268,24 @@ v05 操作审计还有一处人为偏差：为按新规则在 formal 前停止�
 越界的原因不是错误哨兵，而是 parity 汇总先抛错并触发 `set -e`/EXIT trap；审计确认
 `measurements/` 不存在、nsys 路径为空。v06 使用 post-only runner，quality 后直接执行
 off-only 20+200，脚本物理不引用/安装/启动 nsys，因此不依赖哨兵阻止 profiler-on。
+
+v06 Job `minwm-s3-a2a-h200-20260807-06` 在 runner
+`52cc450575d32e7b839537f2e6761d20dd32b77c` 上成功完成；Pod attempt 为
+`minwm-s3-a2a-h200-20260807-06-swtj9`，结果根目录为其下
+`${MINWM_RUN_ID}/s3-post-off-only`。四组 quality SHA 分别为 SP2 short
+`38e7ef07cffb7e8df2e59323dcbd9dacda92d31ab4a268d1276b554b7f3e833b`、SP2 eviction
+`34bd7aff45c51fb0476f5b3b053e9924780b4308e9c85b9cf666ca36971bcf6f`、SP4 short
+`14af1068a53d0e4479fcc163fdfd5edc3415242c261852fc844cedf19e3c5a4c`、SP4 eviction
+`61805d90b010d3bd918fa5eb5823f44e0f03ae64d12448d85d9e3e22da365d4b`，lane00/01 每组
+一致。四个 measurement lane 各两次重复、共 1600 measured chunks，全部
+schema/count/CV pass；Job 正常完成，不存在 invalid marker。
+
+ABBA 使用 immutable runner `29c6ada1a514c137c2ca4cf81b58fdc2065b401a`，manifest 证据
+commit `f669e8f628`，S0 pin 为 900b，产品实现对应 PR commit `61aa8809e6`（临时 runner
+中的等价 cherry-pick 为 `050791ffd3`）。Job 固定 hostname
+`i-06888dc1ca88547e1`、backoffLimit=0；创建后因该节点被 S0 -08 占用而 Pending，事件为
+`Insufficient nvidia.com/gpu`，其余节点不匹配且无 preemption victim。精确 hostname
+selector 也阻止 Karpenter 为该 Job 新建节点；不抢占、不扩容、不清理其他任务对象。
 
 所有失败、旧契约和 partial attempt 在 PVC 上物理保留：原路径或对应 scope 的
 `invalid/` 下必须有 marker，记录原因、UTC、逐文件路径/大小/SHA256 与可恢复性。
