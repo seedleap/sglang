@@ -396,8 +396,8 @@ def validate_measurement(result: dict[str, Any]) -> None:
                     f"metrics.profiler_on.{name}",
                     (
                         "raw_total",
-                        "total_per_stable_chunk",
-                        "per_rank_per_stable_chunk",
+                        "total_per_chunk",
+                        "per_rank_per_chunk",
                         "stable_chunk_denominator",
                         "capture_scope",
                     ),
@@ -405,10 +405,10 @@ def validate_measurement(result: dict[str, Any]) -> None:
                 )
                 metric = on.get(name)
                 if isinstance(metric, dict) and metric.get("status") == "available":
-                    nested = metric.get("value", {}).get("per_rank_per_stable_chunk")
+                    nested = metric.get("value", {}).get("per_rank_per_chunk")
                     _require_availability(
                         nested,
-                        f"metrics.profiler_on.{name}.value.per_rank_per_stable_chunk",
+                        f"metrics.profiler_on.{name}.value.per_rank_per_chunk",
                         errors,
                     )
             _require_normalized_count(

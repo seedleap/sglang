@@ -231,7 +231,7 @@ def _api_metrics(
         if coverage["status"] == "available":
             per_rank = available(
                 raw_total / stable_chunks / active_gpu_count,
-                "count_per_rank_per_stable_chunk",
+                "count_per_rank_per_chunk",
                 f"{source}; {coverage['source']}",
             )
         else:
@@ -241,8 +241,8 @@ def _api_metrics(
         return available(
             {
                 "raw_total": raw_total,
-                "total_per_stable_chunk": raw_total / stable_chunks,
-                "per_rank_per_stable_chunk": per_rank,
+                "total_per_chunk": raw_total / stable_chunks,
+                "per_rank_per_chunk": per_rank,
                 "stable_chunk_denominator": stable_chunks,
                 "capture_scope": "entire nsys start/stop capture",
             },
