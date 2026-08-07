@@ -29,6 +29,7 @@ from common import (
     write_json,
 )
 from measurement import (
+    MeasurementValidationError,
     available,
     build_measurement,
     latency_summary,
@@ -87,6 +88,19 @@ def required_stage_trace_is_complete(
     required: dict[TraceSelector, set[int]], expected_indices: set[int]
 ) -> bool:
     return all(expected_indices.issubset(observed) for observed in required.values())
+
+
+def incomplete_measurement_diagnostic(
+    required: dict[TraceSelector, set[int]],
+    expected_indices: set[int],
+    stats_by_chunk: dict[int, Any],
+    payload_complete_ns: dict[int, Any],
+) -> dict[str, Any]:
+    return {
+        "missing_stats": sorted(expected_indices - set(stats_by_chunk)),
+        "missing_payloads": sorted(expected_indices - set(payload_complete_ns)),
+        "stage_trace": missing_required_stage_trace(required, expected_indices),
+    }
 
 
 def parse_args() -> argparse.Namespace:
@@ -231,6 +245,7 @@ async def receive_run(args: argparse.Namespace, contract: dict, case: dict) -> d
         "size": f"{contract['width']}x{contract['height']}",
         "fps": int(contract["fps"]),
         "seed": int(contract["seed"]),
+        "trace_id": args.run_id,
         "generator_device": "cuda",
         "num_inference_steps": 4,
         "guidance_scale": 0.0,
@@ -269,19 +284,28 @@ async def receive_run(args: argparse.Namespace, contract: dict, case: dict) -> d
         ):
             try:
                 packed = await asyncio.wait_for(websocket.recv(), timeout=args.timeout)
-            except TimeoutError as exc:
-                trace_diagnostic = missing_required_stage_trace(
-                    required_trace_chunks, expected_trace_indices
+            except websockets.exceptions.ConnectionClosedOK as exc:
+                diagnostic = incomplete_measurement_diagnostic(
+                    required_trace_chunks,
+                    expected_trace_indices,
+                    stats_by_chunk,
+                    payload_complete_ns,
                 )
-                missing_stats = sorted(expected_trace_indices - set(stats_by_chunk))
-                missing_payloads = sorted(
-                    expected_trace_indices - set(payload_complete_ns)
+                raise MeasurementValidationError(
+                    "realtime stream closed normally before the measurement "
+                    f"contract was complete: close={exc}; "
+                    f"diagnostic={json.dumps(diagnostic, sort_keys=True)}"
+                ) from exc
+            except TimeoutError as exc:
+                diagnostic = incomplete_measurement_diagnostic(
+                    required_trace_chunks,
+                    expected_trace_indices,
+                    stats_by_chunk,
+                    payload_complete_ns,
                 )
                 raise TimeoutError(
                     "timed out waiting for complete realtime measurement: "
-                    f"missing_stats={missing_stats}; "
-                    f"missing_payloads={missing_payloads}; "
-                    f"stage_trace={json.dumps(trace_diagnostic, sort_keys=True)}"
+                    f"diagnostic={json.dumps(diagnostic, sort_keys=True)}"
                 ) from exc
             if not isinstance(packed, bytes):
                 raise TypeError(

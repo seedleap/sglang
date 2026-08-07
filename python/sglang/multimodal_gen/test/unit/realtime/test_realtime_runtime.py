@@ -622,6 +622,84 @@ def test_scheduler_stage_metrics_emit_dedicated_realtime_trace_events(monkeypatc
     assert denoise["source"] == "scheduler_result_metrics"
 
 
+def test_trace_drain_sends_scheduled_event_before_return():
+    sent_messages = []
+
+    class _Ws:
+        async def send_bytes(self, message):
+            sent_messages.append(msgspec.msgpack.decode(message))
+
+    async def run():
+        queue = asyncio.Queue()
+        sender = asyncio.create_task(
+            realtime_video_api._send_realtime_trace_events(_Ws(), queue)
+        )
+        sink = realtime_video_api._make_trace_queue_sink(
+            asyncio.get_running_loop(), queue
+        )
+        sink({"event": "last-component-trace", "chunk_index": 10})
+        await asyncio.wait_for(
+            realtime_video_api._drain_realtime_trace_events(queue, sender),
+            timeout=1.0,
+        )
+        sender.cancel()
+        await realtime_video_api._await_realtime_task(sender)
+
+    asyncio.run(run())
+    assert sent_messages == [
+        {
+            "type": "trace_event",
+            "trace": {"event": "last-component-trace", "chunk_index": 10},
+        }
+    ]
+
+
+def test_trace_drain_sender_error_does_not_deadlock():
+    class _FailingWs:
+        async def send_bytes(self, _message):
+            raise RuntimeError("trace send failed")
+
+    async def run():
+        queue = asyncio.Queue()
+        queue.put_nowait({"event": "trace"})
+        sender = asyncio.create_task(
+            realtime_video_api._send_realtime_trace_events(_FailingWs(), queue)
+        )
+        with pytest.raises(RuntimeError, match="trace send failed"):
+            await asyncio.wait_for(
+                realtime_video_api._drain_realtime_trace_events(queue, sender),
+                timeout=1.0,
+            )
+        await asyncio.wait_for(queue.join(), timeout=1.0)
+
+    asyncio.run(run())
+
+
+def test_nsys_chunk_marker_records_identity_index_and_role(monkeypatch):
+    monkeypatch.setenv("SGLANG_REALTIME_NSYS_WARMUP_CHUNKS", "1")
+    monkeypatch.setenv("SGLANG_REALTIME_NSYS_MEASURED_CHUNKS", "10")
+    session = GenerateSession()
+    session.trace_id = "s0-sp2-nsys"
+
+    discard = SimpleNamespace(index=0, request_id="request-zero")
+    measured = SimpleNamespace(index=1, request_id="request-one")
+    assert realtime_video_api._nsys_chunk_marker(session, discard) == (
+        "sglang.realtime.chunk|trace_id=s0-sp2-nsys|request_id=request-zero|"
+        "chunk_index=0|role=discard"
+    )
+    assert realtime_video_api._nsys_chunk_marker(session, measured) == (
+        "sglang.realtime.chunk|trace_id=s0-sp2-nsys|request_id=request-one|"
+        "chunk_index=1|role=measured"
+    )
+
+
+def test_nsys_chunk_marker_rejects_non_integer_configuration(monkeypatch):
+    monkeypatch.setenv("SGLANG_REALTIME_NSYS_WARMUP_CHUNKS", "one")
+    monkeypatch.setenv("SGLANG_REALTIME_NSYS_MEASURED_CHUNKS", "10")
+    with pytest.raises(ValueError, match="chunk counts must be integers"):
+        realtime_video_api._nsys_chunk_role(0)
+
+
 def test_listen_generate_request_propagates_disconnect_without_error_write():
     sent_messages = []
 
