@@ -21,14 +21,26 @@ _CLUSTER_PROFILES = {
     "use1-atl2": {
         "context": "codex-seed-leap-use1",
         "nodepool": "minwm-test-atl2-p6-spot",
-        "capacity_pool": "minwm-test-atl2-karpenter",
+        "toleration_key": "seedleap.ai/capacity-pool",
+        "toleration_value": "minwm-test-atl2-karpenter",
         "zone": "us-east-1-atl-2a",
+        "hardware": ("b200", "b300"),
     },
     "usw2d-sp12": {
         "context": "codex-minwm-test-phx2",
         "nodepool": "minwm-sp12-usw2d-p6-spot",
-        "capacity_pool": "minwm-sp12-usw2d-karpenter",
+        "toleration_key": "seedleap.ai/capacity-pool",
+        "toleration_value": "minwm-sp12-usw2d-karpenter",
         "zone": "us-west-2d",
+        "hardware": ("b200", "b300"),
+    },
+    "use2-b200": {
+        "context": "minwm-spot",
+        "nodepool": "minwm-test-b200-spot",
+        "toleration_key": "seedleap.ai/workload",
+        "toleration_value": "wan22-ti2v",
+        "zone": None,
+        "hardware": ("b200",),
     },
 }
 
@@ -104,6 +116,10 @@ def _job(args) -> dict[str, Any]:
 
     instance_type = f"p6-{args.hardware}.48xlarge"
     cluster_profile = _CLUSTER_PROFILES[args.cluster_profile]
+    if args.hardware not in cluster_profile["hardware"]:
+        raise ValueError(
+            f"cluster profile {args.cluster_profile} does not support {args.hardware}"
+        )
     run_script = r"""
 set -euo pipefail
 repo=/workspace/sglang
@@ -173,6 +189,13 @@ exec bash benchmark/minimax_h3_causal/aws_entrypoint.sh
         "seedleap.ai/task": "minimax-h3-causal-realtime",
         "seedleap.ai/run-id": job_name,
     }
+    node_selector = {
+        "karpenter.sh/capacity-type": "spot",
+        "karpenter.sh/nodepool": cluster_profile["nodepool"],
+        "node.kubernetes.io/instance-type": instance_type,
+    }
+    if cluster_profile["zone"] is not None:
+        node_selector["topology.kubernetes.io/zone"] = cluster_profile["zone"]
     return {
         "apiVersion": "batch/v1",
         "kind": "Job",
@@ -197,17 +220,12 @@ exec bash benchmark/minimax_h3_causal/aws_entrypoint.sh
                     "restartPolicy": "Never",
                     "terminationGracePeriodSeconds": 60,
                     "securityContext": {"seLinuxOptions": {"type": "spc_t"}},
-                    "nodeSelector": {
-                        "karpenter.sh/capacity-type": "spot",
-                        "karpenter.sh/nodepool": cluster_profile["nodepool"],
-                        "node.kubernetes.io/instance-type": instance_type,
-                        "topology.kubernetes.io/zone": cluster_profile["zone"],
-                    },
+                    "nodeSelector": node_selector,
                     "tolerations": [
                         {
-                            "key": "seedleap.ai/capacity-pool",
+                            "key": cluster_profile["toleration_key"],
                             "operator": "Equal",
-                            "value": cluster_profile["capacity_pool"],
+                            "value": cluster_profile["toleration_value"],
                             "effect": "NoSchedule",
                         }
                     ],
