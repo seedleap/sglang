@@ -116,16 +116,18 @@ wait_for_server() {
 }
 
 stop_server() {
+  # Stop sampling before server teardown so the telemetry tail remains a
+  # steady-state window rather than capturing allocator release.
+  if [[ -n "${monitor_pid}" ]]; then
+    kill "${monitor_pid}" 2>/dev/null || true
+    wait "${monitor_pid}" 2>/dev/null || true
+    monitor_pid=""
+  fi
   if [[ -n "${server_pid}" ]]; then
     pkill -TERM -f "sglang serve --model-path ${MODEL_DIR}.*--port 30000" \
       2>/dev/null || true
     wait "${server_pid}" 2>/dev/null || true
     server_pid=""
-  fi
-  if [[ -n "${monitor_pid}" ]]; then
-    kill "${monitor_pid}" 2>/dev/null || true
-    wait "${monitor_pid}" 2>/dev/null || true
-    monitor_pid=""
   fi
 }
 

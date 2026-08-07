@@ -362,3 +362,107 @@ SP4 candidate repeat1/2 已完成，220 hashes 与 SP4 control1 完全一致，t
 Job/Pod。PVC、主 Job、已有结果均未删除；新 Pod `...-55dbf` 当前因原 node GPU 被占满
 而 Pending。EKS auto-mode 同时警告 hostname 不能用于新节点 provisioning；默认 scheduler
 仍保留该 Pod，这个限制符合“不另起机器”的目的。
+
+主 Job 在 49 分钟后 `Complete 1/1`，Pod exit code 0、restart=0，完成时间
+`2026-08-07T10:33:40Z`。旧 comparator 原始 `comparison-summary.json` 输出 `go=true`；
+该文件原样保留。随后从追加 Pod 使用修正版 comparator 对同一只读结果集离线复算，写到
+独立的 `comparison-summary-cv-corrected.json`，退出码 1、`go=false`：SP2/SP4 均只因
+candidate chunk wall CV 超 3% 失败；两 lane 的 bitwise、Client/Scheduler no-regression
+仍通过。没有覆盖原始 JSON。
+
+SP4 两次均值：control/candidate Client FPS 14.7544/15.0837，Scheduler FPS
+14.7713/15.1001，chunk wall 1173.61/1095.19 ms，DiT wall 753.37/747.20 ms，VAE wall
+229.68/231.02 ms。candidate 相对 control 分别约 +2.23%、+2.23%、-6.68%、-0.82%、
++0.59%；SP4 DiT 改善按 `control/candidate-1` 是 0.83%，低于 2%，符合“SP4 仅复验，
+收益噪声量级”的判断。SP4 control2 telemetry 尾段相对中段为 -1416.8 MiB，不是增长；
+其他 SP4 三臂为 0。
+
+追加 Pod `minwm-p0-trace-sync-h200-20260807-02-55dbf` 在主 Job 完成后立即调度到同一
+node，checkout 精确为 SGLang `f4b7d5eaf4d054f9d93bfb1ae26d90a0a9f932f2`、minWM
+`2efc6485f65e8fcab506665efde79bc41406385e`；setup 后开始 SP2 control3，主/追加没有
+GPU 运行重叠。
+
+补充稳定性定向回归：
+
+```bash
+TORCHDYNAMO_DISABLE=1 PYTHONPATH=python python3.11 -m pytest -q \
+  python/sglang/multimodal_gen/test/unit/realtime/test_minwm_realtime.py \
+  -k 'cache or prompt or scene or shard'
+```
+
+实际 `19 passed, 96 deselected`，覆盖 cache append/recompute/override、prompt switch、
+scene cut 与 shard 路径；先前更窄的 `prompt_switch or scene_cut or evict or growing or
+saturated` 选择实际只有 `3 passed, 112 deselected`，所以又用 collect-only 核对真实测试名
+后扩为上述 19 项。两次结果都保留，但这些仍是 CPU/局部回归，不替代 GPU 稳态。
+
+追加 SP2 control3 实测 Client/Scheduler 12.9639/12.9783 FPS、chunk/DiT/VAE wall
+1266.39/744.52/418.48 ms；candidate3 为 12.8311/12.8449 FPS、1279.08/728.14/
+433.99 ms。单个 paired delta 的 Client/Scheduler 约 -1%，所以不能提前宣称 no-regression，
+需等 ABBA 后半。两臂均 220 hashes、440 个预期 trace status 事件；control3 peak 97694 MiB。
+
+candidate3 telemetry summary 出现 tail-middle -1560.7 MiB。复查 runner 找到采样顺序缺口：
+`stop_server` 先终止 server，monitor 会把 allocator teardown 混进最后若干 samples；主 Job
+SP4 control2 的 -1416.8 MiB 同源。因此这些负值不是性能收益，也不是稳态显存下降。已将
+本分支未来 runner 改为先停 monitor、再停 server，`bash -n`/diff check 通过；已落盘 raw
+CSV 将另行截取 teardown 前 plateau。当前 Job pin 的脚本不热改，原 summary 如实保留。
+
+另外，全仓没有现成的 MinWM 逐 chunk KV tensor `data_ptr` 采集；本轮 GPU trace/telemetry
+能证明 200 measured chunks 无 rank hang 与无持续显存爬升，但不能把“无地址漂移”伪造为
+已测。除非 Nsight/后续显式诊断补出地址证据，这一子项保持 schema/采样缺口，最终结论中
+单列，不以单测或理论估算替代。
+
+## ABBA 最终 profiler-off 结论
+
+追加 Job 四臂全部完成后，修正版 comparator 实际输出 `go=false`，runner exit 1，并按
+fail-closed 合同写入
+`invalid-marker-20260807T111909Z.json`（`recoverability=preserved_in_place`）。Pod 状态
+`Error` 是验收失败，不是进程崩溃；restart=0，所有 arm JSON/日志/telemetry 都被 marker
+逐文件 SHA-256 inventory。
+
+| retry lane | control mean | candidate mean | candidate/control | 关键 CV/门禁 |
+| --- | ---: | ---: | ---: | --- |
+| SP2 Client FPS | 12.9020 | 12.8465 | -0.43% | control 0.68%，candidate 0.17%；**FPS 回退** |
+| SP2 Scheduler FPS | 12.9162 | 12.8601 | -0.43% | control 0.68%，candidate 0.17%；**FPS 回退** |
+| SP2 chunk wall (ms) | 1266.35 | 1277.28 | +0.86% | 两臂 CV <0.20% |
+| SP2 DiT wall (ms) | 744.25 | 727.87 | -2.20% | 两臂 CV <0.06% |
+| SP2 VAE wall (ms) | 418.96 | 434.28 | +3.66% | 两臂 CV <0.17% |
+| SP4 Client FPS | 14.7512 | 14.9058 | +1.05% | control 2.53%，candidate 0.40% |
+| SP4 Scheduler FPS | 14.7690 | 14.9233 | +1.04% | control 2.51%，candidate 0.38% |
+| SP4 chunk wall (ms) | 1149.71 | 1124.07 | -2.23% | control 5.27%，candidate 5.26%；**CV 失败** |
+| SP4 DiT wall (ms) | 750.97 | 744.52 | -0.86% | candidate 改善不足 2% |
+| SP4 VAE wall (ms) | 230.17 | 232.07 | +0.82% | CV 通过 |
+
+repeat1-4 的跨 Job pooled 补充统计先验证了 runtime 依赖完全一致、模型转换 manifest 除临时
+目录外一致，且 `390651..f4b7d5` 只改 benchmark/docs/manifest，不改 runtime Python。
+四次 pooled：
+
+- SP2 Client/Scheduler +0.477%/+0.477%，chunk/DiT/VAE -0.914%/-2.364%/+3.740%，
+  `control/candidate-1` DiT 改善 2.421%；10 个 arm/metric CV 全部 <=3%。
+- SP4 Client/Scheduler +1.640%/+1.635%，chunk/DiT/VAE -4.479%/-0.839%/+0.704%；
+  但 control chunk CV=3.237%、candidate=3.957%，仍失败。
+- 两个 SP lane 各 8 臂共 1760 chunk digest 全部 bitwise 相同。
+
+pooled 只作四次统计补充，不覆盖两个独立 Job 的原始 comparator：首 Job 的修正版结论因
+SP2/SP4 chunk CV false；retry 因 SP2 Client/Scheduler regression 和 SP4 chunk CV false。
+因此 profiler-off headline 最终是 **no-go**。此外，无同步后 `perf_counter` span 表示 host
+enqueue wall，异步完成可能迁移到后续 span；单个 DiT/VAE wall 的涨跌不等同 CUDA compute
+变化，CUDA/launch 归因只看独立 Nsight。
+
+对 16 个 arm 的 raw telemetry 离线去除最多 1 个 terminal teardown sample 后，所有 arm
+plateau 的最后 20 samples 相对前 20 samples 均为 0 MiB：SP2 peak 97686--97694 MiB，
+SP4 peak 162948--163402 MiB。由此可说无持续显存增长，但地址采样缺口仍在。
+
+## Artifact reader 与 Nsight 提交
+
+为读取已结束 Pod 的 PVC，新建 read-only reader。第一次用镜像默认用户、第二次显式 root
+都无法遍历 `/results`；诊断显示不是 Unix mode，而是 reader 进程 MCS
+`c366,c868` 与卷 `data_t:s0:c781,c993` 不匹配。没有使用 privileged 绕过；reader manifest
+改为匹配卷 MCS level 后，进程/卷同为 `c781,c993`，非 privileged、read-only 读取成功。
+两次临时 reader Pod 都无用户数据，仅为 manifest 可恢复的 `sleep` Pod；PVC 未修改。
+
+ABBA GPU 释放后提交独立 Nsight manifest，client/server dry-run 再次通过；Job
+`minwm-p0-trace-sync-nsys-h200-20260807-01`、Pod `...-b7kf6` 调度到同一 node，restart=0。
+固定 SGLang `1e9c11322feb27502a45ec308f3bd30d6d7dc4f8`、同一 minWM/image/checkpoint；
+Nsight Systems 2026.4.1 检查通过，8 张 H200 均可采 GPU metrics。当前从 SP2
+production-no-sync lane 开始，profile window 是 20 precondition + 1 discard + 10 stable；
+profiler 下 FPS 不作 headline。
