@@ -1,6 +1,7 @@
 # MinWM timestep modulation pass 内复用
 
-状态：实现与 CPU 回归已完成；H200 BF16 bitwise、A/B 和 Nsight 数据待采集。
+状态：实现与 CPU 回归已完成；H200 CUDA compile smoke 已通过，BF16 output bitwise、A/B
+和 Nsight 数据采集中。
 
 ## 目标与边界
 
@@ -83,7 +84,8 @@ block 的大部分生命周期内也存在，因此预计峰值显存不增加�
 - Codex bundled Python 3.12：三个变更 Python 文件 `compileall` 通过；该环境不含
   torch/pytest，只承担语法检查。
 - Homebrew Python 3.11 + 已有 CPU torch/pytest，临时环境只补 `uvicorn`：
-  `test_minwm_realtime.py` 为 `123 passed`。
+  新增 CUDA-only 用例前 `test_minwm_realtime.py` 为 `123 passed`；新增后目标集合为
+  `8 passed, 1 skipped`，skip 原因是本机无 CUDA。
 - `ruff format --check` 与 `ruff check`：通过。
 - `test_lingbot_causal_denoising.py`：`25 passed, 2 failed`；两项失败均是未构造
   `stage.transformer` 的既有 cache-config fixture，失败文件不在本 diff，和新增的
@@ -92,20 +94,27 @@ block 的大部分生命周期内也存在，因此预计峰值显存不增加�
 本机 CPU 结果不覆盖 CUDA advanced-indexing kernel、BF16 segment compile、SP
 collective、lossless frame bitwise 或峰值显存；这些结论只接受 H200 容器结果。
 
+H200 镜像已运行 CUDA-only smoke：BF16、非均匀 SP frame index 下，pass 外准备结果与
+`torch.compile(fullgraph=True)` 编译的旧 advanced indexing 逐 bit、stride 相同，结果为
+`1 passed`。正式 SP2/SP4 workload 按 MinWM 现有约束关闭 whole-DiT compile；该 smoke
+只证明编译消费者兼容性，不作为 headline 性能数据，也不能据此声称 compile 已消除重复。
+
 H200 数值验收将同时保存旧/新 lossless latent/frame 校验；若出现任何差异，默认不放宽
 阈值，先定位第一个不同的 block 输入和 modulation stride，并回退默认开关。
 
 ## 统一测量契约
 
-测量工具来自 S0 commit `30cb16708fc768adb063c31c2f1a21eac5a016d2`（PR #19）：
+测量工具来自 S0 canonical commit
+`59aa68a382cb9f481e77f98647644347671561dc`（PR #19）：
 
 - schema：`benchmark/minwm_realtime_parity/measurement_schema.json`
 - profiler-off：`benchmark_realtime_throughput.py`
 - validate/CV/Nsight merge：`measurement_tool.py`
 - Nsight SQL 指标：`nsys_metrics.py`
 
-S0 未合并前，只在临时测量分支叠加该 commit；S1 最终对 main 的实现 diff 不复制 S0
-基础设施。
+该 pin 包含 `25cc42ef8c` 的 JSON Schema 机器约束，并强制客户端等待每个合法 chunk
+index 的完整 DiT/VAE wall trace；profiler-on 还等待 DiT/VAE CUDA trace。S0 未合并前，
+只在临时测量分支叠加该工具；S1 最终对 main 的实现 diff 不复制 S0 基础设施。
 
 固定 workload：MinWM 5B step-3200、1248×704、BF16、16 pixel frames/4 latent
 frames per chunk、4 DMD + 1 clean-cache，20 warmup + 200 measured。SP2 是主验收，
@@ -113,9 +122,20 @@ SP4 复验。profiler-off 与 Nsight 分开运行；Nsight 先外部 warmup 20 c
 丢弃 1 个 session 首 chunk后保留至少 10 个 steady chunks，不同时启用
 `torch.profiler`。
 
+吞吐 A/B 显式固定 `realtime_causal_kv_cache_num_frames=45`。这是 rolling-window
+steady-state contract：避免 220 chunks 的 full-history 序列/显存增长使小算子 A/B
+失稳或令 SP2 OOM。旧/新路径使用同一 45 帧窗口；首块、短程 append/recompute、
+variable chunk 与无淘汰 cache growth 的语义由独立数值测试覆盖。
+
 ## 实际 A/B
 
 以下表格只填写 S0 schema 校验通过的同机 paired run。`待测` 不是零，也不代表不可得。
+
+采集 provenance：kube context `codex-minwm-test-phx2`，AWS region `us-west-2`，NodePool
+`minwm-test-phx2-p5e-spot`，实例 `p5e.48xlarge` / NVIDIA H200；整机隔离申请 8 GPU，
+JSON 中 active GPU 严格记 SP2=2、SP4=4，`allocated_count=8`。镜像 digest 为
+`sha256:bedc07ea3ba55059a8c1c569c3b177c4d00d41f37d4fa9105375531534ef5f2a`，MinWM commit 为
+`2efc6485f65e8fcab506665efde79bc41406385e`，checkpoint step 3200。
 
 ### Profiler-off headline
 
@@ -160,6 +180,12 @@ fast-lane、UTC 时间和产物路径。Nsight overhead 下的 FPS 不作为 hea
 3. SP frame metadata 在 MinWM transformer patch/shard 后生成，准备函数在该 metadata
    已确定后执行。
 4. 新缓存是 Python 局部变量，没有写入 model、forward batch 或 realtime session。
+5. 首次集群 Job `minwm-s1-temb-ab-h200-20260807-01` 在 legacy server 启动前收到 S0
+   stage-trace 竞态修复通知；检查确认尚无任何 client JSON 后，只删除了该精确命名 Job，
+   保留 PVC 并升级到 canonical `59aa68a382`。重启 Job 为
+   `minwm-s1-temb-ab-h200-20260807-02`，临时 runner checkout
+   `1cb8d5221e4a4cf91e1aead5517df2f29272310b`；所有结果必须通过 59aa validator，且
+   profiler-off DiT/VAE wall 的 `count=200`、`status=available` 才可进入表格。
 
 最终保留或回滚规则：bitwise 不通过则回滚；profiler-off DiT/Client 回退超过 paired
 噪声或默认 1% 且无法解释则回滚；若 headline 落在噪声内但能稳定消除预期 launch、
