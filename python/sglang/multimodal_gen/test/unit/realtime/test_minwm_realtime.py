@@ -2143,7 +2143,8 @@ def test_minwm_self_attn_post_is_bitwise_exact_for_shards_and_gate_shapes(
         1e-6,
     )
 
-    assert not hidden.is_contiguous()
+    if sequence > 1 and hidden_size > 1:
+        assert not hidden.is_contiguous()
     assert not timestep_gate.is_contiguous()
     torch.testing.assert_close(actual_hidden, expected_hidden, rtol=0, atol=0)
     torch.testing.assert_close(actual_norm, expected_norm, rtol=0, atol=0)
@@ -2185,19 +2186,32 @@ def test_minwm_self_attn_post_cuda_compile_and_autocast_fallback(
     weight = torch.randn(64, generator=generator, device="cuda")
     bias = torch.randn(64, generator=generator, device="cuda")
     timestep_gate = gate_storage.select(2, 2)
-    expected_hidden, expected_norm = _minwm_self_attn_post_op(
-        hidden,
-        attn_output,
-        model_gate,
-        timestep_gate,
-        weight.to(hidden.dtype),
-        bias.to(hidden.dtype),
-        1e-6,
-    )
-
     with torch.autocast(
         device_type="cuda", dtype=torch.bfloat16, enabled=autocast_enabled
     ):
+        if segment_compile:
+            expected_hidden = minwm_module._minwm_adaln(
+                hidden,
+                y=attn_output,
+                m_gate=model_gate,
+                e_gate=timestep_gate,
+            )
+            expected_norm = minwm_module._minwm_layer_norm(
+                expected_hidden,
+                weight=weight,
+                bias=bias,
+                eps=1e-6,
+            )
+        else:
+            expected_hidden, expected_norm = _minwm_self_attn_post_op(
+                hidden,
+                attn_output,
+                model_gate,
+                timestep_gate,
+                weight.to(hidden.dtype),
+                bias.to(hidden.dtype),
+                1e-6,
+            )
         actual_hidden, actual_norm = _minwm_self_attn_post(
             hidden,
             attn_output,
