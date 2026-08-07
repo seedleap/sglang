@@ -17,14 +17,14 @@ spec:
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: minwm-cudagraph-sp12-h200-phx2-20260807-16
+  name: minwm-cudagraph-sp12-h200-phx2-20260807-17
   namespace: default
   labels:
-    app.kubernetes.io/name: minwm-cudagraph-sp12-h200-phx2-20260807-16
+    app.kubernetes.io/name: minwm-cudagraph-sp12-h200-phx2-20260807-17
     seedleap.ai/owner: chenshengdong
     seedleap.ai/purpose: minwm-cuda-graph-perf
     seedleap.ai/task: minwm-realtime-parity
-    seedleap.ai/run-id: minwm-cudagraph-sp12-h200-phx2-20260807-16
+    seedleap.ai/run-id: minwm-cudagraph-sp12-h200-phx2-20260807-17
   annotations:
     seedleap.ai/capacity-type: spot
     seedleap.ai/repo: seedleap/sglang
@@ -41,11 +41,11 @@ spec:
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: minwm-cudagraph-sp12-h200-phx2-20260807-16
+        app.kubernetes.io/name: minwm-cudagraph-sp12-h200-phx2-20260807-17
         seedleap.ai/owner: chenshengdong
         seedleap.ai/purpose: minwm-cuda-graph-perf
         seedleap.ai/task: minwm-realtime-parity
-        seedleap.ai/run-id: minwm-cudagraph-sp12-h200-phx2-20260807-16
+        seedleap.ai/run-id: minwm-cudagraph-sp12-h200-phx2-20260807-17
       annotations:
         seedleap.ai/repo: seedleap/sglang
         seedleap.ai/branch: codex/minwm-cuda-graph
@@ -81,7 +81,7 @@ spec:
             - name: MINWM_BENCHMARK_MODE
               value: cudagraphmatrix
             - name: MINWM_RUN_ID
-              value: minwm-cudagraph-sp12-h200-phx2-20260807-16
+              value: minwm-cudagraph-sp12-h200-phx2-20260807-17
             - name: MINWM_CASES_PATH
               value: /workspace/sglang/benchmark/minwm_realtime_parity/cases.json
             - name: MINWM_CUDA_GRAPH_CASE
@@ -93,7 +93,7 @@ spec:
             - name: MINWM_CUDA_GRAPH_MEASURED_CHUNKS
               value: "30"
             - name: MINWM_SEGMENT_COMPILE
-              value: "true"
+              value: "false"
             - name: MINWM_CUDA_GRAPH_KV_FRAMES
               value: "20"
             - name: MINWM_CONVERT_LOCAL_ATTN_SIZE
