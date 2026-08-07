@@ -4,7 +4,14 @@
 
 任务：S4 / 点子 6
 
-状态：**6a 已完成实现、本地 CPU 语义回归和 H200 v09 完整质量矩阵；H200 v01–v08 的失败证据均判 invalid 并保留。v09 的 control/QKV × eager/compile 四角隔离证明两条 eager→compile 边以完全相同的数值偏差失败，而 control↔QKV 在 eager/compile 下都逐位一致，因此 blocker 属于既有 whole-model compile，QKV 没有额外劣化。v09 compile-off 同序双重复已完成，但只标 exploratory：SP4 约 +5.0% 触发独立反序 ABBA，v10 正固定原节点等待更早的 S3 释放资源。正式 Nsight 固定 pin d5b25227d4，尚未启动；6b 尚未实现。**
+状态：**6a 已完成实现、本地 CPU 语义回归、H200 v09 完整质量矩阵和 v11 独立 server
+反序 ABBA。v09 四角证明 whole-model compile 的既有质量 blocker 对 control/QKV 完全
+相同，QKV 没有额外劣化；compile-off 的 SP1/SP2/SP4 输出、layer probe 和 replay 均
+bitwise。v11 headline 显示 SP2 Client FPS −0.771%、DiT wall −0.108%，SP4 Client FPS
++5.099%、DiT wall +4.977%；SP4 chunk wall CV 超 3%，保留为噪声风险。v10 因旧 PVC
+双挂载的 SELinux 权限错误 root-invalid，全部证据保留。正式 Nsight control v12 已按
+d5b25227d4 exact-window 契约创建并自然 Pending；candidate 在 control 完成后另起唯一
+Job/PVC。6b 尚未实现。**
 
 ## 结论与开关
 
@@ -152,8 +159,8 @@ steady-state contract。首块、短程 append/recompute、cache growth 和尚�
 
 | 项目 | control | candidate | 状态 |
 | --- | --- | --- | --- |
-| SP2 主验收 | `MINWM_FUSED_QKV_PROJECTION=0` | `=1` | v09 129 帧 bitwise，candidate replay bitwise；同序 A/B exploratory，ABBA 待执行 |
-| SP4 复验 | `=0` | `=1` | v09 129 帧 bitwise；同序约 +5.0% 触发 ABBA，待复验 |
+| SP2 主验收 | `MINWM_FUSED_QKV_PROJECTION=0` | `=1` | v09 129 帧/replay bitwise；v11 ABBA Client −0.771%、DiT wall −0.108% |
+| SP4 复验 | `=0` | `=1` | v09 129 帧 bitwise；v11 ABBA Client +5.099%、DiT wall +4.977% |
 | SP1 eager / compile | `=0` | `=1` | v09 四角：两条同模式 QKV 边 bitwise；既有 whole-model compile blocker |
 | TP2 + SP1 smoke | `=0` | `=1` | v09 两侧均被同一既有 S3 RMSNorm TP 路径阻断 |
 | static FP8 | 原量化三 projection | 请求 6a 后安全 fallback | v09 明确 fallback；129 帧完成且与 BF16 SP1 control bitwise |
@@ -347,16 +354,66 @@ GPU 平均 SM clock 为 1975.1/1974.3 MHz，candidate 为 1973.8/1973.7 MHz；�
 init→first-payload 是约 6–10 秒，第二次约 1.5–1.7 秒。whole-model compile 虽关闭，日志
 仍显示 `segment_compile=True`，四个 server 共享同一个容器内
 `/root/.cache/sgl_diffusion/torch_compile_cache`，且日志没有可核验的 hit/miss 事件。因此
-v09 **只标 exploratory，不作为 PR headline**。独立 v10 使用新 PVC/attempt，按
-candidate→control→control→candidate 反序 ABBA；每个位置都完整 stop、校验端口/进程退出、
-再启动新 server，并在位置前后只读记录 inductor/triton cache 的 file count、size 与
-metadata listing SHA。SP2/SP4 都必须由这组 ABBA 的各侧双重复与 CV 决定 headline。
+v09 **只标 exploratory，不作为 PR headline**。独立反序 ABBA 的设计是
+candidate→control→control→candidate；每个位置都完整 stop、校验端口/进程退出、再启动
+新 server，并在位置前后只读记录 inductor/triton cache 的 file count、size 与 metadata
+listing SHA。v10 因证据 PVC 双挂载失败，v11 去掉旧 PVC 后完整执行，结果如下。
+
+### v10 root-invalid 与 v11 profiler-off headline
+
+v10 新 Job/PVC 在 setup 前约 1 秒退出：runner 同时挂载 v09 旧 PVC 到 `/prior-results`，
+节点 SELinux label 使 root 也无法遍历 `/prior-results/attempts`。这不是模型、QKV 或 client
+失败。v10 root-invalid marker 大小 483 bytes、SHA256
+`2729d505ea6cc86fd1a18f78cff0292712541aabae4cd9be59bb6e96a4e941db`；唯一诊断文件
+大小 4631 bytes、SHA256
+`4b00dc4a4d3fe650ae5a38bcce15bf89988cefeec25f97b13c23c214779baa10`。v09/v10 PVC、
+marker 和诊断均原位保留。
+
+v11 使用新 Job/PVC，静态反例和 live spec 都证明没有 `/prior-results` volume/mount。
+启动日志打印由外部单-PVC只读 reader 已核验的 15 条 immutable path/size/SHA（含 v09
+八个 profiler-off JSON、质量/四角/summary/complete 与 v10 marker/diagnostic），随后 H200
+source/CUDA gate 为 39 passed、21 warnings。SP2/SP4 每个位置都重启 server，八个 JSON
+全部通过 b924 validator，所有 available wall count 都等于 200；本地只读复制后 56 个
+核心文件与 PVC 逐文件 SHA manifest 完全一致。complete SHA256 为
+`c246644fa10c2974d08ee76f9173758bfb057570f7769061fd9b27d337636962`，ABBA summary
+SHA256 为 `225e4ca40b70db42af7bafe04408eca49e106292ebae5773f5c0db56061e150f`。
+
+| SP / metric | control mean（CV） | candidate mean（CV） | candidate 性能变化 |
+| --- | ---: | ---: | ---: |
+| SP2 Client FPS | 12.6707（0.008%） | 12.5730（0.177%） | −0.771% |
+| SP2 Scheduler FPS | 12.6818（0.013%） | 12.5842（0.176%） | −0.769% |
+| SP2 chunk wall ms | 1290.753（0.455%） | 1329.663（1.671%） | −3.015% |
+| SP2 DiT wall ms | 756.051（0.085%） | 756.865（0.290%） | −0.108% |
+| SP2 VAE wall ms | 423.862（0.038%） | 423.762（0.126%） | +0.024% |
+| SP4 Client FPS | 14.6640（2.191%） | 15.4117（2.929%） | +5.099% |
+| SP4 Scheduler FPS | 14.6767（2.202%） | 15.4287（2.942%） | +5.124% |
+| SP4 chunk wall ms | 1147.753（3.721%） | 1091.733（4.379%） | +4.881% |
+| SP4 DiT wall ms | 750.840（0.188%） | 713.468（0.873%） | +4.977% |
+| SP4 VAE wall ms | 233.346（0.172%） | 233.462（0.042%） | −0.050% |
+
+SP2 的 control 双点几乎不漂移，candidate 仍稳定回退约 0.77%；这与 DiT stage 仅
+0.108% 的差异不完全一致，提示 scheduler 中未被 stage wall 覆盖的 device/launch/通信
+开销需要 Nsight 归因。SP4 两侧均随位置变慢，Client/Scheduler CV 尚低于 3%，但
+chunk-wall CV 超过 3%，因此 headline 保留噪声警告。不过 ABBA 的两端 candidate 对中间
+control 仍给出约 5% 同向收益，且 DiT wall 同向 +4.977%，不是单纯 client write 偏差。
+
+cache snapshot 显示 SP2 position 1 前为空，结束后稳定为 inductor 59 files / triton
+130 files；SP4 position 1 后扩展为 127 / 154，之后三个位置的 count、size、listing SHA
+完全不变。首个 candidate 承担每个 SP 的 cache 建立却仍是 SP4 最快位置，cache 不能解释
+SP4 收益；时间漂移仍需在结论中保留。
+
+按 client steady window 切片的 1 Hz telemetry 显示 SP4 四位置平均 SM clock 都在
+1974.0–1975.4 MHz。candidate position 1/4 的平均功耗为 453.5/439.1 W，control
+position 2/3 为 437.2/426.9 W；温度约 59–60°C。没有 candidate 时钟优势，功耗升高与
+DiT 更快一致。SP2 candidate/control 时钟都约 1938–1939 MHz；candidate 平均 GPU util/
+功耗略低（约 87.0–88.3% / 626.5–627.9 W）于 control（88.6–89.0% /
+630.4–631.9 W），与没有 device-stage 收益的方向一致。
 
 ### Provenance
 
 | 字段 | control | candidate |
 | --- | --- | --- |
-| SGLang 临时测量 commit | `59e99d87a57ef581d5b23168cdb85d19d549ee0d` | 同左 |
+| SGLang 临时测量 commit | `8ba6408133618ad4ebf8eba04a51803e060ca66b` | 同左 |
 | minWM commit | `2efc6485f65e8fcab506665efde79bc41406385e` | 同左 |
 | container image | `…/leap-world/minwm-training@sha256:bedc07ea…53ef5f2a` | 同左 |
 | GPU active / allocated | SP2: 2/8；SP4: 4/8，NVIDIA H200 | 同左 |
@@ -366,10 +423,10 @@ metadata listing SHA。SP2/SP4 都必须由这组 ABBA 的各侧双重复与 CV 
 
 | SP | lane | Client FPS | Scheduler FPS | chunk wall | DiT wall | VAE wall | CV | 状态 |
 | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
-| 2 | 3 GEMM control | — | — | — | — | — | — | 未执行 |
-| 2 | 1 GEMM candidate | — | — | — | — | — | — | 未执行 |
-| 4 | 3 GEMM control | — | — | — | — | — | — | 未执行 |
-| 4 | 1 GEMM candidate | — | — | — | — | — | — | 未执行 |
+| 2 | 3 GEMM control | 12.6707 | 12.6818 | 1290.753 ms | 756.051 ms | 423.862 ms | 必选项 ≤0.085% | v11 headline |
+| 2 | 1 GEMM candidate | 12.5730 | 12.5842 | 1329.663 ms | 756.865 ms | 423.762 ms | 必选项 ≤0.290% | v11 headline，Client −0.771% |
+| 4 | 3 GEMM control | 14.6640 | 14.6767 | 1147.753 ms | 750.840 ms | 233.346 ms | 必选项 ≤2.202%；chunk 3.721% | v11 headline，噪声说明必需 |
+| 4 | 1 GEMM candidate | 15.4117 | 15.4287 | 1091.733 ms | 713.468 ms | 233.462 ms | 必选项 ≤2.942%；chunk 4.379% | v11 headline，Client +5.099% |
 
 ### Nsight steady state（20 precondition + 1 discard + >=10）
 
@@ -380,7 +437,10 @@ metadata listing SHA。SP2/SP4 都必须由这组 ABBA 的各侧双重复与 CV 
 | SP4 control | — | — | — | — | — | — | — | — | — | — | — | — | — |
 | SP4 candidate | — | — | — | — | — | — | — | — | — | — | — | — | — |
 
-本表当前全部为“延后”，不是 0：b924 exact-window 缺口关闭前禁止采集正式 Nsight。
+本表当前全部为“待 v12/control 与后续 candidate”，不是 0。control v12 固定临时 runner
+`ad22c2556e3f07fb2862b7e0235c9dd9d6d65839`，其 ancestor 为 canonical
+`d5b25227d4487d113e62c86a0fb572a62d6bcc5b`；只跳过已有 v11 覆盖的 profiler-off，
+不改 d5 的 capture、merge、active mapping 或严格 validator。
 
 空值表示尚未测量，不表示 0。若 SM/Tensor/DRAM 指标不可得，必须保留 S0 的
 `unavailable + reason + evidence`，不能用 nvidia-smi utilization 冒充。
@@ -425,7 +485,11 @@ contract/request postflight、逐帧 SHA 与 frame metric 都写入结果，并�
 完整 SP1、TP2、FP8、SP2/SP4 之前；最终 quality summary 同时包含 preflight plan、实际
 client metadata 与四边证据。
 
-性能与数值是否符合预期尚无真机数据。完成 A/B 后，本节必须逐项解释：
+数值方面比保守预期更好：尽管单 GEMM 允许 BF16 bucket 变化，v09 的 eager/compile
+同模式 control↔candidate、SP1/SP2/SP4 和 replay 都是 bitwise。性能则分叉：SP4 的
+M=214/215 小 GEMM 符合“加宽 N 提高 Tensor Core 占用”的预期，ABBA DiT/端到端都约
++5%；SP2 M=429 没有收益，Client/Scheduler 反而约 −0.77%，与“少 300 launch 必然更快”
+的简化预期不符。当前需要 d5 Nsight 逐项解释：
 
 - GEMM kernel 是否接近理论 3:1；若不是，是否被 compile/cuBLASLt 或 capture 合并；
 - projection CUDA 下降为何没有或有转化为 DiT/chunk wall；
@@ -451,6 +515,11 @@ client metadata 与四边证据。
 8. 真机 probe 纠正了纸面 shape 假设：projection 的 SP1 M 是 patch 后的 858，而不是
    patch 前 latent 位置 3432；SP2 为 429，SP4 为非均匀 215/215/214/214。因此 SP2 才是
    uniform peer-first pack 主归因，SP4 还要区分 varlen pack/A2A。
+9. v10 证明“只读旧 PVC + 新结果 PVC”也会因节点 SELinux label 破坏 setup；v11 完全去掉
+   旧 PVC，只把外部核验的 path/size/SHA 作为不可变常量打印，既保留证据链又不双挂载。
+10. v11 ABBA 证明 v09 的 SP4 +5% 方向可复现，同时推翻 v09 的 SP2 小幅正收益；因此
+    profiler-off headline 改用 v11，Nsight 必须同时解释 SP2 回退和 SP4 收益，不能只挑
+    有利的 SP4。
 
 ## 尝试后放弃或暂缓的方案
 
@@ -542,6 +611,27 @@ PriorityClass、不改变默认优先级，与已先运行的 S3 同优先级；
 `Insufficient nvidia.com/gpu`、`No preemption victims found`，所以 v10 自然 Pending，不抢占
 S3。这个 setup 事件不冒充 workload attempt。
 
+修正版 v10 随后成功创建 Pod，但旧 v09 PVC 与新 v10 PVC 同时挂载时触发 SELinux label
+权限错误，在 clone/setup/test/server/client 前 exit 1。attempt-root marker 与唯一 diagnostic
+的 SHA 分别为 `2729d505ea6cc86fd1a18f78cff0292712541aabae4cd9be59bb6e96a4e941db`
+和 `4b00dc4a4d3fe650ae5a38bcce15bf89988cefeec25f97b13c23c214779baa10`；v10 Job、Pod、
+PVC 和证据均保留。v11 新 PVC 完全移除旧 PVC mount，以 manifest 常量打印外部只读 reader
+核验的 path/size/SHA，避免证据读取改变运行时安全上下文。
+
+v11 Job `minwm-s4-qkv-abba-h200-20260807-11`、Pod
+`minwm-s4-qkv-abba-h200-20260807-11-rctrp` 在固定节点 exit 0，restarts=0、backoffLimit=0；
+八位置 JSON、cache snapshot、telemetry、summary 和 complete 全部保留在新 PVC
+`minwm-s4-qkv-h200-results-20260807-v11`。审计 reader 首版因 PVC source 与 container
+mount 双重 readOnly 无法做 SELinux relabel；改为仅 container mount readOnly 后可读且
+`/results` 不可写，核心树远端/本地 SHA manifest 完全一致。reader Pod 已精确删除，PVC
+未删除；首次中断的 39 MiB 本地 partial copy 也保留但不作证据。
+
+正式 Nsight control v12 使用新 Job/PVC，manifest SHA256 为
+`842514cefb8700b10f0c7a7f5874abbb7fbf90564940b151d3d9601ccb20532f`，runner 固定
+`ad22c2556e3f07fb2862b7e0235c9dd9d6d65839`（包含 canonical d5）。client/server dry-run、
+嵌入 shell、无旧 PVC、默认 priority、固定 hostname、backoff0、8GPU 均通过；当前因
+目标节点已有其他 1/4-GPU 工作而自然 Pending，PVC 尚未绑定/写数据，不抢占、不扩容。
+
 若需要集群止损，只允许删除名称精确匹配本任务 `minwm-s4-qkv-*` 的 Job/Pod 控制对象；
 PVC 和其中的诊断证据必须保留。所有 `kubectl` 读取、dry-run、apply、logs 和 delete 都显式
 使用 `--context codex-minwm-test-phx2`，并在提交前记录 region、NodePool、zone 与
@@ -570,9 +660,11 @@ dict 都有反向加载路径。若 fast lane 启动日志没有出现 `single-g
 - H200 v09 四角：两条同模式 QKV 边 bitwise；两条 eager→compile 边以完全相同幅度失败，
   分类为既有 whole-model compile blocker，只放行 compile-off；
 - layer/latent/video/determinism：v09 SP1/SP2/SP4 与 replay 完整矩阵通过；
-- profiler-off A/B：v09 同序双重复和 CV 已完成；SP2 约 +0.31%，SP4 约 +5.03%，但固定
-  顺序/共享 cache 使整组仍为 exploratory；v10 反序 ABBA 已提交并等待 S3 释放原节点，
-  ABBA 完成前不写 headline；Nsight pin `d5b25227d4`，独立 Job尚未启动；
+- profiler-off A/B：v09 同序仅为 exploratory；v10 因旧 PVC 双挂载 SELinux 权限错误
+  root-invalid；v11 反序 ABBA 八个位置全部完成并成为 headline，SP2 Client −0.771% / DiT
+  wall −0.108%，SP4 Client +5.099% / DiT wall +4.977%，SP4 chunk wall CV 超 3% 已披露；
+- Nsight：control v12 固定 `d5b25227d4` 语义和临时 runner `ad22c2556e`，当前自然
+  Pending；candidate 将在 control 完成后用新 Job/PVC 执行，尚无 device 指标；
 - 6b：等待 6a 证据；
 - 默认开关：保持关闭。
 
