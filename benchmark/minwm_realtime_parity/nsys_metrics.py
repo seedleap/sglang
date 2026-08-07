@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 import sqlite3
-import statistics
-from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from measurement import available, unavailable, validate_measurement
+from measurement import (
+    API_BOUNDARY_ATTRIBUTION_POLICY,
+    available,
+    unavailable,
+    validate_measurement,
+)
 
 _MARKER_PREFIX = "sglang.realtime.chunk"
 _MARKER_RE = re.compile(
@@ -240,8 +244,10 @@ def _stable_window(
         "observed_discard_chunk_indices": observed_discard,
         "normalization_denominator": measured,
         "attribution_policy": (
-            "Events must be fully contained in exactly one measured range; GPU "
-            "samples use timestamps in [start,end); gaps and non-target traces are excluded"
+            "CUDA runtime/API discrete counts use event start timestamps in one "
+            "half-open measured range [start,end); kernel durations/counts require "
+            "full containment; GPU samples use timestamps in [start,end); gaps and "
+            "non-target traces are excluded"
         ),
         "intervals": [
             {
@@ -281,6 +287,20 @@ def _point_membership(timestamp: int, intervals: list[dict[str, Any]]) -> int | 
     return None
 
 
+def _discrete_event_start_attribution(
+    start: int, end: int, intervals: list[dict[str, Any]]
+) -> tuple[int | None, list[int], bool]:
+    """Attribute a discrete event once by start while retaining overlap evidence."""
+    owner = _point_membership(start, intervals)
+    overlap_indices = [
+        index
+        for index, interval in enumerate(intervals)
+        if start < int(interval["end_ns"]) and end > int(interval["start_ns"])
+    ]
+    fully_contained = owner is not None and end <= int(intervals[owner]["end_ns"])
+    return owner, overlap_indices, bool(overlap_indices) and not fully_contained
+
+
 def _window_failure_metrics(window: dict[str, Any]) -> dict[str, Any]:
     evidence = window.get("evidence", "stable window is unavailable")
     missing = unavailable("stable_window_unproven", evidence)
@@ -317,6 +337,30 @@ def _merged_duration(intervals: list[tuple[int, int]]) -> int:
         else:
             merged.append([start, end])
     return sum(end - start for start, end in merged)
+
+
+def _histogram_order_statistic(histogram: dict[float, int], index: int) -> float:
+    remaining = index
+    for value, count in sorted(histogram.items()):
+        if remaining < count:
+            return value
+        remaining -= count
+    raise ValueError(f"histogram index {index} exceeds sample count")
+
+
+def _histogram_median(histogram: dict[float, int], count: int) -> float:
+    upper = _histogram_order_statistic(histogram, count // 2)
+    if count % 2:
+        return upper
+    lower = _histogram_order_statistic(histogram, count // 2 - 1)
+    return (lower + upper) / 2.0
+
+
+def _histogram_percentile(
+    histogram: dict[float, int], count: int, quantile: float
+) -> float:
+    index = max(0, min(count - 1, math.ceil(quantile * count) - 1))
+    return _histogram_order_statistic(histogram, index)
 
 
 def _kernel_metrics(
@@ -529,23 +573,42 @@ def _api_metrics(
         else set()
     )
     selected: list[tuple[int, int | None]] = []
-    boundary = 0
+    boundary_rows: list[dict[str, Any]] = []
     for row in raw:
         name_id, start, end = int(row[0]), int(row[1]), int(row[2])
-        _chunk, crosses = _event_membership(start, end, intervals)
-        if _chunk is not None:
-            process_id = int(row[3]) if len(row) > 3 else None
-            if (
-                process_id is not None
-                and has_global_tid_mapping
-                and not direct_process_column
-            ):
-                process_id &= ~0xFFFFFF
-                if process_id not in known_global_pids:
-                    process_id = None
+        start_chunk, overlap_chunks, crosses = _discrete_event_start_attribution(
+            start, end, intervals
+        )
+        process_id = int(row[3]) if len(row) > 3 else None
+        if (
+            process_id is not None
+            and has_global_tid_mapping
+            and not direct_process_column
+        ):
+            process_id &= ~0xFFFFFF
+            if process_id not in known_global_pids:
+                process_id = None
+        if start_chunk is not None:
             selected.append((name_id, process_id))
-        elif crosses:
-            boundary += 1
+        if crosses:
+            boundary_rows.append(
+                {
+                    "name_id": name_id,
+                    "start_ns": start,
+                    "end_ns": end,
+                    "duration_ns": end - start,
+                    "process_id": process_id,
+                    "start_chunk_index": (
+                        int(intervals[start_chunk]["chunk_index"])
+                        if start_chunk is not None
+                        else None
+                    ),
+                    "overlap_chunk_indices": [
+                        int(intervals[index]["chunk_index"]) for index in overlap_chunks
+                    ],
+                    "included_by_start": start_chunk is not None,
+                }
+            )
     selected_process_ids = sorted(
         {process_id for _name_id, process_id in selected if process_id is not None}
     )
@@ -562,25 +625,38 @@ def _api_metrics(
             "rank_capture_coverage_unconfirmed",
             f"{table} columns={sorted(columns)}; stable-window device_ids={captured_device_ids}",
         )
-    if boundary:
-        evidence = (
-            f"{table}: captured_raw_total={len(raw)}; selected_raw_total={len(selected)}; "
-            f"boundary_overlap_count={boundary}; strict containment required"
-        )
-        missing = unavailable("event_crosses_stable_window_boundary", evidence)
-        return {"cuda_api_count": missing, "kernel_launch_api_count": missing}, coverage
-
     name_ids = [name_id for name_id, _process_id in selected]
-    names = _resolve_string_ids(connection, set(name_ids), tables)
+    names = _resolve_string_ids(connection, {int(row[0]) for row in raw}, tables)
     launch_pattern = re.compile(
         r"(?:cu|cuda).*(?:launch|graphlaunch).*(?:kernel|graph)?", re.I
     )
-    launch_count = sum(
-        bool(launch_pattern.search(names.get(name_id, ""))) for name_id in name_ids
-    )
     denominator = len(intervals)
 
-    def normalized_count(raw_total: int, source: str) -> dict[str, Any]:
+    def normalized_count(
+        selected_name_ids: list[int],
+        captured_name_ids: list[int],
+        selected_boundary_rows: list[dict[str, Any]],
+        source: str,
+    ) -> dict[str, Any]:
+        raw_total = len(selected_name_ids)
+        captured_raw_total = len(captured_name_ids)
+        boundary_included = sum(
+            bool(row["included_by_start"]) for row in selected_boundary_rows
+        )
+        boundary_excluded = len(selected_boundary_rows) - boundary_included
+        boundary_examples = [
+            {
+                "raw_api_name": names.get(int(row["name_id"]), ""),
+                "process_global_pid": row["process_id"],
+                "start_ns": row["start_ns"],
+                "end_ns": row["end_ns"],
+                "duration_ns": row["duration_ns"],
+                "owner_range_chunk_index": row["start_chunk_index"],
+                "overlap_chunk_indices": row["overlap_chunk_indices"],
+                "included_by_start": row["included_by_start"],
+            }
+            for row in selected_boundary_rows[:20]
+        ]
         per_rank = (
             available(
                 raw_total / denominator / active_gpu_count,
@@ -593,22 +669,47 @@ def _api_metrics(
         return available(
             {
                 "raw_total": raw_total,
-                "captured_raw_total": len(raw),
-                "excluded_raw_total": len(raw) - len(selected),
-                "boundary_overlap_count": 0,
+                "captured_raw_total": captured_raw_total,
+                "excluded_raw_total": captured_raw_total - raw_total,
+                "boundary_spanning_count": len(selected_boundary_rows),
+                "boundary_included_by_start_count": boundary_included,
+                "boundary_excluded_by_start_count": boundary_excluded,
+                "boundary_event_examples": boundary_examples,
+                "boundary_event_examples_truncated": len(selected_boundary_rows) > 20,
+                "boundary_attribution_policy": API_BOUNDARY_ATTRIBUTION_POLICY,
                 "total_per_chunk": raw_total / denominator,
                 "per_rank_per_chunk": per_rank,
                 "stable_chunk_denominator": denominator,
                 "capture_scope": _CAPTURE_SCOPE,
             },
             "count",
-            source,
+            f"{source}; {API_BOUNDARY_ATTRIBUTION_POLICY}",
         )
 
     return {
-        "cuda_api_count": normalized_count(len(name_ids), table),
+        "cuda_api_count": normalized_count(
+            name_ids,
+            [int(row[0]) for row in raw],
+            boundary_rows,
+            table,
+        ),
         "kernel_launch_api_count": normalized_count(
-            launch_count, f"{table} names matching CUDA kernel/graph launch APIs"
+            [
+                name_id
+                for name_id in name_ids
+                if launch_pattern.search(names.get(name_id, ""))
+            ],
+            [
+                int(row[0])
+                for row in raw
+                if launch_pattern.search(names.get(int(row[0]), ""))
+            ],
+            [
+                row
+                for row in boundary_rows
+                if launch_pattern.search(names.get(int(row["name_id"]), ""))
+            ],
+            f"{table} names matching CUDA kernel/graph launch APIs",
         ),
     }, coverage
 
@@ -730,20 +831,9 @@ def _gpu_metrics(
         metric_id: next(iter(names)) for metric_id, names in metric_names_by_id.items()
     }
 
-    captured: dict[int, list[tuple[int, float, int]]] = {}
-    selected: dict[int, list[tuple[int, float, int, int]]] = {}
-    for type_id, metric_id, value, timestamp in connection.execute(
-        f"SELECT typeId, metricId, value, {timestamp_column} FROM GPU_METRICS"
-    ):
-        metric_id = int(metric_id)
-        sample = (int(type_id), float(value), int(timestamp))
-        captured.setdefault(metric_id, []).append(sample)
-        chunk = _point_membership(sample[2], intervals)
-        if chunk is not None:
-            selected.setdefault(metric_id, []).append((*sample, chunk))
-
     collected_type_ids = sorted(
-        {type_id for samples in captured.values() for type_id, _value, _time in samples}
+        int(row[0])
+        for row in connection.execute("SELECT DISTINCT typeId FROM GPU_METRICS")
     )
     collected_type_ids_by_pw_gpu_id: dict[int, list[int]] = {}
     for type_id in collected_type_ids:
@@ -840,39 +930,109 @@ def _gpu_metrics(
             }
         )
 
-    def select(label: str, predicate: Callable[[str], bool]) -> dict[str, Any]:
-        candidates = sorted(
-            metric_id for metric_id, name in id_to_name.items() if predicate(name)
+    selectors: dict[str, list[int]] = {
+        "sm_active": sorted(
+            metric_id
+            for metric_id, name in id_to_name.items()
+            if _is_sm_active_metric(name)
+        ),
+        "tensor_active": sorted(
+            metric_id
+            for metric_id, name in id_to_name.items()
+            if _gpu_metric_base_name(name) == "tensor active"
+        ),
+        "dram": sorted(
+            metric_id
+            for metric_id, name in id_to_name.items()
+            if "dram" in name.casefold()
+            and any(
+                marker in name.casefold()
+                for marker in ("throughput", "bandwidth", "active")
+            )
+        ),
+    }
+    selected_metric_ids = sorted(
+        {candidates[0] for candidates in selectors.values() if candidates}
+    )
+    chunk_keys = [str(interval["chunk_index"]) for interval in intervals]
+    stats: dict[int, dict[str, Any]] = {
+        metric_id: {
+            "all_count": 0,
+            "active_captured_count": 0,
+            "stable_count": 0,
+            "stable_sum": 0.0,
+            "stable_min": None,
+            "stable_max": None,
+            "nonzero_count": 0,
+            "histogram": {},
+            "per_chunk": {key: 0 for key in chunk_keys},
+            "per_type_chunk": {
+                str(type_id): {key: 0 for key in chunk_keys}
+                for type_id in active_type_ids
+            },
+            "per_type_sum": {str(type_id): 0.0 for type_id in active_type_ids},
+            "per_type_count": {str(type_id): 0 for type_id in active_type_ids},
+        }
+        for metric_id in selected_metric_ids
+    }
+    if selected_metric_ids:
+        placeholders = ",".join("?" for _ in selected_metric_ids)
+        query = (
+            f"SELECT typeId, metricId, value, {timestamp_column} FROM GPU_METRICS "
+            f"WHERE metricId IN ({placeholders})"
         )
+        for type_id, metric_id, raw_value, timestamp in connection.execute(
+            query, tuple(selected_metric_ids)
+        ):
+            type_id = int(type_id)
+            metric_id = int(metric_id)
+            value = float(raw_value)
+            metric_stats = stats[metric_id]
+            metric_stats["all_count"] += 1
+            if type_id not in active_type_id_set:
+                continue
+            metric_stats["active_captured_count"] += 1
+            chunk = _point_membership(int(timestamp), intervals)
+            if chunk is None:
+                continue
+            type_key = str(type_id)
+            chunk_key = chunk_keys[chunk]
+            metric_stats["stable_count"] += 1
+            metric_stats["stable_sum"] += value
+            metric_stats["stable_min"] = (
+                value
+                if metric_stats["stable_min"] is None
+                else min(metric_stats["stable_min"], value)
+            )
+            metric_stats["stable_max"] = (
+                value
+                if metric_stats["stable_max"] is None
+                else max(metric_stats["stable_max"], value)
+            )
+            metric_stats["nonzero_count"] += int(value != 0)
+            histogram = metric_stats["histogram"]
+            histogram[value] = histogram.get(value, 0) + 1
+            metric_stats["per_chunk"][chunk_key] += 1
+            metric_stats["per_type_chunk"][type_key][chunk_key] += 1
+            metric_stats["per_type_sum"][type_key] += value
+            metric_stats["per_type_count"][type_key] += 1
+
+    def select(label: str) -> dict[str, Any]:
+        candidates = selectors[label]
         if not candidates:
             return unavailable(
                 "metric_not_exposed",
                 _metric_evidence(sorted(id_to_name.values()), external_evidence),
             )
         metric_id = candidates[0]
-        all_captured_samples = captured.get(metric_id, [])
-        captured_samples = [
-            sample for sample in all_captured_samples if sample[0] in active_type_id_set
-        ]
-        samples = [
-            sample
-            for sample in selected.get(metric_id, [])
-            if sample[0] in active_type_id_set
-        ]
-        per_chunk_sample_count = {
-            str(interval["chunk_index"]): sum(sample[3] == chunk for sample in samples)
-            for chunk, interval in enumerate(intervals)
-        }
-        observed_type_ids = sorted({sample[0] for sample in samples})
-        per_type_per_chunk_sample_count = {
-            str(type_id): {
-                str(interval["chunk_index"]): sum(
-                    sample[0] == type_id and sample[3] == chunk for sample in samples
-                )
-                for chunk, interval in enumerate(intervals)
-            }
-            for type_id in observed_type_ids
-        }
+        metric_stats = stats[metric_id]
+        per_chunk_sample_count = metric_stats["per_chunk"]
+        per_type_per_chunk_sample_count = metric_stats["per_type_chunk"]
+        observed_type_ids = sorted(
+            int(type_id)
+            for type_id, count in metric_stats["per_type_count"].items()
+            if count
+        )
         missing_type_chunks = {
             type_id: [
                 chunk_index for chunk_index, count in chunk_counts.items() if count == 0
@@ -889,23 +1049,21 @@ def _gpu_metrics(
                 f"missing_type_chunks={missing_type_chunks}; "
                 f"per_chunk_sample_count={per_chunk_sample_count}",
             )
-        per_type: dict[str, list[float]] = {}
-        for type_id, value, _timestamp, _chunk in samples:
-            per_type.setdefault(str(type_id), []).append(value)
         per_type_mean = {
-            type_id: sum(values) / len(values)
-            for type_id, values in sorted(per_type.items())
+            type_id: metric_stats["per_type_sum"][type_id] / count
+            for type_id, count in sorted(metric_stats["per_type_count"].items())
+            if count
         }
-        all_values = [value for _type_id, value, _timestamp, _chunk in samples]
-        if label == "sm_active" and all(value == 0 for value in all_values):
+        sample_count = metric_stats["stable_count"]
+        if label == "sm_active" and metric_stats["nonzero_count"] == 0:
             return unavailable(
                 "gpu_metric_all_zero_under_kernel_load",
                 f"metric={id_to_name[metric_id]}; active_cuda_device_ids="
                 f"{active_cuda_device_ids}; active_type_ids={active_type_ids}; "
-                f"stable_sample_count={len(all_values)}; nonzero_sample_count=0; "
+                f"stable_sample_count={sample_count}; nonzero_sample_count=0; "
                 "CUDA kernel rows exist on every active device",
             )
-        captured_count = len(captured_samples)
+        captured_count = metric_stats["active_captured_count"]
         per_device_per_chunk_sample_count = {
             str(type_id_to_cuda_device[int(type_id)]): chunk_counts
             for type_id, chunk_counts in per_type_per_chunk_sample_count.items()
@@ -918,18 +1076,21 @@ def _gpu_metrics(
             {
                 "metric_name": id_to_name[metric_id],
                 "raw_metric_name": id_to_name[metric_id],
-                "mean": sum(all_values) / len(all_values),
-                "min": min(all_values),
-                "p50": statistics.median(all_values),
-                "max": max(all_values),
-                "nonzero_sample_count": sum(value != 0 for value in all_values),
-                "samples": len(all_values),
-                "sample_count": len(all_values),
+                "mean": metric_stats["stable_sum"] / sample_count,
+                "min": metric_stats["stable_min"],
+                "p50": _histogram_median(metric_stats["histogram"], sample_count),
+                "p95": _histogram_percentile(
+                    metric_stats["histogram"], sample_count, 0.95
+                ),
+                "max": metric_stats["stable_max"],
+                "nonzero_sample_count": metric_stats["nonzero_count"],
+                "samples": sample_count,
+                "sample_count": sample_count,
                 "captured_sample_count": captured_count,
-                "excluded_sample_count": captured_count - len(all_values),
-                "all_collected_sample_count": len(all_captured_samples),
+                "excluded_sample_count": captured_count - sample_count,
+                "all_collected_sample_count": metric_stats["all_count"],
                 "excluded_inactive_target_sample_count": (
-                    len(all_captured_samples) - captured_count
+                    metric_stats["all_count"] - captured_count
                 ),
                 "per_chunk_sample_count": per_chunk_sample_count,
                 "per_type_per_chunk_sample_count": per_type_per_chunk_sample_count,
@@ -956,8 +1117,14 @@ def _gpu_metrics(
                 "per_type_mean": per_type_mean,
                 "per_device_mean": per_device_mean,
                 "per_type_sample_count": {
-                    type_id: len(values) for type_id, values in sorted(per_type.items())
+                    type_id: count
+                    for type_id, count in sorted(metric_stats["per_type_count"].items())
+                    if count
                 },
+                "aggregation_mode": (
+                    "streaming selected metricId rows into metric×type×chunk "
+                    "counters and a bounded native-value histogram"
+                ),
                 "exposed_metric_names": sorted(id_to_name.values()),
                 "capture_scope": _CAPTURE_SCOPE,
                 "timestamp_column": timestamp_column,
@@ -967,22 +1134,9 @@ def _gpu_metrics(
         )
 
     return {
-        "sm_active": select(
-            "sm_active",
-            _is_sm_active_metric,
-        ),
-        "tensor_active": select(
-            "tensor_active",
-            lambda name: _gpu_metric_base_name(name) == "tensor active",
-        ),
-        "dram": select(
-            "dram",
-            lambda name: "dram" in name.casefold()
-            and any(
-                marker in name.casefold()
-                for marker in ("throughput", "bandwidth", "active")
-            ),
-        ),
+        "sm_active": select("sm_active"),
+        "tensor_active": select("tensor_active"),
+        "dram": select("dram"),
     }
 
 
