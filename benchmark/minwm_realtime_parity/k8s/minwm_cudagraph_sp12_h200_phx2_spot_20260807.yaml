@@ -17,20 +17,20 @@ spec:
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: minwm-cudagraph-sp12-h200-phx2-20260807-15
+  name: minwm-cudagraph-sp12-h200-phx2-20260807-16
   namespace: default
   labels:
-    app.kubernetes.io/name: minwm-cudagraph-sp12-h200-phx2-20260807-15
+    app.kubernetes.io/name: minwm-cudagraph-sp12-h200-phx2-20260807-16
     seedleap.ai/owner: chenshengdong
     seedleap.ai/purpose: minwm-cuda-graph-perf
     seedleap.ai/task: minwm-realtime-parity
-    seedleap.ai/run-id: minwm-cudagraph-sp12-h200-phx2-20260807-15
+    seedleap.ai/run-id: minwm-cudagraph-sp12-h200-phx2-20260807-16
   annotations:
     seedleap.ai/capacity-type: spot
     seedleap.ai/repo: seedleap/sglang
     seedleap.ai/branch: codex/minwm-cuda-graph
-    seedleap.ai/commit: "20be9d918ad23acedea8560b8b8023421be84d47"
-    seedleap.ai/sglang-git-ref: "20be9d918ad23acedea8560b8b8023421be84d47"
+    seedleap.ai/commit: "096c60521c6a3a56d6c18e373c00245cebf57979"
+    seedleap.ai/sglang-git-ref: "096c60521c6a3a56d6c18e373c00245cebf57979"
     seedleap.ai/minwm-git-ref: "2efc6485f65e8fcab506665efde79bc41406385e"
     seedleap.ai/checkpoint-version-id: "wduScksw2f3yPErnG9lBioOuE2AToyAP"
     seedleap.ai/ttl: 24h
@@ -41,15 +41,15 @@ spec:
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: minwm-cudagraph-sp12-h200-phx2-20260807-15
+        app.kubernetes.io/name: minwm-cudagraph-sp12-h200-phx2-20260807-16
         seedleap.ai/owner: chenshengdong
         seedleap.ai/purpose: minwm-cuda-graph-perf
         seedleap.ai/task: minwm-realtime-parity
-        seedleap.ai/run-id: minwm-cudagraph-sp12-h200-phx2-20260807-15
+        seedleap.ai/run-id: minwm-cudagraph-sp12-h200-phx2-20260807-16
       annotations:
         seedleap.ai/repo: seedleap/sglang
         seedleap.ai/branch: codex/minwm-cuda-graph
-        seedleap.ai/commit: "20be9d918ad23acedea8560b8b8023421be84d47"
+        seedleap.ai/commit: "096c60521c6a3a56d6c18e373c00245cebf57979"
     spec:
       restartPolicy: Never
       terminationGracePeriodSeconds: 60
@@ -75,13 +75,13 @@ spec:
                   key: token
                   optional: true
             - name: SGLANG_GIT_REF
-              value: "20be9d918ad23acedea8560b8b8023421be84d47"
+              value: "096c60521c6a3a56d6c18e373c00245cebf57979"
             - name: MINWM_GIT_REF
               value: "2efc6485f65e8fcab506665efde79bc41406385e"
             - name: MINWM_BENCHMARK_MODE
               value: cudagraphmatrix
             - name: MINWM_RUN_ID
-              value: minwm-cudagraph-sp12-h200-phx2-20260807-15
+              value: minwm-cudagraph-sp12-h200-phx2-20260807-16
             - name: MINWM_CASES_PATH
               value: /workspace/sglang/benchmark/minwm_realtime_parity/cases.json
             - name: MINWM_CUDA_GRAPH_CASE
