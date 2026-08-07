@@ -210,6 +210,20 @@ Black 首次指出 comparator 与 measurement test 需格式化；运行 Black �
 没有 `set -e`，所以后续 commit 仍被执行。该 commit 尚未 push；立即删除空格、重新
 执行 cached diff check，并 amend 后才允许作为 Job source。这条失败没有从记录中省略。
 
+补充稳定性/布局回归：
+
+```bash
+TORCHDYNAMO_DISABLE=1 PYTHONPATH=python python3.11 -m pytest -q \
+  python/sglang/multimodal_gen/test/unit/realtime/test_minwm_realtime.py \
+  -k 'nonuniform_sp8 or sequence_shard_frame_indices'
+python3 -m pytest -q \
+  benchmark/minwm_realtime_parity/test_prompt_switch_harness.py
+```
+
+实际分别为 `2 passed, 113 deselected` 和 `2 passed`，覆盖非均匀 SP8 output shard、
+mid-frame sequence shard boundary 与 prompt-switch harness；这是 CPU/局部回归，不冒充
+704p GPU headline 或 200-chunk scene-cut 真机结果。
+
 ## 待执行真机矩阵与当前门禁
 
 1. 提交安全代码 commit 并 push；Job 只能 checkout immutable SHA。
@@ -284,3 +298,37 @@ skip-profiler-off、result root、trace-sync 和 session-label 控制都必须�
 `git rev-parse 1e9c11322f` 发现真实 SHA 是
 `1e9c11322feb27502a45ec308f3bd30d6d7dc4f8`，立即修正 manifest 三处 pin。错误 SHA
 从未提交到集群，也没有产生 Job/PVC；保留这条记录，后续仍需 `git ls-remote` 再校验。
+
+## P0 ABBA 运行中结果（2026-08-07）
+
+同 Pod、同 node 的 SP2 `control1,candidate1,candidate2,control2` 已完成；Pod restart=0，
+每臂均是 20 warmup + 200 measured，且 220 个 raw RGB chunk SHA-256 map 四臂完全
+一致。control 的 trace 审计均为 `cuda_timing_status=available`、440 个匹配事件；candidate
+均为 `cuda_timing_status=disabled`、440 个匹配事件，wall timing 仍保留。因此本轮 BF16
+bitwise 和“可观测性没有静默丢失”两项通过。
+
+| SP2 指标 | control1 | control2 | candidate1 | candidate2 | control mean | candidate mean | candidate/control |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Client FPS | 12.6904 | 12.5208 | 12.5787 | 12.9868 | 12.6056 | 12.7827 | +1.41% |
+| Scheduler FPS | 12.7037 | 12.5338 | 12.5921 | 13.0011 | 12.6187 | 12.7966 | +1.41% |
+| scheduler chunk wall (ms) | 1330.29 | 1329.89 | 1327.93 | 1262.92 | 1330.09 | 1295.43 | -2.61% |
+| DiT wall (ms) | 744.75 | 747.06 | 728.99 | 725.12 | 745.90 | 727.06 | -2.53% |
+| VAE wall (ms) | 419.95 | 420.34 | 435.61 | 436.81 | 420.14 | 436.21 | +3.82% |
+
+Client/Scheduler/DiT/VAE 两次重复 CV 均 <=3%；但 candidate chunk wall CV=3.55%，超过
+统一默认门槛。检查发现 Job pin 的旧版 `compare_trace_sync_abba.py` 只把 Client、Scheduler、
+DiT、VAE 纳入 `cv_pass`，错误漏掉了同样要求报告的 chunk wall。已新增失败合同测试并将
+`METRICS` 五项全部纳入 CV 门；修复后本地测量工具回归为 `48 passed`，Black/Ruff/
+`git diff --check`/shell syntax 均通过。由于运行中 Job checkout 是 immutable SHA，没有
+热改 Pod；最终将用修正版离线重验完整产物，并把 SP2 当前状态视为 **no-go / 需追加重复**，
+不采信旧 Job 可能生成的绿色 `go`。
+
+显存逐秒采样为：control1 peak 97694 MiB、tail-middle 0；candidate1 97686/0；candidate2
+97688/0；control2 97686/+262.8 MiB（均为 active ranks aggregate）。最后一个非零 proxy
+尚需检查原始时间序列，当前不写成“无增长”。
+
+运行中还发生两条不影响 Job 的本地只读命令失败：一次把 context 名误写成 namespace，
+API 返回 `namespaces "minwm-test-phx2" not found`，随后从 manifest 确认 namespace 是
+`default`；一次尝试用本机 GNU `timeout` 做有界轮询，macOS 环境没有该命令，后续改用
+工具层有界 wait。两者均未对 Pod/PVC/Job 产生写操作。SP4 control1 已在同一 Pod/node
+启动；Nsight Job 仍未提交，避免与 profiler-off headline 抢占资源。

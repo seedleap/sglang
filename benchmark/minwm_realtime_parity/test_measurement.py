@@ -191,6 +191,35 @@ def test_trace_sync_abba_summary_requires_bitwise_and_no_fps_regression() -> Non
     assert summary["lanes"]["sp4"]["payload_bitwise"]["passes"] is False
 
 
+def test_trace_sync_abba_summary_rejects_chunk_wall_cv_above_three_percent() -> None:
+    records = {}
+    for degree in (2, 4):
+        records[degree] = {
+            arm: [
+                _trace_sync_record(
+                    run_id=f"sp{degree}-{arm}-{repeat}",
+                    gpu_count=degree,
+                    client_fps=16.0,
+                    scheduler_fps=16.1,
+                    trace_sync_cuda=1 if arm == "control" else 0,
+                )
+                for repeat in (1, 2)
+            ]
+            for arm in ("control", "candidate")
+        }
+
+    records[2]["candidate"][0]["metrics"]["profiler_off"]["scheduler_chunk_wall_ms"] = (
+        _latency(900.0, 200)
+    )
+    records[2]["candidate"][1]["metrics"]["profiler_off"]["scheduler_chunk_wall_ms"] = (
+        _latency(1100.0, 200)
+    )
+
+    summary = build_trace_sync_summary(records)
+    assert summary["acceptance"]["go"] is False
+    assert summary["lanes"]["sp2"]["acceptance"]["cv_le_3_percent"] is False
+
+
 def _machine_schema_validator() -> Draft202012Validator:
     schema_path = Path(__file__).with_name("measurement_schema.json")
     schema = json.loads(schema_path.read_text(encoding="utf-8"))

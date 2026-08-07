@@ -142,14 +142,7 @@ def build_trace_sync_summary(
         )
         arm_summaries = {arm: _arm_summary(arms[arm]) for arm in ARMS}
         cv_pass = all(
-            arm_summaries[arm][name]["cv"] <= 0.03
-            for arm in ARMS
-            for name in (
-                "client_fps",
-                "scheduler_fps",
-                "dit_wall_ms",
-                "vae_wall_ms",
-            )
+            arm_summaries[arm][name]["cv"] <= 0.03 for arm in ARMS for name in METRICS
         )
         client_no_regression = (
             arm_summaries["candidate"]["client_fps"]["mean"]
