@@ -34,7 +34,7 @@ metadata:
     seedleap.ai/checkpoint-version-id: "wduScksw2f3yPErnG9lBioOuE2AToyAP"
     seedleap.ai/resource-isolation: full 8-GPU H200 node request
 spec:
-  backoffLimit: 2
+  backoffLimit: 0
   activeDeadlineSeconds: 14400
   template:
     metadata:
