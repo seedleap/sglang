@@ -369,12 +369,19 @@
               "properties": {
                 "value": {
                   "type": "object",
-                  "required": ["raw_metric_name", "sample_count", "captured_sample_count", "excluded_sample_count", "per_chunk_sample_count", "per_type_per_chunk_sample_count", "observed_type_ids", "type_id_coverage_semantics", "exposed_metric_names", "capture_scope", "timestamp_column"],
+                  "required": ["raw_metric_name", "mean", "min", "p50", "max", "nonzero_sample_count", "sample_count", "captured_sample_count", "excluded_sample_count", "all_collected_sample_count", "excluded_inactive_target_sample_count", "per_chunk_sample_count", "per_type_per_chunk_sample_count", "per_device_per_chunk_sample_count", "observed_type_ids", "active_cuda_device_ids", "active_pw_gpu_ids", "collected_type_ids", "collected_target_count", "active_target_count", "allocated_target_count", "target_mapping", "gpu_id_extraction", "type_id_coverage_semantics", "exposed_metric_names", "capture_scope", "timestamp_column"],
                   "properties": {
                     "raw_metric_name": {"type": "string", "minLength": 1},
+                    "mean": {"type": "number"},
+                    "min": {"type": "number"},
+                    "p50": {"type": "number"},
+                    "max": {"type": "number"},
+                    "nonzero_sample_count": {"type": "integer", "minimum": 0},
                     "sample_count": {"type": "integer", "minimum": 1},
                     "captured_sample_count": {"type": "integer", "minimum": 1},
                     "excluded_sample_count": {"type": "integer", "minimum": 0},
+                    "all_collected_sample_count": {"type": "integer", "minimum": 1},
+                    "excluded_inactive_target_sample_count": {"type": "integer", "minimum": 0},
                     "per_chunk_sample_count": {
                       "type": "object",
                       "minProperties": 10,
@@ -389,7 +396,40 @@
                         "additionalProperties": {"type": "integer", "minimum": 1}
                       }
                     },
+                    "per_device_per_chunk_sample_count": {
+                      "type": "object",
+                      "minProperties": 1,
+                      "additionalProperties": {
+                        "type": "object",
+                        "minProperties": 10,
+                        "additionalProperties": {"type": "integer", "minimum": 1}
+                      }
+                    },
                     "observed_type_ids": {"type": "array", "items": {"type": "integer"}},
+                    "active_cuda_device_ids": {"type": "array", "items": {"type": "integer", "minimum": 0}},
+                    "active_pw_gpu_ids": {"type": "array", "items": {"type": "integer", "minimum": 0}},
+                    "collected_type_ids": {"type": "array", "items": {"type": "integer"}},
+                    "collected_target_count": {"type": "integer", "minimum": 1},
+                    "active_target_count": {"type": "integer", "minimum": 1},
+                    "allocated_target_count": {"type": "integer", "minimum": 1},
+                    "target_mapping": {
+                      "type": "array",
+                      "minItems": 1,
+                      "items": {
+                        "type": "object",
+                        "required": ["type_id", "pw_gpu_id", "cuda_device_id", "bus_location", "uuid", "gpu_name", "active"],
+                        "properties": {
+                          "type_id": {"type": "integer"},
+                          "pw_gpu_id": {"type": "integer", "minimum": 0},
+                          "cuda_device_id": {"type": "integer", "minimum": 0},
+                          "bus_location": {"type": "string"},
+                          "uuid": {"type": "string"},
+                          "gpu_name": {"type": "string"},
+                          "active": {"type": "boolean"}
+                        }
+                      }
+                    },
+                    "gpu_id_extraction": {"type": "string", "minLength": 1},
                     "type_id_coverage_semantics": {"type": "string", "minLength": 1},
                     "capture_scope": {"const": "union of exact measured outer chunk NVTX ranges"},
                     "timestamp_column": {"type": "string", "minLength": 1},

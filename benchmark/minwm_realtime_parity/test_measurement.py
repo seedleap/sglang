@@ -35,7 +35,7 @@ from measurement_tool import (  # noqa: E402
     load_aggregate_records,
     require_complete_stable_nsys,
 )
-from nsys_metrics import merge_nsys_metrics  # noqa: E402
+from nsys_metrics import _is_sm_active_metric, merge_nsys_metrics  # noqa: E402
 
 
 def _latency(value: float, count: int) -> dict:
@@ -53,7 +53,25 @@ def _latency(value: float, count: int) -> dict:
     )
 
 
-def _record(mode: str = "profiler_off", run_id: str = "run-1") -> dict:
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("SM Active", True),
+        ("SMs Active [Throughput %]", True),
+        ("Tensor Active [Throughput %]", False),
+        ("SM Issue [Throughput %]", False),
+        ("SM Clock Frequency [MHz]", False),
+        ("Unallocated Warps in Active SMs [Throughput %]", False),
+        ("Pixel Warps in Flight [Throughput %]", False),
+    ],
+)
+def test_sm_active_metric_aliases_are_controlled(name: str, expected: bool) -> None:
+    assert _is_sm_active_metric(name) is expected
+
+
+def _record(
+    mode: str = "profiler_off", run_id: str = "run-1", gpu_count: int = 2
+) -> dict:
     measured_chunks = 200 if mode == "profiler_off" else 10
     off_metrics = {
         "client_fps": available(16.0, "frames_per_second", "test fixture"),
@@ -65,15 +83,15 @@ def _record(mode: str = "profiler_off", run_id: str = "run-1") -> dict:
     return build_measurement(
         mode=mode,
         run_id=run_id,
-        profile_name="bf16-fast-sp2",
+        profile_name=f"bf16-fast-sp{gpu_count}",
         timestamp_utc="2026-08-07T00:00:00+00:00",
         sglang_commit="a" * 40,
         minwm_commit=available("b" * 40, "git_commit", "fixture"),
         container_image=available("image@sha256:123", "image_reference", "fixture"),
         gpu_model=available("NVIDIA H200", "model_name", "fixture"),
-        gpu_count=2,
+        gpu_count=gpu_count,
         allocated_gpu_count=8,
-        sp_degree=2,
+        sp_degree=gpu_count,
         checkpoint_id="global_step_003200/ema_student/model.pt",
         checkpoint_step=3200,
         width=1248,
@@ -287,6 +305,10 @@ def _create_nsys_fixture(
     include_boundary_event: bool = False,
     missing_kernel_device: bool = False,
     missing_gpu_type_chunk: bool = False,
+    active_cuda_devices: tuple[int, ...] = (0, 1),
+    pw_to_cuda: dict[int, int] | None = None,
+    collected_pw_gpu_ids: tuple[int, ...] | None = None,
+    all_zero_sm: bool = False,
 ) -> None:
     connection = sqlite3.connect(path)
     runtime_process_column = ", globalTid INTEGER" if include_process_ids else ""
@@ -300,11 +322,18 @@ def _create_nsys_fixture(
         INSERT INTO StringIds VALUES (2, 'cudaMemcpyAsync_v3020');
         """)
     if include_process_ids:
-        connection.executescript("""
-            CREATE TABLE PROCESSES (globalPid INTEGER, pid INTEGER, name TEXT);
-            INSERT INTO PROCESSES VALUES (1677721600, 100, 'rank-0');
-            INSERT INTO PROCESSES VALUES (3355443200, 200, 'rank-1');
-            """)
+        connection.execute(
+            "CREATE TABLE PROCESSES (globalPid INTEGER, pid INTEGER, name TEXT)"
+        )
+        connection.executemany(
+            "INSERT INTO PROCESSES VALUES (?, ?, ?)",
+            [
+                (pid << 24, pid, f"rank-{rank}")
+                for rank, pid in enumerate(
+                    100 * (device + 1) for device in active_cuda_devices
+                )
+            ],
+        )
 
     def marker(
         trace_id: str,
@@ -354,20 +383,41 @@ def _create_nsys_fixture(
     kernel_rows = []
     for chunk in range(1, 11):
         start = chunk * 100_000
-        runtime_rows.extend(
-            [
-                (1, start + 1_000, start + 2_000, 100),
-                (2, start + 3_000, start + 4_000, 200),
-            ]
+        for device in active_cuda_devices:
+            pid = 100 * (device + 1)
+            runtime_rows.append(
+                (
+                    1 if device % 2 == 0 else 2,
+                    start + 1_000 + device * 100,
+                    start + 2_000 + device * 100,
+                    pid,
+                )
+            )
+        kernel_devices = (
+            active_cuda_devices[:1] if missing_kernel_device else active_cuda_devices
         )
-        kernel_rows.append((0, start + 5_000, start + 15_000, 100))
-        if not missing_kernel_device:
-            kernel_rows.append((1, start + 5_000, start + 15_000, 200))
+        for device in kernel_devices:
+            kernel_rows.append(
+                (device, start + 5_000, start + 15_000, 100 * (device + 1))
+            )
     for start in (12_000, 32_000, 1_102_000):
         runtime_rows.extend(
-            [(1, start, start + 500, 100), (2, start, start + 500, 200)]
+            [
+                (
+                    1 if device % 2 == 0 else 2,
+                    start,
+                    start + 500,
+                    100 * (device + 1),
+                )
+                for device in active_cuda_devices
+            ]
         )
-        kernel_rows.extend([(0, start, start + 500, 100), (1, start, start + 500, 200)])
+        kernel_rows.extend(
+            [
+                (device, start, start + 500, 100 * (device + 1))
+                for device in active_cuda_devices
+            ]
+        )
     if include_boundary_event:
         runtime_rows.append((1, 149_000, 151_000, 100))
         kernel_rows.append((0, 149_000, 151_000, 100))
@@ -397,27 +447,103 @@ def _create_nsys_fixture(
         )
     if include_gpu_metrics:
         connection.executescript("""
-            CREATE TABLE TARGET_INFO_GPU_METRICS (metricId INTEGER, metricName TEXT);
+            CREATE TABLE TARGET_INFO_GPU (
+                pwGpuId INTEGER,
+                cuDevice INTEGER,
+                busLocation TEXT,
+                uuid TEXT,
+                name TEXT
+            );
+            CREATE TABLE TARGET_INFO_GPU_METRICS (
+                typeId INTEGER,
+                sourceId INTEGER,
+                typeName TEXT,
+                metricId INTEGER,
+                metricName TEXT
+            );
             CREATE TABLE GPU_METRICS (typeId INTEGER, metricId INTEGER, value REAL, timestamp INTEGER);
-            INSERT INTO TARGET_INFO_GPU_METRICS VALUES (3, 'SM Active');
-            INSERT INTO TARGET_INFO_GPU_METRICS VALUES (5, 'Tensor Active');
-            INSERT INTO TARGET_INFO_GPU_METRICS VALUES (18, 'DRAM Throughput');
             """)
+        gpu_metric_type_base = 0x1000100000000
+        pw_to_cuda = pw_to_cuda or {
+            0: 2,
+            1: 3,
+            2: 0,
+            3: 1,
+            4: 4,
+            5: 5,
+            6: 6,
+            7: 7,
+        }
+        collected_pw_gpu_ids = collected_pw_gpu_ids or tuple(pw_to_cuda)
+        connection.executemany(
+            "INSERT INTO TARGET_INFO_GPU VALUES (?, ?, ?, ?, ?)",
+            [
+                (
+                    pw_gpu_id,
+                    cuda_device_id,
+                    f"0000:{pw_gpu_id:02x}:00.0",
+                    f"GPU-{pw_gpu_id}",
+                    "NVIDIA H200",
+                )
+                for pw_gpu_id, cuda_device_id in pw_to_cuda.items()
+            ],
+        )
+        metric_names = {
+            3: "SMs Active [Throughput %]",
+            5: "Tensor Active [Throughput %]",
+            7: "SM Issue [Throughput %]",
+            8: "Unallocated Warps in Active SMs [Throughput %]",
+            18: "DRAM Throughput",
+        }
+        connection.executemany(
+            "INSERT INTO TARGET_INFO_GPU_METRICS VALUES (?, ?, '', ?, ?)",
+            [
+                (
+                    gpu_metric_type_base + pw_gpu_id,
+                    gpu_metric_type_base,
+                    metric_id,
+                    name,
+                )
+                for pw_gpu_id in collected_pw_gpu_ids
+                for metric_id, name in metric_names.items()
+            ],
+        )
         gpu_rows = []
         for chunk in range(1, 11):
             timestamp = chunk * 100_000 + 25_000
-            rows = [
-                (0, 3, 80.0, timestamp),
-                (1, 3, 82.0, timestamp),
-                (0, 5, 55.0, timestamp),
-                (1, 5, 55.0, timestamp),
-                (0, 18, 40.0, timestamp),
-                (1, 18, 40.0, timestamp),
-            ]
+            rows = []
+            for pw_gpu_id in collected_pw_gpu_ids:
+                cuda_device_id = pw_to_cuda[pw_gpu_id]
+                type_id = gpu_metric_type_base + pw_gpu_id
+                active = cuda_device_id in active_cuda_devices
+                rows.extend(
+                    [
+                        (
+                            type_id,
+                            3,
+                            (
+                                0.0
+                                if all_zero_sm and active
+                                else 80.0 + cuda_device_id if active else 99.0
+                            ),
+                            timestamp,
+                        ),
+                        (type_id, 5, 55.0 if active else 88.0, timestamp),
+                        (type_id, 18, 40.0 if active else 77.0, timestamp),
+                        (type_id, 7, 999.0, timestamp),
+                        (type_id, 8, 998.0, timestamp),
+                    ]
+                )
             if missing_gpu_type_chunk and chunk == 5:
-                rows.remove((1, 3, 82.0, timestamp))
+                rows.remove((gpu_metric_type_base + 3, 3, 81.0, timestamp))
             gpu_rows.extend(rows)
-        gpu_rows.extend([(0, metric_id, 999.0, 15_000) for metric_id in (3, 5, 18)])
+        gpu_rows.extend(
+            [
+                (gpu_metric_type_base + pw_gpu_id, metric_id, 999.0, 15_000)
+                for pw_gpu_id in collected_pw_gpu_ids
+                for metric_id in (3, 5, 18)
+            ]
+        )
         connection.executemany("INSERT INTO GPU_METRICS VALUES (?, ?, ?, ?)", gpu_rows)
     connection.commit()
     connection.close()
@@ -477,26 +603,51 @@ def test_nsys_merge_extracts_counts_buckets_busy_and_gpu_metrics(
         "1": [200 << 24],
     }
     assert on["gpu_kernel_busy"]["value"]["mean_pct"] == pytest.approx(20.0)
-    assert on["gpu_metrics"]["sm_active"]["value"]["mean"] == 81.0
-    assert on["gpu_metrics"]["sm_active"]["value"]["raw_metric_name"] == ("SM Active")
+    assert on["gpu_metrics"]["sm_active"]["value"]["mean"] == 80.5
+    assert on["gpu_metrics"]["sm_active"]["value"]["raw_metric_name"] == (
+        "SMs Active [Throughput %]"
+    )
     assert on["gpu_metrics"]["sm_active"]["value"]["sample_count"] == 20
-    assert on["gpu_metrics"]["sm_active"]["value"]["captured_sample_count"] == 21
-    assert on["gpu_metrics"]["sm_active"]["value"]["excluded_sample_count"] == 1
+    assert on["gpu_metrics"]["sm_active"]["value"]["captured_sample_count"] == 22
+    assert on["gpu_metrics"]["sm_active"]["value"]["excluded_sample_count"] == 2
+    assert on["gpu_metrics"]["sm_active"]["value"]["all_collected_sample_count"] == 88
+    assert (
+        on["gpu_metrics"]["sm_active"]["value"]["excluded_inactive_target_sample_count"]
+        == 66
+    )
+    assert on["gpu_metrics"]["sm_active"]["value"]["active_cuda_device_ids"] == [
+        0,
+        1,
+    ]
+    assert on["gpu_metrics"]["sm_active"]["value"]["active_pw_gpu_ids"] == [2, 3]
+    assert on["gpu_metrics"]["sm_active"]["value"]["collected_target_count"] == 8
+    assert on["gpu_metrics"]["sm_active"]["value"]["active_target_count"] == 2
+    assert on["gpu_metrics"]["sm_active"]["value"]["allocated_target_count"] == 8
     assert set(
         on["gpu_metrics"]["sm_active"]["value"]["per_chunk_sample_count"].values()
     ) == {2}
     assert (
-        "Tensor Active"
+        "Tensor Active [Throughput %]"
         in on["gpu_metrics"]["sm_active"]["value"]["exposed_metric_names"]
     )
     assert on["gpu_metrics"]["tensor_active"]["status"] == "available"
     assert on["gpu_metrics"]["dram"]["status"] == "available"
     require_complete_stable_nsys(record)
 
+    forged_zero_sm = copy.deepcopy(record)
+    forged_zero_value = forged_zero_sm["metrics"]["profiler_on"]["gpu_metrics"][
+        "sm_active"
+    ]["value"]
+    forged_zero_value["nonzero_sample_count"] = 0
+    for field in ("mean", "min", "p50", "max"):
+        forged_zero_value[field] = 0.0
+    with pytest.raises(MeasurementValidationError, match="cannot be all zero"):
+        validate_measurement(forged_zero_sm)
+
     no_dram = copy.deepcopy(record)
     no_dram["metrics"]["profiler_on"]["gpu_metrics"]["dram"] = unavailable(
         "metric_not_exposed",
-        "Nsight exposed GPU metric names: SM Active, Tensor Active",
+        "Nsight exposed GPU metric names: SMs Active [Throughput %], Tensor Active [Throughput %]",
     )
     require_complete_stable_nsys(no_dram)
 
@@ -515,9 +666,14 @@ def test_nsys_merge_extracts_counts_buckets_busy_and_gpu_metrics(
         require_complete_stable_nsys(no_sm)
 
     incomplete_type_matrix = copy.deepcopy(record)
+    missing_type_id = str(
+        incomplete_type_matrix["metrics"]["profiler_on"]["gpu_metrics"]["sm_active"][
+            "value"
+        ]["observed_type_ids"][1]
+    )
     del incomplete_type_matrix["metrics"]["profiler_on"]["gpu_metrics"]["sm_active"][
         "value"
-    ]["per_type_per_chunk_sample_count"]["1"]["5"]
+    ]["per_type_per_chunk_sample_count"][missing_type_id]["5"]
     with pytest.raises(
         MeasurementValidationError, match="must cover every stable chunk"
     ):
@@ -603,6 +759,89 @@ def test_nsys_gpu_metric_requires_each_type_in_each_stable_chunk(
     assert "'5'" in gpu["sm_active"]["evidence"]
     assert gpu["tensor_active"]["status"] == "available"
     assert gpu["dram"]["status"] == "available"
+
+
+def test_nsys_gpu_metrics_map_active_cuda_devices_to_perfworks_targets(
+    tmp_path: Path,
+) -> None:
+    sqlite_path = tmp_path / "profile.sqlite"
+    _create_nsys_fixture(sqlite_path, include_gpu_metrics=True)
+    gpu = merge_nsys_metrics(_record("profiler_on"), sqlite_path)["metrics"][
+        "profiler_on"
+    ]["gpu_metrics"]
+    value = gpu["sm_active"]["value"]
+    assert value["active_cuda_device_ids"] == [0, 1]
+    assert value["active_pw_gpu_ids"] == [2, 3]
+    assert value["collected_target_count"] == 8
+    assert value["active_target_count"] == 2
+    assert value["allocated_target_count"] == 8
+    assert {
+        (row["cuda_device_id"], row["pw_gpu_id"])
+        for row in value["target_mapping"]
+        if row["active"]
+    } == {(0, 2), (1, 3)}
+
+
+def test_nsys_gpu_metrics_support_non_contiguous_sp4_perfworks_mapping(
+    tmp_path: Path,
+) -> None:
+    sqlite_path = tmp_path / "profile.sqlite"
+    pw_to_cuda = {2: 0, 5: 1, 1: 2, 7: 3, 0: 4, 3: 5, 4: 6, 6: 7}
+    _create_nsys_fixture(
+        sqlite_path,
+        include_gpu_metrics=True,
+        active_cuda_devices=(0, 1, 2, 3),
+        pw_to_cuda=pw_to_cuda,
+    )
+    record = merge_nsys_metrics(_record("profiler_on", gpu_count=4), sqlite_path)
+    value = record["metrics"]["profiler_on"]["gpu_metrics"]["sm_active"]["value"]
+    assert value["active_cuda_device_ids"] == [0, 1, 2, 3]
+    assert value["active_pw_gpu_ids"] == [1, 2, 5, 7]
+    assert value["active_target_count"] == 4
+    assert set(value["per_device_per_chunk_sample_count"]) == {"0", "1", "2", "3"}
+    require_complete_stable_nsys(record)
+
+
+def test_nsys_gpu_metrics_reject_wrong_collected_physical_targets(
+    tmp_path: Path,
+) -> None:
+    sqlite_path = tmp_path / "profile.sqlite"
+    _create_nsys_fixture(
+        sqlite_path,
+        include_gpu_metrics=True,
+        collected_pw_gpu_ids=(0, 1),
+    )
+    gpu = merge_nsys_metrics(_record("profiler_on"), sqlite_path)["metrics"][
+        "profiler_on"
+    ]["gpu_metrics"]
+    for metric in gpu.values():
+        assert metric["status"] == "unavailable"
+        assert metric["reason"] == "gpu_metric_target_coverage_incomplete"
+        assert '"active_pw_gpu_ids": [2, 3]' in metric["evidence"]
+        assert '"collected_pw_gpu_ids": [0, 1]' in metric["evidence"]
+
+
+def test_nsys_sm_active_all_zero_under_kernel_load_fails_closed(
+    tmp_path: Path,
+) -> None:
+    sqlite_path = tmp_path / "profile.sqlite"
+    _create_nsys_fixture(
+        sqlite_path,
+        include_gpu_metrics=True,
+        all_zero_sm=True,
+    )
+    record = merge_nsys_metrics(_record("profiler_on"), sqlite_path)
+    sm = record["metrics"]["profiler_on"]["gpu_metrics"]["sm_active"]
+    assert sm["status"] == "unavailable"
+    assert sm["reason"] == "gpu_metric_all_zero_under_kernel_load"
+    assert "stable_sample_count=20" in sm["evidence"]
+    assert "nonzero_sample_count=0" in sm["evidence"]
+    assert (
+        record["metrics"]["profiler_on"]["gpu_metrics"]["tensor_active"]["status"]
+        == "available"
+    )
+    with pytest.raises(MeasurementValidationError, match="gpu_metrics.sm_active"):
+        require_complete_stable_nsys(record)
 
 
 def test_nsys_gpu_permission_degradation_is_explicit(tmp_path: Path) -> None:
