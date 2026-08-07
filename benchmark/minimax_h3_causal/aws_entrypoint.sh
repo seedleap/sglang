@@ -60,8 +60,8 @@ visible_gpus="$(nvidia-smi -L | wc -l | tr -d ' ')"
 
 mkdir -p "${result_dir}"
 nvidia-smi -q > "${result_dir}/nvidia-smi-q.txt"
+export CARGO_TARGET_DIR=/root/.cache/sglang-rust-target
 python3 -m pip install -e "python[diffusion]" --root-user-action=ignore
-python3 -m pip freeze --all > "${result_dir}/python-environment.txt"
 
 export PYTHONUNBUFFERED=1
 export NCCL_DEBUG=WARN
@@ -70,6 +70,17 @@ export HF_HUB_CACHE="${HF_HOME}/hub"
 export HUGGINGFACE_HUB_CACHE="${HF_HOME}/hub"
 export XDG_CACHE_HOME=/root/.cache/xdg
 export TORCH_HOME=/root/.cache/torch
+
+# The pinned image predates this main checkout. Editable installation upgrades
+# flashinfer-python to the version pinned by python/pyproject.toml, so align the
+# separate CUDA 13 cubin/JIT wheel before importing SGLang.
+python3 -m pip install \
+  --force-reinstall \
+  --no-deps \
+  --index-url https://flashinfer.ai/whl/cu130 \
+  "flashinfer-jit-cache==0.6.15.post1+cu130" \
+  --root-user-action=ignore
+python3 -m pip freeze --all > "${result_dir}/python-environment.txt"
 
 if [[ "${phase}" == "attention-probe" ]]; then
   [[ "${gpu_count}" == "1" ]] || die "attention-probe must request one GPU"

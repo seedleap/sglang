@@ -24,6 +24,7 @@
 5. 本分支实现的是完整 packed sequence 上与 sliding-KV 等价的稀疏可见性，还没有把 H3 pipeline 改成逐 block 生成并跨 block 持久化 KV。它足以测 attention mask 对整段生成的速度影响，但不等价于已经完成流式 causal pipeline。
 6. 官方模型卡说明 H3 在训练末期使用了 native sparse attention，但初始开源只提供 full-attention inference，稀疏实现将另行发布。本实验的 block-causal mask 是给定规格的独立实现，不能声称复原了官方训练 mask。
 7. 官方发布材料没有定义本实验的 `sink=4/window=20` 单位。当前暂按 latent frames 解释并对齐为 6/21；若单位实际是 block，应改为 4/20 blocks，即 12/60 latent frames，再做 8 卡性能结论。
+8. 固定的 B300 运行镜像带 FlashInfer cubin/JIT-cache 0.6.14，而当前 main 固定 `flashinfer-python==0.6.15.post1`。editable 安装会升级 Python 包但不会自动替换独立 cubin wheel，因此集群入口显式安装同版 `0.6.15.post1+cu130`，不关闭版本检查。
 
 ## 重大决策
 
@@ -139,6 +140,12 @@ python benchmark/minimax_h3_causal/run_matrix.py \
 | GPU | Topology | Task | NFE | p50 latency | p95 latency | RTF | Peak/GPU | 结论 |
 | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | --- |
 | — | — | — | — | — | — | — | — | 待测 |
+
+## 运行记录
+
+| Job | 硬件/资源 | 固定代码 | 结果 | 说明 |
+| --- | --- | --- | --- | --- |
+| `minimax-h3-b300-probe-r1` | p6-b300 Spot / 1 GPU | `70584a809858` | 环境失败 | 单测前检测到 FlashInfer Python 0.6.15.post1 与 cubin 0.6.14 不匹配；未执行 GPU kernel，按同版本修复后重跑。 |
 
 ## 理解检查问题
 
