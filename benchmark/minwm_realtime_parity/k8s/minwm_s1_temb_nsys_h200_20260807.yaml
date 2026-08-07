@@ -1,41 +1,42 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: minwm-s1-temb-nsys-h200-20260807-07
+  name: minwm-s1-temb-nsys-h200-20260807-08
   namespace: default
   labels:
-    app.kubernetes.io/name: minwm-s1-temb-nsys-h200-20260807-07
+    app.kubernetes.io/name: minwm-s1-temb-nsys-h200-20260807-08
     seedleap.ai/owner: chenshengdong
     seedleap.ai/purpose: minwm-s1-temb-hoist-nsys
     seedleap.ai/task: minwm-temb-index-hoist-s1
-    seedleap.ai/run-id: minwm-s1-temb-nsys-20260807-07
+    seedleap.ai/run-id: minwm-s1-temb-nsys-20260807-08
   annotations:
     seedleap.ai/capacity-type: spot
     seedleap.ai/repo: seedleap/sglang
     seedleap.ai/branch: codex/minwm-s1-temb-nsys-d5b-20260807
-    seedleap.ai/runner-git-ref: "952af69455c7cdb0f411631def90944f13579ca0"
-    seedleap.ai/sglang-git-ref: "5f92d276c08086db638f05536a46fa5434ecb169"
+    seedleap.ai/runner-git-ref: "ff107d64fe036e5ca5d615b41a966a4ea6b492c3"
+    seedleap.ai/sglang-git-ref: "bdbb38369d93f38b52d3fff77d662cc0f0d3d84f"
     seedleap.ai/s0-tool-ref: "d5b25227d4487d113e62c86a0fb572a62d6bcc5b"
     seedleap.ai/minwm-git-ref: "2efc6485f65e8fcab506665efde79bc41406385e"
     seedleap.ai/checkpoint-version-id: "wduScksw2f3yPErnG9lBioOuE2AToyAP"
     seedleap.ai/resource-isolation: full 8-GPU H200 node request
     seedleap.ai/measurement-plan: sp2-nsys-only-legacy-then-candidate-exact-10
+    seedleap.ai/supersedes-invalid-attempt: minwm-s1-temb-nsys-h200-20260807-07
 spec:
   backoffLimit: 0
   activeDeadlineSeconds: 28800
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: minwm-s1-temb-nsys-h200-20260807-07
+        app.kubernetes.io/name: minwm-s1-temb-nsys-h200-20260807-08
         seedleap.ai/owner: chenshengdong
         seedleap.ai/purpose: minwm-s1-temb-hoist-nsys
         seedleap.ai/task: minwm-temb-index-hoist-s1
-        seedleap.ai/run-id: minwm-s1-temb-nsys-20260807-07
+        seedleap.ai/run-id: minwm-s1-temb-nsys-20260807-08
       annotations:
         seedleap.ai/repo: seedleap/sglang
         seedleap.ai/branch: codex/minwm-s1-temb-nsys-d5b-20260807
-        seedleap.ai/runner-git-ref: "952af69455c7cdb0f411631def90944f13579ca0"
-        seedleap.ai/sglang-git-ref: "5f92d276c08086db638f05536a46fa5434ecb169"
+        seedleap.ai/runner-git-ref: "ff107d64fe036e5ca5d615b41a966a4ea6b492c3"
+        seedleap.ai/sglang-git-ref: "bdbb38369d93f38b52d3fff77d662cc0f0d3d84f"
         seedleap.ai/s0-tool-ref: "d5b25227d4487d113e62c86a0fb572a62d6bcc5b"
     spec:
       restartPolicy: Never
@@ -67,9 +68,9 @@ spec:
                   name: github-token
                   key: token
             - name: SGLANG_GIT_REF
-              value: "5f92d276c08086db638f05536a46fa5434ecb169"
+              value: "bdbb38369d93f38b52d3fff77d662cc0f0d3d84f"
             - name: S1_RUNNER_REF
-              value: "952af69455c7cdb0f411631def90944f13579ca0"
+              value: "ff107d64fe036e5ca5d615b41a966a4ea6b492c3"
             - name: MINWM_S0_TOOL_REF
               value: "d5b25227d4487d113e62c86a0fb572a62d6bcc5b"
             - name: MINWM_GIT_REF
@@ -79,7 +80,7 @@ spec:
             - name: MINWM_BENCHMARK_MODE
               value: setup_only
             - name: MINWM_RUN_ID
-              value: minwm-s1-temb-nsys-20260807-07
+              value: minwm-s1-temb-nsys-20260807-08
             - name: MINWM_ALLOCATED_GPU_COUNT
               value: "8"
             - name: MINWM_S0_SP_DEGREES
@@ -173,6 +174,22 @@ spec:
                 /work/s1-runner/minwm_realtime_parity
               git -C /workspace/sglang merge-base --is-ancestor \
                 "${MINWM_S0_TOOL_REF}" "${S1_RUNNER_REF}"
+              git -C /workspace/sglang merge-base --is-ancestor \
+                "${MINWM_S0_TOOL_REF}" "${SGLANG_GIT_REF}"
+              while IFS= read -r model_path; do
+                case "${model_path}" in
+                  benchmark/minwm_realtime_parity/TIMESTEP_MODULATION_HOIST.zh-CN.md|\
+                  python/sglang/multimodal_gen/runtime/models/dits/causal_wanvideo.py|\
+                  python/sglang/multimodal_gen/runtime/models/dits/minwm.py|\
+                  python/sglang/multimodal_gen/test/unit/realtime/test_minwm_realtime.py)
+                    ;;
+                  *)
+                    echo "unexpected model measurement diff: ${model_path}" >&2
+                    exit 2
+                    ;;
+                esac
+              done < <(git -C /workspace/sglang diff --name-only \
+                "${MINWM_S0_TOOL_REF}..${SGLANG_GIT_REF}")
               clone_at minWM /workspace/minWM "${MINWM_GIT_REF}"
               git -C /workspace/sglang checkout --detach "${SGLANG_GIT_REF}"
               [[ "$(git -C /workspace/sglang rev-parse HEAD)" == "${SGLANG_GIT_REF}" ]]
