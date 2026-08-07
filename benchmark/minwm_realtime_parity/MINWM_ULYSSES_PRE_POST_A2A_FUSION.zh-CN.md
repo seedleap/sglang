@@ -3,14 +3,15 @@
 状态：pre-A2A 候选已因真实端到端 parity 失败从产品实现和开关中删除；只在本节文档与
 benchmark 证据中保留负结论。post-A2A 候选已通过 H200 CUDA exact gate，以及 SP2/SP4
 short 与 KV45 eviction 的逐帧 SHA parity；post-only profiler-off A/B 已完成。SP2 headline
-近零，SP4 约 +4.95%，但 v06 固定 baseline-first，尚不能排除顺序/cache 偏差；独立 SP4
-ABBA 已排队复验。Nsight 使用 S0 exact-window/GPU-target canonical 后另跑。
+近零；SP4 v06 约 +4.95%，独立 server 的逆序 ABBA 仍为 +3.56%，排除了单纯
+baseline-first/cache 顺序偏差。Nsight 使用 S0 exact-window/GPU-target canonical 后另跑。
 
 基线为 `origin/main@9a9dc59cd1`，实现分支为
 `codex/ulysses-pre-post-a2a-fusion`。统一测量契约来自 S0
 `b9240233b2438829cbd72ee3dfbc1d37ed675560`，v06 profiler-off 结果在该合同下有效；后续
-ABBA/Nsight 临时 runner 更新到
-`900b5f279b65b2afcfbe6cc9b36cfa4496b41bc3`。S0 未合并前，它们只叠加到临时 H200
+ABBA off-only runner 使用
+`900b5f279b65b2afcfbe6cc9b36cfa4496b41bc3`，正式 Nsight 必须使用最新 canonical
+`d5b25227d4487d113e62c86a0fb572a62d6bcc5b`。S0 未合并前，它们只叠加到临时 H200
 测量分支，不进入本 PR 对 main 的实现 diff。
 
 ## 假设与预期
@@ -83,7 +84,8 @@ prepared metadata 仍抛出原有异常，不以 fallback 隐藏状态错误。
 | v06 post-only CUDA gate | H200、runner `52cc450575` | 7/7 exact，含 nonzero position、unsupported stride 与 malformed cache rank fallback |
 | v06 post-only E2E | SP2/SP4、short 129 frames、KV45 eviction 241 frames | lane01 对 lane00 四项逐帧 SHA bitwise exact |
 | v06 profiler-off | H200、每 lane 2×(20+200)、KV45 | 四 lane JSON 均通过 b924 schema、count=200 与 CV gate；见下表 |
-| Nsight | 等待单独 attempt | b924 capture window 有归一化缺陷；正式采集只允许 900b |
+| SP4 off-only ABBA | H200、4 个独立 server | A1/B1/B2/A2 均 count=200、CV pass；逆序配对仍复现收益 |
+| Nsight | 等待单独 attempt | b924 capture window 有归一化缺陷；正式采集只允许 d5b |
 
 本地系统默认 Python 3.9.6，无法解析仓库的现代 union type；改用已安装的
 `/opt/homebrew/bin/python3.11`。为避免修改仓库或全局环境，测试使用一次性
@@ -124,7 +126,7 @@ contract，20 个 warmup chunk 后必须已进入窗口淘汰态。
 | 2 | `00` baseline | 12.8208 | 12.8318 | 1311.595 | 744.737 / 744.314 | 419.754 / 419.204 | exact | 2 repeats，CV pass |
 | 2 | `01` post | 12.7889 | 12.7997 | 1311.308 | 720.054 / 719.641 | 420.169 / 419.602 | exact | 2 repeats，CV pass |
 | 4 | `00` baseline | 14.9448 | 14.9594 | 1154.905 | 745.494 / 745.011 | 231.196 / 230.636 | exact | 2 repeats，CV pass |
-| 4 | `01` post | 15.6844 | 15.7001 | 1095.115 | 705.839 / 705.410 | 231.232 / 230.675 | exact | 2 repeats，CV pass；待 ABBA |
+| 4 | `01` post | 15.6844 | 15.7001 | 1095.115 | 705.839 / 705.410 | 231.232 / 230.675 | exact | 2 repeats，CV pass；ABBA 已复验 |
 
 表中 FPS/wall 是两个 canonical JSON 的算术平均；CUDA 是同一 200-chunk stage trace 中
 `component=minwm_denoising/vae_decoder` 的 CUDA event 补充汇总。b924 的 profiler-off
@@ -132,7 +134,8 @@ schema只把 wall 写入 headline JSON，因此 CUDA 数值来自保留的完整
 Nsight device 汇总混用。SP2 candidate 相对 baseline 为 Client `-0.249%`、Scheduler
 `-0.250%`、chunk wall `-0.022%`；满足“不回退超过 1%”，但没有端到端收益。SP4 为
 Client `+4.949%`、Scheduler `+4.951%`、chunk wall `-5.177%`；由于 v06 顺序固定
-baseline→candidate，先视为待复验信号，不直接作为最终收益。
+baseline→candidate，该轮单独看只能作为待复验信号；后续 ABBA 的逆序独立 server
+设计仍复现同向收益，因此不再归因为顺序/cache 偏差。
 
 真实 session window 审计没有发现 baseline 降频：SP4 四次均全程 P0，active GPU SM
 clock 均值为 baseline `1971.67/1971.65 MHz`、candidate `1971.10/1969.99 MHz`，温度最高
@@ -141,26 +144,43 @@ clock 均值为 baseline `1971.67/1971.65 MHz`、candidate `1971.10/1969.99 MHz`
 repeat1 首 payload 为 baseline `9.831s`、candidate `9.479s`；同 server repeat2 为
 `1.538s/1.561s`，首次 segment compile/cache 与热态也基本对称。启动时
 `nvidia-smi -q` 的 HW thermal/power braking 计数为零；v06 没有保存每个 session 前后的
-限速计数，所以不能把该项表述为完整历史证明，ABBA 为每个 position 新增 before/after
+限速计数，所以该轮不能单独作为完整历史证明；ABBA 已为每个 position 保存 before/after
 快照。
 
 阶段证据显示差异集中在 DiT。SP4 DiT wall/CUDA 均约 `-5.32%`，VAE 约 `+0.02%`；
 SP2 DiT 也约 `-3.31%`，但 scheduler 中未归入 DiT/VAE 的部分增加约 `27.4ms`，抵消
 `24.7ms` DiT 缩短。SP4 未归类部分反而减少约 `10.8ms`。telemetry 与 stage trace
-无法解释这个 SP 依赖和 baseline-first 顺序效应，故新增 SP4 off-only ABBA：
+无法解释这个 SP 依赖和 baseline-first 顺序效应，故新增并完成 SP4 off-only ABBA：
 candidate A1→baseline B1→baseline B2→candidate A2，每个 position 独立 server、
 20+200/KV45、独立 telemetry/marker/限速快照。Job
-`minwm-s3-post-sp4-abba-20260807-07` 固定已有 S0 节点，在 S0 -08 释放前只自然 Pending；
-预计约 30 分钟，整机 8×H200 预留约 4 GPU·小时，实际 active 4 卡约 2 GPU·小时。
+`minwm-s3-post-sp4-abba-20260807-07` 固定已有 S0 节点，等待 S0 -08 释放后自然调度，
+最终 26 分钟完成；整机分配 8×H200，模型 active 4 卡，约为 3.47 allocated GPU·小时、
+1.73 active GPU·小时。
+
+| position | lane | Client FPS | Scheduler FPS | chunk wall ms | DiT wall/CUDA ms | VAE wall/CUDA ms |
+| --- | --- | ---: | ---: | ---: | --- | --- |
+| A1 | candidate | 15.5930 | 15.6150 | 1087.230 | 710.671 / 710.225 | 232.038 / 231.436 |
+| B1 | baseline | 14.8445 | 14.8639 | 1163.125 | 741.391 / 740.894 | 231.784 / 231.216 |
+| B2 | baseline | 15.0704 | 15.0891 | 1114.835 | 744.525 / 744.059 | 233.369 / 232.764 |
+| A2 | candidate | 15.3867 | 15.4054 | 1081.350 | 713.467 / 713.003 | 233.454 / 232.883 |
+
+ABBA 两个 candidate 对两个 baseline 的均值差为 Client `+3.559%`、Scheduler
+`+3.563%`、chunk wall `-4.802%`、DiT wall `-4.158%`、VAE wall `+0.073%`；所有
+wall/CUDA count 都是 200，candidate 与 baseline aggregate 均通过 CV gate。四个
+position 的 active GPU 都全程 P0，SM clock 均值为 `1973.94/1974.23/1973.95/1973.98
+MHz`，最高温度 `72/71/71/72°C`；HW Power Braking、HW Thermal Slowdown、SW Thermal
+Slowdown、Sync Boost 的 before/after counter 增量均为 0。candidate 功耗仍略高，不能用
+baseline 降频、热限速或先后顺序解释该收益。A1 的首 payload 较慢但不进入 20+200
+稳态窗口，A2 仍复现相同方向。
 
 Nsight 稳态至少 10 chunks，单独记录 A2A 后 kernel/launch、短 kernel 分桶、NCCL
 SendRecv 时间与次数、两侧 idle gap、GPU kernel busy、SM Active、Tensor Active，以及
 可得时的 DRAM。若 GPU metrics 因权限不可用，按 S0 schema 填 `unavailable`、原因和
 采集证据，不留空。b924 的 raw capture 实际覆盖 1 discarded + 10 stable，却用 10
 归一化，故任何 b924 Nsight 正式结果均无效；v06 与 ABBA runner 物理不含 Nsight
-路径。正式 profiler-on 只允许临时 pin 900b：采集 all 8 target 后只汇总 active
-`pwGpuId`，并要求 exact 10 ranges、DiT/VAE CUDA、kernel/API/launch、SM/Tensor 与 target
-coverage 全部通过。
+路径。正式 profiler-on 只允许临时 pin d5b：按 API start-time half-open 归属并分别保留
+API/launch 边界证据，采集 all 8 target 后只汇总 active `pwGpuId`，并要求 exact 10
+ranges、DiT/VAE CUDA、kernel/API/launch、SM/Tensor 与 target coverage 全部通过。
 
 正确性另跑两组：短程无淘汰用例覆盖首块、growth、append 与同一 active
 chunk 的 DMD/clean-cache recompute；45-frame 固定窗口用例覆盖稳态淘汰与 fallback
@@ -204,8 +224,8 @@ headline。
 - 修改 Q/K/V GEMM 数量或合并 projection：属于 S4，明确不做。
 - 保留 pre fast lane 并放宽 tolerance：真实 decoded frame 已大面积分叉，与 bitwise
   合同冲突，放弃并删除。
-- 默认开启 post fast lane：SP2 headline 近零、SP4 baseline-first 信号尚待 ABBA，且正式
-  Nsight 还未完成；当前证据不足以改变默认关闭。
+- 默认开启 post fast lane：SP4 ABBA 已确认收益不是单纯顺序偏差，但 SP2 headline 仍近零，
+  且正式 Nsight 还未完成；当前证据不足以改变默认关闭。
 
 ## 风险、回滚与复现
 
@@ -224,8 +244,9 @@ TORCH_COMPILE_DISABLE=1 TORCHDYNAMO_DISABLE=1 PYTHONPATH=python \
 ```
 
 v06 profiler-off 临时叠加 S0 `b9240233b2438829cbd72ee3dfbc1d37ed675560`；其结果仍
-有效。后续 ABBA/Nsight runner 临时叠加 S0
-`900b5f279b65b2afcfbe6cc9b36cfa4496b41bc3`，产物必须通过
+有效。ABBA off-only runner 临时叠加 S0
+`900b5f279b65b2afcfbe6cc9b36cfa4496b41bc3`；后续正式 Nsight 临时叠加
+`d5b25227d4487d113e62c86a0fb572a62d6bcc5b`。产物必须通过
 `benchmark/minwm_realtime_parity/measurement_tool.py validate`；正式 PR 不包含 S0
 基础设施。最终 JSON 记录实际 checkout SHA，`gpu.count` 按 active GPUs、
 `gpu.allocated_count` 单列；Nsight/API 统一使用 `raw_total`、`total_per_chunk`、
@@ -284,8 +305,21 @@ ABBA 使用 immutable runner `29c6ada1a514c137c2ca4cf81b58fdc2065b401a`，manife
 commit `f669e8f628`，S0 pin 为 900b，产品实现对应 PR commit `61aa8809e6`（临时 runner
 中的等价 cherry-pick 为 `050791ffd3`）。Job 固定 hostname
 `i-06888dc1ca88547e1`、backoffLimit=0；创建后因该节点被 S0 -08 占用而 Pending，事件为
-`Insufficient nvidia.com/gpu`，其余节点不匹配且无 preemption victim。精确 hostname
-selector 也阻止 Karpenter 为该 Job 新建节点；不抢占、不扩容、不清理其他任务对象。
+`Insufficient nvidia.com/gpu`，随后在原节点自然调度并成功完成。精确 hostname selector
+阻止 Karpenter 为该 Job 新建节点；全程不抢占、不扩容、不清理其他任务对象。
+
+ABBA 证据根为
+`/results/attempts/minwm-s3-post-sp4-abba-20260807-07-dfvvc/minwm-s3-post-sp4-abba-20260807-07/s3-post-sp4-abba-off-only`，
+共 50 个文件、24,255,371 bytes、无 invalid marker。A1/B1/B2/A2 JSON SHA256 分别为
+`a2e43d89ba8384d170b2482cd86703836bd0d91c3e50c97bff8a917662da0dbc`、
+`44f275648c4122c66c8130406e7ff8897a54b5685795049d8e24a7b60545a003`、
+`ff4488613ddc13e6b0936181836d9962dcce28b9a826b8bd8c89f03d2d3eb20e`、
+`c4cf80ed5934ed41d8c90b78d856ea8bfab8a132f7c946704b8fcb6fc7794135`；candidate/baseline
+aggregate SHA256 为
+`9abda8475206f70bc5ea4a34043803d8848c177df25100ae1cea40246cea5424`、
+`f24672b7d1a34257c629901cd2f7da022e45cc10bb41d25ef8dbdc88c6ed2714`，总 summary 为
+`ee3e01d8d6960962b3b68dfbbc6d4071252092a15ea9b49f7aa8b67f8a6a41f5`。审计用 0-GPU、
+只读 PVC reader 已精确删除，PVC 与全部 evidence 保留。
 
 所有失败、旧契约和 partial attempt 在 PVC 上物理保留：原路径或对应 scope 的
 `invalid/` 下必须有 marker，记录原因、UTC、逐文件路径/大小/SHA256 与可恢复性。
