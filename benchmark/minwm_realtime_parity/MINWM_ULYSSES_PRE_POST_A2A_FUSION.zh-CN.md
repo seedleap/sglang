@@ -74,7 +74,7 @@ prepared metadata 仍抛出原有异常，不以 fallback 隐藏状态错误。
 | cache 首块/recompute/growth/eviction fallback/错误 metadata | Python 3.11.13、torch 2.13.0，临时环境仅补 `uvicorn` | post/fallback 目标用例通过 |
 | MinWM realtime CPU 语义回归 | 同上 | 全文件 `118 passed` |
 | v03/v04 CUDA/Triton BF16 bitwise | H200、torch 2.11.0+cu130、Triton 3.6.0 | post 初始 `2 failed/3 passed`；两处均为 1 ULP，已按 eager FP32 指令边界修复 |
-| v05 CUDA/Triton BF16 bitwise | 同上，commit `8fee184e47` | 当时注册的 6 项全部 exact；产品修剪后改为 6 项 post-only CUDA/回归 gate |
+| v05 CUDA/Triton BF16 bitwise | 同上，commit `8fee184e47` | 当时注册的 6 项全部 exact；产品修剪与 predicate 加固后改为 7 项 post-only CUDA/回归 gate |
 | v05 SP2/SP4 post-only E2E | 1248×704、short 129 frames、KV45 eviction 241 frames | lane01 对 lane00 四项 `.npy` SHA 与逐元素比较均 bitwise exact |
 | v05 SP2/SP4 pre-enabled E2E | 同上 | lane10/11 四项均 SHA 偏离；pre 验收失败并从产品代码删除 |
 | profiler-off / Nsight | 本机无 NVIDIA GPU/Nsight | 未测，不能用历史结果代替 |

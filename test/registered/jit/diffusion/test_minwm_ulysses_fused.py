@@ -388,3 +388,35 @@ def test_fused_rope_cache_update_rejects_unsupported_strides():
         key_sin,
         0,
     )
+
+
+def test_fused_rope_cache_update_rejects_malformed_cache_rank():
+    current_tokens, heads, head_dim = 3, 6, 128
+    qkv = torch.randn(
+        1,
+        current_tokens,
+        heads,
+        3 * head_dim,
+        dtype=torch.bfloat16,
+        device="cuda",
+    )
+    query, key, value = qkv.chunk(3, dim=-1)
+    malformed_cache = torch.empty((), dtype=query.dtype, device=query.device)
+    angles = torch.randn(
+        current_tokens, head_dim // 2, dtype=torch.float32, device=query.device
+    )
+    cos, sin = angles.cos(), angles.sin()
+
+    assert not can_fuse_rope_cache_update(
+        query,
+        key,
+        value,
+        malformed_cache,
+        malformed_cache,
+        malformed_cache,
+        cos,
+        sin,
+        cos,
+        sin,
+        0,
+    )
