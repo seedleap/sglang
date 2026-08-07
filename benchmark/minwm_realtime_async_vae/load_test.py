@@ -27,6 +27,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--measured-chunks", type=int, default=6)
     parser.add_argument("--model", default="/work/model")
     parser.add_argument("--prompt", default="A cinematic forward-moving landscape")
+    parser.add_argument(
+        "--generation-mode",
+        choices=("i2v", "t2v"),
+        default="t2v",
+    )
+    parser.add_argument(
+        "--first-frame",
+        type=Path,
+        help="Reference image used when --generation-mode=i2v",
+    )
     parser.add_argument("--size", default="832x480")
     parser.add_argument("--fps", type=int, default=24)
     parser.add_argument("--timeout-s", type=float, default=300.0)
@@ -164,14 +174,14 @@ def action_event(event_id: int, actions: list[str]) -> bytes:
 
 
 def init_request(args: argparse.Namespace, *, total_chunks: int, trace_id: str) -> dict:
-    return {
+    generation_mode = getattr(args, "generation_mode", "t2v")
+    request = {
         "type": "init",
-        "generation_mode": "t2v",
+        "generation_mode": generation_mode,
         "model": args.model,
         "prompt": args.prompt,
         "size": args.size,
         "fps": args.fps,
-        "num_frames": 1 + (total_chunks - 1) * 16,
         "seed": 42,
         "generator_device": "cuda",
         "num_inference_steps": 4,
@@ -183,6 +193,14 @@ def init_request(args: argparse.Namespace, *, total_chunks: int, trace_id: str) 
         "output_compression": 55,
         "trace_id": trace_id,
     }
+    if generation_mode == "i2v":
+        first_frame = getattr(args, "first_frame_bytes", None)
+        if not first_frame:
+            raise ValueError("i2v benchmark requires first_frame_bytes")
+        request["first_frame"] = first_frame
+    else:
+        request["num_frames"] = 1 + (total_chunks - 1) * 16
+    return request
 
 
 def stage_values(
@@ -704,6 +722,12 @@ async def async_main(args: argparse.Namespace) -> None:
     levels = [int(value) for value in args.concurrency.split(",") if value.strip()]
     if not levels or any(value < 1 for value in levels):
         raise ValueError("concurrency levels must be positive")
+    if args.generation_mode == "i2v":
+        if args.first_frame is None or not args.first_frame.is_file():
+            raise ValueError("--first-frame must name an existing image for i2v")
+        args.first_frame_bytes = args.first_frame.read_bytes()
+    elif args.first_frame is not None:
+        raise ValueError("--first-frame is only valid with --generation-mode=i2v")
     runs = []
     for concurrency in levels:
         run = await run_level(args, concurrency)
@@ -714,6 +738,8 @@ async def async_main(args: argparse.Namespace) -> None:
         "profile": args.profile,
         "request": {
             "model": args.model,
+            "generation_mode": args.generation_mode,
+            "first_frame": str(args.first_frame) if args.first_frame else None,
             "size": args.size,
             "fps": args.fps,
             "steps": 4,

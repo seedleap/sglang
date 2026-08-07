@@ -32,6 +32,24 @@ def test_init_request_keeps_t2v_frame_count_aligned_with_chunk_count():
     assert request["max_chunks"] == 5
 
 
+def test_init_request_supports_i2v_reference_bytes():
+    args = Namespace(
+        model="lingbot-world-v2-14b-causal-fast-diffusers",
+        prompt="test prompt",
+        size="1280x704",
+        fps=24,
+        generation_mode="i2v",
+        first_frame_bytes=b"reference-image",
+    )
+
+    request = init_request(args, total_chunks=3, trace_id="trace-i2v")
+
+    assert request["generation_mode"] == "i2v"
+    assert request["first_frame"] == b"reference-image"
+    assert request["max_chunks"] == 3
+    assert "num_frames" not in request
+
+
 def test_record_frame_batch_counts_all_batches_in_the_same_chunk():
     frame_counts = {}
 
