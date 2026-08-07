@@ -276,6 +276,7 @@ class LingBotWorldRealtimeAdapter(BaseRealtimeModelAdapter):
         if request is None:
             raise ValueError("realtime request is not initialized")
 
+        latest_sampled_event_id = state.latest_sampled_event_id
         prompt_updated = False
         if chunk.index == 0:
             prompt = request.prompt
@@ -283,6 +284,10 @@ class LingBotWorldRealtimeAdapter(BaseRealtimeModelAdapter):
             prompt = state.sample_prompt()
             request.prompt = prompt
             prompt_updated = True
+            latest_sampled_event_id = self._latest_event_id(
+                latest_sampled_event_id,
+                state.latest_sampled_event_id,
+            )
         else:
             prompt = request.prompt
 
@@ -290,9 +295,19 @@ class LingBotWorldRealtimeAdapter(BaseRealtimeModelAdapter):
         if prompt_updated:
             condition_inputs[LINGBOT_PROMPT_UPDATED_CONDITION] = True
         camera_actions = state.sample_camera_actions(chunk_size)
+        latest_sampled_event_id = self._latest_event_id(
+            latest_sampled_event_id,
+            state.latest_sampled_event_id,
+        )
+        state.latest_sampled_event_id = latest_sampled_event_id
         if camera_actions is not None:
             condition_inputs[LINGBOT_CAMERA_ACTIONS_CONDITION] = camera_actions
         return RealtimeChunkInputs(prompt=prompt, condition_inputs=condition_inputs)
+
+    @staticmethod
+    def _latest_event_id(*event_ids: int | None) -> int | None:
+        present = [event_id for event_id in event_ids if event_id is not None]
+        return max(present) if present else None
 
     def build_sampling_params(
         self,
