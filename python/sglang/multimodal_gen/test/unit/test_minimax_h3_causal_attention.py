@@ -19,13 +19,13 @@ from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.m
 )
 
 
-def _packed(*, latent_t: int = 30, first_frame: bool = False):
+def _packed(*, latent_t: int = 30, audio_t: int = 192, first_frame: bool = False):
     return minimax_h3_packed_sequence(
         text_len=5,
         latent_t=latent_t,
         latent_h=4,
         latent_w=4,
-        audio_t=48,
+        audio_t=audio_t,
         include_keyframe_cond=first_frame,
         keyframe_frame_indices=[0] if first_frame else None,
         frame_count=90 if first_frame else None,
@@ -83,6 +83,7 @@ def test_causal_plan_keeps_prefix_global_and_couples_audio_video_blocks():
     assert mask[block9_video, block3_video]
 
     audio_blocks = plan.block_ids[packed["audio_pos"]]
+    assert set(range(plan.num_target_blocks)).issubset(set(audio_blocks.tolist()))
     shared_block = 5
     audio_row = int(packed["audio_pos"][(audio_blocks == shared_block).nonzero()[0]])
     video_row = int(target_img_pos[(video_blocks == shared_block).nonzero()[0]])

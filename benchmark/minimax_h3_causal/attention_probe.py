@@ -29,7 +29,7 @@ def parse_args():
     parser.add_argument("--latent-t", type=int, default=9)
     parser.add_argument("--latent-h", type=int, default=8)
     parser.add_argument("--latent-w", type=int, default=8)
-    parser.add_argument("--audio-t", type=int, default=24)
+    parser.add_argument("--audio-t", type=int, default=64)
     parser.add_argument("--text-len", type=int, default=32)
     parser.add_argument("--heads", type=int, default=7)
     parser.add_argument("--head-dim", type=int, default=128)

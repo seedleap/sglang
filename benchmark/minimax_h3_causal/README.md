@@ -148,6 +148,7 @@ python benchmark/minimax_h3_causal/run_matrix.py \
 | `minimax-h3-b300-probe-r1` | p6-b300 Spot / 1 GPU | `70584a809858` | 环境失败 | 单测前检测到 FlashInfer Python 0.6.15.post1 与 cubin 0.6.14 不匹配；未执行 GPU kernel，按同版本修复后重跑。 |
 | `minimax-h3-b300-probe-r2` | p6-b300 Spot / 1 GPU | 错误 ref | 操作失败 | 手工扩展短 SHA 时写错，Git fetch 返回 `not our ref`；未进入安装或 GPU 测试。 |
 | `minimax-h3-b300-probe-r3` | p6-b300 Spot / 1 GPU | `106bafaa1dfe` | 环境失败 | JIT-cache 已升级至 0.6.15.post1，但旧 standalone cubin 0.6.14 的优先级更高；未执行 GPU kernel，改为移除已无同版发布的旧可选 cubin。 |
+| `minimax-h3-b300-probe-r4` | p6-b300 Spot / 1 GPU | `a681be1ab6b2` | 测试夹具失败 | FlashInfer runtime 检查通过；GPU 单测 5/6 通过，包含 BF16 Flex/dense-reference parity。失败项的模拟音频只有 48 个时间步，却固定查询未被音频覆盖的 block 5；独立速度探针因此未执行。修正为覆盖完整模拟视频时域，并显式断言所有目标 block 都有音频 row。 |
 
 ## 理解检查问题
 
