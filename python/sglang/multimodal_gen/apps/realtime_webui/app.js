@@ -3784,7 +3784,7 @@ async function applyPreset(preset, options = {}) {
     ?? Boolean(ws && ws.readyState === WebSocket.OPEN);
   selectedPreset = preset;
   $("prompt").value = preset.prompt;
-  $("size").value = preset.size;
+  if (!options.preserveSize) $("size").value = preset.size;
   $("fps").value = UI_CONFIG.targetFps == null ? preset.fps : DEFAULT_TARGET_FPS;
   updateOutputSizeText();
   syncPlaybackTargetFps();
@@ -3876,6 +3876,7 @@ function presetForModelInfo(info) {
 
 async function queryServerModelInfo(options = {}) {
   const applyPresetForModel = options.applyPresetForModel ?? true;
+  const preserveSize = options.preserveSize ?? false;
   let info;
   try {
     const response = await fetch(modelsUrlFromServerUrl($("serverUrl").value), {
@@ -3892,7 +3893,7 @@ async function queryServerModelInfo(options = {}) {
   const modelId = servedModelId(info);
   const preset = presetForModelInfo(info);
   if (preset && applyPresetForModel && preset !== selectedPreset) {
-    await applyPreset(preset, { sendRuntimeEvents: false });
+    await applyPreset(preset, { sendRuntimeEvents: false, preserveSize });
   }
   if (modelId) $("model").value = modelId;
   addHistory(
@@ -4277,11 +4278,14 @@ setPreviewScale(DEFAULT_PREVIEW_SCALE);
 updateSuperResolutionControls();
 applyQueryParams()
   .then(async (query) => {
-    if (!query.preset) await applyPreset(presets[0], { sendRuntimeEvents: false });
+    if (!query.preset) {
+      await applyPreset(presets[0], { sendRuntimeEvents: false, preserveSize: true });
+    }
     return query;
   })
   .then((query) => queryServerModelInfo({
     applyPresetForModel: !query.model && !query.preset,
+    preserveSize: true,
   }))
   .catch(showError);
 scheduleRenderLoop();

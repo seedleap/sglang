@@ -87,6 +87,16 @@ assert.match(
   "webui should show the default output size before the first server response",
 );
 assert.match(
+  appJs,
+  /applyPreset\(presets\[0\], \{ sendRuntimeEvents: false, preserveSize: true \}\)/,
+  "initial preset hydration should preserve the user-facing 1280x704 default size",
+);
+assert.match(
+  appJs,
+  /if \(!options\.preserveSize\) \$\("size"\)\.value = preset\.size;/,
+  "preset application should support hydrating prompt and reference without overriding size",
+);
+assert.match(
   indexHtml,
   /<option value="adaptive">Adaptive \(buffered, fast input\)<\/option>/,
   "webui should keep adaptive playback available",
