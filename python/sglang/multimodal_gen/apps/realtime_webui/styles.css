@@ -485,6 +485,76 @@ button:focus-visible {
   color: #fffdf7;
   font-weight: 650;
 }
+
+.fullscreen-button {
+  position: relative;
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 30px;
+  width: 30px;
+  height: 30px;
+  min-height: 30px;
+  padding: 0;
+  border-color: rgba(232, 234, 223, 0.22);
+  background: rgba(238, 241, 236, 0.06);
+  color: rgba(232, 234, 223, 0.88);
+}
+
+.fullscreen-button:hover:not(:disabled) {
+  border-color: rgba(232, 234, 223, 0.44);
+  background: rgba(238, 241, 236, 0.13);
+  box-shadow: none;
+  transform: none;
+}
+
+.fullscreen-button:focus-visible {
+  outline: 2px solid rgba(238, 241, 236, 0.82);
+  outline-offset: 2px;
+}
+
+.fullscreen-icon {
+  width: 14px;
+  height: 14px;
+  color: currentColor;
+  background:
+    linear-gradient(currentColor, currentColor) left top / 6px 1.5px no-repeat,
+    linear-gradient(currentColor, currentColor) left top / 1.5px 6px no-repeat,
+    linear-gradient(currentColor, currentColor) right top / 6px 1.5px no-repeat,
+    linear-gradient(currentColor, currentColor) right top / 1.5px 6px no-repeat,
+    linear-gradient(currentColor, currentColor) left bottom / 6px 1.5px no-repeat,
+    linear-gradient(currentColor, currentColor) left bottom / 1.5px 6px no-repeat,
+    linear-gradient(currentColor, currentColor) right bottom / 6px 1.5px no-repeat,
+    linear-gradient(currentColor, currentColor) right bottom / 1.5px 6px no-repeat;
+}
+
+.stage:fullscreen {
+  width: 100vw;
+  height: 100vh;
+  max-width: none;
+  border: 0;
+  border-radius: 0;
+  grid-template-rows: auto minmax(0, 1fr) auto auto auto;
+  box-shadow: none;
+}
+
+.stage:fullscreen .model-player-grid,
+.stage:fullscreen .model-player,
+.stage:fullscreen .preview-frame {
+  min-height: 0;
+}
+
+.stage:fullscreen .preview-frame {
+  width: 100%;
+  height: 100%;
+}
+
+.stage:fullscreen #minwmViewport,
+.stage:fullscreen #lingbot2Viewport {
+  width: 100%;
+  height: 100%;
+  max-height: none;
+  object-fit: contain;
+}
 #statusText {
   display: inline-block;
   min-width: 92px;
@@ -568,6 +638,10 @@ button:focus-visible {
 @media (max-width: 900px) {
   .model-player-grid {
     grid-template-columns: 1fr;
+  }
+
+  .stage:fullscreen .model-player-grid {
+    grid-template-rows: repeat(2, minmax(0, 1fr));
   }
 }
 

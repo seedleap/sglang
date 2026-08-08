@@ -447,6 +447,14 @@ let traceRenderFrame = 0;
 
 const stage = document.querySelector(".stage");
 const previewFrame = document.querySelector(".model-player-grid");
+const fullscreenController = window.SGLangFullscreen?.createFullscreenController?.({
+  documentRef: document,
+  target: stage,
+  button: $("fullscreenBtn"),
+  onError: (error) => {
+    addHistory(`fullscreen unavailable: ${error?.message || error}`);
+  },
+});
 const canvas = $("minwmViewport");
 const ctx = canvas.getContext("2d", { alpha: false });
 const lingbot2Canvas = $("lingbot2Viewport");

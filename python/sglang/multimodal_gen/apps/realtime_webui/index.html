@@ -145,6 +145,16 @@
               <input id="previewScale" type="range" min="80" max="170" value="100" />
               <b id="previewScaleText">100%</b>
             </label>
+            <button
+              id="fullscreenBtn"
+              class="fullscreen-button"
+              type="button"
+              aria-label="Enter fullscreen comparison"
+              aria-pressed="false"
+              title="Enter fullscreen comparison"
+            >
+              <span class="fullscreen-icon" aria-hidden="true"></span>
+            </button>
             <span class="stage-stat">output <b id="outputSizeText">1280x704</b></span>
             <span class="stage-stat">render <b id="renderFps">0</b> fps</span>
             <span class="stage-stat">source <b id="theoreticalFpsText">-</b></span>
@@ -256,8 +266,9 @@
   <script src="./playback_controller.js?v=realtime-playback-v28"></script>
   <script src="./model_session.js?v=dual-model-v2"></script>
   <script src="./dual_model_controller.js?v=dual-model-v2"></script>
+  <script src="./fullscreen_controller.js?v=dual-fullscreen-v1"></script>
   <script src="./trace_topology.js?v=realtime-trace-topology-v6"></script>
   <script src="./trace_transport.js?v=realtime-trace-http-v2"></script>
-  <script src="./app.js?v=realtime-production-gateway-v17"></script>
+  <script src="./app.js?v=realtime-production-gateway-v18"></script>
 </body>
 </html>
