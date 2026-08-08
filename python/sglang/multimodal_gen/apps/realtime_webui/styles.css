@@ -537,6 +537,24 @@ button:focus-visible {
   box-shadow: none;
 }
 
+.stage:fullscreen .topbar {
+  flex-wrap: wrap;
+  height: auto;
+  min-height: 44px;
+  padding: 7px 14px;
+  row-gap: 7px;
+}
+
+.stage:fullscreen .topbar-spacer {
+  display: none;
+}
+
+.stage:fullscreen #outputSizeText,
+.stage:fullscreen #theoreticalFpsText,
+.stage:fullscreen #stageLatencyText {
+  min-width: 0;
+}
+
 .stage:fullscreen .model-player-grid,
 .stage:fullscreen .model-player,
 .stage:fullscreen .preview-frame {
