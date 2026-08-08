@@ -93,6 +93,28 @@ async function main() {
   await assert.rejects(() => failingController.connect({ trace_id: "failed" }), /lingbot2 unavailable/);
   assert.equal(failingMinwm.closeCalls.length, 1, "successful peer is closed after partial startup");
 
+  const t2vMinwm = new FakeSession("minwm");
+  const t2vLingbot = new FakeSession("lingbot2", { failConnect: true });
+  const t2vController = new DualModelController({
+    sessions: { minwm: t2vMinwm, lingbot2: t2vLingbot },
+    backends: {
+      minwm: { model: "minwm", wsUrl: "/minwm" },
+      lingbot2: {
+        model: "lingbot2",
+        wsUrl: "/lingbot2",
+        enabled: (init) => init.generation_mode !== "t2v",
+      },
+    },
+    now: () => 5678,
+  });
+  await t2vController.connect({ trace_id: "t2v", generation_mode: "t2v" });
+  assert.equal(t2vMinwm.connectCalls.length, 1, "MinWM should serve T2V");
+  assert.equal(t2vLingbot.connectCalls.length, 0, "LingBot2 should stay disconnected for T2V");
+  assert.equal(t2vLingbot.closeCalls.length, 1, "disabled peer should clear stale state");
+  t2vController.sendEvent("camera_actions", { transitions: [{ actions: ["w"] }] });
+  assert.equal(t2vMinwm.events.length, 1, "active T2V backend should receive shared input");
+  assert.equal(t2vLingbot.events.length, 0, "disabled T2V backend should not receive input");
+
   console.log("dual model controller ok");
 }
 

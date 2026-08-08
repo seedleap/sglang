@@ -57,6 +57,7 @@
       this.traceId = "";
       this.epoch = 0;
       this.renderScheduled = false;
+      this.renderSamples = [];
       this.decodeQueue = [];
       this.decodeInProgress = false;
       this.worker = null;
@@ -87,6 +88,7 @@
       this.pendingHeader = null;
       this.decodeQueue = [];
       this.decodeInProgress = false;
+      this.renderSamples = [];
       this.stats = {
         frames: 0,
         bytes: 0,
@@ -169,6 +171,19 @@
         socket.close(1000, reason.slice(0, 120));
       }
       if (notify) this.setState("closed");
+    }
+
+    setUnavailable(reason = "Unavailable for this mode") {
+      this.close(reason, { notify: false });
+      this.clearCanvas();
+      this.setState("unavailable", { reason });
+    }
+
+    clearCanvas() {
+      const width = this.canvas.width || 1280;
+      const height = this.canvas.height || 720;
+      this.ctx.fillStyle = "#11140f";
+      this.ctx.fillRect(0, 0, width, height);
     }
 
     receive(data, epoch) {
@@ -310,6 +325,8 @@
       if (decision.action === "draw") {
         const frame = decision.frame;
         this.drawFrame(frame.image);
+        this.renderSamples.push(now);
+        this.renderSamples = this.renderSamples.filter((sample) => now - sample < 1000);
         this.stats.renderedFrames += 1;
         this.stats.lastChunk = Number(frame.chunk ?? this.stats.lastChunk ?? 0);
         this.stats.lastDisplayLagMs = now - Number(frame.receivedAt || now);
@@ -351,8 +368,10 @@
     setState(state, details = {}) {
       if (this.root) this.root.dataset.sessionState = state;
       if (this.overlay?.style) {
-        this.overlay.style.display = state === "connecting" ? "grid" : "none";
+        this.overlay.style.display = state === "connecting" || state === "unavailable" ? "grid" : "none";
       }
+      const message = this.overlay?.querySelector?.(".preview-unavailable-text");
+      if (message && state === "unavailable") message.textContent = details.reason || "Unavailable";
       this.canvas.setAttribute?.("aria-busy", state === "connecting" ? "true" : "false");
       this.onState(state, { key: this.key, ...details });
     }
@@ -376,6 +395,7 @@
         ...playback,
         queueFrames: Number(playback.queueFrames ?? playback.queueLength ?? 0),
         decodeQueueLength: this.decodeQueue.length,
+        renderFps: this.renderSamples.length,
       };
     }
 

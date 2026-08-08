@@ -93,8 +93,13 @@ assert.match(
 );
 assert.match(
   appJs,
-  /if \(!options\.preserveSize\) \$\("size"\)\.value = preset\.size;/,
-  "preset application should support hydrating prompt and reference without overriding size",
+  /async function applyPreset\(preset, options = \{\}\) \{[\s\S]*?\$\("prompt"\)\.value = preset\.prompt;[\s\S]*?\$\("fps"\)\.value/,
+  "preset application should hydrate prompt and reference",
+);
+assert.doesNotMatch(
+  appJs,
+  /\$\("size"\)\.value\s*=\s*preset\.size/,
+  "preset selection must preserve the user-entered size",
 );
 assert.match(
   indexHtml,

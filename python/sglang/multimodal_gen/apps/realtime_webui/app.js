@@ -130,7 +130,6 @@ function applyRuntimeUiConfig() {
   $("windowFrames").value = String(
     configuredNumber("windowFrames", Number($("windowFrames").value)),
   );
-  $("targetFpsSummary").textContent = `${DEFAULT_TARGET_FPS} fps`;
   if (UI_CONFIG.modelLabel) {
     $("modelSectionTitle").textContent = String(UI_CONFIG.modelLabel);
   }
@@ -393,6 +392,7 @@ let decodeRequestId = 1;
 let streamEpoch = 0;
 let lastDecodeMs = 0;
 let lastDisplayLagMs = 0;
+let lastRenderedChunk = null;
 let encodedDecodeErrors = 0;
 let socketHadError = false;
 let socketCloseExpected = false;
@@ -500,10 +500,11 @@ const lingbot2Session = new RealtimeModelSession({
     if (!root) return;
     root.dataset.chunk = stats.lastChunk ?? "";
     root.dataset.frames = String(stats.frames || 0);
+    renderModelTelemetry("lingbot2", stats);
   },
   onError: (error) => {
     addHistory(`LingBot2 session failed · ${error.message || "unknown"}`);
-    if (ws && ws.readyState === WebSocket.OPEN) {
+    if (selectedGenerationMode() !== "t2v" && ws && ws.readyState === WebSocket.OPEN) {
       abortCurrentSession("LingBot2 peer failed", { expectedClose: false });
     }
   },
@@ -544,6 +545,8 @@ const dualModelController = new DualModelController({
           realtime_causal_kv_cache_num_frames: 12,
         };
       },
+      enabled: (init) => init.generation_mode !== "t2v",
+      unavailableReason: "T2V unavailable",
       wsUrl: (init) => backendWebSocketUrl("lingbot2", init.trace_id),
     },
   },
@@ -919,21 +922,14 @@ function resetStreamStats() {
   renderedPreviewFrames = 0;
   lastSentEventId = 0;
   lastSampledEventId = 0;
+  lastRenderedChunk = null;
   renderedTraceChunks = new Set();
   controlStateController?.reset({ sendRelease: false });
   resetDecoderState();
+  resetModelTelemetry("minwm");
+  resetModelTelemetry("lingbot2");
   updateStats();
-  $("renderFps").textContent = "0";
-  $("latencyText").textContent = "-";
-  $("stageLatencyText").textContent = "-";
   $("actionStateText").textContent = "-";
-  $("decodeText").textContent = "-";
-  $("displayLagText").textContent = "-";
-  $("serverSendText").textContent = "-";
-  $("chunkPayloadText").textContent = "-";
-  $("theoreticalFpsText").textContent = "-";
-  $("chunkText").textContent = "chunk -";
-  $("payloadMode").textContent = selectedTransportLabel();
   updateOutputSizeText();
 }
 
@@ -1067,39 +1063,58 @@ function isWorkerDecodableRawContentType(contentType) {
 
 function updateStats() {
   const playback = playbackController.snapshot();
-  const playbackLabel =
-    playback.mode === "timeline"
-      ? "full timeline"
-      : playback.mode === "smooth_timeline"
-      ? "smooth timeline"
-      : playback.mode === "adaptive"
-      ? "adaptive input-fast"
-      : "low latency";
-  const queueParts = [
-    playbackLabel,
-    `buffer ${formatMs(playback.bufferMs)}`,
-  ];
-  queueParts.push(`q ${playback.queueFrames}`);
-  if (playback.buffering && playback.queueFrames) queueParts.push("hold");
-  if (pendingDecodeBatches) {
-    queueParts.push(`decode ${pendingDecodeBatches}`);
-    if (queuedDecodeBytes) queueParts.push(`decode-bytes ${formatBytes(queuedDecodeBytes)}`);
-  }
-  const now = performance.now();
-  if (playback.lastDropAt && now - playback.lastDropAt < RECENT_DROP_DISPLAY_MS) {
-    const reason = playback.lastDropReason ? ` ${playback.lastDropReason}` : "";
-    queueParts.push(`drop +${playback.lastDropCount}${reason}`);
-  }
-  if (lastDecodeDropAt && now - lastDecodeDropAt < RECENT_DROP_DISPLAY_MS) {
-    queueParts.push(`decode drop +${lastDecodeDropCount}`);
-  }
   const totalDroppedFrames = playback.droppedFrames + droppedDecodeFrames;
-  if (totalDroppedFrames) queueParts.push(`dropped ${totalDroppedFrames} total`);
-  $("queueText").textContent = queueParts.join(" · ");
-  $("frameText").textContent = `frames ${frames}`;
-  $("byteText").textContent = `${(bytes / 1048576).toFixed(1)} MB`;
-  $("stageLatencyText").textContent =
-    `${formatMs(playback.bufferMs)} / ${formatMs(playback.targetLeadMs)}`;
+  renderModelTelemetry("minwm", {
+    ...playback,
+    frames,
+    bytes,
+    lastChunk: lastRenderedChunk,
+    lastDecodeMs,
+    lastDisplayLagMs,
+    renderFps: fpsSamples.length,
+    droppedFrames: totalDroppedFrames,
+    decodeQueueLength: pendingDecodeBatches,
+  });
+}
+
+function resetModelTelemetry(key) {
+  renderModelTelemetry(key, {
+    frames: 0,
+    bytes: 0,
+    lastChunk: null,
+    lastDecodeMs: 0,
+    lastDisplayLagMs: 0,
+    renderFps: 0,
+    sourceFps: 0,
+    bufferMs: 0,
+    queueFrames: 0,
+  });
+}
+
+function renderModelTelemetry(key, stats = {}) {
+  const prefix = key === "lingbot2" ? "lingbot2" : "minwm";
+  const renderFps = Number(stats.renderFps || 0);
+  const sourceFps = Number(stats.sourceFps || 0);
+  const bufferMs = Number(stats.bufferMs || 0);
+  const queueFrames = Number(stats.queueFrames ?? stats.queueLength ?? 0);
+  const droppedFrames = Number(stats.droppedFrames || 0);
+  const decodeQueueLength = Number(stats.decodeQueueLength || 0);
+  const totalFrames = Number(stats.frames || 0);
+  const bufferParts = [formatMs(bufferMs), `q ${queueFrames}`];
+  if (decodeQueueLength) bufferParts.push(`decode ${decodeQueueLength}`);
+  if (droppedFrames) bufferParts.push(`drop ${droppedFrames}`);
+  $(`${prefix}ChunkText`).textContent = stats.lastChunk == null ? "-" : `#${stats.lastChunk}`;
+  $(`${prefix}RateText`).textContent = totalFrames > 0
+    ? `${renderFps} render · ${sourceFps.toFixed(1)} source`
+    : "-";
+  $(`${prefix}BufferText`).textContent = bufferParts.join(" · ");
+  $(`${prefix}FramesText`).textContent = `${totalFrames} · ${(Number(stats.bytes || 0) / 1048576).toFixed(1)} MB`;
+  $(`${prefix}DecodeText`).textContent = stats.lastDecodeMs > 0
+    ? `${Math.round(stats.lastDecodeMs)} ms`
+    : "-";
+  $(`${prefix}DisplayLagText`).textContent = stats.lastDisplayLagMs > 0
+    ? `${(stats.lastDisplayLagMs / 1000).toFixed(1)} s`
+    : "-";
 }
 
 function requestedInputFps() {
@@ -1706,7 +1721,7 @@ function drawRecordingTopbar() {
     maxWidth: 120,
   });
   x += 126;
-  drawRecordingLabel(recordingElementText("chunkText", "chunk -"), x, y + 33, {
+  drawRecordingLabel(`chunk ${recordingElementText("minwmChunkText", "-")}`, x, y + 33, {
     color: "#e8eadf",
     font: "15px ui-sans-serif, system-ui, sans-serif",
     maxWidth: 96,
@@ -1724,10 +1739,9 @@ function drawRecordingTopbar() {
   });
 
   let right = RECORDING_STAGE_WIDTH - RECORDING_STAGE_PADDING;
-  right = drawRecordingTopbarStatRight(`buffer ${recordingElementText("stageLatencyText", "-")}`, right, y);
+  right = drawRecordingTopbarStatRight(`buffer ${recordingElementText("minwmBufferText", "-")}`, right, y);
   right = drawRecordingTopbarStatRight(`action ${recordingElementText("actionStateText", "-")}`, right, y);
-  right = drawRecordingTopbarStatRight(`source ${recordingElementText("theoreticalFpsText", "-")}`, right, y);
-  right = drawRecordingTopbarStatRight(`render ${recordingElementText("renderFps", "0")} fps`, right, y);
+  right = drawRecordingTopbarStatRight(recordingElementText("minwmRateText", "-"), right, y);
   right = drawRecordingTopbarStatRight(`output ${recordingElementText("outputSizeText", "-")}`, right, y);
   drawRecordingTopbarStatRight(
     `Preview ${recordingElementText("previewScaleText", "100%")}`,
@@ -1894,14 +1908,14 @@ function drawRecordingTelemetry() {
   fillRecordingRect(0, y, RECORDING_STAGE_WIDTH, RECORDING_STAGE_TELEMETRY_HEIGHT, "#11140f");
   const rows = [
     [
-      ["Payload", recordingElementText("payloadMode", selectedTransportLabel())],
-      ["Server send", recordingElementText("serverSendText", "-")],
-      ["Chunk bytes", recordingElementText("chunkPayloadText", "-")],
+      ["MinWM chunk", recordingElementText("minwmChunkText", "-")],
+      ["MinWM rate", recordingElementText("minwmRateText", "-")],
+      ["MinWM frames", recordingElementText("minwmFramesText", "-")],
     ],
     [
-      ["Chunk wait", recordingElementText("latencyText", "-")],
-      ["Decode", recordingElementText("decodeText", "-")],
-      ["Display lag", recordingElementText("displayLagText", "-")],
+      ["MinWM buffer", recordingElementText("minwmBufferText", "-")],
+      ["MinWM decode", recordingElementText("minwmDecodeText", "-")],
+      ["MinWM lag", recordingElementText("minwmDisplayLagText", "-")],
     ],
   ];
   const cellWidth = RECORDING_STAGE_WIDTH / 3;
@@ -3120,7 +3134,7 @@ function handleEncodedPreviewDecodeError(error, header, data, payloadBytes) {
   const signature = payloadSignature(data);
   const mode = shortPayloadMode(header.content_type);
   const message = error?.message || "encoded preview decode failed";
-  $("decodeText").textContent = `drop ${encodedDecodeErrors}`;
+  $("minwmDecodeText").textContent = `drop ${encodedDecodeErrors}`;
   setStatus("Decode dropped", "error");
   addHistory(
     `decode drop c${header.chunk_index} ${mode} ${formatBytes(payloadBytes)} ${signature} · ${message}`,
@@ -3186,12 +3200,8 @@ function renderLoop(now) {
     drawFrame(item.image);
     fpsSamples.push(now);
     fpsSamples = fpsSamples.filter((t) => now - t < 1000);
-    const renderedFps = String(fpsSamples.length);
-    $("renderFps").textContent = renderedFps;
-    $("chunkText").textContent = `chunk ${item.chunk}`;
+    lastRenderedChunk = item.chunk;
     lastDisplayLagMs = now - (item.receivedAt || now);
-    $("decodeText").textContent = `${Math.round(item.decodeMs || lastDecodeMs)} ms`;
-    $("displayLagText").textContent = `${(lastDisplayLagMs / 1000).toFixed(1)} s`;
     recordChunkFirstRendered(item.chunk, {
       render_loop: true,
       display_lag_ms: lastDisplayLagMs,
@@ -3514,7 +3524,7 @@ function openPrimarySession(init, url) {
       });
       void traceHttpClient?.flushClientEvents().catch(() => {});
       if (!renderedPreviewFrames) setPreviewState("idle");
-      if (!normalClose && !socketCloseExpected) {
+      if (generationMode !== "t2v" && !normalClose && !socketCloseExpected) {
         lingbot2Session.close("MinWM peer failed");
       }
       if (!opened) reject(new Error(`MinWM closed before startup (${event.code})`));
@@ -3658,23 +3668,10 @@ async function decodeAndEnqueueFrameBatch(header, data, epoch) {
   recordDecodedFrameBatch(decodedFrames);
   const enqueueResult = playbackController.enqueueDecodedFrames(header, decodedFrames, now);
   closeFrames(enqueueResult.droppedFrames);
-  const playback = enqueueResult.snapshot;
   lastSampledEventId = Number(header.event_id || lastSampledEventId);
   updateControlDebugText();
-  $("chunkPayloadText").textContent = `${formatBytes(payloadBytes)} · ${chunkFrameCount}f`;
-  const realtimeRatio = playback.targetFps > 0
-    ? playback.sourceFps / playback.targetFps
-    : 0;
-  $("theoreticalFpsText").textContent = (
-    `${playback.sourceFps.toFixed(1)} fps · ${realtimeRatio.toFixed(2)}x`
-  );
-  if (enqueueResult.cutover?.latencyMs) {
-    const eventLatency = enqueueResult.cutover.latencyMs / 1000;
-    $("latencyText").textContent = `${eventLatency.toFixed(1)}s · event`;
-  }
   frames += chunkFrameCount;
   bytes += payloadBytes;
-  $("payloadMode").textContent = payloadModeLabelFromHeader(header);
   updateOutputSizeFromHeader(header);
   setStatus("Live", "live");
   updateStats();
@@ -3792,7 +3789,6 @@ async function applyPreset(preset, options = {}) {
     ?? Boolean(ws && ws.readyState === WebSocket.OPEN);
   selectedPreset = preset;
   $("prompt").value = preset.prompt;
-  if (!options.preserveSize) $("size").value = preset.size;
   $("fps").value = UI_CONFIG.targetFps == null ? preset.fps : DEFAULT_TARGET_FPS;
   updateOutputSizeText();
   syncPlaybackTargetFps();

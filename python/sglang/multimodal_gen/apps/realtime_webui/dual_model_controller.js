@@ -5,14 +5,32 @@
       this.backends = backends;
       this.now = now;
       this.nextEventId = 1;
+      this.activeKeys = new Set();
     }
 
     async connect(baseInit) {
       this.nextEventId = 1;
-      const entries = Object.entries(this.sessions);
-      const results = await Promise.allSettled(entries.map(([key, session]) => {
+      this.activeKeys.clear();
+      const entries = [];
+      for (const [key, session] of Object.entries(this.sessions)) {
         const backend = this.backends[key];
         if (!backend) throw new Error(`missing backend configuration for ${key}`);
+        const enabled = typeof backend.enabled === "function"
+          ? backend.enabled(baseInit, key)
+          : backend.enabled !== false;
+        if (enabled) {
+          entries.push([key, session]);
+          this.activeKeys.add(key);
+          continue;
+        }
+        if (typeof session.setUnavailable === "function") {
+          session.setUnavailable(backend.unavailableReason || "Unavailable for this mode");
+        } else {
+          session.close("disabled for request");
+        }
+      }
+      const results = await Promise.allSettled(entries.map(([key, session]) => {
+        const backend = this.backends[key];
         const traceBase = baseInit.trace_id || `trace-${Date.now()}`;
         const model = typeof backend.model === "function"
           ? backend.model(baseInit, key)
@@ -33,6 +51,7 @@
       const failure = results.find((result) => result.status === "rejected");
       if (!failure) return;
       for (const [, session] of entries) session.close("dual model startup failed");
+      this.activeKeys.clear();
       throw failure.reason;
     }
 
@@ -47,12 +66,13 @@
         client_sent_perf_ms: sentAt,
         client_sent_epoch_ms: Date.now(),
       };
-      for (const session of Object.values(this.sessions)) session.sendEvent(envelope);
+      for (const key of this.activeKeys) this.sessions[key]?.sendEvent(envelope);
       return eventId;
     }
 
     close(reason = "dual model session closed") {
       for (const session of Object.values(this.sessions)) session.close(reason);
+      this.activeKeys.clear();
     }
   }
 

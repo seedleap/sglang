@@ -68,6 +68,7 @@ function fakeCanvas() {
     getContext: () => ({
       drawImage: (...args) => draws.push(args),
       putImageData: (...args) => draws.push(args),
+      fillRect: (...args) => draws.push(args),
       imageSmoothingEnabled: true,
       imageSmoothingQuality: "medium",
     }),
@@ -133,6 +134,7 @@ async function main() {
   scheduled.shift()(130);
   assert.equal(canvas.draws.length, 1);
   assert.equal(frames[0].chunk, 3);
+  assert.equal(session.snapshot().renderFps, 1);
 
   socket.message({
     type: "frame_batch_header",
@@ -145,6 +147,12 @@ async function main() {
   await flush();
   assert.equal(decodedHeaders.at(-1).chunk_index, 4,
     "split frame_batch_header payloads must be decoded as media, not MsgPack");
+
+  const reconnecting = session.connect({ type: "init", trace_id: "trace:lingbot2:next" }, "/lingbot2");
+  const replacementSocket = FakeSocket.instances.at(-1);
+  assert.equal(session.snapshot().renderFps, 0, "a new request must not inherit the prior render rate");
+  replacementSocket.open();
+  await reconnecting;
 
   const otherCanvas = fakeCanvas();
   const other = new RealtimeModelSession({
@@ -159,8 +167,9 @@ async function main() {
   });
   assert.equal(other.snapshot().queueFrames, 0, "model playback queues remain independent");
 
-  session.close("done");
-  assert.equal(socket.readyState, FakeSocket.CLOSED);
+  session.setUnavailable("T2V unavailable");
+  assert.equal(replacementSocket.readyState, FakeSocket.CLOSED);
+  assert.ok(states.includes("unavailable"), "disabled model should expose an unavailable state");
   console.log("realtime model session ok");
 }
 

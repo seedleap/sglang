@@ -24,6 +24,11 @@ assert.equal((html.match(/class="stage-controls"/g) || []).length, 1, "camera co
 assert.equal((html.match(/id="firstFrame"/g) || []).length, 1, "reference picker remains shared");
 assert.equal((html.match(/id="prompt"/g) || []).length, 1, "prompt remains shared");
 assert.equal((html.match(/id="fullscreenBtn"/g) || []).length, 1, "comparison fullscreen remains shared");
+assert.equal((html.match(/class="model-player-telemetry"/g) || []).length, 2, "each player needs its own telemetry");
+assert.match(html, /id="minwmDisplayLagText"/, "MinWM should expose independent display lag");
+assert.match(html, /id="lingbot2DisplayLagText"/, "LingBot2 should expose independent display lag");
+assert.doesNotMatch(html, /class="stage-telemetry"/, "shared stream telemetry is misleading");
+assert.doesNotMatch(html, /class="spec-grid"/, "generic LingBot capability cards should be removed");
 assert.match(
   html,
   /id="fullscreenBtn"[\s\S]*?aria-label="Enter fullscreen comparison"/,
@@ -47,6 +52,7 @@ assert.match(app, /await dualModelController\.connect\(init\)/);
 assert.match(app, /dualModelController\.sendEvent\(kind, payload\)/);
 assert.match(app, /backendWebSocketUrl\("minwm"/);
 assert.match(app, /backendWebSocketUrl\("lingbot2"/);
+assert.match(app, /enabled:\s*\(init\)\s*=>\s*init\.generation_mode\s*!==\s*"t2v"/);
 assert.match(app, /function drawRecordingComparisonPreview\(/);
 assert.match(app, /createFullscreenController/);
 assert.match(server, /BACKEND_ENV_PREFIXES = \{/);
