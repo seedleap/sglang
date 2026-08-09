@@ -22,7 +22,6 @@ from pathlib import Path
 from typing import Any
 
 import msgspec.msgpack
-
 from common import (
     action_weights,
     is_realtime_trace_event,
@@ -172,10 +171,7 @@ async def receive_run(args: argparse.Namespace, contract: dict, case: dict) -> d
     ) as websocket:
         await websocket.send(msgspec.msgpack.encode(request))
         init_completed_ns = time.perf_counter_ns()
-        while (
-            len(stats_by_chunk) < total_chunks
-            or len(payload_complete_ns) < total_chunks
-        ):
+        while len(payload_complete_ns) < total_chunks:
             packed = await asyncio.wait_for(websocket.recv(), timeout=args.timeout)
             if not isinstance(packed, bytes):
                 raise TypeError(
@@ -246,14 +242,18 @@ async def receive_run(args: argparse.Namespace, contract: dict, case: dict) -> d
                 payload_complete_ns[chunk_index] = time.perf_counter_ns()
 
     expected_indices = list(range(total_chunks))
-    if sorted(stats_by_chunk) != expected_indices:
+    if stats_by_chunk and sorted(stats_by_chunk) != expected_indices:
         raise AssertionError("chunk_stats indices are not contiguous")
     if sorted(payload_complete_ns) != expected_indices:
         raise AssertionError("frame payload indices are not contiguous")
 
     measured_indices = list(range(args.warmup_chunks, total_chunks))
-    measured_stats = [stats_by_chunk[index] for index in measured_indices]
-    measured_frames = sum(int(stat["num_frames"]) for stat in measured_stats)
+    measured_stats = [
+        stats_by_chunk[index] for index in measured_indices if index in stats_by_chunk
+    ]
+    measured_frames = sum(
+        int(frame_batches_by_chunk[index]["frames"]) for index in measured_indices
+    )
     expected_measured_frames = (
         args.measured_chunks * pixel_frames_per_latent * latent_frames_per_chunk
     )
