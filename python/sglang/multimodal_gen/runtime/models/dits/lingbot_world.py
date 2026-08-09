@@ -170,6 +170,20 @@ class LingBotWorldCausalSelfAttention(CausalWanSelfAttention):
                 f"num_heads ({self.num_heads}) must be divisible by ulysses_degree ({ulysses_world_size})."
             )
         self.ulysses_num_heads = self.num_heads // ulysses_world_size
+        from sglang.multimodal_gen.runtime.server_args import get_global_server_args
+
+        try:
+            backend_config = get_global_server_args().attention_backend_config or {}
+        except ValueError:
+            backend_config = {}
+        causal_fa_num_splits = backend_config.get("lingbot_causal_fa_num_splits")
+        if causal_fa_num_splits is not None:
+            causal_fa_num_splits = int(causal_fa_num_splits)
+        if causal_fa_num_splits is not None and causal_fa_num_splits < 0:
+            raise ValueError(
+                "attention_backend_config.lingbot_causal_fa_num_splits "
+                "must be non-negative"
+            )
         self.ulysses_attn = LocalAttention(
             num_heads=self.ulysses_num_heads,
             head_size=self.head_dim,
@@ -181,6 +195,7 @@ class LingBotWorldCausalSelfAttention(CausalWanSelfAttention):
                 AttentionBackendEnum.AITER,
                 AttentionBackendEnum.TORCH_SDPA,
             ),
+            num_splits=causal_fa_num_splits,
         )
 
     def forward(

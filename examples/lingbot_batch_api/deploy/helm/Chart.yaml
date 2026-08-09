@@ -1,0 +1,6 @@
+apiVersion: v2
+name: lingbot-batch-api
+description: One-slot HTTP adapters paired with autoscaled SGLang LingBot workers
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

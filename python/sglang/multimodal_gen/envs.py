@@ -59,6 +59,9 @@ if TYPE_CHECKING:
     SGLANG_USE_RUNAI_MODEL_STREAMER: bool = True
     SGLANG_LINGBOT_ENABLE_INTERACTIVE_KV_WINDOW: bool = False
     SGLANG_LINGBOT_LAZY_VAE_ENCODE_BLACK_FRAMES: int | None = None
+    # Benchmark-only idealized Ulysses communication bypass. This preserves
+    # tensor shapes and compute work but does not preserve model semantics.
+    SGLANG_DIFFUSION_BENCHMARK_BYPASS_USP_A2A: bool = False
     SGLANG_DIFFUSION_FLASHINFER_FP4_GEMM_BACKEND: str | None = None
     SGLANG_DIFFUSION_ENABLE_W8A8_FP8_GEMM: bool = False
     SGLANG_DIFFUSION_VAE_CHANNELS_LAST_3D: str = "auto"
@@ -299,6 +302,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     "SGLANG_LINGBOT_ENABLE_INTERACTIVE_KV_WINDOW": _lazy_bool(
         "SGLANG_LINGBOT_ENABLE_INTERACTIVE_KV_WINDOW"
+    ),
+    "SGLANG_DIFFUSION_BENCHMARK_BYPASS_USP_A2A": _lazy_bool(
+        "SGLANG_DIFFUSION_BENCHMARK_BYPASS_USP_A2A"
     ),
     "SGLANG_LINGBOT_LAZY_VAE_ENCODE_BLACK_FRAMES": _lazy_int(
         "SGLANG_LINGBOT_LAZY_VAE_ENCODE_BLACK_FRAMES"
