@@ -779,7 +779,7 @@ class MinWMCausalSelfAttentionKVCache(CausalSelfAttentionKVCache):
         )
 
     def copy_committed_history_from(
-        self, other: MinWMCausalSelfAttentionKVCache
+        self, other: "MinWMCausalSelfAttentionKVCache"
     ) -> None:
         """Copy positive-branch self history while preserving cross KV elsewhere."""
         if self.rope_position_mode != other.rope_position_mode:
