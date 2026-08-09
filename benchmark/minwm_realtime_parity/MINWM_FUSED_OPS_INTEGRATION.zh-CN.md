@@ -23,11 +23,14 @@ postprocess runtime 候选。S0 产品/契约 SHA 为
 bitwise、profiler-off headline、每个 SP 8 组（共 16 组）factorial Nsight 与产物审计均已
 通过。随后 `main` 合入 async-VAE/causal-attention-plan，组合 PR 已更新到
 `dc4c865a6e`，本地回归为 `145 passed, 2 skipped`。由于新 main 触及 MinWM runtime，不能把
-attempt-04 冒充当前 HEAD 真机结果。当前 SHA 的独立 attempt-05 在首个 SP2 profiler-off
-请求进入生成前失败：测量专用 trace relay 仍读取已由新 main 删除的
-`GenerateSession.client_trace`，产品路径没有这个读取点。该 attempt 无性能数据并按 root/lane
-marker 保留；修复仅进入临时 runner，产品 PR 保持 draft、不等待人工 approval，但需等待
-新的当前 SHA H200 gate。
+attempt-04 冒充当前 HEAD 真机结果。当前 SHA 的 attempt-05 在首个 SP2 profiler-off 请求进入
+生成前暴露 runner-only trace relay 仍读取已删除的 `GenerateSession.client_trace`；删除该读取后，
+attempt-06 已成功进入生成，并完整产出到 chunk 34，但在 `server_elapsed_ms=60043.368` 被新 main
+的 60 秒 session-idle watchdog 关闭。测量客户端过去只发送一次 init、随后被动收结果，未发送
+WebUI 已有的 `event/heartbeat`，因此这仍是 runner 协议适配缺口，不是产品实现或性能回退。
+attempt-05/06 都无正式性能 JSON，root/lane marker、日志和 telemetry 原位保留。修复仅进入临时
+runner：每 15 秒发送同一连接的标准 heartbeat，正常或异常退出都取消任务；产品 PR 保持
+draft、不等待人工 approval，但需等待新的当前 SHA H200 gate。
 
 ## 预期
 
@@ -236,7 +239,12 @@ runner-only SHA `ddc2816880` 因此保留测量专用 relay，同时合入产品
 `session.client_trace`，而新 main 已从 request/session 两侧删除该字段；服务端因此抛出
 `AttributeError` 并返回 `invalid generate request`。修复是只从 runner 的日志字段中删除该
 访问，保留按 `trace_id` 注册的 sink/queue；新增结构测试要求 relay 存在且源码不得再访问
-`session.client_trace`，不恢复产品已删除的 websocket client-trace 状态。
+`session.client_trace`，不恢复产品已删除的 websocket client-trace 状态。attempt-06 证明这项
+修复有效：init、DiT/VAE 和 payload 均正常推进到 chunk 35；但新 main 的 watchdog 只把客户端
+入站事件视为 activity，服务端持续输出并不会续期。修复复用产品已经支持、WebUI 已在使用的
+`{type: event, kind: heartbeat}`，默认间隔 15 秒，且 A/B 两侧完全相同；它不携带 action、
+不修改计时窗口，也不恢复 client-trace。新增行为测试校验 MessagePack 字段、单调 event_id 和
+scope 退出后的任务清理；S0/S5 测量测试合计 `51 passed`。
 
 ## H200 隔离、失败与产物保留
 
@@ -313,6 +321,11 @@ kubectl --context codex-minwm-test-phx2 apply \
 | artifact manifest | `s5-summary/artifact-manifest.json` / `cd7f8f171b01d1a97ef7e6b6de6a87a247087535c47da30e5ef2d0dc48eb9de0` | 2,479 files / 32,620,946,396 bytes；PVC 内可恢复 |
 | 当前 SHA 复验 runner | `ddc2816880fb60b0dd3994f09697843b8e44e6e9` | runner-only；含测量专用 trace relay |
 | attempt-05 manifest | runner `4a1b5351c3` / `minwm_s5_fusedops_h200_20260809_attempt05.yaml` | 已提交；backoff 0 |
+| heartbeat runner | `ed255b3c6b` | runner-only；15 秒标准 heartbeat，`51 passed` |
+| attempt-06 lane marker | `03d8e32514efeb8a95d76053f970481813fd94bff8afc788fddc96d8ee525e3f` | 2,527 bytes；PVC 原位可恢复 |
+| attempt-06 root marker | `8103c20d27d13ce46ddf4745ce507ede4843b6ec524e532c484e65dcedea8aa2` | 3,973 bytes；PVC 原位可恢复 |
+| attempt-06 server log | `2e61029e9fe9f29c25575442a661027e308e177bf260af772af7d507145fcd99` | 734,340 bytes；记录 60.043 秒 watchdog close |
+| attempt-06 pod diagnostic | `0c953b0ab98d950da049b0feb270d431489c7ece1d797960ce8f0d551a2e108a` | 4,453 bytes；exit 1/backoff 0 |
 | PR | `seedleap/sglang#26` | draft；当前 SHA H200 gate 后转 ready，不等待人工 approval |
 
 正式测量前的 attempts 均在同一隔离节点、不同 Pod/host-scoped root 中保留：
@@ -324,6 +337,7 @@ kubectl --context codex-minwm-test-phx2 apply \
 | `03` | `0e03a900a4` | preflight/setup | 自适应原因和最终 CV/fallback gate 不完整 | Pod/PVC/raw 保留 |
 | `04` | `49863b9051` | 完成 | 无；exit 0；无 invalid marker | Pod 按 TTL 清理，PVC/raw 全部保留 |
 | `05` | `ddc2816880` | 首个 SP2 init、生成前 | runner-only relay 读取已删除的 `GenerateSession.client_trace`；无性能数据 | Job `minwm-s5-fusedops-h200-20260809-05` failed/backoff 0；root/lane marker、server log 与独立 host root/PVC 保留 |
+| `06` | `2adb6e1437` | 首个 SP2 `111` profiler-off，完整至 chunk 34 | 新 main 60 秒 idle watchdog；旧测量客户端只有 init、没有 heartbeat；无性能 JSON | Job `minwm-s5-fusedops-h200-20260809-06` failed/backoff 0；两级 marker、server log、telemetry、diagnostic 与 PVC 全部保留 |
 
 ## 收益大小解释框架
 
@@ -356,9 +370,10 @@ wall 反而增加 1.582%；因此设备微基准和端到端吞吐必须同时�
   `+9.2%/−1.0%`。若模型、分辨率、KV 窗口或硬件变化，重新跑 ABBA + exact-window，而不是
   沿用本轮交互系数。
 
-以上是 attempt-04 对 `3d159d20fc` 的建议。attempt-05 若在当前 `dc4c865a6e` 上保持严格
-bitwise、必选 CV 通过且收益方向一致，则转为最终；若不一致，以 attempt-05 当前 SHA 为准，
-保留两轮差异并重新解释，不能选择性沿用较好数字。
+以上是 attempt-04 对 `3d159d20fc` 的建议。attempt-05/06 都属于当前 `dc4c865a6e` 的
+runner 协议失败，不能参与性能比较。下一有效 attempt 若保持严格 bitwise、必选 CV 通过且
+收益方向一致，则转为最终；若不一致，以当前 SHA 的有效 attempt 为准，保留两轮差异并重新
+解释，不能选择性沿用较好数字。
 
 ## 让我掌握代码改动：检查题
 
@@ -386,3 +401,5 @@ bitwise、必选 CV 通过且收益方向一致，则转为最终；若不一致
 22. SP2 Nsight DiT CUDA 改善 14.234%，为什么最终仍不建议默认开启 S3/S4？
 23. kernel/launch 残差为 0，但 DiT wall 残差非零，说明哪些时间不能由 launch 数线性预测？
 24. SP4 `000` chunk-wall CV 为 3.221% 时，为什么 headline 仍可用，又必须附带什么警告？
+25. 为什么服务端持续发送视频仍会触发 session-idle watchdog？测量客户端的 heartbeat 为什么
+    必须复用标准 `event` 协议、A/B 同频发送并在退出时取消？
