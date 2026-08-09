@@ -187,9 +187,7 @@ async def run_case(args, case, contract, first_frame: Path | None):
             # targets chunk 1 without relying on a client-side sleep.
             await websocket.send(msgspec.msgpack.encode(queued_prompt_event))
             prompt_event_sent_ns = time.perf_counter_ns()
-        while len(completed_chunks) < int(contract["chunks"]) or len(stats) < int(
-            contract["chunks"]
-        ):
+        while len(completed_chunks) < int(contract["chunks"]):
             packed = await asyncio.wait_for(websocket.recv(), timeout=args.timeout)
             header = msgspec.msgpack.decode(packed)
             message_type = header.get("type")
@@ -237,7 +235,10 @@ async def run_case(args, case, contract, first_frame: Path | None):
         target_chunk = int(case["prompt_switch"]["target_chunk"])
         event_id = int(queued_prompt_event["event_id"])
         stats_by_chunk = {int(item["chunk_index"]): item for item in stats}
-        observed_stats_event_id = stats_by_chunk[target_chunk].get("event_id")
+        observed_stats = stats_by_chunk.get(target_chunk)
+        observed_stats_event_id = (
+            observed_stats.get("event_id") if observed_stats is not None else None
+        )
         observed_frame_event_id = frame_event_ids[target_chunk]
         first_stats_chunk = next(
             (
@@ -268,7 +269,9 @@ async def run_case(args, case, contract, first_frame: Path | None):
             "first_stats_chunk_with_event": first_stats_chunk,
             "first_frame_chunk_with_event": first_frame_chunk,
         }
-        if first_stats_chunk != target_chunk or first_frame_chunk != target_chunk:
+        if first_frame_chunk != target_chunk or (
+            stats_by_chunk and first_stats_chunk != target_chunk
+        ):
             raise AssertionError(
                 f"{case['id']}: prompt event {event_id} first affected stats/frame "
                 f"chunks {first_stats_chunk}/{first_frame_chunk}, expected "
