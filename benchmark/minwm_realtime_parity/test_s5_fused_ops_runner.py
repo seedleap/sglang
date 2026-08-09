@@ -153,3 +153,18 @@ def test_attempt07_pins_heartbeat_runner_and_current_product_tree():
     assert manifest.count(product_ref) == 3
     assert "backoffLimit: 0" in manifest
     assert 'nvidia.com/gpu: "8"' in manifest
+
+
+def test_attempt08_pins_chunk_trace_runner_and_current_product_tree():
+    manifest = (
+        ROOT
+        / "k8s/minwm_s5_fusedops_h200_20260809_attempt08.yaml"
+    ).read_text()
+    runner_ref = "b2c3227d1d31ae95d18bf97a41337f4311f1cca2"
+    product_ref = "dc4c865a6e41dd26f5feaeb8f9236facd5725082"
+    assert "minwm-s5-fusedops-h200-20260809-07" not in manifest
+    assert manifest.count("minwm-s5-fusedops-h200-20260809-08") == 6
+    assert manifest.count(runner_ref) == 3
+    assert manifest.count(product_ref) == 3
+    assert "backoffLimit: 0" in manifest
+    assert 'nvidia.com/gpu: "8"' in manifest
