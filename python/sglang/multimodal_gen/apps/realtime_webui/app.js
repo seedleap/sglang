@@ -538,7 +538,7 @@ const dualModelController = new DualModelController({
       transformInit: (init) => {
         const interactiveInit = {
           ...init,
-          realtime_interactive_event_grace_ms: 250,
+          realtime_interactive_event_grace_ms: 1000,
         };
         const is720p = init.size === "1280x704" || init.size === "1280x720";
         if (!is720p) return interactiveInit;

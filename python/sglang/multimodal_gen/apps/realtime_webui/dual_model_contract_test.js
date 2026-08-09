@@ -44,7 +44,7 @@ assert.match(css, /\.stage:fullscreen\s*\{/);
 assert.match(css, /\.stage:fullscreen\s*\{[\s\S]*?height:\s*100vh/);
 assert.match(html, /model_session\.js\?v=dual-model-v3/);
 assert.match(html, /dual_model_controller\.js\?v=dual-model-v3/);
-assert.match(html, /app\.js\?v=realtime-production-gateway-v19/);
+assert.match(html, /app\.js\?v=realtime-production-gateway-v20/);
 assert.match(html, /fullscreen_controller\.js\?v=dual-fullscreen-v1/);
 
 const app = fs.readFileSync(path.join(root, "app.js"), "utf8");
@@ -69,7 +69,7 @@ assert.match(app, /function abortCurrentSession[\s\S]{0,220}resetControls = true
 assert.match(app, /if \(resetControls\) controlStateController\?\.reset/);
 assert.match(app, /backendWebSocketUrl\("minwm"/);
 assert.match(app, /backendWebSocketUrl\("lingbot2"/);
-assert.match(app, /realtime_interactive_event_grace_ms:\s*250/);
+assert.match(app, /realtime_interactive_event_grace_ms:\s*1000/);
 assert.doesNotMatch(
   app,
   /if \(!ws \|\| ws\.readyState !== WebSocket\.OPEN\) return;\s*dualModelController\.sendEvent\("heartbeat"/,
