@@ -14,6 +14,7 @@ from pathlib import Path
 import msgspec.msgpack
 import numpy as np
 
+from benchmark_realtime_throughput import chunk_stats_from_trace
 from common import (
     action_label_sequence,
     action_weights,
@@ -194,6 +195,11 @@ async def run_case(args, case, contract, first_frame: Path | None):
             header = msgspec.msgpack.decode(packed)
             message_type = header.get("type")
             if is_realtime_trace_event(header):
+                trace = header.get("trace")
+                if isinstance(trace, dict):
+                    chunk_stats = chunk_stats_from_trace(trace)
+                    if chunk_stats is not None:
+                        stats.append(chunk_stats)
                 continue
             if message_type == "error":
                 raise RuntimeError(header.get("content", "unknown realtime error"))

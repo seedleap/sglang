@@ -125,6 +125,13 @@ def test_measurement_trace_relay_does_not_restore_removed_client_trace_state():
     assert "session.client_trace" not in source
 
 
+def test_correctness_client_consumes_chunk_complete_trace_stats():
+    source = (ROOT / "run_sglang_api.py").read_text()
+    assert "from benchmark_realtime_throughput import chunk_stats_from_trace" in source
+    assert "chunk_stats = chunk_stats_from_trace(trace)" in source
+    assert "stats.append(chunk_stats)" in source
+
+
 def test_attempt06_pins_the_relay_fix_and_current_product_tree():
     manifest = (
         ROOT
