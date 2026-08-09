@@ -205,6 +205,8 @@ else
     --local-attn-size "${MINWM_CONVERT_LOCAL_ATTN_SIZE:--1}" \
     --sink-size "${MINWM_CONVERT_SINK_SIZE:-0}" \
     --sliding-window-num-frames "${MINWM_CONVERT_WINDOW_SIZE:-128}" \
+    --rope-position-mode "${MINWM_CONVERT_ROPE_POSITION_MODE:-absolute}" \
+    --rope-max-frame-gap "${MINWM_CONVERT_ROPE_MAX_FRAME_GAP:-1}" \
     | tee "${RESULTS}/conversion.log"
 fi
 cp "${MODEL_DIR}/minwm_conversion_manifest.json" "${RESULTS}/"
