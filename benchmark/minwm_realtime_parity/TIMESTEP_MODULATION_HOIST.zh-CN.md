@@ -330,6 +330,12 @@ invalid marker。SP4 不再追加 Nsight：SP2 已把预期 kernel-name 与精�
    `metrics.profiler_on.observed_wall_with_profiler_overhead.{dit,vae}_wall_ms`。按 fail-closed
    约定，不保留该 legacy 为正式 lane，也不与未来 candidate 跨 attempt 拼接；`-10` 在同一
    attempt 重跑两侧并成功。
+9. PR 在合入 async-VAE/causal-attention-plan 的新 main 后出现一处文本冲突：S1 在
+   `_apply_output_head` 后新增 `_prepare_transformer_block_temb`，main 在同一位置新增
+   `prepare_causal_attention_plan`。两者调用链独立，解决方式是并列保留，而不是任选一侧；
+   合并后 MinWM realtime 为 `130 passed, 1 skipped`，ruff、compileall 与 diff-check 通过。
+   该处理不改变已经测量的 S1 fast path，但当前 main 的组合态仍由 S5 当前-SHA H200 gate
+   复验。
 
 ## 证据与决策过程
 
