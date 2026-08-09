@@ -38,7 +38,9 @@ marker；当前修复从该权威 trace 恢复原统计字段。attempt-08 已�
 JSON 全部有效；随后短 correctness 客户端仍忽略相同 trace，在完整视频正常 close 后失败。
 因此 attempt-08 的 SP2 headline 只作可恢复 checkpoint，尚不能成为整体验收。修复现已复用同一
 转换函数覆盖 throughput 与 correctness 客户端；产品 PR 保持 draft、不等待人工 approval，但
-需等待新的当前 SHA H200 gate。
+需等待新的当前 SHA H200 gate。attempt-09 已用这项修复完成当前产品树的 SP2/SP4
+profiler-off、两种 SP 的严格 bitwise，以及 SP2 全 8 组 factorial Nsight；SP4 Nsight 尚在运行，
+所以以下当前 HEAD 数值是已验证的阶段证据，不提前把整个 Job 标为完成。
 
 ## 预期
 
@@ -267,6 +269,36 @@ correctness：`run_sglang_api.py` 完整收到视频，却仍只识别旧 `chunk
 退出。修复让 correctness 客户端复用 `chunk_stats_from_trace`，不复制字段映射；对应结构门与
 全套测量测试现为 `56 passed`。
 
+### attempt-09 当前 HEAD 阶段证据
+
+attempt-09 固定产品树 `dc4c865a6e41dd26f5feaeb8f9236facd5725082`、runner
+`0bb1f7acbf08cfc64347ddbb918ca756123e398e`，Job
+`minwm-s5-fusedops-h200-20260809-09` 使用整机 8×H200、`backoffLimit=0`。两种 SP 的
+ABBA 都因位置漂移超过 3% 而按合同各追加 `000/111` 一个独立 server；追加后四个必选指标
+CV 均通过。SP4 `000` 的非必选 chunk-wall CV 为 `3.452%`，作为环境噪声警告保留，不影响
+Client/Scheduler/DiT/VAE 的必选 gate。
+
+| SP | Client FPS | Scheduler FPS | chunk wall | DiT wall | VAE wall | 当前状态 |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| 2 | **+3.168%** | **+3.174%** | **+2.706%** | **+4.292%** | **+0.318%** | 3 lane/variant；必选 CV 通过 |
+| 4 | **+6.645%** | **+6.660%** | **+4.961%** | **+9.933%** | **+0.143%** | 3 lane/variant；必选 CV 通过 |
+
+这里的百分比均以 `111` 相对 `000` 计算，wall 为降低比例。SP2 与 SP4 correctness 都覆盖
+clean-cache + recompute、chunk 0..7 和全部 active rank；latent 的 dtype/shape/SHA 全部一致，
+最终视频也逐 bit 相等、`max_abs=0`。SP2 视频 SHA 为
+`38e7ef07cffb7e8df2e59323dcbd9dacda92d31ab4a268d1276b554b7f3e833b`，SP4 视频 SHA 为
+`14af1068a53d0e4479fcc163fdfd5edc3415242c261852fc844cedf19e3c5a4c`；二者不同是 SP degree
+本身的既有数值路径差异，不是 `000/111` 差异。
+
+SP2 exact-window factorial 已完成。相对 `000`，三个单项 `100/010/001`
+（hoist/post-A2A/QKV）的 DiT wall 分别降低 `2.928%/10.044%/6.057%`；kernel/launch 每 stable
+chunk 分别变化 `−870/−8400/0`，CUDA API 分别变化 `−1.842%/−19.153%/−0.257%`。组合 `111`
+的 DiT wall/CUDA 分别降低 `17.162%/17.165%`，kernel/launch 降低 `9270`（`−26.786%`），
+CUDA API 降低 `21.350%`，GPU kernel-busy mean 增加 `2.676pp`。组合 DiT wall 的三阶残差为
+`+1.868pp`，因此不能把三个单项 wall 收益直接相加；pairwise gate 已触发并已补齐
+`110/101/011`。这些是 profiler-on 归因数值，不能替代上表 profiler-off headline；尤其 SP2
+两者兑现幅度差异较大，最终报告必须结合 SP4 factorial 与 telemetry 再解释。
+
 ## H200 隔离、失败与产物保留
 
 - kube context 固定为 `codex-minwm-test-phx2`；一次占用完整 8-GPU H200 节点；
@@ -349,6 +381,11 @@ kubectl --context codex-minwm-test-phx2 apply \
 | attempt-06 pod diagnostic | `0c953b0ab98d950da049b0feb270d431489c7ece1d797960ce8f0d551a2e108a` | 4,453 bytes；exit 1/backoff 0 |
 | chunk-trace runner | `b2c3227d1d` | runner-only；从 `server.chunk_complete` 恢复原 stats 合同，`54 passed` |
 | parity-trace runner | `0bb1f7acbf` | runner-only；correctness 客户端复用同一转换，`56 passed` |
+| attempt-09 profiler-off SP2 | `s5-summary/headline-sp2.json` / `19c608689245bf183a15f44e2a1346446a0ad3ce8adb4c631d9440ff521d40bc` | 6,284 bytes；必选 CV 通过 |
+| attempt-09 profiler-off SP4 | `s5-summary/headline-sp4.json` / `a7c7185f86d50263019ac5b8e08789b668646af96ab7f710f2a6a4933a498bd6` | 6,354 bytes；必选 CV 通过 |
+| attempt-09 correctness SP2 | `correctness/sp2/correctness-summary.json` / `07c44bb80111ee9cd6593550577ad62b5052ede125d120cea509681f6cfdd421` | 7,341 bytes；bitwise |
+| attempt-09 correctness SP4 | `correctness/sp4/correctness-summary.json` / `bcf0868a5e9fb4cf62e3d29bb0bf97b06cf00e51ee35571645d1f365b9d76d33` | 13,901 bytes；bitwise |
+| attempt-09 factorial Nsight SP2 | `s5-summary/nsys-sp2.json` / `ebdd79bad89c411a56ab5378dee7ad6d8b1c6438f1b097157f7e6db9bda08a33` | 296,992 bytes；8 配置完成 |
 | PR | `seedleap/sglang#26` | draft；当前 SHA H200 gate 后转 ready，不等待人工 approval |
 
 正式测量前的 attempts 均在同一隔离节点、不同 Pod/host-scoped root 中保留：
@@ -363,6 +400,7 @@ kubectl --context codex-minwm-test-phx2 apply \
 | `06` | `2adb6e1437` | 首个 SP2 `111` profiler-off，完整至 chunk 34 | 新 main 60 秒 idle watchdog；旧测量客户端只有 init、没有 heartbeat；无性能 JSON | Job `minwm-s5-fusedops-h200-20260809-06` failed/backoff 0；两级 marker、server log、telemetry、diagnostic 与 PVC 全部保留 |
 | `07` | `ed255b3c6b` | 首个 SP2 `111` profiler-off，payload 0..219 全部完成 | 新 main 删除独立 `chunk_stats`，同字段迁入 `server.chunk_complete` trace；客户端未消费，正常 close 后 220 条 stats 全缺；无性能 JSON | Job `minwm-s5-fusedops-h200-20260809-07` failed/backoff 0；两级 marker、server log、telemetry、diagnostic 与 PVC 全部保留 |
 | `08` | `b2c3227d1d` | SP2 六个 profiler-off lane 完成；首个 correctness `111` 视频完成 | throughput 已适配 trace stats；短 correctness 客户端仍只认旧消息，正常 close 后失败 | Job `minwm-s5-fusedops-h200-20260809-08` failed/backoff 0；6 个有效 headline JSON 与 correctness marker/log/PVC 全部保留 |
+| `09` | `0bb1f7acbf` | 当前运行：profiler-off、bitwise、SP2 factorial 完成；SP4 factorial 进行中 | 尚无失败；不得把阶段产物冒充整体验收 | Job `minwm-s5-fusedops-h200-20260809-09` running/backoff 0；Pod/PVC/raw 原位保留 |
 
 ## 收益大小解释框架
 
