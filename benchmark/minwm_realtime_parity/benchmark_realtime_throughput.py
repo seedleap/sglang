@@ -22,7 +22,6 @@ from pathlib import Path
 from typing import Any
 
 import msgspec.msgpack
-
 from common import (
     action_weights,
     is_realtime_trace_event,
