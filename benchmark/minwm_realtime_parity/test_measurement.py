@@ -19,8 +19,8 @@ from benchmark_realtime_throughput import (  # noqa: E402
     incomplete_measurement_diagnostic,
     load_realtime_trace_log,
     missing_required_stage_trace,
-    record_required_stage_trace,
     realtime_heartbeat,
+    record_required_stage_trace,
     required_stage_trace_chunks,
     required_stage_trace_is_complete,
 )
@@ -659,9 +659,7 @@ def _create_nsys_fixture(
                             (
                                 0.0
                                 if all_zero_sm and active
-                                else 80.0 + cuda_device_id
-                                if active
-                                else 99.0
+                                else 80.0 + cuda_device_id if active else 99.0
                             ),
                             timestamp,
                         ),
