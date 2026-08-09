@@ -22,12 +22,12 @@ from sglang.multimodal_gen.runtime.entrypoints.openai.protocol import (
     RealtimeEvent,
     RealtimeVideoGenerationsRequest,
 )
-from sglang.multimodal_gen.runtime.entrypoints.openai.realtime.generate_session import (
-    GenerateSession,
-)
 from sglang.multimodal_gen.runtime.entrypoints.openai.realtime.adapters.minwm_realtime_adapter import (
     MinWMRealtimeAdapter,
     MinWMRealtimeState,
+)
+from sglang.multimodal_gen.runtime.entrypoints.openai.realtime.generate_session import (
+    GenerateSession,
 )
 from sglang.multimodal_gen.runtime.models.dits.minwm import (
     MinWMCausalSelfAttention,
