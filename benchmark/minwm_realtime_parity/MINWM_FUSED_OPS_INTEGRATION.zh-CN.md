@@ -23,8 +23,11 @@ postprocess runtime 候选。S0 产品/契约 SHA 为
 bitwise、profiler-off headline、每个 SP 8 组（共 16 组）factorial Nsight 与产物审计均已
 通过。随后 `main` 合入 async-VAE/causal-attention-plan，组合 PR 已更新到
 `dc4c865a6e`，本地回归为 `145 passed, 2 skipped`。由于新 main 触及 MinWM runtime，不能把
-attempt-04 冒充当前 HEAD 真机结果；当前 SHA 的独立 attempt-05 已提交，PR 保持 draft，
-不等待人工 approval，但需等待当前 SHA H200 gate。
+attempt-04 冒充当前 HEAD 真机结果。当前 SHA 的独立 attempt-05 在首个 SP2 profiler-off
+请求进入生成前失败：测量专用 trace relay 仍读取已由新 main 删除的
+`GenerateSession.client_trace`，产品路径没有这个读取点。该 attempt 无性能数据并按 root/lane
+marker 保留；修复仅进入临时 runner，产品 PR 保持 draft、不等待人工 approval，但需等待
+新的当前 SHA H200 gate。
 
 ## 预期
 
@@ -228,7 +231,12 @@ exact-window 均通过。环境/调度失败只标记对应 lane invalid，不�
 runner-only SHA `ddc2816880` 因此保留测量专用 relay，同时合入产品树 `dc4c865a6e`；该 relay
 不进入产品 PR。本地合并测试除两条“产品不得 relay”的结构测试按预期 deselect 外为
 `268 passed, 2 skipped`，其余 async-VAE、S0、S5 与 MinWM 回归通过。后续应把 S0 client
-迁移到 trace-query，再移除这一 runner-only 偏差。
+迁移到 trace-query，再移除这一 runner-only 偏差。attempt-05 进一步暴露 relay 合并缺口：
+`_listen_generate_request` 在记录 `server.init_received` 时仍访问
+`session.client_trace`，而新 main 已从 request/session 两侧删除该字段；服务端因此抛出
+`AttributeError` 并返回 `invalid generate request`。修复是只从 runner 的日志字段中删除该
+访问，保留按 `trace_id` 注册的 sink/queue；新增结构测试要求 relay 存在且源码不得再访问
+`session.client_trace`，不恢复产品已删除的 websocket client-trace 状态。
 
 ## H200 隔离、失败与产物保留
 
@@ -315,7 +323,7 @@ kubectl --context codex-minwm-test-phx2 apply \
 | `02` | `8e4f9a9d88` | preflight/setup | correctness server 会预热 A1/B1 | Pod/PVC/raw 保留 |
 | `03` | `0e03a900a4` | preflight/setup | 自适应原因和最终 CV/fallback gate 不完整 | Pod/PVC/raw 保留 |
 | `04` | `49863b9051` | 完成 | 无；exit 0；无 invalid marker | Pod 按 TTL 清理，PVC/raw 全部保留 |
-| `05` | `ddc2816880` | 当前 SHA 复验 | 最新 main 触及 MinWM runtime，不能沿用旧 SHA 验收 | Job `minwm-s5-fusedops-h200-20260809-05`；独立 host root/PVC 保留 |
+| `05` | `ddc2816880` | 首个 SP2 init、生成前 | runner-only relay 读取已删除的 `GenerateSession.client_trace`；无性能数据 | Job `minwm-s5-fusedops-h200-20260809-05` failed/backoff 0；root/lane marker、server log 与独立 host root/PVC 保留 |
 
 ## 收益大小解释框架
 
