@@ -185,7 +185,10 @@
           eventId,
           latencyMs: this.pendingEventSentAt ? now - this.pendingEventSentAt : 0,
         };
-        if (this.mode !== "smooth_timeline") {
+        if (
+          this.mode !== "smooth_timeline"
+          || this.pendingEventCutoverMode === "prompt"
+        ) {
           this.eventCutoverHoldBypassUntil = Math.max(
             this.eventCutoverHoldBypassUntil,
             now + this.config.eventCutoverHoldBypassMs,
@@ -549,7 +552,8 @@
     }
 
     #dropsOldEventFramesForCutover() {
-      return this.mode !== "timeline" && this.mode !== "smooth_timeline";
+      return this.pendingEventCutoverMode === "prompt"
+        || (this.mode !== "timeline" && this.mode !== "smooth_timeline");
     }
 
     #trimStaleBacklog(now) {
@@ -593,6 +597,7 @@
     }
 
     #eventGraceFrames() {
+      if (this.pendingEventCutoverMode === "prompt") return 0;
       if (this.#isLowLatencyMode()) return 0;
       if (this.mode === "adaptive" && this.pendingEventCutoverMode === "motion") return 0;
       const byTime = Math.max(

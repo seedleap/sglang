@@ -122,7 +122,11 @@ async function main() {
   session.sendEvent({ type: "event", kind: "prompt", payload: "new", event_id: 7 });
   assert.equal(socket.sent[1].event_id, 7);
   assert.equal(socket.sent[1].trace_id, "trace:lingbot2");
-  assert.equal(session.playback.inputEvents.at(-1).options.cutoverMode, "motion");
+  assert.equal(
+    session.playback.inputEvents.at(-1).options.cutoverMode,
+    "prompt",
+    "prompt updates should cut over old-prompt playback without changing action playback",
+  );
   assert.equal(session.snapshot().lastSentEventId, 7);
   assert.equal(
     session.snapshot().lastAppliedEventId,

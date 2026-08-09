@@ -165,9 +165,10 @@
       this.stats.lastSentEventId = Number(envelope.event_id || this.stats.lastSentEventId);
       this.playback.noteInputEvent?.(envelope.event_id, this.now(), {
         cutoverMode: envelope.kind === "prompt"
-          || (envelope.kind === "camera_actions" && cameraActionHasActiveMotion(envelope.payload))
-          ? "motion"
-          : "settle",
+          ? "prompt"
+          : envelope.kind === "camera_actions" && cameraActionHasActiveMotion(envelope.payload)
+            ? "motion"
+            : "settle",
       });
       return true;
     }

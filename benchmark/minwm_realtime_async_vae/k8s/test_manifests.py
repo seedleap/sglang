@@ -757,8 +757,10 @@ def test_internal_worker_ports_are_restricted_by_network_policy():
 
 def test_gateway_output_queue_absorbs_one_complete_frame_burst():
     gateway = (ROOT / "gateway.yaml").read_text()
+    b300 = (ROOT / "aws03-b300-capacity-block.yaml").read_text()
 
-    assert "--output-queue-depth=128" in gateway
+    assert "--output-queue-depth=8" in gateway
+    assert "--output-queue-depth=8" in b300
     assert "--output-enqueue-timeout-s=5" in gateway
     assert "--output-drain-timeout-s=90" in gateway
 

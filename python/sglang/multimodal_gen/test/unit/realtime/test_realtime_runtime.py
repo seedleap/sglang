@@ -162,6 +162,42 @@ def test_interactive_event_grace_waits_for_prior_output_before_next_chunk(monkey
     assert events == ["output sent", ("event grace", 0.25)]
 
 
+def test_interactive_event_grace_accepts_public_round_trip_budget():
+    request = RealtimeVideoGenerationsRequest(
+        type="init",
+        prompt="test",
+        realtime_interactive_event_grace_ms=1800,
+    )
+
+    assert request.realtime_interactive_event_grace_ms == 1800
+
+
+def test_interactive_event_grace_wakes_when_new_control_arrives():
+    async def run():
+        request = RealtimeVideoGenerationsRequest(
+            type="init",
+            prompt="test",
+            realtime_interactive_event_grace_ms=1800,
+        )
+        session = GenerateSession()
+        session.set_request(request)
+
+        async def prior_output():
+            await asyncio.sleep(0)
+
+        waiter = asyncio.create_task(
+            realtime_video_api._wait_for_realtime_interactive_event_window(
+                session,
+                asyncio.create_task(prior_output()),
+            )
+        )
+        await asyncio.sleep(0.01)
+        session.mark_event_version("camera_actions")
+        return await asyncio.wait_for(waiter, timeout=0.1)
+
+    assert asyncio.run(run()) is None
+
+
 class _TestRealtimeDiffusionStage(RealtimeDiffusionStage):
     def forward(self, batch, component_manager=None):
         del batch, component_manager

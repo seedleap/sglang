@@ -538,7 +538,7 @@ const dualModelController = new DualModelController({
       transformInit: (init) => {
         const interactiveInit = {
           ...init,
-          realtime_interactive_event_grace_ms: 1000,
+          realtime_interactive_event_grace_ms: 1800,
         };
         const is720p = init.size === "1280x704" || init.size === "1280x720";
         if (!is720p) return interactiveInit;
@@ -3770,7 +3770,11 @@ function sendEvent(kind, payload, historyText = null) {
   if (kind === "camera_actions" || kind === "prompt") {
     if (delivery.sent.minwm) {
       playbackController.noteInputEvent(eventId, performance.now(), {
-        cutoverMode: cameraActionHasActiveMotion(payload) || kind === "prompt" ? "motion" : "settle",
+        cutoverMode: kind === "prompt"
+          ? "prompt"
+          : cameraActionHasActiveMotion(payload)
+            ? "motion"
+            : "settle",
       });
       updateStats();
     }

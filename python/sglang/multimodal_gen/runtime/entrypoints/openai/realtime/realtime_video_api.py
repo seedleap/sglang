@@ -886,12 +886,16 @@ async def _generate_loop_local(ws: WebSocket, session: GenerateSession):
         raise ValueError("realtime adapter is not initialized")
 
     pending_send_task = None
+    pending_event_version = None
     while not session.reached_max_chunks():
         try:
             pending_send_task = await _wait_for_realtime_interactive_event_window(
                 session,
                 pending_send_task,
+                pending_event_version,
             )
+            if pending_send_task is None:
+                pending_event_version = None
             if pending_send_task is not None and pending_send_task.done():
                 await pending_send_task
                 pending_send_task = None
@@ -921,6 +925,7 @@ async def _generate_loop_local(ws: WebSocket, session: GenerateSession):
                 request_id=chunk.request_id,
                 chunk_index=chunk.index,
             )
+            scheduled_event_version = session.interactive_event_version
             batch = adapter.prepare_next_request(
                 session,
                 server_args,
@@ -975,6 +980,7 @@ async def _generate_loop_local(ws: WebSocket, session: GenerateSession):
                     chunk_started,
                 )
             )
+            pending_event_version = scheduled_event_version
 
         except asyncio.CancelledError:
             if pending_send_task is not None:
@@ -1061,6 +1067,7 @@ async def _send_output_and_log(
 async def _wait_for_realtime_interactive_event_window(
     session: GenerateSession,
     pending_send_task: asyncio.Task | None,
+    pending_event_version: int | None = None,
 ) -> asyncio.Task | None:
     request = getattr(session, "request", None)
     grace_ms = int(
@@ -1069,13 +1076,27 @@ async def _wait_for_realtime_interactive_event_window(
     if pending_send_task is None or grace_ms <= 0:
         return pending_send_task
 
+    if pending_event_version is None:
+        pending_event_version = getattr(session, "interactive_event_version", None)
     await pending_send_task
-    await asyncio.sleep(grace_ms / 1000.0)
+    wait_started = time.perf_counter()
+    wait_for_event = getattr(session, "wait_for_interactive_event_after", None)
+    woke_by_event = False
+    if pending_event_version is not None and wait_for_event is not None:
+        woke_by_event = await wait_for_event(
+            pending_event_version,
+            grace_ms / 1000.0,
+        )
+    else:
+        await asyncio.sleep(grace_ms / 1000.0)
+    duration_ms = (time.perf_counter() - wait_started) * 1000
     log_realtime_trace(
         logger,
         session,
         "server.interactive_event_grace_complete",
-        duration_ms=grace_ms,
+        duration_ms=round(duration_ms, 3),
+        configured_grace_ms=grace_ms,
+        woke_by_event=woke_by_event,
     )
     return None
 

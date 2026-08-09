@@ -374,6 +374,30 @@ function smoothTimelineModePreservesFramesAcrossEventCutover() {
   assert.equal(controller.queue[24].eventId, 5);
 }
 
+function smoothTimelineModeCutsOldFramesForPromptUpdate() {
+  const controller = new RealtimePlaybackController({
+    mode: "smooth_timeline",
+    targetFps: 25,
+    minTargetLeadMs: 1600,
+    maxTargetLeadMs: 2400,
+    maxLeadExtraChunkRatio: 1.0,
+  });
+  enqueueChunk(controller, { chunk: 1, frameCount: 24, durationMs: 960, now: 1000 });
+  controller.noteInputEvent(5, 1050, { cutoverMode: "prompt" });
+  const result = enqueueChunk(controller, {
+    chunk: 2,
+    eventId: 5,
+    frameCount: 12,
+    durationMs: 480,
+    now: 1150,
+  });
+
+  assert.ok(result.cutover);
+  assert.equal(result.droppedFrames.length, 24);
+  assert.equal(controller.queue.length, 12);
+  assert.equal(controller.queue[0].eventId, 5);
+}
+
 function smoothTimelineModePacesInsteadOfDrainingEveryRenderTick() {
   const controller = new RealtimePlaybackController({
     mode: "smooth_timeline",
@@ -669,6 +693,7 @@ timelineModeDrainsBacklogOnEveryRenderTick();
 timelineModePreservesFramesAcrossEventCutover();
 smoothTimelineModePreservesBacklogAndCatchesUp();
 smoothTimelineModePreservesFramesAcrossEventCutover();
+smoothTimelineModeCutsOldFramesForPromptUpdate();
 smoothTimelineModePacesInsteadOfDrainingEveryRenderTick();
 smoothTimelineModeSpeedsUpToCatchBacklogWithoutDropping();
 adaptiveModeKeepsBoundedBacklogWithoutLowLatencyJump();

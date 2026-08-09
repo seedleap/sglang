@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -51,6 +52,8 @@ class GenerateSession:
         self.created_at = time.monotonic()
         self.last_client_activity_at = self.created_at
         self.client_activity_version = 0
+        self.interactive_event_version = 0
+        self._interactive_event = asyncio.Event()
         self.action_version = 0
         self.prompt_version = 0
         self.denoise_intervals: dict[int, tuple[float, float]] = {}
@@ -118,6 +121,27 @@ class GenerateSession:
             self.action_version += 1
         elif kind in {"prompt", "scene_cut"}:
             self.prompt_version += 1
+        self.interactive_event_version += 1
+        self._interactive_event.set()
+
+    async def wait_for_interactive_event_after(
+        self, version: int, timeout_s: float
+    ) -> bool:
+        deadline = time.monotonic() + max(0.0, timeout_s)
+        while self.interactive_event_version <= version:
+            self._interactive_event.clear()
+            if self.interactive_event_version > version:
+                break
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            try:
+                await asyncio.wait_for(
+                    self._interactive_event.wait(), timeout=remaining
+                )
+            except TimeoutError:
+                return False
+        return True
 
     @property
     def current_chunk(self) -> RealtimeChunkContext | None:
