@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from benchmark_realtime_throughput import (  # noqa: E402
     incomplete_measurement_diagnostic,
+    load_realtime_trace_log,
     missing_required_stage_trace,
     record_required_stage_trace,
     required_stage_trace_chunks,
@@ -313,6 +314,38 @@ def test_normal_close_diagnostic_lists_every_missing_selector() -> None:
         detail == {"missing": [1], "unexpected": []}
         for detail in diagnostic["stage_trace"].values()
     )
+
+
+def test_realtime_trace_log_filters_by_trace_id(tmp_path: Path) -> None:
+    trace_log = tmp_path / "server.log"
+    trace_log.write_text(
+        "\n".join(
+            [
+                'prefix realtime_trace {"trace_id":"target","event":"first"}',
+                'prefix realtime_trace {"trace_id":"sibling","event":"other"}',
+                'prefix realtime_trace {"trace_id":"target","event":"second"}',
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    assert [
+        event["event"] for event in load_realtime_trace_log(trace_log, "target")
+    ] == [
+        "first",
+        "second",
+    ]
+
+
+def test_realtime_trace_log_rejects_malformed_structured_event(
+    tmp_path: Path,
+) -> None:
+    trace_log = tmp_path / "server.log"
+    trace_log.write_text("prefix realtime_trace {bad json}\n", encoding="utf-8")
+
+    with pytest.raises(MeasurementValidationError, match="malformed realtime trace"):
+        load_realtime_trace_log(trace_log, "target")
 
 
 def _create_nsys_fixture(

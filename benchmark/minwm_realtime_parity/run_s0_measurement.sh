@@ -211,7 +211,7 @@ start_server() {
 }
 
 client_common_args() {
-  local degree="$1" output="$2" profile_name="$3" run_id="$4"
+  local degree="$1" output="$2" profile_name="$3" run_id="$4" trace_log="$5"
   printf '%s\0' \
     --cases "${CASES}" \
     --case "${CASE_ID}" \
@@ -230,14 +230,16 @@ client_common_args() {
     --checkpoint-id global_step_003200/ema_student/model.pt \
     --checkpoint-step 3200 \
     --kv-cache-num-frames "${KV_CACHE_NUM_FRAMES}" \
+    --trace-log "${trace_log}" \
     --require-complete-stage-trace
 }
 
 run_client() {
-  local degree="$1" output="$2" profile_name="$3" run_id="$4"
-  shift 4
+  local degree="$1" output="$2" profile_name="$3" run_id="$4" trace_log="$5"
+  shift 5
   mapfile -d '' -t CLIENT_ARGS < <(
-    client_common_args "${degree}" "${output}" "${profile_name}" "${run_id}"
+    client_common_args \
+      "${degree}" "${output}" "${profile_name}" "${run_id}" "${trace_log}"
   )
   python3 "${SCRIPT_DIR}/benchmark_realtime_throughput.py" \
     "${CLIENT_ARGS[@]}" "$@" | tee "${output%.json}.log"
@@ -279,6 +281,7 @@ run_profiler_off() {
     run_client \
       "${degree}" "${output}" "bf16-fast-sp${degree}" \
       "${MINWM_RUN_ID}-sp${degree}-off-r${repeat}" \
+      "${lane_dir}/profiler-off-server.log" \
       --measurement-mode profiler_off \
       --warmup-chunks "${OFF_WARMUP_CHUNKS}" \
       --measured-chunks "${OFF_MEASURED_CHUNKS}"
@@ -295,6 +298,7 @@ PY
     run_client \
       "${degree}" "${output}" "bf16-fast-sp${degree}" \
       "${MINWM_RUN_ID}-sp${degree}-off-r3" \
+      "${lane_dir}/profiler-off-server.log" \
       --measurement-mode profiler_off \
       --warmup-chunks "${OFF_WARMUP_CHUNKS}" \
       --measured-chunks "${OFF_MEASURED_CHUNKS}"
@@ -367,6 +371,7 @@ run_profiler_on() {
     "${degree}" "${profile_dir}/precondition-warmup.json" \
     "bf16-fast-sp${degree}-precondition" \
     "${MINWM_RUN_ID}-sp${degree}-precondition" \
+    "${profile_dir}/server.log" \
     --measurement-mode profiler_off \
     --warmup-chunks "$((PROFILE_PRECONDITION_CHUNKS - 1))" \
     --measured-chunks 1
@@ -392,6 +397,7 @@ run_profiler_on() {
     "${degree}" "${profile_dir}/client.json" \
     "bf16-fast-sp${degree}-nsys" \
     "${MINWM_RUN_ID}-sp${degree}-nsys" \
+    "${profile_dir}/server.log" \
     --measurement-mode profiler_on \
     --precondition-warmup-chunks "${PROFILE_PRECONDITION_CHUNKS}" \
     --warmup-chunks "${PROFILE_DISCARD_CHUNKS}" \

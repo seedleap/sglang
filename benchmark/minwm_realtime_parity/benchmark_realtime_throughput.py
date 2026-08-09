@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
+import hashlib
 import json
 import os
 import subprocess
@@ -38,6 +40,7 @@ from measurement import (
 )
 
 TraceSelector = tuple[str, str, str]
+_TRACE_LOG_MARKER = "realtime_trace "
 
 
 def required_stage_trace_chunks(mode: str) -> dict[TraceSelector, set[int]]:
@@ -103,6 +106,27 @@ def incomplete_measurement_diagnostic(
     }
 
 
+def load_realtime_trace_log(path: str | Path, trace_id: str) -> list[dict[str, Any]]:
+    """Load one request's structured trace events from the server log plane."""
+    events = []
+    for line_number, line in enumerate(
+        Path(path).read_text(encoding="utf-8", errors="replace").splitlines(), start=1
+    ):
+        marker_index = line.find(_TRACE_LOG_MARKER)
+        if marker_index < 0:
+            continue
+        encoded = line[marker_index + len(_TRACE_LOG_MARKER) :].strip()
+        try:
+            payload = json.loads(encoded)
+        except json.JSONDecodeError as exc:
+            raise MeasurementValidationError(
+                f"malformed realtime trace JSON at {path}:{line_number}: {exc}"
+            ) from exc
+        if isinstance(payload, dict) and payload.get("trace_id") == trace_id:
+            events.append(payload)
+    return events
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cases", default=Path(__file__).with_name("cases.json"))
@@ -140,7 +164,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--require-complete-stage-trace",
         action="store_true",
-        help="wait for every measured DiT/VAE wall (and profiler-on CUDA) trace",
+        help="require every DiT/VAE wall (and profiler-on CUDA) trace in --trace-log",
+    )
+    parser.add_argument(
+        "--trace-log",
+        help="server log containing structured 'realtime_trace' JSON events",
     )
     parser.add_argument("--timeout", type=float, default=1800.0)
     return parser.parse_args()
@@ -174,6 +202,10 @@ def validate_contract(manifest: dict, args: argparse.Namespace) -> tuple[dict, d
         raise ValueError("allocated-gpu-count cannot be smaller than active gpu-count")
     if args.kv_cache_num_frames is not None and args.kv_cache_num_frames < 1:
         raise ValueError("kv-cache-num-frames must be positive")
+    if args.require_complete_stage_trace and not args.trace_log:
+        raise ValueError("--require-complete-stage-trace requires --trace-log")
+    if args.require_complete_stage_trace and not args.run_id:
+        raise ValueError("--require-complete-stage-trace requires --run-id")
     cases = {case["id"]: case for case in manifest["cases"]}
     if args.case not in cases:
         raise ValueError(f"unknown case {args.case!r}; choose from {sorted(cases)}")
@@ -258,19 +290,14 @@ async def receive_run(args: argparse.Namespace, contract: dict, case: dict) -> d
     stats_by_chunk: dict[int, dict[str, Any]] = {}
     payload_complete_ns: dict[int, int] = {}
     frame_batches_by_chunk: dict[int, dict[str, Any]] = {}
-    trace_events: list[dict[str, Any]] = []
     required_trace_chunks = (
         required_stage_trace_chunks(args.measurement_mode)
         if args.require_complete_stage_trace
         else {}
     )
     expected_trace_indices = set(range(total_chunks))
-
-    def stage_trace_is_complete() -> bool:
-        return required_stage_trace_is_complete(
-            required_trace_chunks, expected_trace_indices
-        )
-
+    measured_payload_sha256 = hashlib.sha256()
+    measured_payload_samples: dict[str, str] = {}
     init_started_ns = time.perf_counter_ns()
     async with websockets.connect(
         args.ws_url, max_size=None, ping_interval=None, open_timeout=args.timeout
@@ -280,13 +307,12 @@ async def receive_run(args: argparse.Namespace, contract: dict, case: dict) -> d
         while (
             len(stats_by_chunk) < total_chunks
             or len(payload_complete_ns) < total_chunks
-            or not stage_trace_is_complete()
         ):
             try:
                 packed = await asyncio.wait_for(websocket.recv(), timeout=args.timeout)
             except websockets.exceptions.ConnectionClosedOK as exc:
                 diagnostic = incomplete_measurement_diagnostic(
-                    required_trace_chunks,
+                    {},
                     expected_trace_indices,
                     stats_by_chunk,
                     payload_complete_ns,
@@ -298,7 +324,7 @@ async def receive_run(args: argparse.Namespace, contract: dict, case: dict) -> d
                 ) from exc
             except TimeoutError as exc:
                 diagnostic = incomplete_measurement_diagnostic(
-                    required_trace_chunks,
+                    {},
                     expected_trace_indices,
                     stats_by_chunk,
                     payload_complete_ns,
@@ -314,10 +340,6 @@ async def receive_run(args: argparse.Namespace, contract: dict, case: dict) -> d
             header = msgspec.msgpack.decode(packed)
             message_type = header.get("type")
             if is_realtime_trace_event(header):
-                trace = header.get("trace")
-                if isinstance(trace, dict):
-                    trace_events.append(trace)
-                    record_required_stage_trace(required_trace_chunks, trace)
                 continue
             if message_type == "error":
                 raise RuntimeError(header.get("content", "unknown realtime error"))
@@ -342,6 +364,13 @@ async def receive_run(args: argparse.Namespace, contract: dict, case: dict) -> d
             batch_index, num_batches, batch_frames = validate_frame_batch(
                 header, payload, chunk_index=chunk_index
             )
+            if chunk_index >= args.warmup_chunks:
+                measured_payload_sha256.update(payload)
+                sample_stride = max(1, len(payload) // 4096)
+                sample = payload[::sample_stride][:4096]
+                measured_payload_samples[f"{chunk_index}:{batch_index}"] = (
+                    base64.b64encode(sample).decode("ascii")
+                )
             state = frame_batches_by_chunk.setdefault(
                 chunk_index,
                 {"num_batches": num_batches, "seen": set(), "frames": 0},
@@ -371,6 +400,27 @@ async def receive_run(args: argparse.Namespace, contract: dict, case: dict) -> d
                         f"expected {expected_frames}"
                     )
                 payload_complete_ns[chunk_index] = time.perf_counter_ns()
+
+    trace_events = (
+        load_realtime_trace_log(args.trace_log, args.run_id)
+        if args.trace_log and args.run_id
+        else []
+    )
+    for trace in trace_events:
+        record_required_stage_trace(required_trace_chunks, trace)
+    if args.require_complete_stage_trace and not required_stage_trace_is_complete(
+        required_trace_chunks, expected_trace_indices
+    ):
+        diagnostic = incomplete_measurement_diagnostic(
+            required_trace_chunks,
+            expected_trace_indices,
+            stats_by_chunk,
+            payload_complete_ns,
+        )
+        raise MeasurementValidationError(
+            "server trace log did not satisfy the measurement contract: "
+            f"diagnostic={json.dumps(diagnostic, sort_keys=True)}"
+        )
 
     expected_indices = list(range(total_chunks))
     if sorted(stats_by_chunk) != expected_indices:
@@ -469,7 +519,6 @@ async def receive_run(args: argparse.Namespace, contract: dict, case: dict) -> d
         event="server.model_denoise_complete",
         field="cuda_ms",
         measured_indices=measured_index_set,
-        source="scheduler_result_component_timing",
         component="minwm_denoising",
     )
     vae_cuda = stage_trace_values(
@@ -477,7 +526,6 @@ async def receive_run(args: argparse.Namespace, contract: dict, case: dict) -> d
         event="server.vae_decode_complete",
         field="cuda_ms",
         measured_indices=measured_index_set,
-        source="scheduler_result_component_timing",
         component="vae_decoder",
     )
 
@@ -522,10 +570,10 @@ async def receive_run(args: argparse.Namespace, contract: dict, case: dict) -> d
     }
     cuda_metrics = {
         "dit_cuda_ms": complete_latency_metric(
-            dit_cuda, "dit_cuda_ms", "realtime denoising CUDA events"
+            dit_cuda, "dit_cuda_ms", "worker structured trace log CUDA events"
         ),
         "vae_cuda_ms": complete_latency_metric(
-            vae_cuda, "vae_cuda_ms", "realtime VAE decoder CUDA events"
+            vae_cuda, "vae_cuda_ms", "worker structured trace log CUDA events"
         ),
     }
     timestamp_utc = args.timestamp_utc or datetime.now(timezone.utc).isoformat()
@@ -581,6 +629,8 @@ async def receive_run(args: argparse.Namespace, contract: dict, case: dict) -> d
             "warmup_chunks": args.warmup_chunks,
             "measured_chunks": args.measured_chunks,
             "measured_frames": measured_frames,
+            "measured_payload_sha256": measured_payload_sha256.hexdigest(),
+            "measured_payload_samples_base64": measured_payload_samples,
             "server": server,
             "client": client,
         }

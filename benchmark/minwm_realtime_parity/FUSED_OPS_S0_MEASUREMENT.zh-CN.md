@@ -18,6 +18,12 @@
 - API 边界归属与有界 GPU metrics 聚合 canonical：`d5b25227d4487d113e62c86a0fb572a62d6bcc5b`
 - base：`main`。`main` 的 `9a9dc59cd1` 已完整包含 MinWM realtime API、causal Ulysses、Parallel VAE 和历史 benchmark；`codex/minwm-realtime-api` 还叠加了量化与性能实验，不适合作为 S0 的独立 review base。
 
+正式 H200 表严格绑定上述 `d5b25227d4`，不把后续 merge 结果冒充重采数据。PR
+等待期间 `main` 合入新的多用户 realtime trace 架构：视频 WebSocket 不再发送 trace，
+结构化事件统一进入 server log/OTLP plane。S0 合并适配后由客户端按唯一
+`trace_id` 读取同一 server log，继续要求 wall/CUDA selector 完整覆盖；payload
+SHA/sample 也保留主线新字段。这个适配只做 CPU 回归，不改变或重写 `-09` 产物。
+
 ## 假设与预期
 
 ### 固定 workload
@@ -47,7 +53,7 @@
 
 - JSON Schema：`measurement_schema.json`
 - Python 构造与校验：`measurement.py`
-- profiler-off / profiler-on WebSocket 客户端：`benchmark_realtime_throughput.py`
+- profiler-off / profiler-on 客户端（payload 走 WebSocket，stage trace 走结构化 server log）：`benchmark_realtime_throughput.py`
 - Nsight SQLite 解析：`nsys_metrics.py`
 - 校验、Nsight merge、重复 CV 汇总：`measurement_tool.py`
 - H200 编排：`run_s0_measurement.sh`
@@ -349,13 +355,14 @@ launch/start/client 结构。跨进程 relay commit `839f312c3b` 是 `d5b25227d4
 21. **SM 全零不是合法“可用值”**：NVIDIA schema 的 `GPU_METRICS.value` 已是 0–100 整数百分比，无需浮点缩放。稳定窗口 kernel busy 76.315% 时 SM Active 全 capture 仍全 0，只能说明 target/采集错误；新增 parser 与 custom validator 双重 all-zero gate，禁止这种记录通过 formal acceptance。
 22. **API 边界按 start 唯一归属**：`-08` 的真实 crossing 是正常 generation 中高频轮询的 `cudaEventQuery_v3020`，进程属于已验证 rank，起点在 measured union 外、结束后 360 ns 落入 chunk 7；它不是 teardown、launch 或 marker 乱序。采用半开 start 规则后明确排除且保留 raw evidence；launch 仍与 kernel 346,080 一致。Kernel duration/busy 没有借此放宽。
 23. **GPU metrics 有界聚合**：旧实现把全表所有 metric/target 样本装入 list，8-target SQLite 现场峰值约 8.50 GiB。新实现只扫描三个选中 metricId，并用小型 counter/histogram 保留所有验收字段；在相同 invalid SQLite 上做旧/新与 raw reference 三方等价后，才允许 `-09` 使用该 canonical。
+24. **合并主线后的 trace transport**：新 `main` 明确禁止在视频 WebSocket 启动 trace sender，worker/API 的结构化 trace 已写到统一 log/OTLP plane。没有恢复旧 sender 或修改生产协议；runner 将本 lane 的 server log 显式传给客户端，解析器按 `trace_id` 隔离 sibling run，遇到 malformed JSON、缺 selector 或缺合法 chunk 都 fail closed。outer NVTX marker 仍只在环境变量启用时包住本地 scheduler forward。
 
 ## 风险与回滚
 
 - 风险：Spot reclaim。补救：`backoffLimit=0` 先停住并保留 attempt，核查后用新 Job 名安全重跑；不删除其他任务释放容量。
 - 风险：Nsight GPU metrics 权限不足。补救：保留 `nsys status -e` 和 fallback report，但正式 lane 失败；SM/Tensor 不允许权限降级后通过，DRAM 只允许 `metric_not_exposed`。
 - 风险：容器 CUDA ordinal 与 Nsight/PerfWorks ID 顺序不同。补救：采集 all allocated target，依据 SQLite 的 `deviceId/cuDevice/pwGpuId/typeId&0xFF` 现场映射；collected/active/allocated 数量与每 device×chunk coverage 由 schema 强制。
-- 风险：realtime trace 队列或跨进程 relay 丢事件。补救：每个 stage metric 必须恰好覆盖 measured chunk 数；worker component timing 仅传输 pickle-safe 标量，API 对 metrics/metrics_list 去重并拒绝冲突，缺失或缺 CUDA 时字段标记 `incomplete_trace_metric`，验收失败。
+- 风险：多进程 structured trace 缺失或混入 sibling run。补救：server log plane 继承所有 worker/API stdout，解析只接受精确 `trace_id`；每个 stage metric 必须恰好覆盖 measured chunk 数，malformed JSON、重复、缺失或缺 CUDA 均 fail closed。正式 `d5b25227d4` 的跨进程 relay 保留为历史产物证据，不在新主线恢复视频 WebSocket trace sender。
 - 风险：失败重试覆盖审计证据。补救：runner 不删除旧文件；非零退出写逐文件 checksum marker，同路径重跑先移动到 `invalid/`，聚合排除 invalid；只能删除精确 Job/Pod 控制对象止损，不能删除 PVC。
 - 风险：Nsight 开销污染 FPS。补救：schema 从结构上禁止 profiler-on 结果成为 headline。
 - 风险：schema 影响现有 summary。补救：新 JSON 仍保留顶层 `profile_name`、`server`、`client`、`warmup_chunks` 等兼容字段。
@@ -367,7 +374,7 @@ launch/start/client 结构。跨进程 relay commit `839f312c3b` 是 `d5b25227d4
 ### 本地 CPU 测试
 
 ```bash
-python3 -m pytest -q \
+python3.11 -m pytest -q \
   benchmark/minwm_realtime_parity/test_measurement.py \
   benchmark/minwm_realtime_parity/test_common.py
 
@@ -375,8 +382,10 @@ TORCHDYNAMO_DISABLE=1 PYTHONPATH=python python3.11 -m pytest -q \
   python/sglang/multimodal_gen/test/unit/realtime/test_realtime_runtime.py
 ```
 
-`d5b25227d4` 加最终文档的复验结果：measurement/common `45 passed`，realtime
-runtime `47 passed`；两组都不依赖 GPU。最终文档文件的 pre-commit hooks 也全部通过。
+`d5b25227d4` 加最终文档时的复验结果为 measurement/common `45 passed`、
+realtime runtime `47 passed`；合并当前 `main` 并切换到 structured server-log
+trace 后分别为 `47 passed`、`67 passed`。两组都不依赖 GPU；最终文件已通过
+同一套 pre-commit hooks。
 
 ### 校验与汇总
 
@@ -438,7 +447,7 @@ PVC：`minwm-s0-fusedops-h200-results-20260807`。每次尝试的根目录：
 2. **4 次 DMD 后的第 5 次 DiT forward 在哪里，为什么不能漏算？**
    - 参考：`causal_denoising.py::_denoise_and_update_causal_block` 先 `_denoise_causal_dmd_chunk`，再 `_update_causal_context_cache` 用 clean latent 写 KV。
 3. **DiT wall 和 DiT CUDA 分别从哪条 trace 取，如何证明均值覆盖完整窗口？**
-   - 参考：wall 选择 `source=scheduler_result_metrics`；CUDA 同时选择 `source=scheduler_result_component_timing`、`component=minwm_denoising` 的 `cuda_ms`。worker 先把纯标量 timing 放入 `RequestMetrics`，API 从 result 重发；两者的 `value.count` 必须等于 `workload.measured_chunks`，由 schema 和 `validate_measurement` 双重检查。
+   - 参考：客户端从显式 `--trace-log` 读取精确 `trace_id`；wall 选择 `source=scheduler_result_metrics`，CUDA 选择 `component=minwm_denoising` 的 worker `cuda_ms`。每个 selector 的合法 chunk 集合必须完整，两者的 `value.count` 必须等于 `workload.measured_chunks`，由客户端、schema 和 `validate_measurement` 多重检查。
 4. **为什么 profiler-on 的 `observed_wall_with_profiler_overhead` 不能拿去做 headline？**
    - 参考：Nsight 注入 tracing/metrics 开销；`measurement_contract.headline_eligible` 只允许 profiler-off 为真，validator 会检查。
 5. **GPU metrics 表不存在时，脚本如何区分权限问题与普通未采集？**
