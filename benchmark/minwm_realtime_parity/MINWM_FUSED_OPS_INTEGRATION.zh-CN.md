@@ -19,10 +19,12 @@ postprocess runtime 候选。S0 产品/契约 SHA 为
 `d5b25227d4487d113e62c86a0fb572a62d6bcc5b`。S0 测量代码只进入临时 runner，
 不进入产品 diff。
 
-当前状态：产品代码已叠加，本地 gate 已通过；H200 attempt-04 使用固定 runner
-`49863b90512a09d1d85c4434e918e6b9418c12f0` 完成且退出码为 0。SP2/SP4 严格 bitwise、
-profiler-off headline、每个 SP 8 组（共 16 组）factorial Nsight 与产物审计均已通过。最终建议是：S1 继续默认开；
-S3/S4 继续默认关，但在 SP4 上同时 opt-in 为 `111`；SP2 暂不默认启用 `111`。
+当前状态：H200 attempt-04 在产品树 `3d159d20fc` 上完成且退出码为 0；SP2/SP4 严格
+bitwise、profiler-off headline、每个 SP 8 组（共 16 组）factorial Nsight 与产物审计均已
+通过。随后 `main` 合入 async-VAE/causal-attention-plan，组合 PR 已更新到
+`dc4c865a6e`，本地回归为 `145 passed, 2 skipped`。由于新 main 触及 MinWM runtime，不能把
+attempt-04 冒充当前 HEAD 真机结果；当前 SHA 的独立 attempt-05 已提交，PR 保持 draft，
+不等待人工 approval，但需等待当前 SHA H200 gate。
 
 ## 预期
 
@@ -221,6 +223,13 @@ DiT/VAE 的同步、客户端节拍和 server 调度仍是主要噪声/瓶颈；
 attempt-04 无 invalid marker，严格 bitwise、fallback、all-target coverage、stage count 和
 exact-window 均通过。环境/调度失败只标记对应 lane invalid，不改写成实现结论。
 
+最新 main 还引入一项测量接口偏差：产品路径明确禁止把 trace 事件复用视频 WebSocket，改走
+独立 trace-query；S0 measurement client 仍依赖同连接完整 stage trace。attempt-05 的
+runner-only SHA `ddc2816880` 因此保留测量专用 relay，同时合入产品树 `dc4c865a6e`；该 relay
+不进入产品 PR。本地合并测试除两条“产品不得 relay”的结构测试按预期 deselect 外为
+`268 passed, 2 skipped`，其余 async-VAE、S0、S5 与 MinWM 回归通过。后续应把 S0 client
+迁移到 trace-query，再移除这一 runner-only 偏差。
+
 ## H200 隔离、失败与产物保留
 
 - kube context 固定为 `codex-minwm-test-phx2`；一次占用完整 8-GPU H200 节点；
@@ -282,6 +291,7 @@ kubectl --context codex-minwm-test-phx2 apply \
 | S4 产品头 | `f1c9082bb12ee58d610e6e83bb4db192d9ccf96b` | 已叠加 |
 | canonical exact-window | `d5b25227d4487d113e62c86a0fb572a62d6bcc5b` | runner-only |
 | H200 验证的产品树 | `3d159d20fc6cfac9bfe09fdc06dee99cd8713011` | 固定；后续只补文档 |
+| 当前产品树 | `dc4c865a6e41dd26f5feaeb8f9236facd5725082` | 已合入最新 main；本地 gate 通过 |
 | 固定测量 runner | `49863b90512a09d1d85c4434e918e6b9418c12f0` | runner-only |
 | runner 分支当前头 | `c65c3b09fb` | 含 attempt-04 manifest；Job 固定上行测量 SHA |
 | H200 PVC | `minwm-s5-fusedops-h200-results-20260807`（200Gi） | 保留 |
@@ -293,7 +303,9 @@ kubectl --context codex-minwm-test-phx2 apply \
 | correctness SP2 | `correctness/sp2/correctness-summary.json` / `b7899f40aaac9fdb00a873d63e6860d81eba0f17565e76a1c6417c05dde1678a` | 8,397 bytes |
 | correctness SP4 | `correctness/sp4/correctness-summary.json` / `a8962ffe0348a391aafba1a02e4c462e1009dd555f8d9fc41ebde2dc63ac95e8` | 14,957 bytes |
 | artifact manifest | `s5-summary/artifact-manifest.json` / `cd7f8f171b01d1a97ef7e6b6de6a87a247087535c47da30e5ef2d0dc48eb9de0` | 2,479 files / 32,620,946,396 bytes；PVC 内可恢复 |
-| PR | `seedleap/sglang#26` | H200 gate 完成；文档提交后转 ready |
+| 当前 SHA 复验 runner | `ddc2816880fb60b0dd3994f09697843b8e44e6e9` | runner-only；含测量专用 trace relay |
+| attempt-05 manifest | runner `4a1b5351c3` / `minwm_s5_fusedops_h200_20260809_attempt05.yaml` | 已提交；backoff 0 |
+| PR | `seedleap/sglang#26` | draft；当前 SHA H200 gate 后转 ready，不等待人工 approval |
 
 正式测量前的 attempts 均在同一隔离节点、不同 Pod/host-scoped root 中保留：
 
@@ -303,6 +315,7 @@ kubectl --context codex-minwm-test-phx2 apply \
 | `02` | `8e4f9a9d88` | preflight/setup | correctness server 会预热 A1/B1 | Pod/PVC/raw 保留 |
 | `03` | `0e03a900a4` | preflight/setup | 自适应原因和最终 CV/fallback gate 不完整 | Pod/PVC/raw 保留 |
 | `04` | `49863b9051` | 完成 | 无；exit 0；无 invalid marker | Pod 按 TTL 清理，PVC/raw 全部保留 |
+| `05` | `ddc2816880` | 当前 SHA 复验 | 最新 main 触及 MinWM runtime，不能沿用旧 SHA 验收 | Job `minwm-s5-fusedops-h200-20260809-05`；独立 host root/PVC 保留 |
 
 ## 收益大小解释框架
 
@@ -323,7 +336,7 @@ DiT profiler-off 缩短 10.152%，Client 仍能兑现 7.626%。为什么 SP2 只
 Nsight 中 DiT CUDA 缩短 14.234%，但 profiler-off 的非 DiT 调度段抵消了大部分收益，chunk
 wall 反而增加 1.582%；因此设备微基准和端到端吞吐必须同时看。
 
-## 最终建议
+## 最终建议（待当前 SHA 复验确认）
 
 - **默认配置**：保持 S1 开、S3/S4 关，即现有 `100`；S1 是严格 bitwise 且无明显回退的
   低风险默认收益。
@@ -334,6 +347,10 @@ wall 反而增加 1.582%；因此设备微基准和端到端吞吐必须同时�
 - **不可直接相加**：未来容量规划采用实测 SP4 `+7.6%`、SP2 `+1.0%`，不采用单项和
   `+9.2%/−1.0%`。若模型、分辨率、KV 窗口或硬件变化，重新跑 ABBA + exact-window，而不是
   沿用本轮交互系数。
+
+以上是 attempt-04 对 `3d159d20fc` 的建议。attempt-05 若在当前 `dc4c865a6e` 上保持严格
+bitwise、必选 CV 通过且收益方向一致，则转为最终；若不一致，以 attempt-05 当前 SHA 为准，
+保留两轮差异并重新解释，不能选择性沿用较好数字。
 
 ## 让我掌握代码改动：检查题
 
