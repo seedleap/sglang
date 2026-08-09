@@ -19,7 +19,11 @@ from sglang.multimodal_gen.configs.pipeline_configs.minwm import (
 )
 from sglang.multimodal_gen.configs.sample.minwm import MinWMSamplingParams
 from sglang.multimodal_gen.runtime.entrypoints.openai.protocol import (
+    RealtimeEvent,
     RealtimeVideoGenerationsRequest,
+)
+from sglang.multimodal_gen.runtime.entrypoints.openai.realtime.generate_session import (
+    GenerateSession,
 )
 from sglang.multimodal_gen.runtime.entrypoints.openai.realtime.adapters.minwm_realtime_adapter import (
     MinWMRealtimeAdapter,
@@ -160,6 +164,27 @@ def test_minwm_action_label_bits_match_wasd_ijkl_order():
             [0, 0, 0, 0, 1, 1, 0, 0],
         ]
     ]
+
+
+@pytest.mark.parametrize(
+    "encoder_cls",
+    [PrimitiveTokenResidualActionEncoder, PrimitiveRoPETokenResidualActionEncoder],
+)
+def test_minwm_action_label_table_is_a_nonpersistent_model_buffer(encoder_cls):
+    encoder = encoder_cls(dim=24, embed_dim=8, hidden_dim=16, kernel_size=3)
+    assert "_label_to_bits" in dict(encoder.named_buffers())
+    assert "_label_to_bits" not in encoder.state_dict()
+    assert encoder._label_to_bits.device == encoder.proj.weight.device
+    labels = torch.tensor([[0, 9, 10, 1]])
+    torch.testing.assert_close(
+        action_labels_to_primitive_bits(labels, label_to_bits=encoder._label_to_bits),
+        action_labels_to_primitive_bits(labels),
+    )
+
+    with torch.device("meta"):
+        meta_encoder = encoder_cls(dim=24, embed_dim=8, hidden_dim=16, kernel_size=3)
+    assert meta_encoder.proj.weight.device.type == "meta"
+    assert meta_encoder._label_to_bits.device.type == "cpu"
 
 
 @pytest.mark.parametrize(
@@ -1164,48 +1189,6 @@ def test_minwm_t2v_decoder_reseeds_one_latent_first_block(monkeypatch):
     assert regular_batch.latents is regular_latents
 
 
-def test_minwm_remote_vae_preserves_output_index_and_t2v_trim(monkeypatch):
-    def fake_forward(_self, batch, _server_args):
-        return OutputBatch(
-            remote_vae_request={
-                "block_idx": batch.block_idx,
-                "output_block_idx": batch.block_idx,
-                "trim_leading_frames": 0,
-            }
-        )
-
-    monkeypatch.setattr(CausalVaeDecodingStage, "forward", fake_forward)
-    stage = MinWMCausalVaeDecodingStage.__new__(MinWMCausalVaeDecodingStage)
-    session = RealtimeSession()
-    first_latent = torch.full((1, 2, 1, 1, 1), 1.0)
-    regular_latents = torch.full((1, 2, 4, 1, 1), 2.0)
-    first_batch = SimpleNamespace(
-        block_idx=0,
-        image_latent=None,
-        latents=first_latent,
-        session=session,
-        realtime_event_id=10,
-    )
-    regular_batch = SimpleNamespace(
-        block_idx=1,
-        image_latent=None,
-        latents=regular_latents,
-        session=session,
-        realtime_event_id=11,
-    )
-
-    stage.forward(first_batch, SimpleNamespace())
-    result = stage.forward(regular_batch, SimpleNamespace())
-
-    assert result.remote_vae_request["block_idx"] == 0
-    assert result.remote_vae_request["output_block_idx"] == 1
-    assert result.remote_vae_request["trim_leading_frames"] == 1
-    assert result.realtime_output_chunk_index_start == 1
-    assert result.realtime_output_event_id == 11
-    assert regular_batch.block_idx == 1
-    assert regular_batch.latents is regular_latents
-
-
 def test_minwm_unbounded_kv_policy_reaches_cache_allocation():
     stage = MinWMCausalDMDDenoisingStage.__new__(MinWMCausalDMDDenoisingStage)
     stage.num_transformer_blocks = 2
@@ -1228,6 +1211,58 @@ def test_minwm_unbounded_kv_policy_reaches_cache_allocation():
     assert len(stage.causal_kv_cache) == 2
     assert all(cache.allow_growth for cache in stage.causal_kv_cache)
     assert stage.causal_kv_cache[0].k.shape == (1, 15, 2, 4)
+
+
+def _minwm_cuda_graph_cache_stage(*, allow_growth, rope_position_mode):
+    stage = MinWMCausalDMDDenoisingStage.__new__(MinWMCausalDMDDenoisingStage)
+    stage._minwm_cuda_graph_enabled = True
+    stage._minwm_unbounded_cache = allow_growth
+    stage.transformer = SimpleNamespace(
+        config=SimpleNamespace(
+            arch_config=SimpleNamespace(
+                rope_position_mode=rope_position_mode,
+                rope_max_frame_gap=1,
+                prompt_first_frame_pin_enabled=False,
+                scene_cut_rope_offset=0,
+                scene_cut_sink_enabled=False,
+            )
+        )
+    )
+    return stage
+
+
+def test_minwm_cuda_graph_accepts_bounded_block_relative_cache():
+    stage = _minwm_cuda_graph_cache_stage(
+        allow_growth=False,
+        rope_position_mode="block_relative",
+    )
+    kwargs = stage._causal_kv_cache_kwargs(
+        SimpleNamespace(sequence_shard_enabled=True, expected_cache_tokens=32)
+    )
+
+    assert kwargs["allow_growth"] is False
+    assert kwargs["rope_position_mode"] == "block_relative"
+
+
+@pytest.mark.parametrize(
+    ("allow_growth", "rope_position_mode", "message"),
+    [
+        (True, "block_relative", "bounded realtime KV window"),
+        (False, "absolute", "block_relative RoPE"),
+    ],
+)
+def test_minwm_cuda_graph_rejects_dynamic_cache_contracts(
+    allow_growth, rope_position_mode, message
+):
+    stage = _minwm_cuda_graph_cache_stage(
+        allow_growth=allow_growth,
+        rope_position_mode=rope_position_mode,
+    )
+
+    with pytest.raises(ValueError, match=message):
+        stage._causal_kv_cache_kwargs(
+            SimpleNamespace(sequence_shard_enabled=False, expected_cache_tokens=32)
+        )
 
 
 def test_minwm_unipc_scheduler_matches_native_shift_contract():
@@ -1385,6 +1420,102 @@ def test_minwm_realtime_adapter_groups_pixel_weights_by_vae_factor():
     assert all(len(window) == 4 for window in windows)
     assert windows == [[row] * 4] * 4
     assert inputs.condition_inputs[MINWM_TOTAL_CHUNKS_CONDITION] == 8
+
+
+def test_minwm_refreshes_queued_chunk_with_latest_camera_state():
+    adapter = MinWMRealtimeAdapter()
+    session = GenerateSession()
+    session.set_adapter(adapter)
+    session.set_request(
+        RealtimeVideoGenerationsRequest(
+            type="init",
+            prompt="test",
+            first_frame="/tmp/reference.png",
+            max_chunks=4,
+        )
+    )
+    state = adapter._state(session)
+    state.receive_camera_state(["w"], event_id=1)
+    chunk = session.new_chunk()
+    initial_labels = state.sample_action_labels(4)
+    batch = SimpleNamespace(
+        condition_inputs={MINWM_ACTION_LABELS_CONDITION: initial_labels},
+        realtime_chunk_size=4,
+        realtime_action_version=0,
+        realtime_prompt_version=0,
+        realtime_event_id=1,
+    )
+
+    adapter.ingest_event(
+        session,
+        RealtimeEvent(
+            type="event",
+            kind="camera_actions",
+            event_id=2,
+            payload={
+                "mode": "state",
+                "transitions": [{"actions": ["a"], "client_ts_ms": 10}],
+            },
+        ),
+    )
+    session.mark_event_version("camera_actions")
+    refreshed = adapter.refresh_queued_request(
+        session,
+        SimpleNamespace(
+            pipeline_config=SimpleNamespace(
+                vae_config=SimpleNamespace(
+                    arch_config=SimpleNamespace(scale_factor_temporal=4)
+                )
+            )
+        ),
+        chunk,
+        batch,
+        "camera_actions",
+    )
+
+    assert refreshed is not batch
+    assert (
+        refreshed.condition_inputs[MINWM_ACTION_LABELS_CONDITION]
+        == [key_state_to_action_label(["a"])] * 4
+    )
+    assert refreshed.realtime_action_version == 1
+    assert refreshed.realtime_event_id == 2
+
+
+def test_minwm_does_not_consume_prompt_while_previewing_queued_chunk():
+    adapter = MinWMRealtimeAdapter()
+    session = GenerateSession()
+    session.set_adapter(adapter)
+    session.set_request(
+        RealtimeVideoGenerationsRequest(
+            type="init",
+            prompt="old prompt",
+            first_frame="/tmp/reference.png",
+            max_chunks=4,
+        )
+    )
+    state = adapter._state(session)
+    state.receive_prompt("new prompt", event_id=7, switch_kind="scene_cut")
+    chunk = session.new_chunk()
+    batch = SimpleNamespace(
+        condition_inputs={},
+        realtime_chunk_size=4,
+        realtime_action_version=0,
+        realtime_prompt_version=0,
+        realtime_event_id=1,
+    )
+
+    refreshed = adapter.refresh_queued_request(
+        session,
+        SimpleNamespace(),
+        chunk,
+        batch,
+        "scene_cut",
+    )
+
+    assert refreshed is None
+    assert state.prompt_queue.has_events("condition_switch")
+    assert session.request.prompt == "old prompt"
 
 
 def test_minwm_t2v_first_latent_is_noop_without_consuming_pixel_actions():
@@ -2380,7 +2511,6 @@ def test_minwm_cache_qk_norm_stays_eager(monkeypatch):
         == 3
     )
     assert compile_calls == []
-
     assert (
         _minwm_apply_qk_op(
             operation,
@@ -2391,6 +2521,22 @@ def test_minwm_cache_qk_norm_stays_eager(monkeypatch):
         == 3
     )
     assert compile_calls == [True]
+
+
+def test_minwm_cuda_graph_disables_segment_compile(monkeypatch):
+    import sglang.multimodal_gen.runtime.models.dits.minwm as minwm_module
+
+    def operation(value):
+        return value
+
+    monkeypatch.setattr(minwm_module, "_MINWM_SEGMENT_COMPILE", True)
+    monkeypatch.setattr(minwm_module, "_MINWM_CUDA_GRAPH_ACTIVE", False)
+    monkeypatch.setattr(minwm_module._MinWMSegmentCompile, "_compiled", {})
+
+    minwm_module.set_minwm_cuda_graph_active(True)
+
+    assert minwm_module._MinWMSegmentCompile.get(operation, True) is operation
+    assert minwm_module._MinWMSegmentCompile._compiled == {}
 
 
 def test_minwm_rotary_embedding_matches_main_explicit_formula():
