@@ -43,6 +43,41 @@ from measurement import (
 
 TraceSelector = tuple[str, str, str]
 
+CHUNK_STATS_TRACE_FIELDS = {
+    "chunk_index": "chunk_index",
+    "request_prepare_ms": "request_prepare_ms",
+    "scheduler_forward_ms": "scheduler_forward_ms",
+    "output_pace_ms": "pace_wait_ms",
+    "header_write_ms": "header_write_ms",
+    "raw_payload_build_ms": "raw_payload_build_ms",
+    "raw_write_ms": "raw_write_ms",
+    "ws_write_ms": "ws_write_ms",
+    "chunk_total_ms": "chunk_total_ms",
+    "num_batches": "num_batches",
+    "num_frames": "num_frames",
+    "raw_bytes": "raw_bytes",
+    "ws_payload_bytes": "ws_payload_bytes",
+    "content_type": "content_type",
+}
+
+
+def chunk_stats_from_trace(trace: dict[str, Any]) -> dict[str, Any] | None:
+    if trace.get("event") != "server.chunk_complete":
+        return None
+    missing = [name for name in CHUNK_STATS_TRACE_FIELDS if name not in trace]
+    if missing:
+        raise MeasurementValidationError(
+            f"server.chunk_complete trace missing required fields: {missing}"
+        )
+    stats = {
+        target: trace[source] for source, target in CHUNK_STATS_TRACE_FIELDS.items()
+    }
+    stats["type"] = "chunk_stats"
+    for name in ("trace_id", "session_id", "request_id", "event_id"):
+        if name in trace:
+            stats[name] = trace[name]
+    return stats
+
 
 async def send_realtime_heartbeats(
     websocket: Any, *, trace_id: str | None, interval_s: float
@@ -77,9 +112,7 @@ async def realtime_heartbeat(
     websocket: Any, *, trace_id: str | None, interval_s: float
 ):
     task = asyncio.create_task(
-        send_realtime_heartbeats(
-            websocket, trace_id=trace_id, interval_s=interval_s
-        )
+        send_realtime_heartbeats(websocket, trace_id=trace_id, interval_s=interval_s)
     )
     try:
         yield
@@ -377,6 +410,9 @@ async def receive_run(args: argparse.Namespace, contract: dict, case: dict) -> d
                 if isinstance(trace, dict):
                     trace_events.append(trace)
                     record_required_stage_trace(required_trace_chunks, trace)
+                    chunk_stats = chunk_stats_from_trace(trace)
+                    if chunk_stats is not None:
+                        stats_by_chunk[int(chunk_stats["chunk_index"])] = chunk_stats
                 continue
             if message_type == "error":
                 raise RuntimeError(header.get("content", "unknown realtime error"))

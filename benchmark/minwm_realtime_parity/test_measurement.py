@@ -15,6 +15,7 @@ from jsonschema import Draft202012Validator
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from benchmark_realtime_throughput import (  # noqa: E402
+    chunk_stats_from_trace,
     incomplete_measurement_diagnostic,
     missing_required_stage_trace,
     realtime_heartbeat,
@@ -97,6 +98,45 @@ def test_realtime_heartbeat_matches_server_contract_and_stops_at_scope_exit() ->
         },
     ]
     assert len(sent) == messages_at_scope_exit
+
+
+def test_chunk_complete_trace_restores_removed_chunk_stats_message() -> None:
+    trace = {
+        "event": "server.chunk_complete",
+        "trace_id": "test-run",
+        "session_id": "session-1",
+        "request_id": "request-1",
+        "event_id": 9,
+        "chunk_index": 21,
+        "request_prepare_ms": 1.0,
+        "scheduler_forward_ms": 700.0,
+        "output_pace_ms": 2.0,
+        "header_write_ms": 3.0,
+        "raw_payload_build_ms": 4.0,
+        "raw_write_ms": 5.0,
+        "ws_write_ms": 8.0,
+        "chunk_total_ms": 1200.0,
+        "num_batches": 1,
+        "num_frames": 16,
+        "raw_bytes": 48,
+        "ws_payload_bytes": 64,
+        "content_type": "application/x-raw-rgb",
+    }
+    stats = chunk_stats_from_trace(trace)
+    assert stats is not None
+    assert stats["type"] == "chunk_stats"
+    assert stats["chunk_index"] == 21
+    assert stats["pace_wait_ms"] == 2.0
+    assert stats["scheduler_forward_ms"] == 700.0
+    assert stats["chunk_total_ms"] == 1200.0
+    assert stats["num_frames"] == 16
+    assert stats["trace_id"] == "test-run"
+
+    assert chunk_stats_from_trace({"event": "server.vae_decode_complete"}) is None
+    incomplete = dict(trace)
+    del incomplete["scheduler_forward_ms"]
+    with pytest.raises(MeasurementValidationError, match="scheduler_forward_ms"):
+        chunk_stats_from_trace(incomplete)
 
 
 @pytest.mark.parametrize(
