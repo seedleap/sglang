@@ -123,3 +123,18 @@ def test_measurement_trace_relay_does_not_restore_removed_client_trace_state():
     assert "_install_realtime_trace_sink(session, trace_sink)" in source
     assert "_send_realtime_trace_events(ws, trace_queue)" in source
     assert "session.client_trace" not in source
+
+
+def test_attempt06_pins_the_relay_fix_and_current_product_tree():
+    manifest = (
+        ROOT
+        / "k8s/minwm_s5_fusedops_h200_20260809_attempt06.yaml"
+    ).read_text()
+    runner_ref = "2adb6e1437fd4d06127dc938786354b4a7b1f63c"
+    product_ref = "dc4c865a6e41dd26f5feaeb8f9236facd5725082"
+    assert "minwm-s5-fusedops-h200-20260809-05" not in manifest
+    assert manifest.count("minwm-s5-fusedops-h200-20260809-06") == 6
+    assert manifest.count(runner_ref) == 3
+    assert manifest.count(product_ref) == 3
+    assert "backoffLimit: 0" in manifest
+    assert 'nvidia.com/gpu: "8"' in manifest
