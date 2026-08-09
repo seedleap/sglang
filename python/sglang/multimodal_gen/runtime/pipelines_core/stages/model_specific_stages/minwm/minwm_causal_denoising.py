@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 import torch
+
 from sglang.multimodal_gen.configs.pipeline_configs.minwm import (
     MINWM_ACTION_LABELS_CONDITION,
     MINWM_ACTION_WEIGHTS_CONDITION,

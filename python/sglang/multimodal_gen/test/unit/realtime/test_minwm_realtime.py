@@ -22,12 +22,12 @@ from sglang.multimodal_gen.runtime.entrypoints.openai.protocol import (
     RealtimeEvent,
     RealtimeVideoGenerationsRequest,
 )
-from sglang.multimodal_gen.runtime.entrypoints.openai.realtime.generate_session import (
-    GenerateSession,
-)
 from sglang.multimodal_gen.runtime.entrypoints.openai.realtime.adapters.minwm_realtime_adapter import (
     MinWMRealtimeAdapter,
     MinWMRealtimeState,
+)
+from sglang.multimodal_gen.runtime.entrypoints.openai.realtime.generate_session import (
+    GenerateSession,
 )
 from sglang.multimodal_gen.runtime.models.dits.minwm import (
     MinWMCausalSelfAttention,
@@ -71,8 +71,8 @@ from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.m
     MinWMCausalUniPCDenoisingStage,
     MinWMCausalVaeDecodingStage,
     MinWMChunkLatentPreparationStage,
-    _MinWMCudaGraphRunner,
     _cuda_graph_attention_plan_signature,
+    _MinWMCudaGraphRunner,
 )
 from sglang.multimodal_gen.runtime.pipelines_core.stages.realtime.vae import (
     CausalVaeDecodingStage,
