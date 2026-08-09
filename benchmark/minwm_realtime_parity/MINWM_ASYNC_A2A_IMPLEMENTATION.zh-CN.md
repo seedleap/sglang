@@ -1,8 +1,12 @@
 # MinWM Ulysses 异步 A2A 实施与验收记录
 
-状态：实施中，尚未通过验收。`async_op=True`、可 capture、non-blocking copy、collective
-数量减少或单个 NCCL kernel 变短都不单独构成 overlap。最终只在 profiler-off 客户端 FPS
-达到硬门槛，且 Nsight 证明 A2A exposed critical-path time 被真实 compute 隐藏时判定通过。
+状态（2026-08-09）：**FAIL / 未验收，不进入产品路径，不创建 PR**。H200 已完成三类
+单请求候选的正确性、profiler-off A/B 和候选 1 的精确 Nsight；QK/V split、split IPC、
+query-tiled reverse A2A（tiles=4/2）均未达到 `+3%`，其中最后两档 tiled candidate 分别为
+`-20.536%/-7.651%` Client FPS。B200/B300 正式验收未启动，因为 H200 预检已稳定反向，换
+硬件不能替代设计门禁。所有实验开关默认关闭；分支仅保留研究实现、可复现实验工具和负证据。
+`async_op=True`、可 capture、non-blocking copy、collective 数量减少或单个 NCCL kernel 变短
+都不单独构成 overlap。
 
 ## 版本与环境合同
 
@@ -12,7 +16,7 @@
 | MinWM 逻辑基线 | `0e30671cf8a00622fd138c71af3faa93353b5425`（`codex/ulysses-pre-post-a2a-fusion`；失败的 pre-A2A QK-norm 已删除，post-A2A parity 路径默认关闭） |
 | upstream 通信基线 | 已 cherry-pick `754b692afc29`（本分支 `4202d2a043`，SP2 IPC）、`bfce378e5fbc`（本分支 `36066c3d44`，capture-safe PyNCCL A2A）、`f829fb30d3d3`（本分支 `35a313e616`，IPC lifecycle/reset）和 `44bde391d0b1`（本分支 `ed152d6c48`，真实 peer CUDA ordinal）；`a5888c956f90` 的 packed QKV + reusable staging 与 MinWM 现有同名但不同返回合同的实现重复，未强行合并 |
 | 实现分支 | `codex/minwm-async-a2a-overlap` |
-| 候选提交 | 核心实现 `dad5de09f1b644074cb3d977fdad11ffd18772bf`；GPU 测试隔离修复 `0a975bac14e20660e6a31744bf864c8d51d99aff`；精确 Nsight chunk 窗口与 forward 标记整合至 `c6309c3004`；IPC output A2A trace 识别修复为 `3ed01a42a33423a9d86ceccd7aff2c2d95cca02d`。完整模型任务继续使用每次已推送的不可变 SHA，并在对应实验条目固定 |
+| 候选提交 | QK/V split `dad5de09f1b644074cb3d977fdad11ffd18772bf`；精确 Nsight/IPC output 识别 `3ed01a42a33423a9d86ceccd7aff2c2d95cca02d`；split IPC 合同 `028fe3f7b7fb55c389e51b9eaa9042cefb51eadc`；query-tiled output `9fe7a086c4054dc54f45c2f2eb7bc424a5b071d7`；IPC role 隔离 `13565f994fe29fadc39c31dd6566e9b617e70780`；quality runner `2aa64b6fb26db7de90461879485164b4991f735e`。每个真机 job 使用不可变 SHA |
 | 主硬件 | B200/B300 同节点 Spot；若容量不可得，H200 只用于诊断，不能冒充最终硬件结论 |
 | 软件 | 首轮 H200 transport 合同实测为 PyTorch `2.12.1+cu130`、CUDA `13.0`、NCCL `2.29.7`；完整模型与正式 B200/B300 各自继续保存 runtime provenance。Nsight Systems 目标版本为 `2026.4.1` |
 | checkpoint | 预定沿用 canonical MinWM 5B DMD checkpoint；精确 S3 URI、VersionId、ETag/CRC64/SHA256 在任务 dry-run 与 provenance 中固定 |
@@ -20,7 +24,7 @@
 | 主输入 | 1248×704（项目 720p）、5s、固定 prompt/首帧/action、固定 seed、SP2 |
 | 次输入 | 同一 720p 5s 的 SP4；832×480 仅作边界对照 |
 | 稳定性 | 同配置连续至少 10 请求或等价长跑；覆盖 eager 与生产启用时的 CUDA Graph |
-| 结果根目录 | H200 transport：PVC `minwm-async-a2a-contract-results-20260807`，成功路径 `/results/minwm-async-a2a-contract-h200-20260807-04`；完整模型与正式性能每次使用不可覆盖的 run-id 子目录，负结果同样保留 |
+| 结果根目录 | transport PVC `minwm-async-a2a-contract-results-20260807`；quality PVC `minwm-async-a2a-quality-results-20260807`；performance PVC `minwm-async-a2a-perf-results-20260807`。每次使用不可覆盖的 run-id/attempt 子目录，失败 job 与负结果均保留 |
 
 所有正式命令、环境值和路径按实验追加记录，不以“与上次相同”省略。已有 post-A2A
 融合证据只作为基线审计资料，不算本任务的异步 A2A 验收。
@@ -407,6 +411,17 @@ time、与 compute kernel 的区间交集及 buffer slot/generation。
   `minwm-async-a2a-perf-preflight-tiled-h200-20260807-01/async-a2a-abba/`。三项主指标
   稳定同向恶化，tiles=4 **FAIL/淘汰**；按预声明门禁不采 Nsight。最后只评估 tiles=2 的
   额外 FA 调用下界；若仍低于 baseline，则当前单请求 query tiling 设计族整体结束。
+- tiles=2 最小边界：联合门禁 job `minwm-async-a2a-tiled2-gate-h200-20260807-01` 先跑同一
+  720p/5s SP2 baseline/candidate quality，129 帧视频以及 rank0/rank1 各 69 个 probes 再次
+  bitwise exact；随后运行相同四位置、5+20 chunk profiler-off A/B。Client FPS
+  `12.949869→11.959085`（`-7.651%`，p10/p90 分别
+  `12.936959/12.962778→11.945872/11.972298`），DiT wall
+  `713.528→820.867 ms`（性能 `-15.043%`），chunk wall `1277.800→1383.850 ms`
+  （性能 `-8.299%`），scheduler FPS `12.979159→11.983456`（`-7.672%`）。所有 CV
+  `≤1.278%`。结果：
+  `/results/attempts/minwm-async-a2a-tiled2-gate-h200-20260807-01-4jvgd/`
+  `minwm-async-a2a-tiled2-gate-h200-20260807-01/{async-a2a-quality,async-a2a-abba}/`。
+  tiles=2 **FAIL/淘汰**；当前公开 FA API 的 query-tiling 族结案，不采其 Nsight。
 
 ### 2026-08-07：候选 1——QK A2A 与 V projection 重叠
 
@@ -459,10 +474,10 @@ time、与 compute kernel 的区间交集及 buffer slot/generation。
 - 根因：FA4 的 query tiling改变 kernel 形状，并把每层一次 attention launch/调度拆为四次；
   30 blocks×每 chunk 多次 DMD forward 的额外 kernel/低效形状远超可隐藏通信预算。数学可分不
   等于实现成本可忽略。
-- 决策：tiles=4 淘汰且不采 Nsight，不把“launch→wait 中有 attention”当性能通过。只再测
-  最小 tiles=2 边界；若仍失败，公开 FA API 下的 query-tiling 族结束，下一可执行方向必须是
-  单次 attention kernel 内的分段 epilogue/peer publish，或 scheduler/cache 隔离后的跨请求
-  wavefront，而不是继续增加 FA 调用数。
+- 决策：tiles=4 淘汰且不采 Nsight，不把“launch→wait 中有 attention”当性能通过。最小
+  tiles=2 随后也在 bitwise parity 后得到 Client FPS `-7.651%`、DiT `-15.043%`，且 CV
+  `≤1.278%`。因此公开 FA API 下的 query-tiling 族结束；下一可执行方向必须是单次 attention
+  kernel 内的分段 epilogue/programmatic peer publish，而不是继续增加 FA 调用数。
 
 ### 2026-08-07：同一 comm stream 和本 rank 在途限制都不能保护 peer staging 消费
 
@@ -615,9 +630,9 @@ time、与 compute kernel 的区间交集及 buffer slot/generation。
 - 决策：post fusion 可留作默认关闭的 parity-passed 基线能力，但不算本任务异步收益；主验收
   仍以 SP2 B200/B300 profiler-off FPS 与 exposed-time 证据为准。
 
-## 当前 before/after、复现与剩余风险
+## 最终 before/after、验收结论、复现与下一设计
 
-以下为候选 1 的 H200 诊断结论，不是 B200/B300 最终硬件验收：
+以下为候选 1 的 H200 精确机制诊断；它不是 B200/B300 正式 PASS：
 
 | 指标（SP2，1248×704） | 同步 baseline | QK/V split candidate | 变化/判定 |
 | --- | ---: | ---: | ---: |
@@ -633,16 +648,108 @@ time、与 compute kernel 的区间交集及 buffer slot/generation。
 | 同步 API count | 1550 | 1550 | 无新增，但不构成通过 |
 | 720p 5s parity / 连续请求 | baseline | SP2/SP4 bitwise；候选连续 10 请求 | H200 eager 正确性通过 |
 
-回滚开关为 `MINWM_ASYNC_A2A=0`（默认）；`MINWM_ASYNC_A2A_OUTPUT=0` 继续保持。候选 1
-不进入 B200/B300 正式性能验收。剩余风险与下一步：
+所有 profiler-off H200 预检汇总如下；百分比均以“越大越好”的性能方向报告：
 
-- B300 64 张卡在最近盘点时仍被四个他人训练任务占满；不抢占。最终 PASS 必须在同节点
-  B200/B300 上重做 profiler-off ABBA/BAAB 各至少 5 样本与相同 Nsight 稳态窗。
-- 单请求 block 内完整 input/output A2A 都没有合法独立工作。下一步必须先审计 realtime
-  scheduler 的在途 request/chunk 数、causal cache/session ownership 和输出顺序，证明能安全
-  放入另一请求/下一 chunk 的 GPU work，再实现跨请求双缓冲；不能只把现有 begin/wait 拉开。
-- SP2 reverse IPC 对 rank skew 很敏感；后续分析器已同时识别 NCCL 与
-  copy/signal/spin-wait IPC 协议。任何下一候选都要分别报告 input 与 output，不得再把 IPC
-  output 误报为 0。
-- 480p 边界对照、SP4 次验收、生产 CUDA Graph 完整模型 10 请求稳定性及最终 trace
-  截图/统计仍待下一可行候选与 B200/B300 资源；当前整体状态仍为 **未验收**。
+| 候选（SP2，1248×704） | Client FPS baseline→candidate | Client FPS | DiT 性能 | chunk 性能 | 决策 |
+| --- | ---: | ---: | ---: | ---: | --- |
+| QK/V split ProcessGroup | 12.9927→12.7634 | `-1.765%` | `-4.455%` | `-3.602%` | FAIL；Nsight 机制也失败 |
+| QK/V split IPC | 13.0592→12.8720 | `-1.433%` | `-4.160%` | `-0.919%` | FAIL；按门禁不采 Nsight |
+| query tiled output，T=4 | 12.9857→10.3190 | `-20.536%` | `-43.236%` | `-26.558%` | FAIL；FA 拆分成本主导 |
+| query tiled output，T=2 | 12.9499→11.9591 | `-7.651%` | `-15.043%` | `-8.299%` | FAIL；最小 tiling 边界也失败 |
+
+### 验收判定
+
+- 最终本地回归：上述 unit/realtime/GPU 入口/runner 合同合并执行为
+  `129 passed, 1 skipped`（本机无 CUDA，GPU 入口按合同 skip）；`bash -n`、Ruff 和
+  `git diff --check` 全部通过。真 GPU 数值结论来自上列 H200 jobs，不以本地 skip 替代。
+- A 正确性：候选 1 的 SP2/SP4 720p/5s、连续 10 请求和 transport CUDA Graph 合同通过；
+  tiled T=4/T=2 的 SP2 720p/5s 视频与 tensor exact，transport SP2/SP4/graph 通过。由于 B 门
+  已失败，tiled 候选没有浪费资源扩成 SP4 完整模型/连续 10 请求，所以不能宣称完整 A 门。
+- B profiler-off：四个候选全部低于 `+3%`，且核心指标同向恶化、CV 合同通过。**硬门失败**；
+  不运行 6+6 正式 B200/B300，也不把 H200 换卡视为补救。
+- C 机制：候选 1 的 10/10 chunk 确有非零 QK A2A/V GEMM overlap，但仅 `1.630 ms`，input
+  exposed 反而 `+148.282%`，A2A+idle `+152.391%`；**硬门失败**。其他候选在 B 明确失败后
+  按预声明门禁不采昂贵 Nsight。最终整体结论为 **FAIL / 未验收**。
+
+### 回滚与产品状态
+
+- `MINWM_ASYNC_A2A=0`、`MINWM_ASYNC_A2A_OUTPUT=0`、
+  `MINWM_ASYNC_A2A_OUTPUT_TILES=1` 均为默认值；这三项共同回到同步 packed-QKV input +
+  同步 reverse output 基线。backend 默认 `auto`。
+- 失败实现只存在于 `codex/minwm-async-a2a-overlap` 研究分支，用于复现负证据；没有创建 PR，
+  没有改生产默认值，也不得在产品配置开启。若要彻底丢弃研究实现，直接不合并此分支即可；
+  upstream IPC lifecycle、peer ordinal、capture-safe PyNCCL 的已合入安全修复不依赖实验开关。
+
+### 关键复现入口
+
+本地合同：
+
+```bash
+PYTHONPATH=python TORCHDYNAMO_DISABLE=1 python3 -m pytest -q \
+  python/sglang/multimodal_gen/test/unit/test_ipc_a2a_lifecycle.py \
+  python/sglang/multimodal_gen/test/unit/realtime/test_minwm_realtime.py \
+  python/sglang/multimodal_gen/test/single_test_file/test_minwm_async_a2a_gpu.py \
+  benchmark/minwm_realtime_parity/test_async_a2a_runners.py
+```
+
+真机 transport 与候选 1 精确 Nsight：
+
+```bash
+kubectl --context codex-minwm-test-phx2 apply \
+  -f benchmark/minwm_realtime_parity/k8s/minwm_async_a2a_contract_h200_20260807.yaml
+kubectl --context codex-minwm-test-phx2 apply \
+  -f benchmark/minwm_realtime_parity/k8s/minwm_async_a2a_nsys_h200_20260807.yaml
+```
+
+已完成模型转换的真机容器内，tiled 质量/性能使用同一 runner 合同：
+
+```bash
+export MINWM_ASYNC_A2A_EXPERIMENT=output_tiled
+export MINWM_ASYNC_A2A_OUTPUT_TILES=2  # 或失败的 T=4
+export MINWM_ASYNC_A2A_BENCH_BACKEND=ipc
+export MINWM_ASYNC_A2A_SP_DEGREES=2
+export MINWM_ASYNC_A2A_STABILITY_REQUESTS=1
+bash benchmark/minwm_realtime_parity/run_async_a2a_quality.sh
+
+export MINWM_ASYNC_A2A_SEQUENCE='candidate baseline baseline candidate'
+export MINWM_ASYNC_A2A_MIN_LANE_SAMPLES=2
+export MINWM_S0_OFF_WARMUP_CHUNKS=5
+export MINWM_S0_OFF_MEASURED_CHUNKS=20
+bash benchmark/minwm_realtime_parity/run_async_a2a_measurement.sh
+```
+
+### 下一种可执行设计：单次 FA4 + programmatic dependent peer publish
+
+现有公开 FA API 的问题不是依赖错误，而是为了获得 output tile readiness 必须把一次 attention
+拆成 T 次；T=2 已证明额外 FA 成本大于最多约 57ms/chunk 的 output A2A 预算。下一设计必须
+保留一次完整 FA4 launch，同时让已完成 query tile 的 output 先行发布：
+
+1. 在 FA4/CuTe output epilogue 中按 destination query tile 维护 CTA completion counter；最后
+   一个 CTA 对 tile 做 `threadfence_system` 后设置 device-ready flag，不改变 softmax、累加顺序
+   或 BF16 output 数值。
+2. 在独立 comm stream 启动一个 programmatic-dependent peer-publish kernel。它等待各 tile 的
+   ready flag，将 `[tile, local_heads]` 直接写入 owner rank 的双缓冲 IPC output 中对应
+   `rank * local_heads` 区间；FA4 继续计算后续 tile。这样 Nsight 可分别看到一个 FA kernel 与
+   peer-publish kernel 的真实区间交集，而不是 T 次 FA。
+3. 每个 block/slot 使用 role 隔离的 staging、单调 generation 和 GPU-side completion barrier；
+   output projection 只等待本 rank 收齐全部 head slices。异常只能在任何 peer publish 前
+   fallback；publish 后必须 retire/报错，不能跨 rank 分歧回 NCCL。capture 前预热指针、flags、
+   events 和 IPC mappings，graph replay 只更新 device sequence。
+4. 第一阶段只做 SP2 H200 micro-contract：单层 full-FA reference 与 peer-publish output bitwise，
+   12 次双 slot、rank skew、取消/timeout、capture+3 replay；同时量化单层 FA 增量必须 `<5%`，
+   output exposed 至少 `-20%`。达不到即停止，不启动 checkpoint。
+5. 第二阶段才接完整 MinWM：720p/5s SP2 小 parity → profiler-off 四位置 5+20 预检 → 达到
+   Client FPS `≥+3%` 后采相同 10-chunk Nsight → 再扩 6+6、SP4、10 请求和 B200/B300 正式门。
+
+若当前 CUDA/FA4 版本不能提供 programmatic dependent launch/epilogue hook，备选不是继续拆
+FA，而是两 session、独立 cache/workspace 的 block-wavefront scheduler；它只能改善并发请求
+总吞吐，不能冒充本任务单客户端 FPS，通过前必须另立 multi-client 验收合同。
+
+### 剩余风险
+
+- 下一设计涉及 FA4/CuTe 内核与 GPU-side IPC barrier，目前尚未实现；本分支没有可启用的
+  `+3%` 产品候选。
+- B300 容量盘点时 64 卡被他人任务占满，本任务未抢占或删除他人资源。正式 PASS 仍要求
+  同节点 B200/B300 6+6 与相同 Nsight 窗口，但只应在 H200 预检为正后投入。
+- 候选 1 的原始 `baseline.nsys-rep`、`candidate.nsys-rep`、SQLite 和统计 JSON 已保留；未额外
+  制作装饰性截图，原始 trace/统计是机制证据源。tiled 候选因性能门失败没有 trace。
