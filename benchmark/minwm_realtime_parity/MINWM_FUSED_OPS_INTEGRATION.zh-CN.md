@@ -39,8 +39,9 @@ JSON 全部有效；随后短 correctness 客户端仍忽略相同 trace，在�
 因此 attempt-08 的 SP2 headline 只作可恢复 checkpoint，尚不能成为整体验收。修复现已复用同一
 转换函数覆盖 throughput 与 correctness 客户端；产品 PR 保持 draft、不等待人工 approval，但
 需等待新的当前 SHA H200 gate。attempt-09 已用这项修复完成当前产品树的 SP2/SP4
-profiler-off、两种 SP 的严格 bitwise，以及 SP2 全 8 组 factorial Nsight；SP4 Nsight 尚在运行，
-所以以下当前 HEAD 数值是已验证的阶段证据，不提前把整个 Job 标为完成。
+profiler-off、两种 SP 的严格 bitwise，以及两种 SP 各 8 组 factorial Nsight。Job
+`minwm-s5-fusedops-h200-20260809-09` 在 129 分钟后 `Complete 1/1`、exit 0、restart 0，attempt
+内没有 invalid marker；以下当前 HEAD 数值替代 attempt-04，作为最终验收与容量规划依据。
 
 ## 预期
 
@@ -135,7 +136,7 @@ binary 的 `000 vs 111` 比较 latent 和最终视频。要求 shape/dtype 一�
 最大绝对差为 0，并记录两侧 SHA256。任何 capability/layout/quantization fallback 都必须
 从日志或断言显式识别；不允许用更宽阈值替代 bitwise。
 
-## 实际结果
+## 实际结果（attempt-09 当前 HEAD）
 
 ### 正确性
 
@@ -157,23 +158,25 @@ QKV candidate 在 correctness server 中实际命中，不存在 requested=true 
 
 | SP | variant | Client FPS | Scheduler FPS | chunk wall ms | DiT wall ms | VAE wall ms | 必选项 CV |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| 2 | `000` | 12.8177 | 12.8310 | 1279.013 | 745.405 | 420.964 | ≤0.1245% |
-| 2 | `111` | 12.9468 | 12.9606 | 1299.248 | 716.927 | 421.502 | ≤0.2908% |
-| 2 | improvement | **+1.007%** | **+1.010%** | **−1.582%** | **+3.820%** | **−0.128%** | 两侧通过 |
-| 4 | `000` | 14.8892 | 14.9050 | 1117.003 | 746.198 | 230.723 | ≤1.1848% |
-| 4 | `111` | 16.0246 | 16.0436 | 1040.562 | 670.444 | 230.996 | ≤0.4655% |
-| 4 | improvement | **+7.626%** | **+7.639%** | **+6.843%** | **+10.152%** | **−0.118%** | 两侧通过 |
+| 2 | `000` | 12.6053 | 12.6204 | 1314.948 | 749.321 | 422.144 | ≤1.162% |
+| 2 | `111` | 13.0047 | 13.0210 | 1279.367 | 717.156 | 420.799 | ≤0.955% |
+| 2 | improvement | **+3.168%** | **+3.174%** | **+2.706%** | **+4.292%** | **+0.318%** | 两侧通过 |
+| 4 | `000` | 14.9023 | 14.9222 | 1116.479 | 745.479 | 231.449 | ≤1.763% |
+| 4 | `111` | 15.8925 | 15.9160 | 1061.090 | 671.428 | 231.117 | ≤0.634% |
+| 4 | improvement | **+6.645%** | **+6.660%** | **+4.961%** | **+9.933%** | **+0.143%** | 两侧通过 |
 
-SP2 使用两次 repeat，无自适应追加。SP4 的首次 ABBA 在 chunk wall 出现
-`000=5.309%`、`111=4.075%` 的位置漂移，故各追加一个独立 server；追加后四个必选 headline
-指标全部通过 3% CV 门。`000` 的非必选 chunk-wall CV 仍为 `3.221%`，已保留为环境噪声警告，
-不能写成“所有指标 CV 均通过”。
+两种 SP 的首次 ABBA 都在 chunk wall 出现超过 3% 的位置漂移，故 `000/111` 各追加一个独立
+server，即每个 variant 三次。追加后四个必选 headline 指标全部通过 3% CV 门；SP2 两侧的
+非必选 chunk-wall CV 也分别为 `2.034%/2.697%`。SP4 `000` 的非必选 chunk-wall CV 仍为
+`3.452%`，已保留为环境噪声警告，不能写成“所有指标 CV 均通过”。
 
 真实 session telemetry 中所有活跃 GPU 100% 为 P0。SP4 两侧 clock p50/p95 均为
-`1980/1980 MHz`；`000` 三次 mean clock 为 `1973.84/1974.25/1973.88 MHz`，`111` 为
-`1973.30/1973.35/1973.18 MHz`。`111` 功耗略高（约 `425.8–432.0 W` 对
-`412.7–418.2 W`），最高温度 `76°C`，未享受更高频率，因此 +7.6% 不是降频或热态假象。
-SP2 的 clock p50/p95 为 `1965/1980 MHz`，两侧 mean 相差不超过 6.1 MHz。
+`1980/1980 MHz`；`000/111` 全部 lane 合并 mean clock 为 `1975.98/1975.27 MHz`，平均功耗
+`415.87/426.92 W`，平均利用率 `69.66%/69.75%`，最高温度 `72/73°C`。SP2 两侧 clock
+p50/p95 均为 `1965/1980 MHz`，mean 为 `1945.24/1940.59 MHz`，平均功耗
+`606.92/602.45 W`，平均利用率 `85.16%/83.49%`，最高温度均为 `79°C`。两种 SP 的
+candidate 都未享受更高频率，且显存峰值只在采样波动范围内，因此端到端正收益不是时钟、
+热态或显存占用伪造；SP2 持续负载更接近功耗/温度上限，是其收益兑现小于 SP4 的背景因素之一。
 
 ### Nsight 与交互残差
 
@@ -184,28 +187,27 @@ mapping。以下数值均为每 stable chunk，wall/CUDA 单位为 ms：
 
 | SP/config | chunk wall | DiT wall / CUDA | VAE wall / CUDA | kernel = launch | CUDA API | GPU busy | SM / Tensor / DRAM Active |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| 2 / `000` | 1279.0 | 730.574 / 730.070 | 440.896 / 440.241 | 34608 | 91016.7 | 76.792% | 62.593% / 28.971% / 8.417% |
-| 2 / `111` | 1173.1 | 626.662 / 626.150 | 440.839 / 440.098 | 25338 | 71575.1 | 78.910% | 64.821% / 31.728% / 8.195% |
-| 2 / improvement | +8.280% | +14.223% / +14.234% | +0.013% / +0.033% | **−9270（−26.786%）** | **−19441.6（−21.360%）** | +2.118pp | +2.228 / +2.757 / −0.222pp |
-| 4 / `000` | 1233.5 | 788.989 / 788.444 | 254.692 / 253.959 | 69202 | 184826.3 | 67.599% | 36.772% / 15.555% / 4.297% |
-| 4 / `111` | 1090.9 | 658.671 / 658.173 | 251.423 / 250.776 | 50662 | 144892.0 | 66.147% | 39.291% / 17.732% / 4.475% |
-| 4 / improvement | +11.561% | +16.517% / +16.523% | +1.283% / +1.253% | **−18540（−26.791%）** | **−39934.3（−21.606%）** | −1.452pp | +2.519 / +2.177 / +0.178pp |
+| 2 / `000` | 1328.3 | 744.832 / 744.348 | 442.699 / 442.023 | 34608 | 91006.3 | 75.710% | 61.327% / 28.235% / 8.235% |
+| 2 / `111` | 1169.0 | 617.007 / 616.580 | 441.449 / 440.869 | 25338 | 71576.6 | 78.386% | 64.997% / 31.739% / 8.255% |
+| 2 / improvement | +11.991% | +17.162% / +17.165% | +0.282% / +0.261% | **−9270（−26.786%）** | **−19429.7（−21.350%）** | +2.676pp | +3.669 / +3.504 / +0.020pp |
+| 4 / `000` | 1145.6 | 790.467 / 790.020 | 253.795 / 253.200 | 69202 | 184819.2 | 69.517% | 38.008% / 15.963% / 4.421% |
+| 4 / `111` | 1066.8 | 674.160 / 673.529 | 256.933 / 256.248 | 50662 | 145623.4 | 68.754% | 38.839% / 17.302% / 4.393% |
+| 4 / improvement | +6.881% | +14.714% / +14.745% | −1.236% / −1.204% | **−18540（−26.791%）** | **−39195.8（−21.208%）** | −0.763pp | +0.830 / +1.340 / −0.028pp |
 
-短 kernel 也随 launch 消除而下降：SP2 `<10µs` 为 `18406.3→13087.8`、`10–50µs`
-为 `12141.9→7994.6`；SP4 分别为 `49483.8→32483.1`、`13019.7→10958.2`。
+短 kernel 也随 launch 消除而下降：SP2 `<10µs` 为 `18253.4→13084.9`、`10–50µs`
+为 `12299.4→8012.7`；SP4 分别为 `49108.1→32465.3`、`13394.7→10947.2`。
 kernel/launch 的 `111` 变化严格等于三个单项之和，残差为 0；CUDA API 残差只为
-SP2 `−217.1`、SP4 `−304.5` 每 chunk。设备时间则不是简单相加：
+SP2 `−89.3`、SP4 `+557.4` 每 chunk。设备时间则不是简单相加：
 
 | SP | all-on DiT wall 非加和残差 | `110` | `101` | `011` | 解释 |
 | --- | --- | --- | --- | --- | --- |
-| 2 | `−25.390 ms`（`−3.475pp` of `000`） | −2.318pp | −1.196pp | −3.739pp | 三对都协同；launch 数虽可加，关键路径/等待不可加 |
-| 4 | `+2.561 ms`（`+0.325pp`） | −1.081pp | +0.154pp | +1.297pp | all-on DiT 近似可加；S3+S4 有小幅互相抵消 |
+| 2 | `+13.913 ms`（`+1.868pp` of `000`） | +1.478pp | +1.905pp | +2.139pp | 三对都有重叠收益；launch 数可加，wall 收益不可加 |
+| 4 | `+19.242 ms`（`+2.434pp`） | +0.283pp | −0.465pp | +2.394pp | S1+S4 略协同，主要抵消来自 S3+S4 |
 
-SP2/SP4 的 scheduler chunk-wall 非加和残差分别为 `−207.6 ms` 与 `+125.8 ms`。它比
-DiT 残差大得多且方向随 SP 翻转，结合 profiler-off 的 SP2 chunk wall 回退，说明未归入
-DiT/VAE 的同步、客户端节拍和 server 调度仍是主要噪声/瓶颈；不能只拿 profiler-on 的
-`+8.28%` 宣称 SP2 端到端收益。SP4 在 profiler-off、DiT wall/CUDA 和 Client/Scheduler
-三层均同向，才构成可发布的 opt-in 证据。
+SP2/SP4 的 scheduler chunk-wall 非加和残差分别为 `+17.5 ms` 与 `−155.6 ms`。该指标在
+10-chunk Nsight lane 中受 CPU/输出/运行顺序影响明显，所以只作定位；正式 200-chunk
+profiler-off 才决定端到端收益。当前 HEAD 上 SP2/SP4 的 Client、Scheduler、chunk wall 与
+DiT headline 已全部同向为正，因此两种 SP 都构成 720p H200 可发布的 opt-in 证据。
 
 ## 与预期不符之处
 
@@ -237,7 +239,22 @@ DiT/VAE 的同步、客户端节拍和 server 调度仍是主要噪声/瓶颈；
    下方向不同，结论是环境/采样扰动而非 VAE 优化。
 
 attempt-04 无 invalid marker，严格 bitwise、fallback、all-target coverage、stage count 和
-exact-window 均通过。环境/调度失败只标记对应 lane invalid，不改写成实现结论。
+exact-window 均通过。环境/调度失败只标记对应 lane invalid，不改写成实现结论。它现在只作
+旧产品树历史对照，不覆盖 attempt-09：
+
+1. 当前 HEAD 的 SP2 Client 从旧 `+1.007%` 提高到 `+3.168%`，chunk wall 从
+   `−1.582%` 转为 `+2.706%`；SP4 Client 从 `+7.626%` 变为 `+6.645%`，方向与数量级稳定。
+   主干同时改了 async-VAE、causal attention plan 与 realtime 协议，不能把两轮差异归因给
+   某一个 fusion；决策是保留两轮 provenance，只用当前 HEAD 做发布建议。
+2. attempt-09 的 Nsight DiT 短窗收益为 SP2 `17.162%`、SP4 `14.714%`，明显大于持续
+   profiler-off 的 `4.292%/9.933%`。计数、CUDA time 与 exact-window 都有效，因此不把差异
+   说成解析错误；更合理的边界是短窗 instrumentation、热稳态与非 DiT 调度共同影响兑现率，
+   headline 继续只认 200-chunk profiler-off。
+3. SP2/SP4 的三阶 DiT wall 残差分别为 `+1.868pp/+2.434pp`，与旧树的协同方向不同。
+   kernel/launch 残差在两轮都严格为 0，说明实现确实消除了预期 launch；wall 交互则依赖
+   runtime 与 shape，不能固化成可跨版本复用的加法系数。
+4. attempt-09 的 VAE profiler-off 只变化 `+0.318%/+0.143%`，Nsight SP4 则回退
+   `1.236%`。VAE 不在改动路径，继续判定为采样/调度扰动，不为追求表格全正而修改 VAE。
 
 最新 main 还引入一项测量接口偏差：产品路径明确禁止把 trace 事件复用视频 WebSocket，改走
 独立 trace-query；S0 measurement client 仍依赖同连接完整 stage trace。attempt-05 的
@@ -269,7 +286,7 @@ correctness：`run_sglang_api.py` 完整收到视频，却仍只识别旧 `chunk
 退出。修复让 correctness 客户端复用 `chunk_stats_from_trace`，不复制字段映射；对应结构门与
 全套测量测试现为 `56 passed`。
 
-### attempt-09 当前 HEAD 阶段证据
+### attempt-09 当前 HEAD 最终证据
 
 attempt-09 固定产品树 `dc4c865a6e41dd26f5feaeb8f9236facd5725082`、runner
 `0bb1f7acbf08cfc64347ddbb918ca756123e398e`，Job
@@ -290,14 +307,17 @@ clean-cache + recompute、chunk 0..7 和全部 active rank；latent 的 dtype/sh
 `14af1068a53d0e4479fcc163fdfd5edc3415242c261852fc844cedf19e3c5a4c`；二者不同是 SP degree
 本身的既有数值路径差异，不是 `000/111` 差异。
 
-SP2 exact-window factorial 已完成。相对 `000`，三个单项 `100/010/001`
+SP2/SP4 exact-window factorial 均已完成。相对 `000`，SP2 三个单项 `100/010/001`
 （hoist/post-A2A/QKV）的 DiT wall 分别降低 `2.928%/10.044%/6.057%`；kernel/launch 每 stable
 chunk 分别变化 `−870/−8400/0`，CUDA API 分别变化 `−1.842%/−19.153%/−0.257%`。组合 `111`
 的 DiT wall/CUDA 分别降低 `17.162%/17.165%`，kernel/launch 降低 `9270`（`−26.786%`），
 CUDA API 降低 `21.350%`，GPU kernel-busy mean 增加 `2.676pp`。组合 DiT wall 的三阶残差为
 `+1.868pp`，因此不能把三个单项 wall 收益直接相加；pairwise gate 已触发并已补齐
 `110/101/011`。这些是 profiler-on 归因数值，不能替代上表 profiler-off headline；尤其 SP2
-两者兑现幅度差异较大，最终报告必须结合 SP4 factorial 与 telemetry 再解释。
+两者兑现幅度差异较大：Nsight 只有 10 个 stable chunk，profiler-off 是持续 200 chunk 的
+headline，后者优先。SP4 `111` 的 profiler-on DiT wall/CUDA 分别降低
+`14.714%/14.745%`，kernel/launch 降低 `18540`（`−26.791%`），CUDA API 降低
+`21.208%`；两种 SP 的 count 变化完全可加，但 wall 都存在非线性交互。
 
 ## H200 隔离、失败与产物保留
 
@@ -383,10 +403,13 @@ kubectl --context codex-minwm-test-phx2 apply \
 | parity-trace runner | `0bb1f7acbf` | runner-only；correctness 客户端复用同一转换，`56 passed` |
 | attempt-09 profiler-off SP2 | `s5-summary/headline-sp2.json` / `19c608689245bf183a15f44e2a1346446a0ad3ce8adb4c631d9440ff521d40bc` | 6,284 bytes；必选 CV 通过 |
 | attempt-09 profiler-off SP4 | `s5-summary/headline-sp4.json` / `a7c7185f86d50263019ac5b8e08789b668646af96ab7f710f2a6a4933a498bd6` | 6,354 bytes；必选 CV 通过 |
-| attempt-09 correctness SP2 | `correctness/sp2/correctness-summary.json` / `07c44bb80111ee9cd6593550577ad62b5052ede125d120cea509681f6cfdd421` | 7,341 bytes；bitwise |
-| attempt-09 correctness SP4 | `correctness/sp4/correctness-summary.json` / `bcf0868a5e9fb4cf62e3d29bb0bf97b06cf00e51ee35571645d1f365b9d76d33` | 13,901 bytes；bitwise |
+| attempt-09 correctness SP2 | `correctness/sp2/correctness-summary.json` / `99aac30d89c239f069f68fe57c3c7d2119d342f7a4e8b62817eec780f92f6f38` | 8,397 bytes；bitwise + fallback evidence |
+| attempt-09 correctness SP4 | `correctness/sp4/correctness-summary.json` / `9150b9c8b705a728d55088d3a1dcf44bb94a5c13130434f0a493fdd2a8237a0b` | 14,957 bytes；bitwise + fallback evidence |
 | attempt-09 factorial Nsight SP2 | `s5-summary/nsys-sp2.json` / `ebdd79bad89c411a56ab5378dee7ad6d8b1c6438f1b097157f7e6db9bda08a33` | 296,992 bytes；8 配置完成 |
-| PR | `seedleap/sglang#26` | draft；当前 SHA H200 gate 后转 ready，不等待人工 approval |
+| attempt-09 factorial Nsight SP4 | `s5-summary/nsys-sp4.json` / `bb1edab878f6bad1d46c20742b64011c33ce365ed580a5be3be0ed8338df5dc0` | 347,067 bytes；8 配置完成 |
+| attempt-09 artifact manifest | `s5-summary/artifact-manifest.json` / `3accc914acf42c392977f9e73986eeed54be1cb96295f1b624e7ff0c35f167fd` | 2,497 files / 32,716,402,597 bytes；PVC 内可恢复 |
+| attempt-09 exit diagnostic | `pod-exit-diagnostic.txt` / `41d37182e1839978980d6e2a0ea29b10135a0074047aab337c530b840c8c4bd4` | exit 0；finished `2026-08-09T06:23:24Z` |
+| PR | `seedleap/sglang#26` | 当前 SHA H200 gate 通过后转 ready；按用户指示不等待人工 approval |
 
 正式测量前的 attempts 均在同一隔离节点、不同 Pod/host-scoped root 中保留：
 
@@ -400,44 +423,46 @@ kubectl --context codex-minwm-test-phx2 apply \
 | `06` | `2adb6e1437` | 首个 SP2 `111` profiler-off，完整至 chunk 34 | 新 main 60 秒 idle watchdog；旧测量客户端只有 init、没有 heartbeat；无性能 JSON | Job `minwm-s5-fusedops-h200-20260809-06` failed/backoff 0；两级 marker、server log、telemetry、diagnostic 与 PVC 全部保留 |
 | `07` | `ed255b3c6b` | 首个 SP2 `111` profiler-off，payload 0..219 全部完成 | 新 main 删除独立 `chunk_stats`，同字段迁入 `server.chunk_complete` trace；客户端未消费，正常 close 后 220 条 stats 全缺；无性能 JSON | Job `minwm-s5-fusedops-h200-20260809-07` failed/backoff 0；两级 marker、server log、telemetry、diagnostic 与 PVC 全部保留 |
 | `08` | `b2c3227d1d` | SP2 六个 profiler-off lane 完成；首个 correctness `111` 视频完成 | throughput 已适配 trace stats；短 correctness 客户端仍只认旧消息，正常 close 后失败 | Job `minwm-s5-fusedops-h200-20260809-08` failed/backoff 0；6 个有效 headline JSON 与 correctness marker/log/PVC 全部保留 |
-| `09` | `0bb1f7acbf` | 当前运行：profiler-off、bitwise、SP2 factorial 完成；SP4 factorial 进行中 | 尚无失败；不得把阶段产物冒充整体验收 | Job `minwm-s5-fusedops-h200-20260809-09` running/backoff 0；Pod/PVC/raw 原位保留 |
+| `09` | `0bb1f7acbf` | 完成：SP2/SP4 profiler-off、bitwise、16 个 factorial Nsight 与 manifest | 无 invalid marker；exit 0 | Job `minwm-s5-fusedops-h200-20260809-09` Complete 1/1、backoff 0；Pod 按 TTL 清理，PVC/raw 原位保留 |
 
 ## 收益大小解释框架
 
-按 1248×704 的正式 profiler-off Client FPS 排序：S4 SP4 `+5.099%` > S3 SP4
-`+3.559%` > S1 SP4 `+0.504%`；S2 无可发布 runtime 候选。三项可以叠加，但实际 `111`
-为 `+7.626%`，不是简单相加的 `+9.162%`。SP2 三个单项都在近零到负向区间，组合则为
-`+1.007%`，仍不足以覆盖 chunk-wall 回退和跨运行噪声，所以不做全局默认。
+跨 PR 的旧单项 profiler-off 只能用于候选排序，不能直接相加；当前 HEAD 的同 Job factorial
+给出更可靠的设备归因。按 DiT profiler-on 单项 wall 降低排序，SP2 为 S3 post-A2A
+`10.044%` > S4 QKV `6.057%` > S1 hoist `2.928%`，SP4 为 S3 `10.197%` > S4
+`5.541%` > S1 `1.408%`。S2 无可发布 runtime 候选。三项可以叠加，但重叠访存、同步和关键
+路径使组合 wall 收益小于单项和；正式容量规划只采用 profiler-off 实测 `111`。
 
 device 侧原因很清楚：S1/S3/S4 的 kernel/launch 变化可严格相加，SP2/SP4 分别少
-`9270/18540` 次每 chunk；CUDA API 少 `21.36%/21.61%`，短 kernel 大幅减少，SM/Tensor
+`9270/18540` 次每 chunk；CUDA API 少 `21.35%/21.21%`，短 kernel 大幅减少，SM/Tensor
 Active 上升。S3 的 fusion 虽新增每 chunk `300/600` 个 fused post kernel，却替代更多
 RoPE/cache 小算子；S4 的 QKV module 调用从 3 GEMM 变 1 GEMM，但配套 layout kernel 会抵消
 全图 count 下降，所以其主要收益是缩短 projection span；S1 则稳定减少 timestep gather/fill。
 这些优化都作用在 DiT，VAE 基本不变。
 
 为什么 SP4 收益大：分片后 GEMM 与 elementwise 更小，固定 launch/同步开销占比更高，融合后
-DiT profiler-off 缩短 10.152%，Client 仍能兑现 7.626%。为什么 SP2 只兑现 1.007%：虽然
-Nsight 中 DiT CUDA 缩短 14.234%，但 profiler-off 的非 DiT 调度段抵消了大部分收益，chunk
-wall 反而增加 1.582%；因此设备微基准和端到端吞吐必须同时看。
+每 chunk 的绝对 launch 消除量也是 SP2 的两倍；DiT profiler-off 缩短 `9.933%`，Client 兑现
+`6.645%`。SP2 现在也不是负收益：DiT profiler-off 缩短 `4.292%`，Client 兑现 `3.168%`，
+chunk wall 同向改善 `2.706%`。它小于 SP4，一方面是固定 launch 开销占比更低，另一方面是
+持续 200-chunk session 的功耗/温度更高；A/B 时钟证据并未偏袒 candidate。Nsight 的短窗
+device 改善比 profiler-off 更大，进一步说明设备微基准不能替代持续端到端吞吐。
 
-## 最终建议（待当前 SHA 复验确认）
+## 最终建议
 
 - **默认配置**：保持 S1 开、S3/S4 关，即现有 `100`；S1 是严格 bitwise 且无明显回退的
-  低风险默认收益。
-- **SP4 推荐配置**：显式开启 S3 与 S4，形成 `111`。正式 1248×704 Client/Scheduler 为
-  `+7.626%/+7.639%`，DiT wall `+10.152%`，且 latent/video bitwise。
-- **SP2 配置**：暂不默认开启 S3/S4。组合 Client 虽 `+1.007%`，但 chunk wall
-  `−1.582%` 且单项 S3/S4 都未给出稳定端到端正收益；保留 opt-in 供特定部署复测。
-- **不可直接相加**：未来容量规划采用实测 SP4 `+7.6%`、SP2 `+1.0%`，不采用单项和
-  `+9.2%/−1.0%`。若模型、分辨率、KV 窗口或硬件变化，重新跑 ABBA + exact-window，而不是
-  沿用本轮交互系数。
+  低风险默认；代码层保留 S3/S4 显式 fallback，避免把 H200 720p 结论外推到未知形状/量化。
+- **H200 720p SP2 推荐 profile**：显式开启 S3 与 S4，形成 `111`。Client/Scheduler
+  `+3.168%/+3.174%`，chunk/DiT wall `+2.706%/+4.292%`，latent/video bitwise。
+- **H200 720p SP4 推荐 profile**：同样使用 `111`。Client/Scheduler
+  `+6.645%/+6.660%`，chunk/DiT wall `+4.961%/+9.933%`，latent/video bitwise。
+- **不可直接相加**：容量规划采用实测 SP2 `+3.17%`、SP4 `+6.65%`，不采用历史跨 PR
+  单项 FPS 之和，也不采用 Nsight 短窗 FPS。若模型、分辨率、KV 窗口、精度或硬件变化，
+  重新跑 ABBA + exact-window。
+- **S2 保持负结论**：没有 runtime 候选，不为凑齐“六项”恢复无真实边界或负收益的融合。
 
-以上是 attempt-04 对 `3d159d20fc` 的建议。attempt-05/06 都属于当前 `dc4c865a6e` 的
-runner 协议失败，attempt-07 也只验证了 heartbeat 与完整 payload，三者都不能参与性能比较。
-attempt-09 若保持严格 bitwise、必选 CV 通过且
-收益方向一致，则转为最终；若不一致，以当前 SHA 的有效 attempt 为准，保留两轮差异并重新
-解释，不能选择性沿用较好数字。
+attempt-04 是旧产品树 `3d159d20fc` 的有效历史对照；attempt-05–08 是当前树协议适配过程的
+失败证据，均保留 marker/raw。最终决策只使用 attempt-09 的当前产品树
+`dc4c865a6e`，没有选择性沿用更好数字。
 
 ## 让我掌握代码改动：检查题
 
@@ -460,14 +485,19 @@ attempt-09 若保持严格 bitwise、必选 CV 通过且
 17. 如果只有一个 BF16 元素相差 1 ULP，是否可以放宽阈值？正确处置是什么？
 18. 如果 kernel/launch 明显下降但 DiT wall 不降，应优先检查哪些同步、通信或硬件指标？
 19. 为什么每个 lane 必须独立 server？compile cache 和运行顺序会怎样伪造收益？
-20. 最终为什么可以给 SP2 和 SP4 不同建议，但不能预设 `111` 是全局最优？
-21. 为什么 SP4 三个单项 Client 收益相加是 9.162%，组合却只能按 7.626% 做容量规划？
-22. SP2 Nsight DiT CUDA 改善 14.234%，为什么最终仍不建议默认开启 S3/S4？
+20. 当前 HEAD 为什么可以给 SP2/SP4 都推荐 `111`，却仍保持 S3/S4 代码默认关闭？
+21. 为什么容量规划只能采用 SP2 `+3.168%`、SP4 `+6.645%` 的 profiler-off 实测，不能把
+    单项或 Nsight 短窗收益相加？
+22. SP2 Nsight DiT CUDA 改善 `17.165%`，为什么 Client 最终只兑现 `3.168%`？
 23. kernel/launch 残差为 0，但 DiT wall 残差非零，说明哪些时间不能由 launch 数线性预测？
-24. SP4 `000` chunk-wall CV 为 3.221% 时，为什么 headline 仍可用，又必须附带什么警告？
+24. SP4 `000` chunk-wall CV 为 `3.452%` 时，为什么 headline 仍可用，又必须附带什么警告？
 25. 为什么服务端持续发送视频仍会触发 session-idle watchdog？测量客户端的 heartbeat 为什么
     必须复用标准 `event` 协议、A/B 同频发送并在退出时取消？
 26. 新 main 不再发送独立 `chunk_stats` 后，为什么可以从 `server.chunk_complete` 恢复统计，
     又为什么必须逐字段校验而不能从 server 文本日志事后猜测？
 27. throughput 与 correctness 两个客户端为什么必须复用一个 trace-to-stats 转换函数，而不能
     各自维护一份看似相同的字段表？
+28. 为什么 SP4 少 `18540` 次 launch、恰好是 SP2 `9270` 的两倍，但端到端收益不是两倍？
+29. telemetry 中 candidate mean clock 略低时，为什么这反而能排除“更高频率伪造收益”？
+30. 最终 artifact manifest 为什么必须在所有 summary/fallback evidence 写完后生成？若中途
+    读取 correctness summary，为什么 SHA 和最终 manifest 中的 SHA 可能不同？
