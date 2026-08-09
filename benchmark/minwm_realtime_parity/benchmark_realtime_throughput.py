@@ -18,6 +18,7 @@ import json
 import os
 import subprocess
 import time
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -41,6 +42,49 @@ from measurement import (
 )
 
 TraceSelector = tuple[str, str, str]
+
+
+async def send_realtime_heartbeats(
+    websocket: Any, *, trace_id: str | None, interval_s: float
+) -> None:
+    event_id = 1
+    while True:
+        await asyncio.sleep(interval_s)
+        await websocket.send(
+            msgspec.msgpack.encode(
+                {
+                    "type": "event",
+                    "kind": "heartbeat",
+                    "payload": {},
+                    "event_id": event_id,
+                    "trace_id": trace_id,
+                }
+            )
+        )
+        event_id += 1
+
+
+async def cancel_task(task: asyncio.Task[Any]) -> None:
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+
+@asynccontextmanager
+async def realtime_heartbeat(
+    websocket: Any, *, trace_id: str | None, interval_s: float
+):
+    task = asyncio.create_task(
+        send_realtime_heartbeats(
+            websocket, trace_id=trace_id, interval_s=interval_s
+        )
+    )
+    try:
+        yield
+    finally:
+        await cancel_task(task)
 
 
 def required_stage_trace_chunks(mode: str) -> dict[TraceSelector, set[int]]:
@@ -145,6 +189,7 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="wait for every measured DiT/VAE wall (and profiler-on CUDA) trace",
     )
+    parser.add_argument("--heartbeat-interval-s", type=float, default=15.0)
     parser.add_argument("--timeout", type=float, default=1800.0)
     return parser.parse_args()
 
@@ -177,6 +222,8 @@ def validate_contract(manifest: dict, args: argparse.Namespace) -> tuple[dict, d
         raise ValueError("allocated-gpu-count cannot be smaller than active gpu-count")
     if args.kv_cache_num_frames is not None and args.kv_cache_num_frames < 1:
         raise ValueError("kv-cache-num-frames must be positive")
+    if args.heartbeat_interval_s <= 0:
+        raise ValueError("heartbeat-interval-s must be positive")
     cases = {case["id"]: case for case in manifest["cases"]}
     if args.case not in cases:
         raise ValueError(f"unknown case {args.case!r}; choose from {sorted(cases)}")
@@ -277,9 +324,16 @@ async def receive_run(args: argparse.Namespace, contract: dict, case: dict) -> d
     measured_payload_sha256 = hashlib.sha256()
     measured_payload_samples: dict[str, str] = {}
     init_started_ns = time.perf_counter_ns()
-    async with websockets.connect(
-        args.ws_url, max_size=None, ping_interval=None, open_timeout=args.timeout
-    ) as websocket:
+    async with (
+        websockets.connect(
+            args.ws_url, max_size=None, ping_interval=None, open_timeout=args.timeout
+        ) as websocket,
+        realtime_heartbeat(
+            websocket,
+            trace_id=args.run_id,
+            interval_s=args.heartbeat_interval_s,
+        ),
+    ):
         await websocket.send(msgspec.msgpack.encode(request))
         init_completed_ns = time.perf_counter_ns()
         while (

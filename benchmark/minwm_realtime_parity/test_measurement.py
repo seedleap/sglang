@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import copy
 import hashlib
 import json
@@ -7,6 +8,7 @@ import sqlite3
 import sys
 from pathlib import Path
 
+import msgspec.msgpack
 import pytest
 from jsonschema import Draft202012Validator
 
@@ -15,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from benchmark_realtime_throughput import (  # noqa: E402
     incomplete_measurement_diagnostic,
     missing_required_stage_trace,
+    realtime_heartbeat,
     record_required_stage_trace,
     required_stage_trace_chunks,
     required_stage_trace_is_complete,
@@ -55,6 +58,45 @@ def _latency(value: float, count: int) -> dict:
         "ms_per_chunk",
         "test fixture",
     )
+
+
+def test_realtime_heartbeat_matches_server_contract_and_stops_at_scope_exit() -> None:
+    async def exercise() -> tuple[list[bytes], int]:
+        sent: list[bytes] = []
+        two_messages = asyncio.Event()
+
+        class FakeWebSocket:
+            async def send(self, message: bytes) -> None:
+                sent.append(message)
+                if len(sent) == 2:
+                    two_messages.set()
+
+        async with realtime_heartbeat(
+            FakeWebSocket(), trace_id="test-run", interval_s=0.001
+        ):
+            await asyncio.wait_for(two_messages.wait(), timeout=1.0)
+        messages_at_scope_exit = len(sent)
+        await asyncio.sleep(0.005)
+        return sent, messages_at_scope_exit
+
+    sent, messages_at_scope_exit = asyncio.run(exercise())
+    assert [msgspec.msgpack.decode(message) for message in sent[:2]] == [
+        {
+            "type": "event",
+            "kind": "heartbeat",
+            "payload": {},
+            "event_id": 1,
+            "trace_id": "test-run",
+        },
+        {
+            "type": "event",
+            "kind": "heartbeat",
+            "payload": {},
+            "event_id": 2,
+            "trace_id": "test-run",
+        },
+    ]
+    assert len(sent) == messages_at_scope_exit
 
 
 @pytest.mark.parametrize(
