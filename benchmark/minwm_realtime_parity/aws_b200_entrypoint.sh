@@ -762,9 +762,7 @@ for degree in (1, 2):
     }
     comparison["sampled_pixel_error"] = sampled_pixel_error(eager, graph)
     for name, getter in {
-        "scheduler_fps": lambda item: item["server"]["scheduler_forward_fps_ratio_of_sums"],
         "client_fps": lambda item: item["client"]["steady_received_fps_ratio_of_sums"],
-        "scheduler_p50_ms": lambda item: item["server"]["scheduler_forward_ms"]["p50"],
         "dit_denoise_pixel_fps": lambda item: item["dit_denoise"]["pixel_fps_ratio_of_sums"],
         "dit_denoise_p50_ms": lambda item: item["dit_denoise"]["p50_ms"],
     }.items():
