@@ -68,7 +68,6 @@ const MAX_DECODE_QUEUE_BYTES = configuredNumber(
   192 * 1024 * 1024,
 );
 const RECENT_DROP_DISPLAY_MS = 1800;
-const CONTROL_BUFFERED_AMOUNT_LIMIT = 1 << 20;
 const CONTROL_TRANSITION_FLUSH_DELAY_MS = 50;
 const CONTROL_HELD_STATE_HEARTBEAT_MS = 100;
 const SESSION_HEARTBEAT_MS = 15000;
@@ -427,6 +426,7 @@ const decodeRequests = new Map();
 let controlStateController = null;
 let lastSentEventId = 0;
 let lastSampledEventId = 0;
+const pendingModelEvents = new Map();
 const traceTopologyApi = window.SGLangRealtimeTraceTopology || {};
 const traceTopology = traceTopologyApi.createRealtimeTraceTopology
   ? traceTopologyApi.createRealtimeTraceTopology({ maxEvents: 220 })
@@ -494,7 +494,6 @@ const lingbot2Session = new RealtimeModelSession({
   workerUrl: DECODER_WORKER_URL,
   onState: (state, details) => {
     if (state === "error") {
-      setStatus("LingBot2 error", "error");
       addHistory(`LingBot2 error · ${details.message || details.reason || "unknown"}`);
     }
   },
@@ -504,12 +503,10 @@ const lingbot2Session = new RealtimeModelSession({
     root.dataset.chunk = stats.lastChunk ?? "";
     root.dataset.frames = String(stats.frames || 0);
     renderModelTelemetry("lingbot2", stats);
+    markModelEventApplied("lingbot2", stats.lastAppliedEventId);
   },
   onError: (error) => {
     addHistory(`LingBot2 session failed · ${error.message || "unknown"}`);
-    if (selectedGenerationMode() !== "t2v" && ws && ws.readyState === WebSocket.OPEN) {
-      abortCurrentSession("LingBot2 peer failed", { expectedClose: false });
-    }
   },
 });
 const primarySessionAdapter = {
@@ -539,10 +536,14 @@ const dualModelController = new DualModelController({
         || DEFAULT_LINGBOT2_MODEL
       ),
       transformInit: (init) => {
-        const is720p = init.size === "1280x704" || init.size === "1280x720";
-        if (!is720p) return init;
-        return {
+        const interactiveInit = {
           ...init,
+          realtime_interactive_event_grace_ms: 250,
+        };
+        const is720p = init.size === "1280x704" || init.size === "1280x720";
+        if (!is720p) return interactiveInit;
+        return {
+          ...interactiveInit,
           size: "1280x720",
           realtime_causal_sink_size: 3,
           realtime_causal_kv_cache_num_frames: 12,
@@ -925,6 +926,7 @@ function resetStreamStats() {
   renderedPreviewFrames = 0;
   lastSentEventId = 0;
   lastSampledEventId = 0;
+  pendingModelEvents.clear();
   lastRenderedChunk = null;
   renderedTraceChunks = new Set();
   controlStateController?.reset({ sendRelease: false });
@@ -3314,6 +3316,7 @@ function abortCurrentSession(reason = "session closed by client", {
   clearFrames = true,
   expectedClose = true,
   keepConnectDisabled = false,
+  resetControls = true,
 } = {}) {
   recordTrajectoryEvent(expectedClose ? "session_close_requested" : "session_abort_requested", {
     reason,
@@ -3324,7 +3327,7 @@ function abortCurrentSession(reason = "session closed by client", {
   streamEpoch++;
   clearQueueOnClose = clearFrames;
   socketCloseExpected = expectedClose;
-  controlStateController?.reset({ sendRelease: false });
+  if (resetControls) controlStateController?.reset({ sendRelease: false });
   pendingHeader = null;
   rejectPendingDecodes("session aborted");
   resetDecoderState();
@@ -3444,8 +3447,15 @@ async function connect() {
     document.activeElement?.blur?.();
     canvas.tabIndex = 0;
     canvas.focus();
-    await dualModelController.connect(init);
+    const connectionReport = await dualModelController.connect(init);
     if (epoch !== streamEpoch) return;
+    if (connectionReport.failed.length) {
+      addHistory(
+        `partial session · ${connectionReport.failed
+          .map(({ key, error }) => `${modelLabel(key)} unavailable: ${error?.message || error}`)
+          .join(" · ")}`,
+      );
+    }
     setStatus("Live", "live");
   } catch (error) {
     $("connectBtn").disabled = false;
@@ -3527,9 +3537,6 @@ function openPrimarySession(init, url) {
       });
       void traceHttpClient?.flushClientEvents().catch(() => {});
       if (!renderedPreviewFrames) setPreviewState("idle");
-      if (generationMode !== "t2v" && !normalClose && !socketCloseExpected) {
-        lingbot2Session.close("MinWM peer failed");
-      }
       if (!opened) reject(new Error(`MinWM closed before startup (${event.code})`));
       socketCloseExpected = false;
     };
@@ -3564,10 +3571,10 @@ function handleReceiveError(error, epoch) {
   if (epoch !== streamEpoch) return;
   setStatus("Receive failed", "error");
   addHistory(error.message || "receive failed");
-  lingbot2Session.close("MinWM receive failed");
   abortCurrentSession(error.message || "receive failed", {
     clearFrames: false,
     expectedClose: false,
+    resetControls: false,
   });
 }
 
@@ -3584,7 +3591,6 @@ function receive(data, epoch) {
       setStatus(socketServerError, "error");
       addHistory(`server error: ${socketServerError}`);
       recordTrajectoryEvent("server_error", { content: socketServerError });
-      lingbot2Session.close("MinWM server error");
       if (ws && ws.readyState === WebSocket.OPEN) {
         socketCloseExpected = true;
         ws.close(1000, socketServerError.slice(0, 120));
@@ -3672,6 +3678,7 @@ async function decodeAndEnqueueFrameBatch(header, data, epoch) {
   const enqueueResult = playbackController.enqueueDecodedFrames(header, decodedFrames, now);
   closeFrames(enqueueResult.droppedFrames);
   lastSampledEventId = Number(header.event_id || lastSampledEventId);
+  markModelEventApplied("minwm", lastSampledEventId);
   updateControlDebugText();
   frames += chunkFrameCount;
   bytes += payloadBytes;
@@ -3723,20 +3730,25 @@ function recordChunkFirstRendered(chunkIndex, details = {}) {
 }
 
 function sendEvent(kind, payload, historyText = null) {
-  if (!ws || ws.readyState !== WebSocket.OPEN) {
-    addHistory(`${historyText || `${kind} event`} · socket not open`);
+  const delivery = dualModelController.sendEvent(kind, payload);
+  const deliveredModels = Object.entries(delivery.sent)
+    .filter(([, sent]) => sent)
+    .map(([key]) => key);
+  if (!deliveredModels.length) {
+    addHistory(`${historyText || `${kind} event`} · no model socket open`);
     recordTrajectoryEvent(`${kind}_event_dropped`, {
-      reason: "socket not open",
+      reason: "no model socket open",
       payload,
     });
     return null;
   }
-  const eventId = dualModelController.sendEvent(kind, payload);
+  const eventId = delivery.eventId;
   const clientSentPerfMs = performance.now();
   markClientTrace("client.event_sent", {
     kind,
     event_id: eventId,
-    ws_buffered_amount: ws.bufferedAmount,
+    delivered_models: deliveredModels,
+    ws_buffered_amount: ws?.bufferedAmount || 0,
   });
   lastSentEventId = eventId;
   updateControlDebugText();
@@ -3747,6 +3759,7 @@ function sendEvent(kind, payload, historyText = null) {
     recordTrajectoryEvent("camera_actions_sent", {
       event_id: eventId,
       payload,
+      delivered_models: deliveredModels,
       active_actions: controlStateController
         ? Array.from(controlStateController.activeActions).sort()
         : [],
@@ -3755,14 +3768,58 @@ function sendEvent(kind, payload, historyText = null) {
     recordTrajectoryEvent(`${kind}_event_sent`, { event_id: eventId, payload });
   }
   if (kind === "camera_actions" || kind === "prompt") {
-    playbackController.noteInputEvent(eventId, performance.now(), {
-      cutoverMode: cameraActionHasActiveMotion(payload) || kind === "prompt" ? "motion" : "settle",
-    });
-    updateStats();
+    if (delivery.sent.minwm) {
+      playbackController.noteInputEvent(eventId, performance.now(), {
+        cutoverMode: cameraActionHasActiveMotion(payload) || kind === "prompt" ? "motion" : "settle",
+      });
+      updateStats();
+    }
     setStatus("Updating", "live");
   }
-  addHistory(`${historyText || `${kind} event sent`} · event#${eventId}`);
+  trackPendingModelEvent(delivery, kind);
+  addHistory(
+    `${historyText || `${kind} event sent`} · event#${eventId} · ${formatModelDelivery(delivery.sent)}`,
+  );
   return eventId;
+}
+
+function modelLabel(key) {
+  return key === "lingbot2" ? "LingBot2" : "MinWM";
+}
+
+function formatModelDelivery(sent = {}) {
+  const entries = Object.entries(sent);
+  if (!entries.length) return "no active model";
+  return entries
+    .map(([key, delivered]) => `${modelLabel(key)} ${delivered ? "sent" : "send failed"}`)
+    .join(" · ");
+}
+
+function trackPendingModelEvent(delivery, kind) {
+  if (kind !== "prompt" && kind !== "camera_actions") return;
+  const pending = new Set(
+    Object.entries(delivery.sent)
+      .filter(([, sent]) => sent)
+      .map(([key]) => key),
+  );
+  if (!pending.size) return;
+  pendingModelEvents.set(delivery.eventId, { kind, pending });
+}
+
+function markModelEventApplied(key, eventId) {
+  const appliedEventId = Number(eventId || 0);
+  if (!appliedEventId) return;
+  const root = document.querySelector(`[data-model-key="${key}"]`);
+  if (root) root.dataset.lastAppliedEventId = String(appliedEventId);
+  for (const [pendingEventId, event] of pendingModelEvents) {
+    if (pendingEventId > appliedEventId || !event.pending.has(key)) continue;
+    event.pending.delete(key);
+    if (event.kind === "prompt") {
+      const outcome = pendingEventId === appliedEventId ? "applied" : "superseded";
+      addHistory(`${modelLabel(key)} prompt ${outcome} · event#${pendingEventId}`);
+    }
+    if (!event.pending.size) pendingModelEvents.delete(pendingEventId);
+  }
 }
 
 function cameraActionHasActiveMotion(payload) {
@@ -4455,9 +4512,6 @@ class ControlStateController {
   flush() {
     this.clearFlushTimer();
     if (!this.pendingTransitions.length) return;
-    if (ws && ws.bufferedAmount > CONTROL_BUFFERED_AMOUNT_LIMIT) {
-      this.compactPendingToLatestPulse();
-    }
     const transitions = this.pendingTransitions;
     this.pendingTransitions = [];
     sendCameraControlTransitions(transitions);
@@ -4508,7 +4562,6 @@ const CONTROL_ACTION_META_KEYS = Object.keys(CONTROL_ACTION_META);
 controlStateController = new ControlStateController();
 updateControlDebugText();
 window.setInterval(() => {
-  if (!ws || ws.readyState !== WebSocket.OPEN) return;
   dualModelController.sendEvent("heartbeat", {
     active_actions: Array.from(controlStateController.activeActions).sort(),
   });

@@ -132,6 +132,36 @@ def test_realtime_output_pacing_compat_field_is_non_blocking():
     assert time.perf_counter() - start < 0.05
 
 
+def test_interactive_event_grace_waits_for_prior_output_before_next_chunk(monkeypatch):
+    events = []
+
+    async def prior_output():
+        events.append("output sent")
+
+    async def fake_sleep(seconds):
+        events.append(("event grace", seconds))
+
+    request = RealtimeVideoGenerationsRequest(
+        type="init",
+        prompt="test",
+        realtime_interactive_event_grace_ms=250,
+    )
+    session = SimpleNamespace(request=request)
+
+    async def run():
+        pending = asyncio.create_task(prior_output())
+        return await realtime_video_api._wait_for_realtime_interactive_event_window(
+            session,
+            pending,
+        )
+
+    monkeypatch.setattr(realtime_video_api.asyncio, "sleep", fake_sleep)
+    remaining = asyncio.run(run())
+
+    assert remaining is None
+    assert events == ["output sent", ("event grace", 0.25)]
+
+
 class _TestRealtimeDiffusionStage(RealtimeDiffusionStage):
     def forward(self, batch, component_manager=None):
         del batch, component_manager

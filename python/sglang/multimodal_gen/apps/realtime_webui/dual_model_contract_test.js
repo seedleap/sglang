@@ -42,16 +42,44 @@ assert.match(css, /\.stage\s*\{[\s\S]*container-type:\s*inline-size/);
 assert.match(css, /@container[^}]*max-width:\s*1180px[\s\S]*\.topbar\s*\{[\s\S]*flex-wrap:\s*wrap/);
 assert.match(css, /\.stage:fullscreen\s*\{/);
 assert.match(css, /\.stage:fullscreen\s*\{[\s\S]*?height:\s*100vh/);
-assert.match(html, /model_session\.js\?v=dual-model-v2/);
-assert.match(html, /dual_model_controller\.js\?v=dual-model-v2/);
+assert.match(html, /model_session\.js\?v=dual-model-v3/);
+assert.match(html, /dual_model_controller\.js\?v=dual-model-v3/);
+assert.match(html, /app\.js\?v=realtime-production-gateway-v19/);
 assert.match(html, /fullscreen_controller\.js\?v=dual-fullscreen-v1/);
 
 const app = fs.readFileSync(path.join(root, "app.js"), "utf8");
 const server = fs.readFileSync(path.join(root, "server.py"), "utf8");
-assert.match(app, /await dualModelController\.connect\(init\)/);
-assert.match(app, /dualModelController\.sendEvent\(kind, payload\)/);
+assert.match(app, /const connectionReport = await dualModelController\.connect\(init\)/);
+assert.match(app, /const delivery = dualModelController\.sendEvent\(kind, payload\)/);
+assert.match(app, /formatModelDelivery\(delivery\.sent\)/);
+assert.match(app, /trackPendingModelEvent\(delivery/);
+assert.doesNotMatch(app, /lingbot2Session\.close\("MinWM peer failed"\)/);
+assert.doesNotMatch(app, /lingbot2Session\.close\("MinWM receive failed"\)/);
+assert.doesNotMatch(app, /lingbot2Session\.close\("MinWM server error"\)/);
+const lingbotErrorHandler = app.slice(
+  app.indexOf('addHistory(`LingBot2 session failed'),
+  app.indexOf("const primarySessionAdapter"),
+);
+assert.doesNotMatch(
+  lingbotErrorHandler,
+  /abortCurrentSession|lingbot2Session\.close/,
+  "LingBot2 failures must remain local to the LingBot2 player",
+);
+assert.match(app, /function abortCurrentSession[\s\S]{0,220}resetControls = true/);
+assert.match(app, /if \(resetControls\) controlStateController\?\.reset/);
 assert.match(app, /backendWebSocketUrl\("minwm"/);
 assert.match(app, /backendWebSocketUrl\("lingbot2"/);
+assert.match(app, /realtime_interactive_event_grace_ms:\s*250/);
+assert.doesNotMatch(
+  app,
+  /if \(!ws \|\| ws\.readyState !== WebSocket\.OPEN\) return;\s*dualModelController\.sendEvent\("heartbeat"/,
+  "LingBot2 heartbeat delivery must not depend on the MinWM socket",
+);
+assert.doesNotMatch(
+  app,
+  /if \(ws && ws\.bufferedAmount > CONTROL_BUFFERED_AMOUNT_LIMIT\)/,
+  "one model's socket pressure must not alter the shared control stream",
+);
 assert.match(app, /enabled:\s*\(init\)\s*=>\s*init\.generation_mode\s*!==\s*"t2v"/);
 assert.match(app, /function drawRecordingComparisonPreview\(/);
 assert.match(app, /createFullscreenController/);

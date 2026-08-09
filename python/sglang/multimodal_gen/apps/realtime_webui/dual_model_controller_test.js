@@ -3,9 +3,10 @@ const assert = require("assert");
 const { DualModelController } = require("./dual_model_controller.js");
 
 class FakeSession {
-  constructor(key, { failConnect = false } = {}) {
+  constructor(key, { failConnect = false, sendOk = true } = {}) {
     this.key = key;
     this.failConnect = failConnect;
+    this.sendOk = sendOk;
     this.connectCalls = [];
     this.events = [];
     this.closeCalls = [];
@@ -18,7 +19,7 @@ class FakeSession {
 
   sendEvent(event) {
     this.events.push(event);
-    return true;
+    return this.sendOk;
   }
 
   close(reason) {
@@ -75,8 +76,10 @@ async function main() {
 
   const firstEvent = controller.sendEvent("camera_actions", { transitions: [{ actions: ["w"] }] });
   const secondEvent = controller.sendEvent("prompt", "updated prompt");
-  assert.equal(firstEvent, 1);
-  assert.equal(secondEvent, 2);
+  assert.equal(firstEvent.eventId, 1);
+  assert.deepEqual(firstEvent.sent, { minwm: true, lingbot2: true });
+  assert.equal(secondEvent.eventId, 2);
+  assert.deepEqual(secondEvent.sent, { minwm: true, lingbot2: true });
   assert.deepEqual(minwm.events, lingbot2.events, "both sessions must receive identical envelopes");
   assert.equal(minwm.events[0].event_id, 1);
   assert.equal(minwm.events[0].client_sent_perf_ms, 1234);
@@ -90,8 +93,28 @@ async function main() {
       lingbot2: { model: "lingbot2", wsUrl: "/lingbot2" },
     },
   });
-  await assert.rejects(() => failingController.connect({ trace_id: "failed" }), /lingbot2 unavailable/);
-  assert.equal(failingMinwm.closeCalls.length, 1, "successful peer is closed after partial startup");
+  const partialReport = await failingController.connect({ trace_id: "failed" });
+  assert.deepEqual(partialReport.connected, ["minwm"]);
+  assert.deepEqual(partialReport.failed.map((item) => item.key), ["lingbot2"]);
+  assert.equal(failingMinwm.closeCalls.length, 0, "healthy peer remains live after partial startup");
+  const partialEvent = failingController.sendEvent("prompt", "minwm only");
+  assert.deepEqual(partialEvent.sent, { minwm: true });
+  assert.equal(failingMinwm.events.length, 1, "healthy peer keeps receiving events");
+
+  const allFailedController = new DualModelController({
+    sessions: {
+      minwm: new FakeSession("minwm", { failConnect: true }),
+      lingbot2: new FakeSession("lingbot2", { failConnect: true }),
+    },
+    backends: {
+      minwm: { model: "minwm", wsUrl: "/minwm" },
+      lingbot2: { model: "lingbot2", wsUrl: "/lingbot2" },
+    },
+  });
+  await assert.rejects(
+    () => allFailedController.connect({ trace_id: "all-failed" }),
+    /no realtime model connected/,
+  );
 
   const t2vMinwm = new FakeSession("minwm");
   const t2vLingbot = new FakeSession("lingbot2", { failConnect: true });

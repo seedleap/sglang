@@ -36,6 +36,7 @@ class FakeSocket {
 class FakePlaybackController {
   constructor() {
     this.queue = [];
+    this.inputEvents = [];
   }
 
   enqueueDecodedFrames(_header, frames) {
@@ -56,7 +57,9 @@ class FakePlaybackController {
     this.queue = [];
   }
 
-  noteInputEvent() {}
+  noteInputEvent(eventId, sentAt, options) {
+    this.inputEvents.push({ eventId, sentAt, options });
+  }
 }
 
 function fakeCanvas() {
@@ -119,6 +122,36 @@ async function main() {
   session.sendEvent({ type: "event", kind: "prompt", payload: "new", event_id: 7 });
   assert.equal(socket.sent[1].event_id, 7);
   assert.equal(socket.sent[1].trace_id, "trace:lingbot2");
+  assert.equal(session.playback.inputEvents.at(-1).options.cutoverMode, "motion");
+  assert.equal(session.snapshot().lastSentEventId, 7);
+  assert.equal(
+    session.snapshot().lastAppliedEventId,
+    0,
+    "sending an event must not be reported as model-applied before an output chunk confirms it",
+  );
+
+  session.sendEvent({
+    type: "event",
+    kind: "camera_actions",
+    payload: { transitions: [{ actions: ["w"] }] },
+    event_id: 8,
+  });
+  assert.equal(
+    session.playback.inputEvents.at(-1).options.cutoverMode,
+    "motion",
+    "an active LingBot2 camera action should cut over stale playback frames",
+  );
+  session.sendEvent({
+    type: "event",
+    kind: "camera_actions",
+    payload: { transitions: [{ actions: [] }] },
+    event_id: 9,
+  });
+  assert.equal(
+    session.playback.inputEvents.at(-1).options.cutoverMode,
+    "settle",
+    "a released LingBot2 camera state may settle buffered frames",
+  );
 
   socket.message({
     type: "frame_batch",
@@ -129,6 +162,7 @@ async function main() {
     payload: new Uint8Array([1, 2, 3]),
   });
   await flush();
+  assert.equal(session.snapshot().lastAppliedEventId, 7);
   assert.equal(session.snapshot().queueFrames, 1);
   assert.equal(canvas.draws.length, 0, "receiving one model does not render synchronously");
   scheduled.shift()(130);

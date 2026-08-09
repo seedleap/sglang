@@ -888,6 +888,10 @@ async def _generate_loop_local(ws: WebSocket, session: GenerateSession):
     pending_send_task = None
     while not session.reached_max_chunks():
         try:
+            pending_send_task = await _wait_for_realtime_interactive_event_window(
+                session,
+                pending_send_task,
+            )
             if pending_send_task is not None and pending_send_task.done():
                 await pending_send_task
                 pending_send_task = None
@@ -1052,6 +1056,28 @@ async def _send_output_and_log(
             send_stats,
         )
     return send_stats
+
+
+async def _wait_for_realtime_interactive_event_window(
+    session: GenerateSession,
+    pending_send_task: asyncio.Task | None,
+) -> asyncio.Task | None:
+    request = getattr(session, "request", None)
+    grace_ms = int(
+        getattr(request, "realtime_interactive_event_grace_ms", 0) or 0
+    )
+    if pending_send_task is None or grace_ms <= 0:
+        return pending_send_task
+
+    await pending_send_task
+    await asyncio.sleep(grace_ms / 1000.0)
+    log_realtime_trace(
+        logger,
+        session,
+        "server.interactive_event_grace_complete",
+        duration_ms=grace_ms,
+    )
+    return None
 
 
 async def _wait_for_realtime_output_slot(

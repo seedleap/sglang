@@ -7,6 +7,12 @@
     image?.close?.();
   }
 
+  function cameraActionHasActiveMotion(payload) {
+    const transitions = payload?.transitions || [];
+    const finalTransition = transitions[transitions.length - 1];
+    return Array.isArray(finalTransition?.actions) && finalTransition.actions.length > 0;
+  }
+
   class RealtimeModelSession {
     constructor({
       key,
@@ -69,6 +75,8 @@
         renderedFrames: 0,
         lastChunk: null,
         lastEventId: 0,
+        lastSentEventId: 0,
+        lastAppliedEventId: 0,
         lastDecodeMs: 0,
         lastDisplayLagMs: 0,
       };
@@ -95,6 +103,8 @@
         renderedFrames: 0,
         lastChunk: null,
         lastEventId: 0,
+        lastSentEventId: 0,
+        lastAppliedEventId: 0,
         lastDecodeMs: 0,
         lastDisplayLagMs: 0,
       };
@@ -152,9 +162,12 @@
     sendEvent(envelope) {
       if (!this.socket || this.socket.readyState !== this.WebSocketCtor.OPEN) return false;
       this.socket.send(this.pack({ ...envelope, trace_id: this.traceId }));
-      this.stats.lastEventId = Number(envelope.event_id || this.stats.lastEventId);
+      this.stats.lastSentEventId = Number(envelope.event_id || this.stats.lastSentEventId);
       this.playback.noteInputEvent?.(envelope.event_id, this.now(), {
-        cutoverMode: envelope.kind === "prompt" ? "motion" : "settle",
+        cutoverMode: envelope.kind === "prompt"
+          || (envelope.kind === "camera_actions" && cameraActionHasActiveMotion(envelope.payload))
+          ? "motion"
+          : "settle",
       });
       return true;
     }
@@ -245,6 +258,9 @@
         this.stats.bytes += bytes;
         this.stats.lastChunk = Number(item.header.chunk_index || 0);
         this.stats.lastEventId = Number(item.header.event_id || this.stats.lastEventId);
+        this.stats.lastAppliedEventId = Number(
+          item.header.event_id || this.stats.lastAppliedEventId,
+        );
         this.stats.lastDecodeMs = decodeMs;
         this.emitStats();
         this.scheduleRender();

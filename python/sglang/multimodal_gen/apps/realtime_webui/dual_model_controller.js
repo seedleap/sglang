@@ -20,7 +20,6 @@
           : backend.enabled !== false;
         if (enabled) {
           entries.push([key, session]);
-          this.activeKeys.add(key);
           continue;
         }
         if (typeof session.setUnavailable === "function") {
@@ -48,11 +47,24 @@
           : backend.wsUrl;
         return session.connect(init, wsUrl);
       }));
-      const failure = results.find((result) => result.status === "rejected");
-      if (!failure) return;
-      for (const [, session] of entries) session.close("dual model startup failed");
-      this.activeKeys.clear();
-      throw failure.reason;
+      const report = { connected: [], failed: [] };
+      results.forEach((result, index) => {
+        const [key] = entries[index];
+        if (result.status === "fulfilled") {
+          this.activeKeys.add(key);
+          report.connected.push(key);
+        } else {
+          report.failed.push({ key, error: result.reason });
+        }
+      });
+      if (!report.connected.length && entries.length) {
+        throw new Error(
+          `no realtime model connected: ${report.failed
+            .map(({ key, error }) => `${key}: ${error?.message || error}`)
+            .join("; ")}`,
+        );
+      }
+      return report;
     }
 
     sendEvent(kind, payload) {
@@ -66,8 +78,11 @@
         client_sent_perf_ms: sentAt,
         client_sent_epoch_ms: Date.now(),
       };
-      for (const key of this.activeKeys) this.sessions[key]?.sendEvent(envelope);
-      return eventId;
+      const sent = {};
+      for (const key of this.activeKeys) {
+        sent[key] = Boolean(this.sessions[key]?.sendEvent(envelope));
+      }
+      return { eventId, sent };
     }
 
     close(reason = "dual model session closed") {
