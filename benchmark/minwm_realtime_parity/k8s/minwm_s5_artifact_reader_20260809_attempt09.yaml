@@ -1,0 +1,46 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: minwm-s5-fusedops-artifact-reader-20260809-09
+  namespace: default
+  labels:
+    seedleap.ai/owner: chenshengdong
+    seedleap.ai/purpose: minwm-s5-fusedops-artifact-readback
+    seedleap.ai/task: minwm-fusedops-s5
+spec:
+  restartPolicy: Never
+  nodeSelector:
+    karpenter.sh/nodepool: minwm-test-phx2-p5e-spot
+    topology.kubernetes.io/zone: us-west-2-phx-2a
+  tolerations:
+    - key: karpenter.sh/nodepool
+      operator: Equal
+      value: minwm-test-phx2-p5e-spot
+      effect: NoSchedule
+    - key: seedleap.ai/capacity-pool
+      operator: Equal
+      value: minwm-test-phx2-karpenter
+      effect: NoSchedule
+  containers:
+    - name: reader
+      image: 829115578968.dkr.ecr.us-east-2.amazonaws.com/leap-world/minwm-training@sha256:bedc07ea3ba55059a8c1c569c3b177c4d00d41f37d4fa9105375531534ef5f2a
+      imagePullPolicy: IfNotPresent
+      command:
+        - /bin/bash
+        - -lc
+        - sleep 7200
+      resources:
+        requests:
+          cpu: 100m
+          memory: 256Mi
+        limits:
+          cpu: 100m
+          memory: 256Mi
+      volumeMounts:
+        - name: results
+          mountPath: /results
+          readOnly: true
+  volumes:
+    - name: results
+      persistentVolumeClaim:
+        claimName: minwm-s5-fusedops-h200-results-20260807
