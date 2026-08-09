@@ -22,12 +22,12 @@ from sglang.multimodal_gen.runtime.entrypoints.openai.protocol import (
     RealtimeEvent,
     RealtimeVideoGenerationsRequest,
 )
-from sglang.multimodal_gen.runtime.entrypoints.openai.realtime.generate_session import (
-    GenerateSession,
-)
 from sglang.multimodal_gen.runtime.entrypoints.openai.realtime.adapters.minwm_realtime_adapter import (
     MinWMRealtimeAdapter,
     MinWMRealtimeState,
+)
+from sglang.multimodal_gen.runtime.entrypoints.openai.realtime.generate_session import (
+    GenerateSession,
 )
 from sglang.multimodal_gen.runtime.models.dits.minwm import (
     MinWMCausalSelfAttention,
@@ -71,6 +71,8 @@ from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.m
     MinWMCausalUniPCDenoisingStage,
     MinWMCausalVaeDecodingStage,
     MinWMChunkLatentPreparationStage,
+    _cuda_graph_attention_plan_signature,
+    _MinWMCudaGraphRunner,
 )
 from sglang.multimodal_gen.runtime.pipelines_core.stages.realtime.vae import (
     CausalVaeDecodingStage,
@@ -447,6 +449,73 @@ def test_minwm_block_relative_rope_clamps_visible_frame_gaps():
     assert cache.position_ids[:, 0].tolist() == [0, 10, 11, 12, 13, 14]
     assert view.key_position_ids[:, 0].tolist() == [0, 3, 4, 5, 6, 7]
     assert view.query_position_ids[:, 0].tolist() == [7]
+
+
+@pytest.mark.parametrize("rope_max_frame_gap", [11, 12])
+def test_minwm_cuda_graph_refreshes_block_relative_rope_after_window_roll(
+    rope_max_frame_gap,
+):
+    cache = _make_minwm_test_cache(
+        cache_size=6,
+        sink_tokens=1,
+        rope_position_mode="block_relative",
+        rope_max_frame_gap=rope_max_frame_gap,
+    )
+
+    def append_chunk(token_start):
+        frames = [token_start, token_start + 1]
+        _append_minwm_test_frames(cache, frames, token_start=token_start)
+        position_ids = torch.tensor(
+            [[frames[0], 0, 0], [frames[1], 0, 0]], dtype=torch.long
+        )
+        plan = cache.prepare_attention_plan(
+            current_chunk_start=token_start,
+            position_ids=position_ids,
+        )
+        plan.query_cos = plan.query_position_ids.float()
+        plan.query_sin = -plan.query_cos
+        plan.key_cos = plan.key_position_ids.float()
+        plan.key_sin = -plan.key_cos
+        return plan
+
+    append_chunk(0)
+    append_chunk(2)
+    captured = append_chunk(4)
+    static_plan = SimpleNamespace(
+        **{
+            name: None if (value := getattr(captured, name)) is None else value.clone()
+            for name in (
+                "key_position_ids",
+                "query_position_ids",
+                "key_cos",
+                "key_sin",
+                "query_cos",
+                "query_sin",
+            )
+        }
+    )
+
+    current = append_chunk(6)
+    assert not torch.equal(static_plan.query_position_ids, current.query_position_ids)
+    assert _cuda_graph_attention_plan_signature(
+        captured
+    ) == _cuda_graph_attention_plan_signature(current)
+
+    runner = _MinWMCudaGraphRunner(key=())
+    runner.capture_dependencies = static_plan
+    runner._copy_attention_plan_inputs(current)
+
+    for name in (
+        "key_position_ids",
+        "query_position_ids",
+        "key_cos",
+        "key_sin",
+        "query_cos",
+        "query_sin",
+    ):
+        torch.testing.assert_close(
+            getattr(static_plan, name), getattr(current, name), rtol=0, atol=0
+        )
 
 
 def test_minwm_prompt_first_frame_promotes_only_when_leaving_tail():
@@ -1203,9 +1272,10 @@ def test_minwm_refreshes_queued_chunk_with_latest_camera_state():
     )
 
     assert refreshed is not batch
-    assert refreshed.condition_inputs[MINWM_ACTION_LABELS_CONDITION] == [
-        key_state_to_action_label(["a"])
-    ] * 4
+    assert (
+        refreshed.condition_inputs[MINWM_ACTION_LABELS_CONDITION]
+        == [key_state_to_action_label(["a"])] * 4
+    )
     assert refreshed.realtime_action_version == 1
     assert refreshed.realtime_event_id == 2
 

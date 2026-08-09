@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 import torch
+
 from sglang.multimodal_gen.configs.pipeline_configs.minwm import (
     MINWM_ACTION_LABELS_CONDITION,
     MINWM_ACTION_WEIGHTS_CONDITION,
@@ -37,6 +38,7 @@ from sglang.multimodal_gen.runtime.models.dits.minwm_action import (
     validate_action_weights,
 )
 from sglang.multimodal_gen.runtime.models.dits.minwm_kv_cache import (
+    MinWMCausalAttentionKVPlan,
     MinWMCausalSelfAttentionKVCache,
 )
 from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import Req
@@ -90,6 +92,32 @@ def _cuda_graph_tensor_signature(value: torch.Tensor) -> tuple:
     return (value.shape, value.stride(), value.dtype, value.device)
 
 
+_MINWM_CUDA_GRAPH_PLAN_INPUTS = (
+    "key_position_ids",
+    "query_position_ids",
+    "key_cos",
+    "key_sin",
+    "query_cos",
+    "query_sin",
+)
+
+
+def _cuda_graph_attention_plan_signature(
+    plan: MinWMCausalAttentionKVPlan,
+) -> tuple:
+    return tuple(
+        (
+            name,
+            (
+                None
+                if (value := getattr(plan, name)) is None
+                else _cuda_graph_tensor_signature(value)
+            ),
+        )
+        for name in _MINWM_CUDA_GRAPH_PLAN_INPUTS
+    )
+
+
 class _MinWMCudaGraphRunner:
     """One full-DiT graph bound to a saturated MinWM session cache."""
 
@@ -104,6 +132,7 @@ class _MinWMCudaGraphRunner:
         self.capture_stream = None
         self.pool = None
         self.capture_dependencies = None
+        self._last_attention_plan_source = None
         self.replay_count = 0
 
     def _copy_inputs(
@@ -118,6 +147,33 @@ class _MinWMCudaGraphRunner:
         self.static_timestep.copy_(timestep)
         self.static_action.copy_(action)
 
+    def _copy_attention_plan_inputs(
+        self, attention_plan: MinWMCausalAttentionKVPlan
+    ) -> None:
+        if attention_plan is self._last_attention_plan_source:
+            return
+        static_plan = self.capture_dependencies
+        if static_plan is None:
+            raise RuntimeError("MinWM CUDA graph has no captured attention plan")
+        for name in _MINWM_CUDA_GRAPH_PLAN_INPUTS:
+            target = getattr(static_plan, name)
+            source = getattr(attention_plan, name)
+            if target is None or source is None:
+                if target is not source:
+                    raise RuntimeError(
+                        f"MinWM CUDA graph attention-plan input {name} changed"
+                    )
+                continue
+            if _cuda_graph_tensor_signature(target) != _cuda_graph_tensor_signature(
+                source
+            ):
+                raise RuntimeError(
+                    f"MinWM CUDA graph attention-plan input {name} changed shape"
+                )
+            if target.data_ptr() != source.data_ptr():
+                target.copy_(source)
+        self._last_attention_plan_source = attention_plan
+
     def run(
         self,
         *,
@@ -125,6 +181,7 @@ class _MinWMCudaGraphRunner:
         prompt: torch.Tensor,
         timestep: torch.Tensor,
         action: torch.Tensor,
+        attention_plan: MinWMCausalAttentionKVPlan,
         capture_forward: (
             Callable[
                 [torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor
@@ -134,6 +191,10 @@ class _MinWMCudaGraphRunner:
     ) -> torch.Tensor:
         if self.graph is not None:
             self._copy_inputs(latent, prompt, timestep, action)
+            # block_relative positions can still change when rope_max_frame_gap
+            # is greater than one (for example Tianpeng gap12). Refresh the
+            # captured plan's static tensors before replaying the fixed graph.
+            self._copy_attention_plan_inputs(attention_plan)
             self.graph.replay()
             self.replay_count += 1
             if self.replay_count == 1 or self.replay_count % 100 == 0:
@@ -178,6 +239,7 @@ class _MinWMCudaGraphRunner:
         # Materialize the first user-visible result through the same replay path
         # as every subsequent denoising step.
         self.graph.replay()
+        self._last_attention_plan_source = self.capture_dependencies
         logger.info(
             "Captured MinWM saturated recompute CUDA graph rank=%d",
             get_sp_parallel_rank(),
@@ -915,6 +977,7 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
             plan.pinned_token_start,
             plan.pinned_token_end,
             plan.prompt_pin_frame,
+            _cuda_graph_attention_plan_signature(plan),
         )
         return (
             cache_pointers,
@@ -987,6 +1050,9 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
                 self._minwm_cuda_graph_runner = _MinWMCudaGraphRunner(graph_key)
             runner = self._minwm_cuda_graph_runner
             action = pos_cond_kwargs["action"]
+            attention_plan = kv_cache[0].last_attention_plan
+            if not isinstance(attention_plan, MinWMCausalAttentionKVPlan):
+                raise RuntimeError("MinWM CUDA graph requires an attention plan")
 
             if runner.graph is None:
                 # Non-checkpoint action buffers start on CPU so meta-device model
@@ -1035,6 +1101,7 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
                     prompt=prompt_embeds,
                     timestep=timestep,
                     action=action,
+                    attention_plan=attention_plan,
                     capture_forward=capture_forward,
                 )
                 # The captured graph owns a single static output allocation.

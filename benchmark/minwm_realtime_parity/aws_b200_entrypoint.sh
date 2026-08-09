@@ -205,6 +205,8 @@ else
     --local-attn-size "${MINWM_CONVERT_LOCAL_ATTN_SIZE:--1}" \
     --sink-size "${MINWM_CONVERT_SINK_SIZE:-0}" \
     --sliding-window-num-frames "${MINWM_CONVERT_WINDOW_SIZE:-128}" \
+    --rope-position-mode "${MINWM_CONVERT_ROPE_POSITION_MODE:-absolute}" \
+    --rope-max-frame-gap "${MINWM_CONVERT_ROPE_MAX_FRAME_GAP:-1}" \
     | tee "${RESULTS}/conversion.log"
 fi
 cp "${MODEL_DIR}/minwm_conversion_manifest.json" "${RESULTS}/"
@@ -612,6 +614,7 @@ PY
       --enable-torch-compile false \
       --enable-cuda-graph "${enabled}" \
       --warmup-mode off \
+      --realtime-session-idle-timeout-s 1800 \
       --port 30000 \
       > "${profile_dir}/server.log" 2>&1 &
     local server_pid=$!
@@ -759,9 +762,7 @@ for degree in (1, 2):
     }
     comparison["sampled_pixel_error"] = sampled_pixel_error(eager, graph)
     for name, getter in {
-        "scheduler_fps": lambda item: item["server"]["scheduler_forward_fps_ratio_of_sums"],
         "client_fps": lambda item: item["client"]["steady_received_fps_ratio_of_sums"],
-        "scheduler_p50_ms": lambda item: item["server"]["scheduler_forward_ms"]["p50"],
         "dit_denoise_pixel_fps": lambda item: item["dit_denoise"]["pixel_fps_ratio_of_sums"],
         "dit_denoise_p50_ms": lambda item: item["dit_denoise"]["p50_ms"],
     }.items():

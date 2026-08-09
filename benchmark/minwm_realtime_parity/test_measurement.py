@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import copy
 import hashlib
 import json
@@ -7,16 +8,19 @@ import sqlite3
 import sys
 from pathlib import Path
 
+import msgspec.msgpack
 import pytest
 from jsonschema import Draft202012Validator
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from benchmark_realtime_throughput import (  # noqa: E402
+    chunk_stats_from_trace,
     incomplete_measurement_diagnostic,
     load_realtime_trace_log,
     missing_required_stage_trace,
     record_required_stage_trace,
+    realtime_heartbeat,
     required_stage_trace_chunks,
     required_stage_trace_is_complete,
 )
@@ -56,6 +60,84 @@ def _latency(value: float, count: int) -> dict:
         "ms_per_chunk",
         "test fixture",
     )
+
+
+def test_realtime_heartbeat_matches_server_contract_and_stops_at_scope_exit() -> None:
+    async def exercise() -> tuple[list[bytes], int]:
+        sent: list[bytes] = []
+        two_messages = asyncio.Event()
+
+        class FakeWebSocket:
+            async def send(self, message: bytes) -> None:
+                sent.append(message)
+                if len(sent) == 2:
+                    two_messages.set()
+
+        async with realtime_heartbeat(
+            FakeWebSocket(), trace_id="test-run", interval_s=0.001
+        ):
+            await asyncio.wait_for(two_messages.wait(), timeout=1.0)
+        messages_at_scope_exit = len(sent)
+        await asyncio.sleep(0.005)
+        return sent, messages_at_scope_exit
+
+    sent, messages_at_scope_exit = asyncio.run(exercise())
+    assert [msgspec.msgpack.decode(message) for message in sent[:2]] == [
+        {
+            "type": "event",
+            "kind": "heartbeat",
+            "payload": {},
+            "event_id": 1,
+            "trace_id": "test-run",
+        },
+        {
+            "type": "event",
+            "kind": "heartbeat",
+            "payload": {},
+            "event_id": 2,
+            "trace_id": "test-run",
+        },
+    ]
+    assert len(sent) == messages_at_scope_exit
+
+
+def test_chunk_complete_trace_restores_removed_chunk_stats_message() -> None:
+    trace = {
+        "event": "server.chunk_complete",
+        "trace_id": "test-run",
+        "session_id": "session-1",
+        "request_id": "request-1",
+        "event_id": 9,
+        "chunk_index": 21,
+        "request_prepare_ms": 1.0,
+        "scheduler_forward_ms": 700.0,
+        "output_pace_ms": 2.0,
+        "header_write_ms": 3.0,
+        "raw_payload_build_ms": 4.0,
+        "raw_write_ms": 5.0,
+        "ws_write_ms": 8.0,
+        "chunk_total_ms": 1200.0,
+        "num_batches": 1,
+        "num_frames": 16,
+        "raw_bytes": 48,
+        "ws_payload_bytes": 64,
+        "content_type": "application/x-raw-rgb",
+    }
+    stats = chunk_stats_from_trace(trace)
+    assert stats is not None
+    assert stats["type"] == "chunk_stats"
+    assert stats["chunk_index"] == 21
+    assert stats["pace_wait_ms"] == 2.0
+    assert stats["scheduler_forward_ms"] == 700.0
+    assert stats["chunk_total_ms"] == 1200.0
+    assert stats["num_frames"] == 16
+    assert stats["trace_id"] == "test-run"
+
+    assert chunk_stats_from_trace({"event": "server.vae_decode_complete"}) is None
+    incomplete = dict(trace)
+    del incomplete["scheduler_forward_ms"]
+    with pytest.raises(MeasurementValidationError, match="scheduler_forward_ms"):
+        chunk_stats_from_trace(incomplete)
 
 
 @pytest.mark.parametrize(
@@ -577,7 +659,9 @@ def _create_nsys_fixture(
                             (
                                 0.0
                                 if all_zero_sm and active
-                                else 80.0 + cuda_device_id if active else 99.0
+                                else 80.0 + cuda_device_id
+                                if active
+                                else 99.0
                             ),
                             timestamp,
                         ),

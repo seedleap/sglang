@@ -23,6 +23,13 @@
 结构化事件统一进入 server log/OTLP plane。S0 合并适配后由客户端按唯一
 `trace_id` 读取同一 server log，继续要求 wall/CUDA selector 完整覆盖；payload
 SHA/sample 也保留主线新字段。这个适配只做 CPU 回归，不改变或重写 `-09` 产物。
+随后 `main@5fdc9788c3` 又删除独立 `chunk_stats` 消息并启用 60 秒 session-idle
+watchdog。合并决策不是放宽 S0 的 Scheduler 合同：客户端只等待 payload 完成，然后从同一
+`trace_id` 的权威 `server.chunk_complete` log event 严格恢复全部旧字段（唯一重命名为
+`output_pace_ms→pace_wait_ms`）；缺任一字段、chunk 不连续或数量不足仍 fail closed。长测量在
+同一 WebSocket 每 15 秒发送产品已有的标准 `event/heartbeat`，退出时必定取消后台任务；它不
+改变计时窗口，也不把 trace 重新塞回视频 WebSocket。这两项只更新合并后的可复用工具，正式
+H200 `-09` 仍绑定原 canonical，不据此重写历史结果。
 
 ## 假设与预期
 
@@ -384,7 +391,10 @@ TORCHDYNAMO_DISABLE=1 PYTHONPATH=python python3.11 -m pytest -q \
 
 `d5b25227d4` 加最终文档时的复验结果为 measurement/common `45 passed`、
 realtime runtime `47 passed`；合并当前 `main` 并切换到 structured server-log
-trace 后分别为 `47 passed`、`67 passed`。两组都不依赖 GPU；最终文件已通过
+trace 后曾分别为 `47 passed`、`67 passed`。继续适配 heartbeat 与
+`server.chunk_complete` 后 measurement/common 为 `49 passed`；两组新增测试分别校验
+heartbeat MessagePack/生命周期与 trace 字段完整性。上述 CPU 测试不改变历史 H200 产物；
+最终文件已通过
 同一套 pre-commit hooks。
 
 ### 校验与汇总
@@ -462,3 +472,7 @@ PVC：`minwm-s0-fusedops-h200-results-20260807`。每次尝试的根目录：
    - 参考：manifest 用 `/results/attempts/${HOSTNAME}`；最终 `backoffLimit=0` 会失败即停，诊断后用新 Job 名手动安全重跑，每个 Pod 名与 attempt 目录都不同。
 10. **一个 CUDA API 从 measured range 外开始、结束时进入 chunk，应不应该计数？如何审计？**
    - 参考：不计。`nsys_metrics.py::_discrete_event_start_attribution` 只用 `start_ns` 在半开 `[start,end)` 中唯一归属；`boundary_event_examples` 保留 raw name、globalPid、start/end、owner 和 overlap chunks。若 start 在 range 内但跨 end，只计一次；API rank coverage 仍由 `globalTid -> PROCESSES.globalPid` 与 kernel device/process 交叉验证。
+11. **新主干不再发送 `chunk_stats` 后，为什么 S0 不能直接采用“有则统计、无则跳过”？**
+   - 参考：Scheduler FPS/chunk wall 是正式合同字段；`chunk_stats_from_trace` 从权威 `server.chunk_complete` 恢复相同语义，缺字段立即失败。静默跳过会让 headline 在没有 Scheduler 证据时看似有效。
+12. **heartbeat 为什么不算测量负载污染，代码又如何保证它不会泄漏到下一 lane？**
+   - 参考：heartbeat 是服务端已有的 session-activity 控制事件，不带 action 或生成参数，也不参与 measured range；`realtime_heartbeat` 用 context manager 包住连接，并在正常/异常退出时 cancel + await 后台 task。测试在 scope 退出后继续等待，确认发送数不再增长。

@@ -18,6 +18,7 @@ import json
 import os
 import subprocess
 import time
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -41,6 +42,83 @@ from measurement import (
 
 TraceSelector = tuple[str, str, str]
 _TRACE_LOG_MARKER = "realtime_trace "
+
+CHUNK_STATS_TRACE_FIELDS = {
+    "chunk_index": "chunk_index",
+    "request_prepare_ms": "request_prepare_ms",
+    "scheduler_forward_ms": "scheduler_forward_ms",
+    "output_pace_ms": "pace_wait_ms",
+    "header_write_ms": "header_write_ms",
+    "raw_payload_build_ms": "raw_payload_build_ms",
+    "raw_write_ms": "raw_write_ms",
+    "ws_write_ms": "ws_write_ms",
+    "chunk_total_ms": "chunk_total_ms",
+    "num_batches": "num_batches",
+    "num_frames": "num_frames",
+    "raw_bytes": "raw_bytes",
+    "ws_payload_bytes": "ws_payload_bytes",
+    "content_type": "content_type",
+}
+
+
+def chunk_stats_from_trace(trace: dict[str, Any]) -> dict[str, Any] | None:
+    """Restore the removed chunk_stats message from its authoritative log event."""
+    if trace.get("event") != "server.chunk_complete":
+        return None
+    missing = [name for name in CHUNK_STATS_TRACE_FIELDS if name not in trace]
+    if missing:
+        raise MeasurementValidationError(
+            f"server.chunk_complete trace missing required fields: {missing}"
+        )
+    stats = {
+        target: trace[source] for source, target in CHUNK_STATS_TRACE_FIELDS.items()
+    }
+    stats["type"] = "chunk_stats"
+    for name in ("trace_id", "session_id", "request_id", "event_id"):
+        if name in trace:
+            stats[name] = trace[name]
+    return stats
+
+
+async def send_realtime_heartbeats(
+    websocket: Any, *, trace_id: str | None, interval_s: float
+) -> None:
+    event_id = 1
+    while True:
+        await asyncio.sleep(interval_s)
+        await websocket.send(
+            msgspec.msgpack.encode(
+                {
+                    "type": "event",
+                    "kind": "heartbeat",
+                    "payload": {},
+                    "event_id": event_id,
+                    "trace_id": trace_id,
+                }
+            )
+        )
+        event_id += 1
+
+
+async def cancel_task(task: asyncio.Task[Any]) -> None:
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+
+@asynccontextmanager
+async def realtime_heartbeat(
+    websocket: Any, *, trace_id: str | None, interval_s: float
+):
+    task = asyncio.create_task(
+        send_realtime_heartbeats(websocket, trace_id=trace_id, interval_s=interval_s)
+    )
+    try:
+        yield
+    finally:
+        await cancel_task(task)
 
 
 def required_stage_trace_chunks(mode: str) -> dict[TraceSelector, set[int]]:
@@ -170,6 +248,7 @@ def parse_args() -> argparse.Namespace:
         "--trace-log",
         help="server log containing structured 'realtime_trace' JSON events",
     )
+    parser.add_argument("--heartbeat-interval-s", type=float, default=15.0)
     parser.add_argument("--timeout", type=float, default=1800.0)
     return parser.parse_args()
 
@@ -202,6 +281,8 @@ def validate_contract(manifest: dict, args: argparse.Namespace) -> tuple[dict, d
         raise ValueError("allocated-gpu-count cannot be smaller than active gpu-count")
     if args.kv_cache_num_frames is not None and args.kv_cache_num_frames < 1:
         raise ValueError("kv-cache-num-frames must be positive")
+    if args.heartbeat_interval_s <= 0:
+        raise ValueError("heartbeat-interval-s must be positive")
     if args.require_complete_stage_trace and not args.trace_log:
         raise ValueError("--require-complete-stage-trace requires --trace-log")
     if args.require_complete_stage_trace and not args.run_id:
@@ -299,15 +380,19 @@ async def receive_run(args: argparse.Namespace, contract: dict, case: dict) -> d
     measured_payload_sha256 = hashlib.sha256()
     measured_payload_samples: dict[str, str] = {}
     init_started_ns = time.perf_counter_ns()
-    async with websockets.connect(
-        args.ws_url, max_size=None, ping_interval=None, open_timeout=args.timeout
-    ) as websocket:
+    async with (
+        websockets.connect(
+            args.ws_url, max_size=None, ping_interval=None, open_timeout=args.timeout
+        ) as websocket,
+        realtime_heartbeat(
+            websocket,
+            trace_id=args.run_id,
+            interval_s=args.heartbeat_interval_s,
+        ),
+    ):
         await websocket.send(msgspec.msgpack.encode(request))
         init_completed_ns = time.perf_counter_ns()
-        while (
-            len(stats_by_chunk) < total_chunks
-            or len(payload_complete_ns) < total_chunks
-        ):
+        while len(payload_complete_ns) < total_chunks:
             try:
                 packed = await asyncio.wait_for(websocket.recv(), timeout=args.timeout)
             except websockets.exceptions.ConnectionClosedOK as exc:
@@ -408,6 +493,9 @@ async def receive_run(args: argparse.Namespace, contract: dict, case: dict) -> d
     )
     for trace in trace_events:
         record_required_stage_trace(required_trace_chunks, trace)
+        chunk_stats = chunk_stats_from_trace(trace)
+        if chunk_stats is not None:
+            stats_by_chunk[int(chunk_stats["chunk_index"])] = chunk_stats
     if args.require_complete_stage_trace and not required_stage_trace_is_complete(
         required_trace_chunks, expected_trace_indices
     ):
@@ -430,7 +518,9 @@ async def receive_run(args: argparse.Namespace, contract: dict, case: dict) -> d
 
     measured_indices = list(range(args.warmup_chunks, total_chunks))
     measured_stats = [stats_by_chunk[index] for index in measured_indices]
-    measured_frames = sum(int(stat["num_frames"]) for stat in measured_stats)
+    measured_frames = sum(
+        int(frame_batches_by_chunk[index]["frames"]) for index in measured_indices
+    )
     expected_measured_frames = (
         args.measured_chunks * pixel_frames_per_latent * latent_frames_per_chunk
     )
