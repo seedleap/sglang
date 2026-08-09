@@ -33,7 +33,11 @@ runner：每 15 秒发送同一连接的标准 heartbeat，正常或异常退出
 H200 上运行到约 279 秒并完整收到 chunk 0..219 的 payload，证明 heartbeat 修复成立；但新
 main 同时删除了独立 `chunk_stats` 消息，把同一字段改为 `server.chunk_complete` trace，旧客户端
 因此在正常 close 1000 后报告 220 条 stats 全缺。attempt-07 同样无正式性能 JSON 并保留
-marker；当前修复从该权威 trace 恢复原统计字段，产品 PR 保持 draft、不等待人工 approval，但
+marker；当前修复从该权威 trace 恢复原统计字段。attempt-08 已据此完成并验证 SP2 ABBA，
+两侧 chunk-wall 位置漂移分别为 `3.382%/4.177%`，按合同各追加一个独立 server，6 个 headline
+JSON 全部有效；随后短 correctness 客户端仍忽略相同 trace，在完整视频正常 close 后失败。
+因此 attempt-08 的 SP2 headline 只作可恢复 checkpoint，尚不能成为整体验收。修复现已复用同一
+转换函数覆盖 throughput 与 correctness 客户端；产品 PR 保持 draft、不等待人工 approval，但
 需等待新的当前 SHA H200 gate。
 
 ## 预期
@@ -257,6 +261,12 @@ payload，但正常结束时 `missing_stats=0..219`。新 main 的 `_log_realtim
 立即 fail-closed。该适配不从日志反推、不修改服务端，也兼容仍直接发送 `chunk_stats` 的旧
 runtime；新增正常、无关事件与缺字段测试后共 `54 passed`。
 
+attempt-08 证明 throughput 客户端适配有效：SP2 六个 20+200 lane 均满足 count/schema，且
+adaptive `000/111` 的 Client FPS 分别为 `12.7244/13.1979`。失败点发生在随后 8-chunk
+correctness：`run_sglang_api.py` 完整收到视频，却仍只识别旧 `chunk_stats`，正常 close 1000 后
+退出。修复让 correctness 客户端复用 `chunk_stats_from_trace`，不复制字段映射；对应结构门与
+全套测量测试现为 `56 passed`。
+
 ## H200 隔离、失败与产物保留
 
 - kube context 固定为 `codex-minwm-test-phx2`；一次占用完整 8-GPU H200 节点；
@@ -338,6 +348,7 @@ kubectl --context codex-minwm-test-phx2 apply \
 | attempt-06 server log | `2e61029e9fe9f29c25575442a661027e308e177bf260af772af7d507145fcd99` | 734,340 bytes；记录 60.043 秒 watchdog close |
 | attempt-06 pod diagnostic | `0c953b0ab98d950da049b0feb270d431489c7ece1d797960ce8f0d551a2e108a` | 4,453 bytes；exit 1/backoff 0 |
 | chunk-trace runner | `b2c3227d1d` | runner-only；从 `server.chunk_complete` 恢复原 stats 合同，`54 passed` |
+| parity-trace runner | `0bb1f7acbf` | runner-only；correctness 客户端复用同一转换，`56 passed` |
 | PR | `seedleap/sglang#26` | draft；当前 SHA H200 gate 后转 ready，不等待人工 approval |
 
 正式测量前的 attempts 均在同一隔离节点、不同 Pod/host-scoped root 中保留：
@@ -351,6 +362,7 @@ kubectl --context codex-minwm-test-phx2 apply \
 | `05` | `ddc2816880` | 首个 SP2 init、生成前 | runner-only relay 读取已删除的 `GenerateSession.client_trace`；无性能数据 | Job `minwm-s5-fusedops-h200-20260809-05` failed/backoff 0；root/lane marker、server log 与独立 host root/PVC 保留 |
 | `06` | `2adb6e1437` | 首个 SP2 `111` profiler-off，完整至 chunk 34 | 新 main 60 秒 idle watchdog；旧测量客户端只有 init、没有 heartbeat；无性能 JSON | Job `minwm-s5-fusedops-h200-20260809-06` failed/backoff 0；两级 marker、server log、telemetry、diagnostic 与 PVC 全部保留 |
 | `07` | `ed255b3c6b` | 首个 SP2 `111` profiler-off，payload 0..219 全部完成 | 新 main 删除独立 `chunk_stats`，同字段迁入 `server.chunk_complete` trace；客户端未消费，正常 close 后 220 条 stats 全缺；无性能 JSON | Job `minwm-s5-fusedops-h200-20260809-07` failed/backoff 0；两级 marker、server log、telemetry、diagnostic 与 PVC 全部保留 |
+| `08` | `b2c3227d1d` | SP2 六个 profiler-off lane 完成；首个 correctness `111` 视频完成 | throughput 已适配 trace stats；短 correctness 客户端仍只认旧消息，正常 close 后失败 | Job `minwm-s5-fusedops-h200-20260809-08` failed/backoff 0；6 个有效 headline JSON 与 correctness marker/log/PVC 全部保留 |
 
 ## 收益大小解释框架
 
@@ -385,7 +397,7 @@ wall 反而增加 1.582%；因此设备微基准和端到端吞吐必须同时�
 
 以上是 attempt-04 对 `3d159d20fc` 的建议。attempt-05/06 都属于当前 `dc4c865a6e` 的
 runner 协议失败，attempt-07 也只验证了 heartbeat 与完整 payload，三者都不能参与性能比较。
-attempt-08 若保持严格 bitwise、必选 CV 通过且
+attempt-09 若保持严格 bitwise、必选 CV 通过且
 收益方向一致，则转为最终；若不一致，以当前 SHA 的有效 attempt 为准，保留两轮差异并重新
 解释，不能选择性沿用较好数字。
 
@@ -419,3 +431,5 @@ attempt-08 若保持严格 bitwise、必选 CV 通过且
     必须复用标准 `event` 协议、A/B 同频发送并在退出时取消？
 26. 新 main 不再发送独立 `chunk_stats` 后，为什么可以从 `server.chunk_complete` 恢复统计，
     又为什么必须逐字段校验而不能从 server 文本日志事后猜测？
+27. throughput 与 correctness 两个客户端为什么必须复用一个 trace-to-stats 转换函数，而不能
+    各自维护一份看似相同的字段表？
