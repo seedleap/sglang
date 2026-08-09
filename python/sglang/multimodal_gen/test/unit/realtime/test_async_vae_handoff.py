@@ -27,6 +27,7 @@ def _req(*, block_idx=3, image_latent=None):
         realtime_prompt_version=4,
         realtime_output_format="webp",
         realtime_preview_max_width=560,
+        extra={},
         trajectory_timesteps=None,
         trajectory_latents=None,
         rollout_trajectory_data=None,
@@ -52,6 +53,7 @@ def test_handoff_returns_contiguous_bf16_latents_without_decoding():
         "action_version": 8,
         "prompt_version": 4,
         "has_reference": False,
+        "is_final_chunk": False,
         "generated_latent_frames": 2,
         "output_format": "webp",
         "preview_max_width": 560,
@@ -74,22 +76,19 @@ def test_handoff_prepends_i2v_reference_only_for_first_chunk():
     assert later_out.realtime_handoff["has_reference"] is True
 
 
-def test_minwm_pipeline_remote_vae_is_feature_flagged():
+def test_minwm_pipeline_remote_vae_requires_an_explicit_backend():
     assert not _use_remote_realtime_vae(
         SimpleNamespace(
-            realtime_vae_worker_url=None,
-            realtime_remote_vae_enabled=False,
+            realtime_vae_backend="local",
         )
     )
     assert _use_remote_realtime_vae(
         SimpleNamespace(
-            realtime_vae_worker_url="ws://vae:18081/v1/realtime_vae/decode",
-            realtime_remote_vae_enabled=False,
+            realtime_vae_backend="exact_remote",
         )
     )
     assert _use_remote_realtime_vae(
         SimpleNamespace(
-            realtime_vae_worker_url=None,
-            realtime_remote_vae_enabled=True,
+            realtime_vae_backend="taehv_remote",
         )
     )

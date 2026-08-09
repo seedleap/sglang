@@ -22,7 +22,9 @@ class RealtimeLatentHandoffStage(PipelineStage):
         if not isinstance(batch.latents, torch.Tensor):
             raise ValueError("Realtime latent handoff requires tensor latents")
         if not batch.realtime_session_id or not batch.realtime_generation_id:
-            raise ValueError("Realtime latent handoff requires session generation identity")
+            raise ValueError(
+                "Realtime latent handoff requires session generation identity"
+            )
 
         generated_latents = batch.latents
         has_reference = isinstance(batch.image_latent, torch.Tensor)
@@ -42,6 +44,9 @@ class RealtimeLatentHandoffStage(PipelineStage):
                 "action_version": batch.realtime_action_version,
                 "prompt_version": batch.realtime_prompt_version,
                 "has_reference": has_reference,
+                "is_final_chunk": bool(
+                    batch.extra.get("realtime_is_final_chunk", False)
+                ),
                 "generated_latent_frames": int(generated_latents.shape[2]),
                 "output_format": batch.realtime_output_format,
                 "preview_max_width": batch.realtime_preview_max_width,

@@ -14,16 +14,16 @@ from typing import Any, Awaitable, Callable
 import torch
 from PIL import Image
 
+from sglang.multimodal_gen.runtime.realtime.async_vae_metrics import (
+    observe_stage,
+    record_backpressure,
+    update_capacity,
+)
 from sglang.multimodal_gen.runtime.realtime.async_vae_protocol import (
     AcceptDisposition,
     ChunkSequenceTracker,
     LatentChunkHeader,
     ProtocolViolation,
-)
-from sglang.multimodal_gen.runtime.realtime.async_vae_metrics import (
-    observe_stage,
-    record_backpressure,
-    update_capacity,
 )
 from sglang.multimodal_gen.runtime.utils.realtime_video import (
     JPEG_FRAME_CONTENT_TYPE,
@@ -44,6 +44,8 @@ class VAESessionCapacityError(RuntimeError):
 class SessionOpen:
     session_id: str
     generation_id: str
+    decoder_backend: str | None = None
+    response_transport: str = "websocket"
     trace_id: str | None = None
     output_format: str = "raw"
     quality: int = 90
@@ -121,7 +123,14 @@ class AsyncVAEWorker:
             raise ValueError("max_sessions must be positive")
         if queue_depth_per_session < 1:
             raise ValueError("queue_depth_per_session must be positive")
+        engine_max_sessions = getattr(engine, "max_sessions", None)
+        if engine_max_sessions is not None and max_sessions > engine_max_sessions:
+            raise ValueError(
+                f"{getattr(engine, 'backend', 'VAE')} backend supports at most "
+                f"{engine_max_sessions} active session(s)"
+            )
         self.engine = engine
+        self.decoder_backend = getattr(engine, "backend", None)
         self.max_sessions = max_sessions
         self.queue_depth_per_session = queue_depth_per_session
         self.encoded_frames_per_batch = max(1, encoded_frames_per_batch)
@@ -133,6 +142,15 @@ class AsyncVAEWorker:
     async def open(self, request: SessionOpen) -> None:
         if not request.session_id or not request.generation_id:
             raise ProtocolViolation("session generation identity is required")
+        if (
+            request.decoder_backend is not None
+            and request.decoder_backend != self.decoder_backend
+        ):
+            raise ProtocolViolation(
+                "requested decoder backend does not match this VAE worker"
+            )
+        if request.response_transport not in {"websocket", "shared_memory"}:
+            raise ProtocolViolation("unsupported VAE response transport")
         identity = (request.session_id, request.generation_id)
         async with self._session_lock:
             if identity in self._sessions:
@@ -236,11 +254,13 @@ class AsyncVAEWorker:
         identity: tuple[str, str],
         state: _WorkerSession,
     ) -> None:
+        fatal_error: Exception | None = None
         try:
             while True:
                 job = await state.queue.get()
                 service_started = time.perf_counter()
                 state.processing = True
+                final_chunk_complete = False
                 try:
                     result = await self._decode_job(state, job)
                 except asyncio.CancelledError:
@@ -250,13 +270,13 @@ class AsyncVAEWorker:
                 except Exception as exc:
                     if not job.future.done():
                         job.future.set_exception(exc)
+                    fatal_error = exc
                 else:
                     if not job.future.done():
                         job.future.set_result(result)
+                    final_chunk_complete = job.header.is_final_chunk
                 finally:
-                    service_time_ms = (
-                        time.perf_counter() - service_started
-                    ) * 1000.0
+                    service_time_ms = (time.perf_counter() - service_started) * 1000.0
                     self._service_time_ms = (
                         service_time_ms
                         if self._service_time_ms == 0
@@ -266,10 +286,31 @@ class AsyncVAEWorker:
                     state.queue.task_done()
                     state.last_activity_at = time.monotonic()
                     self._update_capacity_metrics()
+                if final_chunk_complete:
+                    return
+                if fatal_error is not None:
+                    return
         finally:
             current = self._sessions.get(identity)
             if current is state:
                 self._sessions.pop(identity, None)
+            while not state.queue.empty():
+                try:
+                    pending_job = state.queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                if not pending_job.future.done():
+                    if fatal_error is None:
+                        pending_job.future.cancel()
+                    else:
+                        pending_job.future.set_exception(
+                            RuntimeError("VAE session terminated after decoder failure")
+                        )
+                state.queue.task_done()
+            reset = getattr(state.decoder, "reset", None)
+            if callable(reset):
+                reset()
+            self._update_capacity_metrics()
 
     async def _decode_job(
         self,
@@ -361,9 +402,7 @@ class AsyncVAEWorker:
                 )
 
         decode_ms = (time.perf_counter() - decode_started) * 1000.0
-        encoded_groups = (
-            await asyncio.gather(*encode_tasks) if encode_tasks else []
-        )
+        encoded_groups = await asyncio.gather(*encode_tasks) if encode_tasks else []
         encoded = tuple(batch for group in encoded_groups for batch in group)
         encode_ms = sum(batch.encode_ms for batch in encoded)
         observe_stage("queue_wait", queue_wait_ms)
@@ -454,14 +493,13 @@ class AsyncVAEWorker:
     ) -> list[EncodedFrameBatch]:
         if frames.shape[0] != 1:
             raise RuntimeError("Realtime VAE supports one sample per session")
-        array = (
-            (frames[0, :3] * 255)
-            .round()
-            .to(torch.uint8)
-            .permute(1, 2, 3, 0)
-            .contiguous()
-            .numpy()
-        )
+        rgb_values = (frames[0, :3] * 255).clamp(0, 255)
+        rgb_quantization = getattr(self.engine, "rgb_quantization", "round")
+        if rgb_quantization == "round":
+            rgb_values = rgb_values.round()
+        elif rgb_quantization != "truncate":
+            raise RuntimeError(f"unsupported VAE RGB quantization: {rgb_quantization}")
+        array = rgb_values.to(torch.uint8).permute(1, 2, 3, 0).contiguous().numpy()
         raw_frames = [frame.tobytes() for frame in array]
         source_height = int(array.shape[1]) if len(array) else int(frames.shape[-2])
         source_width = int(array.shape[2]) if len(array) else int(frames.shape[-1])
@@ -556,9 +594,6 @@ class AsyncVAEWorker:
             state.queue.task_done()
         if state.runner is not None:
             await asyncio.gather(state.runner, return_exceptions=True)
-        reset = getattr(state.decoder, "reset", None)
-        if callable(reset):
-            reset()
         self._update_capacity_metrics()
 
     async def close_all(self) -> None:
@@ -595,6 +630,8 @@ class AsyncVAEWorker:
 class TAEHVEngine:
     """Shared immutable TAEHV weights with per-generation decoder objects."""
 
+    backend = "taehv"
+    rgb_quantization = "round"
     _DEFAULT_WARMUP_SHAPE = (1, 48, 1, 30, 52)
 
     def __init__(
@@ -607,7 +644,9 @@ class TAEHVEngine:
         try:
             from taehv import TAEHV
         except ImportError as exc:
-            raise RuntimeError("The taehv package is required by the VAE worker") from exc
+            raise RuntimeError(
+                "The taehv package is required by the VAE worker"
+            ) from exc
         self.device = torch.device(device)
         self.dtype = dtype
         self.model = (

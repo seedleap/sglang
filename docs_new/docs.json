@@ -1249,7 +1249,8 @@
                     "tag": "NEW",
                     "pages": [
                       "cookbook/diffusion/MinWM/MinWM-Realtime",
-                      "cookbook/diffusion/MinWM/MinWM-Realtime.zh-CN"
+                      "cookbook/diffusion/MinWM/MinWM-Realtime.zh-CN",
+                      "docs/sglang-diffusion/minwm/specs/2026-08-09-realtime-vae-backend-unification"
                     ]
                   },
                   {

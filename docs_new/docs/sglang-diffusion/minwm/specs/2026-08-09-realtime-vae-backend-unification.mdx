@@ -1,0 +1,199 @@
+---
+title: "Realtime VAE overlap 后端统一决策"
+description: "统一 exact causal VAE 与 TAEHV 的异步调度、生命周期、部署配置和验证门槛。"
+---
+
+# Realtime VAE overlap 后端统一决策
+
+## 决策摘要
+
+Realtime VAE 只保留一套异步调度：`RealtimeLatentHandoffStage` 把 latent 交给
+`RealtimeVAEClient`，由持久化 `AsyncVAEWorker` 排队、解码并把帧送回 Gateway。
+worker 启动时必须且只能选择一个 decoder backend：
+
+| 部署值 | worker backend | 画质合同 | 会话容量 |
+| --- | --- | --- | --- |
+| `local` | 无远端 worker | Denoiser 进程内的原生 decoder；默认值 | Denoiser 自身限制 |
+| `exact_remote` | `exact` | 原生 causal VAE；目标是保持本地 exact 数值语义 | 固定为 1 |
+| `taehv_remote` | `taehv` | TAEHV 近似解码；不承诺 bitwise 或 numerical parity | 可配置多 Session |
+
+不恢复旧的 output-adapter HTTP future，也不在 async worker 内调用另一个 exact HTTP
+server。两个远端 backend 互斥，因此不会出现“队列套队列”、重复保序或重复生命周期。
+不设置任何参数时仍为 `local`，不会静默把默认画质改成 TAEHV。
+
+## 两套旧实现的关系
+
+### Exact overlap（PR #6）
+
+Exact 路径位于输出侧。Scheduler 返回 Chunk N 后，`RawRGBRealtimeOutputAdapter.send`
+在一个 pending output task 中调用独立 HTTP decoder；主循环同时开始 Chunk N+1 的 DiT，
+但启动下一次 send 前先等待 N 完成。它是深度为一、严格保序的 future，而不是通用
+VAE worker 队列。latent 在 scheduler 路径先同步复制到 CPU，再通过 MessagePack/HTTP
+发送；同机优化只把解码后的 raw RGB 响应放进共享内存。
+
+Exact decoder 持有原生 Wan causal VAE。cache 实际挂在共享模型对象的
+`_feat_map/_conv_idx` 上，所以它只允许一个活动 Session。已知 `max_chunks` 时 final
+chunk 触发清理；断线或无界 Session 原先没有独立的 remote close 合同。
+
+### Async TAEHV（PR #25）
+
+Async 路径位于 latent handoff 层。Denoiser 把 Chunk N 放入有界队列，worker 真正进入
+decode actor 后才返还 credit，因此 VAE(N) 与 DiT(N+1) 重叠。一个 WebSocket 覆盖
+Session open、latent、credit、frame、final 和 abort 生命周期。TAEHV 权重只读共享，
+`StreamingTAEHV` context 按 generation 隔离，因此可服务多个 Session。
+
+历史 diff 说明二者职责重复：#25 明确删除了 #6 的 `remote_vae_request` 和
+output-adapter 调用，替换成 `realtime_latents/realtime_handoff`。旧 exact server/client
+文件虽然一度仍在主干，却没有生产调度入口。`d41d281604` 与 `8ae4e930a3` 的 stable
+patch-id 相同，是同一 async 补丁在不同父提交上的版本。
+
+### 为什么选择 async worker 作为统一层
+
+Async worker 已经拥有有界 backpressure、credit、严格 chunk 顺序、Gateway 直传、
+reservation、断线 abort、per-generation state 和完整 finally 清理。Exact 只需要实现
+相同 engine 接口，不能再复制这些职责。统一后的数据流是：
+
+```text
+Chunk N DiT -> latent handoff -> one bounded AsyncVAEWorker queue -> exact | taehv
+                     ^                                      |
+                     +------ credit / frames / final -------+
+
+同时：Chunk N decode/encode || Chunk N+1 DiT
+```
+
+## 状态与语义合同
+
+- 身份：`session_id + generation_id` 隔离 decoder state；`request_id + chunk_index`
+  实现严格顺序与重复检测；`event_id` 随输出 envelope 原样返回。
+- Exact causal cache：Chunk 0 前 reset，后续 chunk 复用；final、abort、断线和 decode
+  异常都在 worker `finally` 中 reset。由于 cache 是 model-global，exact worker
+  `max_sessions=1`，不得把 TAEHV 的多 Session 交错能力套用到 exact。
+- I2V：reference 信息随 handoff 传递，Chunk 0 使用正常 causal first-chunk 语义。
+- T2V：worker 保存 Chunk 0 的第一 latent；Chunk 1 把它与常规 latent 拼接，重置并
+  重新播种 causal decoder，随后裁掉一个 leading decoded frame。这保留了原来的
+  首帧裁剪和展示 chunk index，不把临时 decoder index 暴露给客户端。
+- Final：bounded request 在 adapter 中显式标记 final；worker 完成该 chunk 后自然退出。
+  无界 Session 由 WebSocket abort/disconnect 清理。
+- RGB24：exact 保留原生输出路径的截断量化；TAEHV 保留现有 worker 的四舍五入量化。
+- Shared memory：loopback URL 的 `auto` 优先把 latent 和返回帧放入同一共享目录；
+  路径必须位于配置根目录，读取时校验大小/checksum 并删除。跨主机必须使用
+  `websocket`。两个进程必须看到相同 mount 和路径。
+
+## 部署命令
+
+以下命令假设 Denoiser 使用 GPU 0、同机 VAE worker 使用 GPU 1。`/models/minwm`
+和 `/models/minwm/vae` 应替换为已校验的 serving artifact。
+
+### Local（默认 exact 画质）
+
+```bash
+CUDA_VISIBLE_DEVICES=0 sglang serve \
+  --model-path /models/minwm \
+  --pipeline-class-name MinWMCausalDMDPipeline \
+  --realtime-vae-backend local \
+  --port 30000
+```
+
+### Exact remote
+
+先启动 GPU 1 worker：
+
+```bash
+CUDA_VISIBLE_DEVICES=1 python -m \
+  sglang.multimodal_gen.runtime.entrypoints.realtime_vae_server \
+  --decoder-backend exact \
+  --vae-path /models/minwm/vae \
+  --model-path /models/minwm \
+  --pipeline-class-name MinWMCausalDMDPipeline \
+  --max-sessions 1 \
+  --shared-memory-dir /dev/shm/sglang-realtime-vae \
+  --host 127.0.0.1 \
+  --port 18081
+```
+
+再启动 GPU 0 Denoiser：
+
+```bash
+CUDA_VISIBLE_DEVICES=0 sglang serve \
+  --model-path /models/minwm \
+  --pipeline-class-name MinWMCausalDMDPipeline \
+  --realtime-vae-backend exact_remote \
+  --realtime-vae-worker-url ws://127.0.0.1:18081/v1/realtime_vae/decode \
+  --realtime-vae-transport auto \
+  --realtime-vae-shared-memory-dir /dev/shm/sglang-realtime-vae \
+  --port 30000
+```
+
+### TAEHV remote（近似画质）
+
+```bash
+CUDA_VISIBLE_DEVICES=1 python -m \
+  sglang.multimodal_gen.runtime.entrypoints.realtime_vae_server \
+  --decoder-backend taehv \
+  --checkpoint-path /models/taehv/taew2_2.pth \
+  --max-sessions 8 \
+  --shared-memory-dir /dev/shm/sglang-realtime-vae \
+  --host 127.0.0.1 \
+  --port 18081
+
+CUDA_VISIBLE_DEVICES=0 sglang serve \
+  --model-path /models/minwm \
+  --pipeline-class-name MinWMCausalDMDPipeline \
+  --realtime-vae-backend taehv_remote \
+  --realtime-vae-worker-url ws://127.0.0.1:18081/v1/realtime_vae/decode \
+  --realtime-vae-transport auto \
+  --realtime-vae-shared-memory-dir /dev/shm/sglang-realtime-vae \
+  --port 30000
+```
+
+TAEHV 是为速度设计的近似 decoder。命令显式选择 `taehv_remote`，健康检查也返回
+`decoder_fidelity=approximate`；它不能用于 exact parity 声明。
+
+启动后校验 worker 身份：
+
+```bash
+curl --fail http://127.0.0.1:18081/health
+```
+
+Exact 应返回 `decoder_backend=exact`、`decoder_fidelity=exact` 和
+`max_sessions=1`；TAEHV 应返回 `decoder_backend=taehv`、
+`decoder_fidelity=approximate`。worker 与请求 backend 不一致时握手会失败，不会回退。
+
+## 拓扑与性能测量方法
+
+每份性能报告至少记录：代码 SHA、镜像 digest、模型/TAEHV checkpoint hash、GPU SKU、
+driver、CUDA/PyTorch、输出格式、尺寸、FPS、每 chunk latent 数、Session 数、warmup 数和
+共享内存 mount。首先保存拓扑：
+
+```bash
+nvidia-smi topo -m
+nvidia-smi --query-gpu=index,name,pci.bus_id,memory.total \
+  --format=csv,noheader
+```
+
+同机推荐 GPU 0 跑 DiT、GPU 1 跑 exact/TAEHV，并确认两者没有意外的 CUDA_VISIBLE_DEVICES
+映射。跨节点测试同时记录 RTT 和 latent/frame wire bytes。
+
+测量时先完成至少 20 个 warmup chunk，再固定输入测 200 个 chunk；分别报告
+`denoise_ms`、`queue_wait_ms`、`latent_send_ms`、`decode_ms`、`encode_ms`、首帧延迟、
+chunk 端到端 p50/p95/p99 和峰值显存。用 trace 或 Nsight Systems 验证时间线上确实存在
+`VAE(N) || DiT(N+1)`，并确认每 Session 最多一个待解码 chunk、输出仍按 chunk index
+严格有序。吞吐对比必须同时包含 local、exact_remote 和 taehv_remote；不能把 TAEHV
+结果作为 exact 加速比。
+
+## 验收门槛与剩余 GPU gate
+
+CPU 可验证部分包括 backend/transport 参数互斥、协议版本、顺序/final、断线和异常清理、
+exact 单 Session 容量、T2V reseed/crop、shared-memory 路径/大小/checksum/删除、最小
+WebSocket 集成与部署 manifest。
+
+合入生产前仍必须在目标 GPU 完成：
+
+1. local exact 与 exact_remote 对两个以上 causal chunk 的 latent、lossless RGB 对比；
+2. I2V 与 T2V 的 Chunk 0、Chunk 1 reseed/crop 和 final chunk 回归；
+3. TAEHV 视觉质量评测，并明确标记为近似结果；
+4. 两 GPU overlap 时间线、显存、稳态吞吐和 p95/p99；
+5. loopback shared memory、跨节点 WebSocket、客户端进程崩溃后的孤儿文件清理演练。
+
+在这些 gate 完成前，只能声明 CPU 合同和调度实现通过，不能声明真实 GPU parity 或性能
+收益。

@@ -291,7 +291,7 @@ spec:
                 --batching-delay-ms 2 \
                 --realtime-max-sessions "${REALTIME_MAX_SESSIONS}" \
                 --realtime-max-sessions-per-worker "${REALTIME_MAX_SESSIONS}" \
-                --realtime-remote-vae-enabled \
+                --realtime-vae-backend taehv_remote \
                 --realtime-session-idle-timeout-s 60 \
                 --realtime-session-max-lifetime-s 600 \
                 --realtime-admission-wait-s 10 \
@@ -417,6 +417,7 @@ spec:
             - -m
             - sglang.multimodal_gen.runtime.entrypoints.realtime_vae_server
           args:
+            - --decoder-backend=taehv
             - --checkpoint-path=/opt/taehv/taew2_2.pth
             - --device=cuda
             - --dtype=bfloat16
