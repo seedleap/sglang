@@ -614,6 +614,7 @@ PY
       --enable-torch-compile false \
       --enable-cuda-graph "${enabled}" \
       --warmup-mode off \
+      --realtime-session-idle-timeout-s 1800 \
       --port 30000 \
       > "${profile_dir}/server.log" 2>&1 &
     local server_pid=$!
