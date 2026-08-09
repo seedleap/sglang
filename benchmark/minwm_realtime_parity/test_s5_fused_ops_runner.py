@@ -112,3 +112,14 @@ def test_nsys_requires_full_post_a2a_launch_coverage():
     assert 'degree * 10 * 150 if config[1] == "1" else 0' in comparator
     assert '"explicit_fallback_launch_slots"' in comparator
     assert '"expected_fused_post_launches_per_active_gpu_per_chunk": 150' in comparator
+
+
+def test_measurement_trace_relay_does_not_restore_removed_client_trace_state():
+    source = (
+        ROOT.parents[1]
+        / "python/sglang/multimodal_gen/runtime/entrypoints/openai/realtime"
+        / "realtime_video_api.py"
+    ).read_text()
+    assert "_install_realtime_trace_sink(session, trace_sink)" in source
+    assert "_send_realtime_trace_events(ws, trace_queue)" in source
+    assert "session.client_trace" not in source

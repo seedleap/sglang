@@ -1489,7 +1489,6 @@ async def _listen_generate_request(
                 fps=realtime_req.fps,
                 num_frames=realtime_req.num_frames,
                 max_chunks=realtime_req.max_chunks,
-                client_trace=session.client_trace,
             )
             adapter = get_realtime_model_adapter(get_global_server_args())
             session.set_adapter(adapter)
