@@ -425,6 +425,21 @@ kubectl --context codex-minwm-test-phx2 apply \
 | `08` | `b2c3227d1d` | SP2 六个 profiler-off lane 完成；首个 correctness `111` 视频完成 | throughput 已适配 trace stats；短 correctness 客户端仍只认旧消息，正常 close 后失败 | Job `minwm-s5-fusedops-h200-20260809-08` failed/backoff 0；6 个有效 headline JSON 与 correctness marker/log/PVC 全部保留 |
 | `09` | `0bb1f7acbf` | 完成：SP2/SP4 profiler-off、bitwise、16 个 factorial Nsight 与 manifest | 无 invalid marker；exit 0 | Job `minwm-s5-fusedops-h200-20260809-09` Complete 1/1、backoff 0；Pod 按 TTL 清理，PVC/raw 原位保留 |
 
+## CI 基线偏差与处理决策
+
+当前 `main` 的 push lint run `31296501646` 已独立失败；#26 首轮全仓 lint 复现相同的
+CloudFormation `!Ref`、脚本 executable bit、isort/ruff/Black 基线问题。CPU 八个分片与
+Arm64 也都在测试收集阶段被 `test_ulysses_qkv_pack.py` 缺少直接运行入口挡住；该文件来自
+已合入 `main` 的 `78ed803b66`，与 `origin/main` byte-identical，不在 #26 diff 中。因此这些
+红灯不能归因于 `111` 融合栈，也不能用它们推翻 H200 gate。
+
+#26 自身涉及的 Python 文件仍按 CI 的精确 Black 26.1.0、isort 7.0.0 与 ruff 0.15.1
+复查。commit `078baee99b` 修正了 3 处 import order 和 1 处 forward annotation；随后
+Python 3.11 compileall、上述三类 lint、`git diff --check` 全部通过，MinWM realtime + QKV
+CPU 单测为 `145 passed, 2 skipped`。决策是不把 `main` 上无关的大规模格式清理混入性能
+PR；主干基线修复后再重跑全仓 gate，并把剩余红灯按“PR 回归 / main 基线 / runner
+基础设施”三类分别归档。
+
 ## 收益大小解释框架
 
 跨 PR 的旧单项 profiler-off 只能用于候选排序，不能直接相加；当前 HEAD 的同 Job factorial
@@ -501,3 +516,7 @@ attempt-04 是旧产品树 `3d159d20fc` 的有效历史对照；attempt-05–08 
 29. telemetry 中 candidate mean clock 略低时，为什么这反而能排除“更高频率伪造收益”？
 30. 最终 artifact manifest 为什么必须在所有 summary/fallback evidence 写完后生成？若中途
     读取 correctness summary，为什么 SHA 和最终 manifest 中的 SHA 可能不同？
+31. 为什么 CPU/Arm64 在执行任何测试前失败不能证明融合实现有功能回归？怎样用
+    `origin/main` 文件一致性和主干 push run 证明它是基线问题？
+32. 为什么不能为了让 #26 的全仓 lint 变绿，顺手格式化所有 `main` 既有文件？这种做法会给
+    性能 PR 的审计、回滚和归因带来什么风险？
