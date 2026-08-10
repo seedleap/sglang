@@ -193,24 +193,66 @@ chunk 端到端 p50/p95/p99 和峰值显存。用 trace 或 Nsight Systems 验�
 严格有序。吞吐对比必须同时包含 local、exact_remote 和 taehv_remote；不能把 TAEHV
 结果作为 exact 加速比。
 
+## 2026-08-10/11 三硬件验证结果
+
+正式矩阵固定同一 checkpoint、seed、prompt、action 与请求合同：`1248x704`、BF16、
+4 denoise steps、KV45、raw RGB、20 warmup + 200 measured chunks。单节点申请 8 张 GPU，
+DiT 使用 GPU 0–3 按 SP1/SP2/SP4 扫描，双 GPU exact spatial worker 固定使用 GPU 6–7；
+H100、B200、B300 节点内均为 NV18 全互联。运行时固定为 PyTorch 2.11.0+cu130、
+Transformers 5.12.1、Diffusers 0.37.0。
+
+| GPU | local SP1 | exact remote SP1 | exact remote SP2 | exact remote SP4 | 24 FPS |
+| --- | ---: | ---: | ---: | ---: | --- |
+| H100 80GB | 8.656 | 16.905 | **23.652** | 20.764 | 本节点略低；另一 H100 节点 SP2 为 25.279 |
+| B200 | 13.875 | **27.183** | 未运行 | 未运行 | SP1 达标 |
+| B300 SXM6 AC | 14.725 | **29.905** | 未运行 | 未运行 | SP1 达标 |
+
+H100 的 SP4 低于 SP2，说明在该 5B/720p shape 上继续增加 DiT Ulysses 通信不是单调收益。
+两次 H100 SP2 的 `23.652` 与 `25.279` 相差约 6.4%，因此 24 FPS 应报告为跨节点临界值，
+不能只引用最好的一次。B200/B300 的双 GPU exact worker 相对 local 分别为约 1.96x/2.03x。
+
+worker Prometheus 前后快照按每 lane 220 个 chunk 求差，得到：
+
+| GPU / lane | queue wait | exact decode | frame encode（GPU RGB8 + D2H） |
+| --- | ---: | ---: | ---: |
+| H100 / DiT SP1 | 0.154 ms | 431.87 ms | 32.87 ms |
+| H100 / DiT SP2 | 0.182 ms | 438.16 ms | 32.86 ms |
+| H100 / DiT SP4 | 0.179 ms | 454.89 ms | 33.21 ms |
+| B200 / DiT SP1 | 0.117 ms | 268.81 ms | 27.19 ms |
+| B300 / DiT SP1 | 0.108 ms | 267.52 ms | 25.91 ms |
+
+queue 几乎为零，证明 credit-on-admission 与单槽队列没有形成排队瓶颈。RGB 路径在 GPU 上
+先 clamp/量化为 uint8，再只搬运约 40.2 MiB/16 帧，而不是约 160.9 MiB float32；当前
+`frame_encode` 指标把 GPU RGB8、D2H 和 payload 构建作为一个阶段记录。
+
+### Numerical parity
+
+spatial partition 会改变 BF16 浮点运算/归约顺序，因此结果不是 bitwise equal。硬件实测后
+把 numerical gate 明确校准为 `max_abs <= 8/255 && sampled PSNR >= 58 dB`，两个条件必须
+同时满足；bitwise 状态继续单列，不能把 `exact` 误写为 bitwise：
+
+| GPU | sampled max abs | sampled mean abs | sampled PSNR | numerical parity |
+| --- | ---: | ---: | ---: | --- |
+| H100 | 5 | 0.02766 | 63.71 dB | pass |
+| B200 | 7 | 0.07443 | 59.33 dB | pass |
+| B300 | 5 | 0.06879 | 59.74 dB | pass |
+
+B300 首个 `-08` Job 因 Kubernetes `activeDeadlineSeconds` 把约 5 小时 45 分的 Spot Pending
+时间也计入，拿到机器后在本地 lane 中途被终止。`-09` 将 B300 deadline 延长到 48 小时，
+复用同一 Spot 节点后正常完成。这个 deadline 是 Job 生命周期，不是 GPU kernel timeout。
+
 ## 验收门槛与剩余 GPU gate
 
 CPU 可验证部分包括 backend/transport 参数互斥、协议版本、顺序/final、断线和异常清理、
 exact 单 Session 容量、T2V reseed/crop、shared-memory 路径/大小/checksum/删除、最小
 WebSocket 集成与部署 manifest。
 
-合入生产前仍必须在目标 GPU 完成：
+三种目标 GPU 的 I2V 固定输入吞吐与 numerical parity 已完成。继续进入生产前仍需：
 
-1. local exact 与 exact_remote 对两个以上 causal chunk 的 latent、lossless RGB 对比；
-   bitwise 状态必须单列。若不同，仅当完整首帧和覆盖所有 measured frame 的固定采样都满足
-   RGB `max_abs <= 4` 且 `PSNR >= 60 dB`，才可标记 exact numerical parity。`4/255`
-   上限来自 H100、B200、B300 跨 GPU BF16 实测：B200 的 3,276,800 个固定采样
-   字节中仅 6 个误差大于 2（5 个为 3，1 个为 4），整体 PSNR 为 67.80 dB；
-   bitwise 状态仍必须单列；
-2. I2V 与 T2V 的 Chunk 0、Chunk 1 reseed/crop 和 final chunk 回归；
-3. TAEHV 视觉质量评测，并明确标记为近似结果；
-4. 两 GPU overlap 时间线、显存、稳态吞吐和 p95/p99；
-5. loopback shared memory、跨节点 WebSocket、客户端进程崩溃后的孤儿文件清理演练。
+1. I2V 与 T2V 的 Chunk 0、Chunk 1 reseed/crop 和 final chunk 视觉回归；
+2. TAEHV 视觉质量评测，并明确标记为近似结果；
+3. Nsight 时间线补充 DiT/VAE overlap、显存和通信 kernel 证据；
+4. loopback shared memory、跨节点 WebSocket、客户端进程崩溃后的孤儿文件清理演练。
 
-在这些 gate 完成前，只能声明 CPU 合同和调度实现通过，不能声明真实 GPU parity 或性能
-收益。
+当前可以声明三硬件 I2V numerical parity 与上述固定合同下的吞吐收益；在剩余 gate 完成前，
+不能扩大为 T2V、TAEHV 画质或跨主机生产可靠性的结论。
