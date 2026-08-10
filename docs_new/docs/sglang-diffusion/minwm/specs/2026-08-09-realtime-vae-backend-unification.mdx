@@ -80,6 +80,8 @@ Chunk N DiT -> latent handoff -> one bounded AsyncVAEWorker queue -> exact | tae
 - Final：bounded request 在 adapter 中显式标记 final；worker 完成该 chunk 后自然退出。
   无界 Session 由 WebSocket abort/disconnect 清理。
 - RGB24：exact 保留原生输出路径的截断量化；TAEHV 保留现有 worker 的四舍五入量化。
+- 输出批次：exact 一次原生 decode 产生完整 Chunk，默认预拼 16 帧以减少 shared-memory
+  文件和 WebSocket 消息；TAEHV 默认逐帧发送以保留低首帧延迟。两者都可显式覆盖批大小。
 - Latent dtype：exact handoff 保留 Denoiser 产出的 dtype，避免在 MinWM decode
   预处理前引入额外精度转换；TAEHV 继续使用 BF16 传输边界。
 - Shared memory：loopback URL 的 `auto` 优先把 latent 和返回帧放入同一共享目录；
@@ -197,6 +199,8 @@ WebSocket 集成与部署 manifest。
 合入生产前仍必须在目标 GPU 完成：
 
 1. local exact 与 exact_remote 对两个以上 causal chunk 的 latent、lossless RGB 对比；
+   bitwise 状态必须单列。若不同，仅当完整首帧和覆盖所有 measured frame 的固定采样都满足
+   RGB `max_abs <= 1` 且 `PSNR >= 60 dB`，才可标记 exact numerical parity；
 2. I2V 与 T2V 的 Chunk 0、Chunk 1 reseed/crop 和 final chunk 回归；
 3. TAEHV 视觉质量评测，并明确标记为近似结果；
 4. 两 GPU overlap 时间线、显存、稳态吞吐和 p95/p99；

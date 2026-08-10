@@ -98,6 +98,7 @@ def create_app(
                 ),
                 "active_sessions": worker.active_sessions,
                 "max_sessions": worker.max_sessions,
+                "encoded_frames_per_batch": worker.encoded_frames_per_batch,
             }
         )
 
@@ -485,7 +486,7 @@ def _add_worker_cli_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--dtype", choices=("bfloat16", "float16"), default="bfloat16")
     parser.add_argument("--max-sessions", type=int)
     parser.add_argument("--queue-depth-per-session", type=int, default=1)
-    parser.add_argument("--encoded-frames-per-batch", type=int, default=1)
+    parser.add_argument("--encoded-frames-per-batch", type=int)
     parser.add_argument("--max-message-mb", type=int, default=64)
     parser.add_argument("--shared-memory-dir")
     parser.add_argument("--worker-epoch")
@@ -521,6 +522,14 @@ def _parse_worker_args(argv: list[str] | None):
     return raw_args, server_args
 
 
+def _resolve_encoded_frames_per_batch(args) -> int:
+    if args.encoded_frames_per_batch is not None:
+        if args.encoded_frames_per_batch < 1:
+            raise ValueError("--encoded-frames-per-batch must be positive")
+        return args.encoded_frames_per_batch
+    return 16 if args.decoder_backend == "exact" else 1
+
+
 def main(argv: list[str] | None = None) -> None:
     logging.basicConfig(level=logging.INFO)
     args, exact_server_args = _parse_worker_args(argv)
@@ -551,7 +560,7 @@ def main(argv: list[str] | None = None) -> None:
         engine,
         max_sessions=max_sessions,
         queue_depth_per_session=args.queue_depth_per_session,
-        encoded_frames_per_batch=args.encoded_frames_per_batch,
+        encoded_frames_per_batch=_resolve_encoded_frames_per_batch(args),
     )
     reservations = WorkerReservationRegistry(
         worker_epoch=resolve_worker_epoch(args.worker_epoch),

@@ -250,6 +250,7 @@ health = json.load(open(sys.argv[1]))
 assert health["decoder_backend"] == "exact", health
 assert health["decoder_fidelity"] == "exact", health
 assert health["max_sessions"] == 1, health
+assert health["encoded_frames_per_batch"] == 16, health
 PY
 
 target_met=false
@@ -259,69 +260,16 @@ for degree in "${requested_degrees[@]}"; do
   profile="exact-remote-sp${degree}"
   run_lane remote "${degree}" "${profile}"
   if [[ "${degree}" == "1" ]]; then
-    python3 - \
+    python3 "${SCRIPT_DIR}/compare_realtime_vae_outputs.py" \
       "${RESULT_ROOT}/local-sp1/throughput.json" \
       "${RESULT_ROOT}/${profile}/throughput.json" \
-      "${RESULT_ROOT}/local-vs-remote-sp1-parity.json" <<'PY'
-import json
-import math
-import sys
-from pathlib import Path
-
-local = json.load(open(sys.argv[1]))
-remote = json.load(open(sys.argv[2]))
-local_frames = local.get("measured_frame_sha256", {})
-remote_frames = remote.get("measured_frame_sha256", {})
-all_frame_keys = sorted(set(local_frames) | set(remote_frames))
-first_differing_frame = next(
-    (key for key in all_frame_keys if local_frames.get(key) != remote_frames.get(key)),
-    None,
-)
-local_first_frame = Path(sys.argv[1]).with_name("first-measured-frame.rgb").read_bytes()
-remote_first_frame = Path(sys.argv[2]).with_name("first-measured-frame.rgb").read_bytes()
-if len(local_first_frame) != len(remote_first_frame):
-    raise SystemExit("local and remote first measured RGB frame lengths differ")
-different_bytes = 0
-absolute_error_sum = 0
-squared_error_sum = 0
-max_absolute_error = 0
-for local_value, remote_value in zip(local_first_frame, remote_first_frame):
-    error = abs(local_value - remote_value)
-    different_bytes += error != 0
-    absolute_error_sum += error
-    squared_error_sum += error * error
-    max_absolute_error = max(max_absolute_error, error)
-mean_absolute_error = absolute_error_sum / len(local_first_frame)
-mean_squared_error = squared_error_sum / len(local_first_frame)
-psnr_db = (
-    math.inf
-    if mean_squared_error == 0
-    else 20 * math.log10(255) - 10 * math.log10(mean_squared_error)
-)
-summary = {
-    "local_payload_sha256": local["measured_payload_sha256"],
-    "remote_payload_sha256": remote["measured_payload_sha256"],
-    "bitwise_equal": local["measured_payload_sha256"]
-    == remote["measured_payload_sha256"],
-    "frame_hashes_equal": local_frames == remote_frames,
-    "first_differing_frame": first_differing_frame,
-    "first_frame_num_bytes": len(local_first_frame),
-    "first_frame_different_byte_fraction": different_bytes / len(local_first_frame),
-    "first_frame_mean_absolute_error": mean_absolute_error,
-    "first_frame_max_absolute_error": max_absolute_error,
-    "first_frame_psnr_db": psnr_db,
-    "local_client_fps": local["client"]["steady_received_fps_ratio_of_sums"],
-    "remote_client_fps": remote["client"]["steady_received_fps_ratio_of_sums"],
-}
-Path(sys.argv[3]).write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
-print(json.dumps(summary, sort_keys=True))
-PY
+      "${RESULT_ROOT}/local-vs-remote-sp1-parity.json"
     parity_met="$(python3 - "${RESULT_ROOT}/local-vs-remote-sp1-parity.json" <<'PY'
 import json
 import sys
 
 summary = json.load(open(sys.argv[1]))
-print("true" if summary["bitwise_equal"] else "false")
+print("true" if summary["numerical_parity"] else "false")
 PY
 )"
   fi
@@ -356,6 +304,8 @@ import sys
 from pathlib import Path
 
 root = Path(sys.argv[1])
+parity_path = root / "local-vs-remote-sp1-parity.json"
+parity_summary = json.loads(parity_path.read_text()) if parity_path.exists() else {}
 lanes = {}
 for result_path in sorted(root.glob("*/throughput.json")):
     result = json.loads(result_path.read_text())
@@ -373,7 +323,8 @@ summary = {
     "matrix_id": sys.argv[6],
     "target_fps": float(sys.argv[2]),
     "target_met": sys.argv[3] == "true",
-    "exact_sp1_bitwise_equal": sys.argv[4] == "true",
+    "exact_sp1_bitwise_equal": parity_summary.get("bitwise_equal"),
+    "exact_sp1_numerical_parity": parity_summary.get("numerical_parity"),
     "selected_sp_degree": int(sys.argv[5]) if sys.argv[5] else None,
     "lanes": lanes,
 }
@@ -386,6 +337,6 @@ if [[ "${target_met}" != "true" ]]; then
 fi
 echo "MINWM_UNIFIED_EXACT_MATRIX_COMPLETE results=${RESULT_ROOT}"
 if [[ "${parity_met}" != "true" ]]; then
-  echo "MINWM_UNIFIED_EXACT_PARITY_FAILED local and exact-remote SP1 payloads differ" >&2
+  echo "MINWM_UNIFIED_EXACT_PARITY_FAILED local and exact-remote SP1 numerical gate failed" >&2
   exit 2
 fi

@@ -158,6 +158,31 @@ def test_unified_worker_cli_selects_one_exact_backend(monkeypatch):
     assert server_args is parsed_server_args
 
 
+@pytest.mark.parametrize(
+    ("backend", "configured", "expected"),
+    [
+        ("exact", None, 16),
+        ("taehv", None, 1),
+        ("exact", 4, 4),
+        ("taehv", 4, 4),
+    ],
+)
+def test_worker_frame_batch_default_is_backend_aware(backend, configured, expected):
+    args = SimpleNamespace(
+        decoder_backend=backend,
+        encoded_frames_per_batch=configured,
+    )
+
+    assert realtime_vae_server._resolve_encoded_frames_per_batch(args) == expected
+
+
+def test_worker_rejects_nonpositive_frame_batch_size():
+    args = SimpleNamespace(decoder_backend="exact", encoded_frames_per_batch=0)
+
+    with pytest.raises(ValueError, match="must be positive"):
+        realtime_vae_server._resolve_encoded_frames_per_batch(args)
+
+
 def test_exact_worker_rejects_multi_session_capacity():
     with pytest.raises(ValueError, match="at most 1 active session"):
         AsyncVAEWorker(_ExactLikeEngine(), max_sessions=2)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import json
 import sys
 from pathlib import Path
 
@@ -20,6 +21,7 @@ from common import (  # noqa: E402
     load_cases,
     materialize_first_frame,
 )
+from compare_realtime_vae_outputs import compare_results  # noqa: E402
 
 DRAGON_CASES = Path(__file__).with_name("cases_dragon_ride_60s_832x480.json")
 STEP1600_T2V_CASES = Path(__file__).with_name("cases_step1600_t2v_30s_832x480.json")
@@ -61,6 +63,47 @@ def test_spot_matrix_python_heredocs_execute_standard_input() -> None:
     assert heredoc_invocations
     for invocation in heredoc_invocations:
         assert "python3 -" in invocation[0], "\n".join(invocation)
+
+
+def test_exact_vae_numerical_gate_keeps_bitwise_status_separate(tmp_path) -> None:
+    local_dir = tmp_path / "local"
+    remote_dir = tmp_path / "remote"
+    local_dir.mkdir()
+    remote_dir.mkdir()
+    base = {
+        "measured_payload_sha256": "local",
+        "measured_frame_sha256": {"20:0": "local"},
+        "measured_frame_samples_base64": {"20:0": "AAECAw=="},
+        "client": {"steady_received_fps_ratio_of_sums": 20.0},
+    }
+    (local_dir / "throughput.json").write_text(json.dumps(base))
+    remote = {
+        **base,
+        "measured_payload_sha256": "remote",
+        "measured_frame_sha256": {"20:0": "remote"},
+        "measured_frame_samples_base64": {"20:0": "AQIDBA=="},
+        "client": {"steady_received_fps_ratio_of_sums": 25.0},
+    }
+    (remote_dir / "throughput.json").write_text(json.dumps(remote))
+    (local_dir / "first-measured-frame.rgb").write_bytes(bytes((0, 1, 2, 3)))
+    (remote_dir / "first-measured-frame.rgb").write_bytes(bytes((1, 2, 3, 4)))
+
+    summary = compare_results(
+        local_dir / "throughput.json",
+        remote_dir / "throughput.json",
+        psnr_threshold_db=40.0,
+    )
+
+    assert summary["bitwise_equal"] is False
+    assert summary["numerical_parity"] is True
+    assert summary["first_frame_max_absolute_error"] == 1
+
+    (remote_dir / "first-measured-frame.rgb").write_bytes(bytes((2, 3, 4, 5)))
+    assert not compare_results(
+        local_dir / "throughput.json",
+        remote_dir / "throughput.json",
+        psnr_threshold_db=40.0,
+    )["numerical_parity"]
 
 
 def test_streamed_frame_batch_completes_unknown_count_from_frame_contract() -> None:

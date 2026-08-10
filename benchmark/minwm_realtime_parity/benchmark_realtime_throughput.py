@@ -225,6 +225,7 @@ async def receive_run(args: argparse.Namespace, contract: dict, case: dict) -> d
     frame_batches_by_chunk: dict[int, dict[str, Any]] = {}
     measured_payload_sha256 = hashlib.sha256()
     measured_frame_sha256: dict[str, str] = {}
+    measured_frame_samples: dict[str, str] = {}
     measured_payload_samples: dict[str, str] = {}
     first_measured_frame_saved = False
     init_started_ns = time.perf_counter_ns()
@@ -284,6 +285,10 @@ async def receive_run(args: argparse.Namespace, contract: dict, case: dict) -> d
                     frame = payload[start : start + bytes_per_frame]
                     frame_key = f"{chunk_index}:{first_frame_index + frame_offset}"
                     measured_frame_sha256[frame_key] = hashlib.sha256(frame).hexdigest()
+                    frame_sample_stride = max(1, len(frame) // 1024)
+                    measured_frame_samples[frame_key] = base64.b64encode(
+                        frame[::frame_sample_stride][:1024]
+                    ).decode("ascii")
                     if (
                         args.save_first_measured_frame
                         and not first_measured_frame_saved
@@ -382,6 +387,7 @@ async def receive_run(args: argparse.Namespace, contract: dict, case: dict) -> d
         "measured_frames": measured_frames,
         "measured_payload_sha256": measured_payload_sha256.hexdigest(),
         "measured_frame_sha256": measured_frame_sha256,
+        "measured_frame_samples_base64": measured_frame_samples,
         "measured_payload_samples_base64": measured_payload_samples,
         "server": server,
         "client": {
