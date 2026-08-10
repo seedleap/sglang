@@ -145,13 +145,22 @@ def create_app(
                         output_url=message.get("output_url"),
                         output_token=message.get("output_token"),
                     )
-                    if reservation_registry is not None:
-                        reservation_token = str(message.get("coordinator_token") or "")
+                    coordinator_token = message.get("coordinator_token")
+                    worker_epoch = message.get("worker_epoch")
+                    if reservation_registry is not None and (
+                        coordinator_token or worker_epoch
+                    ):
+                        if not coordinator_token or not worker_epoch:
+                            raise ProtocolViolation(
+                                "coordinator_token and worker_epoch must be "
+                                "provided together"
+                            )
+                        reservation_token = str(coordinator_token)
                         await reservation_registry.consume(
                             reservation_token,
                             session_id=opened.session_id,
                             generation_id=opened.generation_id,
-                            worker_epoch=str(message.get("worker_epoch") or ""),
+                            worker_epoch=str(worker_epoch),
                             owner_id=reservation_owner,
                         )
                         reservation_consumed = True

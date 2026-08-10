@@ -193,6 +193,85 @@ def test_vae_session_open_consumes_and_close_releases_reservation():
         assert client.get("/v1/realtime_worker/state").json()["active_sessions"] == 0
 
 
+def test_vae_session_open_without_gateway_credentials_skips_reservation():
+    class Engine:
+        backend = "taehv"
+
+        @staticmethod
+        def create_decoder(_identity):
+            return SimpleNamespace(reset=lambda: None)
+
+    registry = WorkerReservationRegistry(worker_epoch="epoch-a", capacity=1)
+    app = create_app(
+        AsyncVAEWorker(Engine(), max_sessions=1),
+        max_message_bytes=1024 * 1024,
+        reservation_registry=registry,
+    )
+
+    with TestClient(app) as client:
+        with client.websocket_connect("/v1/realtime_vae/decode") as websocket:
+            websocket.send_bytes(
+                encode_message(
+                    "session_open",
+                    session_id="session-a",
+                    generation_id="generation-a",
+                    decoder_backend="taehv",
+                    coordinator_token=None,
+                    worker_epoch=None,
+                    output_format="webp",
+                    quality=90,
+                )
+            )
+            assert decode_message(websocket.receive_bytes())["type"] == (
+                "session_accepted"
+            )
+            state = client.get("/v1/realtime_worker/state").json()
+            assert client.get("/health").json()["active_sessions"] == 1
+            assert state["active_sessions"] == 0
+            assert state["reserved_sessions"] == 0
+        assert client.get("/v1/realtime_worker/state").json()["active_sessions"] == 0
+
+
+@pytest.mark.parametrize(
+    ("coordinator_token", "worker_epoch"),
+    [("token-a", None), (None, "epoch-a")],
+)
+def test_vae_session_open_rejects_partial_gateway_credentials(
+    coordinator_token, worker_epoch
+):
+    class Engine:
+        backend = "taehv"
+
+        @staticmethod
+        def create_decoder(_identity):
+            return SimpleNamespace(reset=lambda: None)
+
+    registry = WorkerReservationRegistry(worker_epoch="epoch-a", capacity=1)
+    app = create_app(
+        AsyncVAEWorker(Engine(), max_sessions=1),
+        max_message_bytes=1024 * 1024,
+        reservation_registry=registry,
+    )
+
+    with TestClient(app) as client:
+        with client.websocket_connect("/v1/realtime_vae/decode") as websocket:
+            websocket.send_bytes(
+                encode_message(
+                    "session_open",
+                    session_id="session-a",
+                    generation_id="generation-a",
+                    decoder_backend="taehv",
+                    coordinator_token=coordinator_token,
+                    worker_epoch=worker_epoch,
+                    output_format="webp",
+                    quality=90,
+                )
+            )
+            error = decode_message(websocket.receive_bytes())
+            assert error["type"] == "error"
+            assert "must be provided together" in error["message"]
+
+
 def test_vae_replay_connection_cannot_release_the_original_session():
     class Engine:
         backend = "taehv"
