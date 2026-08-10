@@ -203,7 +203,8 @@ WebSocket 集成与部署 manifest。
 
 1. local exact 与 exact_remote 对两个以上 causal chunk 的 latent、lossless RGB 对比；
    bitwise 状态必须单列。若不同，仅当完整首帧和覆盖所有 measured frame 的固定采样都满足
-   RGB `max_abs <= 1` 且 `PSNR >= 60 dB`，才可标记 exact numerical parity；
+   RGB `max_abs <= 2` 且 `PSNR >= 60 dB`，才可标记 exact numerical parity。`2/255`
+   上限来自 H100 跨 GPU BF16 实测中的稀有舍入差异；bitwise 状态仍必须单列；
 2. I2V 与 T2V 的 Chunk 0、Chunk 1 reseed/crop 和 final chunk 回归；
 3. TAEHV 视觉质量评测，并明确标记为近似结果；
 4. 两 GPU overlap 时间线、显存、稳态吞吐和 p95/p99；

@@ -90,6 +90,17 @@ class _SynchronousBlockingEngine(_FakeEngine):
         return torch.zeros((1, 3, latents.shape[2], 8, 8), dtype=torch.float32)
 
 
+class _SynchronousStreamingBlockingEngine(_SynchronousBlockingEngine):
+    def iter_decode(self, decoder, latents, *, first_chunk):
+        self.started.set()
+        self.release.wait(timeout=2)
+        self.calls.append((decoder, latents.clone(), first_chunk))
+        yield torch.zeros(
+            (1, 3, latents.shape[2], 8, 8),
+            dtype=torch.float32,
+        )
+
+
 def test_taehv_engine_warmup_runs_a_production_shape_decode(monkeypatch):
     engine = TAEHVEngine.__new__(TAEHVEngine)
     engine.device = torch.device("cpu")
@@ -210,9 +221,13 @@ def test_worker_keeps_decoder_state_per_generation():
     asyncio.run(scenario())
 
 
-def test_worker_keeps_event_loop_responsive_during_synchronous_decode():
+@pytest.mark.parametrize(
+    "engine_type",
+    [_SynchronousBlockingEngine, _SynchronousStreamingBlockingEngine],
+)
+def test_worker_keeps_event_loop_responsive_during_synchronous_decode(engine_type):
     async def scenario():
-        engine = _SynchronousBlockingEngine()
+        engine = engine_type()
         worker = AsyncVAEWorker(engine, max_sessions=1)
         await worker.open(SessionOpen("s1", "g1"))
         result = await worker.submit(

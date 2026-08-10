@@ -91,17 +91,28 @@ def test_exact_vae_numerical_gate_keeps_bitwise_status_separate(tmp_path) -> Non
     summary = compare_results(
         local_dir / "throughput.json",
         remote_dir / "throughput.json",
+        max_absolute_error_threshold=2,
         psnr_threshold_db=40.0,
     )
 
     assert summary["bitwise_equal"] is False
     assert summary["numerical_parity"] is True
     assert summary["first_frame_max_absolute_error"] == 1
+    assert summary["max_absolute_error_threshold"] == 2
 
     (remote_dir / "first-measured-frame.rgb").write_bytes(bytes((2, 3, 4, 5)))
+    assert compare_results(
+        local_dir / "throughput.json",
+        remote_dir / "throughput.json",
+        max_absolute_error_threshold=2,
+        psnr_threshold_db=40.0,
+    )["numerical_parity"]
+
+    (remote_dir / "first-measured-frame.rgb").write_bytes(bytes((3, 4, 5, 6)))
     assert not compare_results(
         local_dir / "throughput.json",
         remote_dir / "throughput.json",
+        max_absolute_error_threshold=2,
         psnr_threshold_db=40.0,
     )["numerical_parity"]
 

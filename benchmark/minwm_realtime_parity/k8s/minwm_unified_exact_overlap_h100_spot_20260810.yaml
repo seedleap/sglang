@@ -1,18 +1,18 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: minwm-unified-exact-overlap-h100-20260810-05
+  name: minwm-unified-exact-overlap-h100-20260810-07
   namespace: ray
   labels:
-    app.kubernetes.io/name: minwm-unified-exact-overlap-h100-20260810-05
+    app.kubernetes.io/name: minwm-unified-exact-overlap-h100-20260810-07
     seedleap.ai/owner: chenshengdong
     seedleap.ai/task: minwm-unified-exact-overlap
-    seedleap.ai/run-id: minwm-unified-exact-overlap-h100-20260810-05
+    seedleap.ai/run-id: minwm-unified-exact-overlap-h100-20260810-07
   annotations:
     seedleap.ai/capacity-type: spot
     seedleap.ai/repo: seedleap/sglang
     seedleap.ai/branch: codex/unified-realtime-vae-overlap
-    seedleap.ai/sglang-git-ref: &sglang_ref "79517ae67c56c2e69a44a46a4230ff7dd7c65e6a"
+    seedleap.ai/sglang-git-ref: &sglang_ref "cdb496a58126a51987ebdddc5d31ddf25683d16f"
     seedleap.ai/minwm-git-ref: &minwm_ref "2efc6485f65e8fcab506665efde79bc41406385e"
     seedleap.ai/checkpoint-version-id: "wduScksw2f3yPErnG9lBioOuE2AToyAP"
 spec:
@@ -21,10 +21,10 @@ spec:
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: minwm-unified-exact-overlap-h100-20260810-05
+        app.kubernetes.io/name: minwm-unified-exact-overlap-h100-20260810-07
         seedleap.ai/owner: chenshengdong
         seedleap.ai/task: minwm-unified-exact-overlap
-        seedleap.ai/run-id: minwm-unified-exact-overlap-h100-20260810-05
+        seedleap.ai/run-id: minwm-unified-exact-overlap-h100-20260810-07
       annotations:
         seedleap.ai/repo: seedleap/sglang
         seedleap.ai/branch: codex/unified-realtime-vae-overlap
@@ -63,7 +63,7 @@ spec:
             - name: MINWM_GIT_REF
               value: *minwm_ref
             - name: MINWM_MATRIX_ID
-              value: minwm-unified-exact-overlap-h100-20260810-05
+              value: minwm-unified-exact-overlap-h100-20260810-07
             - name: MINWM_EXPECTED_GPU_SUBSTRING
               value: H100
             - name: MINWM_TARGET_FPS
