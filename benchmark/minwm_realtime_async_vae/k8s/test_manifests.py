@@ -3,9 +3,7 @@ import sys
 from pathlib import Path
 
 import yaml
-
 from validate_manifests import find, load_documents, requirement_values, validate
-
 
 ROOT = Path(__file__).parent
 
@@ -129,9 +127,7 @@ def test_vae_deployment_can_land_on_either_l4_or_l40s_pool():
 
 
 def test_vae_pipeline_keeps_one_waiting_latent_and_sends_low_latency_batches():
-    deployment = find(
-        load_documents(("l4-vae.yaml",)), "Deployment", "minwm-async-vae"
-    )
+    deployment = find(load_documents(("l4-vae.yaml",)), "Deployment", "minwm-async-vae")
     args = _container(deployment, "vae")["args"]
     assert "--queue-depth-per-session=1" in args
     assert "--encoded-frames-per-batch=1" in args
@@ -176,9 +172,7 @@ def test_gpu_workers_publish_epoch_state_and_drain_before_termination():
             in heartbeat_command
         )
 
-        drain_command = " ".join(
-            worker["lifecycle"]["preStop"]["exec"]["command"]
-        )
+        drain_command = " ".join(worker["lifecycle"]["preStop"]["exec"]["command"])
         assert f"http://127.0.0.1:{port}/v1/realtime_worker/drain" in drain_command
         assert '\\"deadline\\"' in drain_command
 
@@ -201,8 +195,16 @@ def test_denoiser_enables_dynamic_remote_vae_handoff_without_a_static_worker_url
     )
     command = " ".join(_container(workload, "denoiser")["args"])
 
-    assert "--realtime-remote-vae-enabled" in command
+    assert "--realtime-vae-backend taehv_remote" in command
     assert "--realtime-vae-worker-url" not in command
+
+    vae = find(
+        load_documents(("l4-vae.yaml",)),
+        "Deployment",
+        "minwm-async-vae",
+    )
+    vae_args = " ".join(_container(vae, "vae")["args"])
+    assert "--decoder-backend=taehv" in vae_args
 
 
 def test_wan22_5b_uses_the_matching_taehv_checkpoint():
@@ -240,9 +242,7 @@ def test_west_model_artifact_uses_a_matching_read_only_s3_mount():
     container = pod_spec["containers"][0]
     stager = pod_spec["initContainers"][0]
     model = next(
-        entry["value"]
-        for entry in container["env"]
-        if entry["name"] == "MINWM_MODEL"
+        entry["value"] for entry in container["env"] if entry["name"] == "MINWM_MODEL"
     )
     assert model.startswith("/model-cache/")
     assert any(
@@ -307,7 +307,9 @@ def test_model_is_staged_once_per_spot_node_before_workers_mmap_it():
     assert "cp -av" in command
     assert ".staging.$$" in command
     assert 'mv "${staging}" "${CACHED_MODEL}"' in command
-    cache = next(volume for volume in pod_spec["volumes"] if volume["name"] == "model-cache")
+    cache = next(
+        volume for volume in pod_spec["volumes"] if volume["name"] == "model-cache"
+    )
     assert cache["hostPath"] == {
         "path": "/var/lib/minwm-model-cache",
         "type": "DirectoryOrCreate",
@@ -378,23 +380,19 @@ def test_denoiser_restarts_as_one_batch_with_two_bounded_cold_load_slots():
     denoiser = _container(workload, "denoiser")
     command = " ".join(denoiser["args"])
 
-    assert 'slot=$((ordinal % DENOISER_STARTUP_PARALLELISM))' in command
-    assert 'denoiser-${slot}.lock' in command
+    assert "slot=$((ordinal % DENOISER_STARTUP_PARALLELISM))" in command
+    assert "denoiser-${slot}.lock" in command
     assert "flock -x 9" in command
     assert "flock -u 9" in command
     assert "python3 -m sglang.multimodal_gen.runtime.launch_server" in command
     env = {item["name"]: item for item in denoiser["env"]}
     assert env["DENOISER_STARTUP_PARALLELISM"]["value"] == "2"
-    assert env["POD_NAME"]["valueFrom"]["fieldRef"]["fieldPath"] == (
-        "metadata.name"
-    )
+    assert env["POD_NAME"]["valueFrom"]["fieldRef"]["fieldPath"] == ("metadata.name")
     assert denoiser["startupProbe"]["httpGet"] == {
         "path": "/health",
         "port": "api",
     }
-    assert any(
-        mount["name"] == "startup-lock" for mount in denoiser["volumeMounts"]
-    )
+    assert any(mount["name"] == "startup-lock" for mount in denoiser["volumeMounts"])
     lock_volume = next(
         volume for volume in pod_spec["volumes"] if volume["name"] == "startup-lock"
     )
@@ -484,7 +482,7 @@ def test_gpu_pools_have_independent_bounded_scheduled_elasticity():
             "resources": ["statefulsets/scale"],
             "resourceNames": ["minwm-async-denoiser"],
             "verbs": ["get", "patch", "update"],
-        }
+        },
     ]
 
     scale_up = find(documents, "CronJob", "minwm-realtime-gpu-scale-up")
@@ -494,9 +492,7 @@ def test_gpu_pools_have_independent_bounded_scheduled_elasticity():
     assert scale_up["spec"]["timeZone"] == "REPLACE_WITH_GPU_SCALE_TIME_ZONE"
     assert scale_down["spec"]["timeZone"] == "REPLACE_WITH_GPU_SCALE_TIME_ZONE"
 
-    up_command = " ".join(
-        _container(scale_up["spec"]["jobTemplate"], "scaler")["args"]
-    )
+    up_command = " ".join(_container(scale_up["spec"]["jobTemplate"], "scaler")["args"])
     down_command = " ".join(
         _container(scale_down["spec"]["jobTemplate"], "scaler")["args"]
     )
@@ -524,9 +520,7 @@ def test_gpu_pools_have_independent_bounded_scheduled_elasticity():
 
 def test_capacity_scaler_uses_the_shared_coordinator_snapshot():
     documents = load_documents(("gpu-capacity-scaler.yaml",))
-    deployment = find(
-        documents, "Deployment", "minwm-realtime-gpu-capacity-scaler"
-    )
+    deployment = find(documents, "Deployment", "minwm-realtime-gpu-capacity-scaler")
     assert deployment["spec"]["replicas"] == "REPLACE_WITH_GPU_EVENT_SCALER_REPLICAS"
     container = _container(deployment, "scaler")
     args = " ".join(container["args"])
@@ -598,9 +592,7 @@ def test_role_image_build_requires_digest_pinned_bases_and_precreated_ecr():
 
 
 def test_gpu_code_overlay_reuses_the_prebuilt_dependency_runtime():
-    overlay = (
-        ROOT.parent / "docker" / "Dockerfile.gpu-code-overlay"
-    ).read_text()
+    overlay = (ROOT.parent / "docker" / "Dockerfile.gpu-code-overlay").read_text()
 
     assert "ARG GPU_RUNTIME_IMAGE" in overlay
     assert "FROM ${GPU_RUNTIME_IMAGE}" in overlay
@@ -609,9 +601,7 @@ def test_gpu_code_overlay_reuses_the_prebuilt_dependency_runtime():
 
 
 def test_cpu_code_overlay_reuses_the_prebuilt_dependency_runtime():
-    overlay = (
-        ROOT.parent / "docker" / "Dockerfile.cpu-code-overlay"
-    ).read_text()
+    overlay = (ROOT.parent / "docker" / "Dockerfile.cpu-code-overlay").read_text()
 
     assert "ARG CPU_RUNTIME_IMAGE" in overlay
     assert "FROM ${CPU_RUNTIME_IMAGE}" in overlay
@@ -674,9 +664,7 @@ def test_model_publisher_reads_the_versioned_east_checkpoint_and_west_donor():
 
 def test_model_publisher_has_a_dedicated_sized_ephemeral_node():
     documents = load_documents(("model-artifact-publisher.yaml",))
-    node_class = find(
-        documents, "EC2NodeClass", "minwm-model-artifact-publisher"
-    )
+    node_class = find(documents, "EC2NodeClass", "minwm-model-artifact-publisher")
     node_pool = find(documents, "NodePool", "minwm-model-artifact-publisher")
     mapping = node_class["spec"]["blockDeviceMappings"][0]["ebs"]
     assert mapping["volumeSize"] == "300Gi"
@@ -684,9 +672,7 @@ def test_model_publisher_has_a_dedicated_sized_ephemeral_node():
     assert node_pool["spec"]["template"]["spec"]["nodeClassRef"]["name"] == (
         "minwm-model-artifact-publisher"
     )
-    assert set(
-        requirement_values(node_pool, "node.kubernetes.io/instance-type")
-    ) == {
+    assert set(requirement_values(node_pool, "node.kubernetes.io/instance-type")) == {
         "r5.8xlarge",
         "r5a.8xlarge",
         "r6a.8xlarge",
@@ -738,11 +724,7 @@ def test_internal_worker_ports_are_restricted_by_network_policy():
     for name, port in expected.items():
         policy = find(documents, "NetworkPolicy", name)
         ingress = policy["spec"]["ingress"]
-        ports = [
-            item["port"]
-            for rule in ingress
-            for item in rule.get("ports", [])
-        ]
+        ports = [item["port"] for rule in ingress for item in rule.get("ports", [])]
         assert port in ports
 
     denoiser = find(documents, "NetworkPolicy", "minwm-async-denoiser")
@@ -765,9 +747,7 @@ def test_gateway_output_queue_absorbs_one_complete_frame_burst():
 
 def test_coordinator_candidate_window_covers_the_full_gpu_session_pool():
     documents = load_documents(("coordinator.yaml",))
-    coordinator = find(
-        documents, "Deployment", "minwm-realtime-coordinator"
-    )
+    coordinator = find(documents, "Deployment", "minwm-realtime-coordinator")
     command = " ".join(_container(coordinator, "coordinator")["args"])
 
     assert "--candidate-limit=64" in command
@@ -776,7 +756,13 @@ def test_coordinator_candidate_window_covers_the_full_gpu_session_pool():
 
 def test_trace_uses_otlp_and_cloudwatch_with_five_day_retention():
     documents = load_documents(
-        ("gateway.yaml", "coordinator.yaml", "h100-denoiser.yaml", "l4-vae.yaml", "observability.yaml")
+        (
+            "gateway.yaml",
+            "coordinator.yaml",
+            "h100-denoiser.yaml",
+            "l4-vae.yaml",
+            "observability.yaml",
+        )
     )
     collector = find(documents, "Deployment", "minwm-realtime-adot")
     assert collector["spec"]["replicas"] == 2
@@ -804,12 +790,18 @@ def test_production_deploy_waits_for_every_rollout_and_restores_exact_snapshot()
     deploy_script = (ROOT.parent / "deploy_production.sh").read_text()
 
     assert "restart_statefulset_in_batches" in deploy_script
-    assert 'DENOISER_RESTART_BATCH_SIZE="${DENOISER_RESTART_BATCH_SIZE:-2}"' in deploy_script
+    assert (
+        'DENOISER_RESTART_BATCH_SIZE="${DENOISER_RESTART_BATCH_SIZE:-2}"'
+        in deploy_script
+    )
     assert "kubectl delete --namespace" in deploy_script
     assert "--wait=true" in deploy_script
     assert "--wait=false" not in deploy_script
 
-    assert "kubectl apply --server-side --force-conflicts --dry-run=server" in deploy_script
+    assert (
+        "kubectl apply --server-side --force-conflicts --dry-run=server"
+        in deploy_script
+    )
     assert "snapshot_workload" in deploy_script
     assert "restore_release_snapshot" in deploy_script
     assert "trap restore_release_snapshot ERR" in deploy_script
@@ -838,7 +830,7 @@ def test_production_deploy_waits_for_every_rollout_and_restores_exact_snapshot()
     assert release_apply in deploy_script
     assert deploy_script.index("RELEASE_APPLIED=1") < deploy_script.index(release_apply)
     assert 'NAMESPACE="minwm-realtime"' in deploy_script
-    assert '${NAMESPACE:-' not in deploy_script
+    assert "${NAMESPACE:-" not in deploy_script
 
 
 def test_production_preflight_validates_dynamodb_keys_index_and_ttl():

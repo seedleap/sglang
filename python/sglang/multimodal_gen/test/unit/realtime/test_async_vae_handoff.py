@@ -27,6 +27,7 @@ def _req(*, block_idx=3, image_latent=None):
         realtime_prompt_version=4,
         realtime_output_format="webp",
         realtime_preview_max_width=560,
+        extra={},
         trajectory_timesteps=None,
         trajectory_latents=None,
         rollout_trajectory_data=None,
@@ -34,11 +35,11 @@ def _req(*, block_idx=3, image_latent=None):
     )
 
 
-def test_handoff_returns_contiguous_bf16_latents_without_decoding():
+def test_taehv_handoff_returns_contiguous_bf16_latents_without_decoding():
     stage = object.__new__(RealtimeLatentHandoffStage)
     req = _req()
 
-    out = stage.forward(req, SimpleNamespace())
+    out = stage.forward(req, SimpleNamespace(realtime_vae_backend="taehv_remote"))
 
     assert out.output is None
     assert out.realtime_latents.dtype == torch.bfloat16
@@ -52,11 +53,22 @@ def test_handoff_returns_contiguous_bf16_latents_without_decoding():
         "action_version": 8,
         "prompt_version": 4,
         "has_reference": False,
+        "is_final_chunk": False,
         "generated_latent_frames": 2,
         "output_format": "webp",
         "preview_max_width": 560,
     }
     assert out.metrics is req.metrics
+
+
+def test_exact_handoff_preserves_latent_dtype_without_decoding():
+    stage = object.__new__(RealtimeLatentHandoffStage)
+    req = _req()
+
+    out = stage.forward(req, SimpleNamespace(realtime_vae_backend="exact_remote"))
+
+    assert out.realtime_latents.dtype == req.latents.dtype
+    assert out.realtime_latents.is_contiguous()
 
 
 def test_handoff_prepends_i2v_reference_only_for_first_chunk():
@@ -65,8 +77,9 @@ def test_handoff_prepends_i2v_reference_only_for_first_chunk():
     first = _req(block_idx=0, image_latent=reference)
     later = _req(block_idx=1, image_latent=reference)
 
-    first_out = stage.forward(first, SimpleNamespace())
-    later_out = stage.forward(later, SimpleNamespace())
+    server_args = SimpleNamespace(realtime_vae_backend="exact_remote")
+    first_out = stage.forward(first, server_args)
+    later_out = stage.forward(later, server_args)
 
     assert first_out.realtime_latents.shape[2] == 3
     assert first_out.realtime_handoff["has_reference"] is True
@@ -74,22 +87,19 @@ def test_handoff_prepends_i2v_reference_only_for_first_chunk():
     assert later_out.realtime_handoff["has_reference"] is True
 
 
-def test_minwm_pipeline_remote_vae_is_feature_flagged():
+def test_minwm_pipeline_remote_vae_requires_an_explicit_backend():
     assert not _use_remote_realtime_vae(
         SimpleNamespace(
-            realtime_vae_worker_url=None,
-            realtime_remote_vae_enabled=False,
+            realtime_vae_backend="local",
         )
     )
     assert _use_remote_realtime_vae(
         SimpleNamespace(
-            realtime_vae_worker_url="ws://vae:18081/v1/realtime_vae/decode",
-            realtime_remote_vae_enabled=False,
+            realtime_vae_backend="exact_remote",
         )
     )
     assert _use_remote_realtime_vae(
         SimpleNamespace(
-            realtime_vae_worker_url=None,
-            realtime_remote_vae_enabled=True,
+            realtime_vae_backend="taehv_remote",
         )
     )

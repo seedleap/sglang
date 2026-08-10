@@ -6,6 +6,7 @@ import os
 import shutil
 import time
 from dataclasses import dataclass
+from functools import partial
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
@@ -53,6 +54,10 @@ from sglang.multimodal_gen.runtime.realtime.async_vae_client import (
 from sglang.multimodal_gen.runtime.realtime.worker_reservation import (
     WorkerReservationRegistry,
     WorkerReservationRejected,
+)
+from sglang.multimodal_gen.runtime.realtime_vae_config import (
+    uses_remote_vae,
+    worker_decoder_backend,
 )
 from sglang.multimodal_gen.runtime.scheduler_client import async_scheduler_client
 from sglang.multimodal_gen.runtime.server_args import get_global_server_args
@@ -572,8 +577,13 @@ def _log_realtime_chunk_timing(
 
 async def _generate_loop(ws: WebSocket, session: GenerateSession):
     server_args = get_global_server_args()
-    if session.vae_worker_url or getattr(server_args, "realtime_vae_worker_url", None):
+    deployment_backend = getattr(server_args, "realtime_vae_backend", "local")
+    if uses_remote_vae(deployment_backend):
         return await _generate_loop_async_vae(ws, session, server_args)
+    if session.vae_worker_url:
+        raise ValueError(
+            "Gateway supplied a remote VAE worker while realtime_vae_backend=local"
+        )
     return await _generate_loop_local(ws, session)
 
 
@@ -713,7 +723,7 @@ async def _complete_remote_chunk(
         "server.vae_decode_complete",
         **common,
         duration_ms=round(remote_result.decode_ms, 3),
-        source="remote_taehv",
+        source=f"remote_{getattr(session, 'vae_decoder_backend', None) or 'vae'}",
     )
     log_realtime_trace(
         logger,
@@ -790,16 +800,22 @@ async def _generate_loop_async_vae(ws, session: GenerateSession, server_args):
         vae_worker_url,
         session_id=session.id,
         generation_id=session.generation_id,
+        transport=server_args.realtime_vae_transport,
+        shared_memory_dir=server_args.realtime_vae_shared_memory_dir,
         timeout_s=server_args.realtime_vae_timeout_s,
         max_message_bytes=server_args.realtime_vae_max_message_mb * 1024 * 1024,
     )
     session.vae_client = client
+    session.vae_decoder_backend = worker_decoder_backend(
+        server_args.realtime_vae_backend
+    )
     output_format = session.request.realtime_output_format or "webp"
     quality = int(session.request.output_compression or 90)
     coordinator = _OrderedDecodeCoordinator()
 
     try:
         await client.open(
+            decoder_backend=session.vae_decoder_backend,
             output_format=output_format,
             quality=quality,
             preview_max_width=session.request.realtime_preview_max_width,
@@ -884,7 +900,8 @@ async def _generate_loop_async_vae(ws, session: GenerateSession, server_args):
             )
             result.realtime_latents = None
             await coordinator.submit(
-                lambda chunk=chunk, batch=batch, handle=handle, send_stats=send_stats, request_prepare_ms=request_prepare_ms, scheduler_forward_ms=scheduler_forward_ms, chunk_started=chunk_started, vae_started=vae_started: _complete_remote_chunk(
+                partial(
+                    _complete_remote_chunk,
                     ws,
                     session,
                     chunk,
@@ -915,6 +932,7 @@ async def _generate_loop_async_vae(ws, session: GenerateSession, server_args):
     finally:
         await client.close()
         session.vae_client = None
+        session.vae_decoder_backend = None
 
 
 async def _generate_loop_local(ws: WebSocket, session: GenerateSession):
