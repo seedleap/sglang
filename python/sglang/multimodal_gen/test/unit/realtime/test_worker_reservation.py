@@ -357,9 +357,7 @@ def test_vae_direct_output_sends_authoritative_media_completion(monkeypatch):
             _latents,
             *,
             on_frame_batch,
-            on_decode_started,
         ):
-            await on_decode_started()
             await on_frame_batch(
                 SimpleNamespace(
                     payloads=(b"webp",),

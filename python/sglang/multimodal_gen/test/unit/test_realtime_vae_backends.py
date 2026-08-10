@@ -326,3 +326,74 @@ def test_unified_exact_worker_shared_memory_final_chunk_round_trip(tmp_path):
             assert worker.active_sessions == 0
 
     assert engine.decoders[0].reset_calls >= 2
+
+
+def test_worker_grants_credit_when_chunk_is_queued():
+    class QueuedWorker:
+        active_sessions = 0
+        max_sessions = 1
+        decoder_backend = "exact"
+
+        async def open(self, _opened):
+            pass
+
+        async def submit(self, _header, _latents, *, on_frame_batch):
+            del on_frame_batch
+            future = asyncio.get_running_loop().create_future()
+
+            async def finish_later():
+                await asyncio.sleep(0)
+                future.set_result(
+                    SimpleNamespace(
+                        num_frames=0,
+                        queue_wait_ms=1.0,
+                        decode_ms=2.0,
+                        encode_ms=0.0,
+                    )
+                )
+
+            asyncio.create_task(finish_later())
+            return future
+
+        async def close(self, *_identity):
+            pass
+
+        async def close_all(self):
+            pass
+
+    app = create_app(QueuedWorker(), max_message_bytes=1024 * 1024)
+    latents = torch.zeros((1, 3, 1, 2, 2), dtype=torch.float32)
+    payload = latents.view(torch.uint8).numpy().tobytes()
+    header = LatentChunkHeader(
+        session_id="session",
+        generation_id="generation",
+        request_id="request-0",
+        chunk_index=0,
+        dtype="float32",
+        shape=tuple(latents.shape),
+        byte_length=len(payload),
+        checksum=checksum_payload(payload),
+    )
+
+    with TestClient(app) as client:
+        with client.websocket_connect("/v1/realtime_vae/decode") as socket:
+            socket.send_bytes(
+                encode_message(
+                    "session_open",
+                    session_id="session",
+                    generation_id="generation",
+                    decoder_backend="exact",
+                    output_format="raw",
+                )
+            )
+            assert decode_message(socket.receive_bytes())["type"] == "session_accepted"
+            socket.send_bytes(
+                encode_message(
+                    "latent_chunk",
+                    header=header,
+                    payload=payload,
+                )
+            )
+
+            assert decode_message(socket.receive_bytes())["type"] == "latent_accepted"
+            assert decode_message(socket.receive_bytes())["type"] == "chunk_complete"

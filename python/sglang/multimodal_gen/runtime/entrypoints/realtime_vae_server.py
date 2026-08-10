@@ -336,23 +336,20 @@ def create_app(
                         output_direct=output_client is not None,
                     )
 
-                async def on_decode_started(*, header=header):
-                    await send(
-                        encode_message(
-                            "latent_accepted",
-                            session_id=header.session_id,
-                            generation_id=header.generation_id,
-                            request_id=header.request_id,
-                            chunk_index=header.chunk_index,
-                            next_credit_chunk_index=header.chunk_index + 1,
-                        )
-                    )
-
                 future = await worker.submit(
                     header,
                     latents,
                     on_frame_batch=on_frame_batch,
-                    on_decode_started=on_decode_started,
+                )
+                await send(
+                    encode_message(
+                        "latent_accepted",
+                        session_id=header.session_id,
+                        generation_id=header.generation_id,
+                        request_id=header.request_id,
+                        chunk_index=header.chunk_index,
+                        next_credit_chunk_index=header.chunk_index + 1,
+                    )
                 )
 
                 async def finish_chunk(future=future, header=header):

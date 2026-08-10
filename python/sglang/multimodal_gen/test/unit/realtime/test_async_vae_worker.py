@@ -407,7 +407,7 @@ def test_worker_coalesces_streaming_yields_into_configured_transport_batch():
     asyncio.run(scenario())
 
 
-def test_worker_grants_next_credit_only_after_the_job_enters_decode():
+def test_worker_notifies_when_the_job_enters_decode():
     async def scenario():
         engine = _BlockingEngine()
         worker = AsyncVAEWorker(engine, max_sessions=1, queue_depth_per_session=2)
