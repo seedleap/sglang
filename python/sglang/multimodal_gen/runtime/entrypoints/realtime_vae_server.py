@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -99,6 +100,9 @@ def create_app(
                 "active_sessions": worker.active_sessions,
                 "max_sessions": worker.max_sessions,
                 "encoded_frames_per_batch": worker.encoded_frames_per_batch,
+                "decode_parallel_size": getattr(
+                    worker.engine, "decode_parallel_size", 1
+                ),
             }
         )
 
@@ -530,14 +534,97 @@ def _resolve_encoded_frames_per_batch(args) -> int:
     return 16 if args.decoder_backend == "exact" else 1
 
 
-def main(argv: list[str] | None = None) -> None:
-    logging.basicConfig(level=logging.INFO)
-    args, exact_server_args = _parse_worker_args(argv)
+def _distributed_launch_state() -> tuple[int, int, int]:
+    return (
+        int(os.environ.get("RANK", "0")),
+        int(os.environ.get("LOCAL_RANK", "0")),
+        int(os.environ.get("WORLD_SIZE", "1")),
+    )
+
+
+def _validate_exact_parallel_launch(server_args, world_size: int) -> None:
+    configured = int(getattr(server_args, "num_gpus", 1) or 1)
+    if configured != world_size:
+        if configured > 1 and world_size == 1:
+            raise ValueError(
+                "multi-GPU exact VAE must be launched with torchrun, for example "
+                "torchrun --standalone --nproc-per-node=2 ... --num-gpus 2"
+            )
+        raise ValueError(
+            f"exact VAE --num-gpus={configured} does not match "
+            f"torchrun WORLD_SIZE={world_size}"
+        )
+    if world_size == 1:
+        return
+
+    expected = {
+        "tp_size": 1,
+        "dp_size": 1,
+        "cfg_parallel_degree": 1,
+        "sp_degree": world_size,
+        "ulysses_degree": world_size,
+        "ring_degree": 1,
+    }
+    mismatches = {
+        name: (getattr(server_args, name, None), value)
+        for name, value in expected.items()
+        if getattr(server_args, name, None) != value
+    }
+    if mismatches:
+        details = ", ".join(
+            f"{name}={actual!r} (expected {expected_value})"
+            for name, (actual, expected_value) in mismatches.items()
+        )
+        raise ValueError(
+            "multi-GPU exact VAE requires one spatial decode group: " + details
+        )
+
+
+def _initialize_exact_parallel(server_args):
+    rank, local_rank, world_size = _distributed_launch_state()
+    _validate_exact_parallel_launch(server_args, world_size)
+    if world_size == 1:
+        return None
+
+    if not torch.cuda.is_available():
+        raise RuntimeError("multi-GPU exact VAE requires CUDA")
+    torch.cuda.set_device(local_rank)
+    from sglang.multimodal_gen.runtime.distributed import (
+        maybe_init_distributed_environment_and_model_parallel,
+    )
+    from sglang.multimodal_gen.runtime.realtime.exact_vae_backend import (
+        ExactVAEParallelController,
+    )
+
+    maybe_init_distributed_environment_and_model_parallel(
+        tp_size=1,
+        sp_size=world_size,
+        cfg_degree=1,
+        ulysses_degree=world_size,
+        ring_degree=1,
+        dp_size=1,
+        distributed_init_method="env://",
+        dist_timeout=server_args.dist_timeout,
+    )
+    return ExactVAEParallelController(
+        rank=rank,
+        world_size=world_size,
+        device=torch.device(f"cuda:{local_rank}"),
+    )
+
+
+def _run_worker(args, exact_server_args) -> None:
+    _, _, world_size = _distributed_launch_state()
 
     dtype = torch.bfloat16 if args.dtype == "bfloat16" else torch.float16
     if args.decoder_backend == "taehv":
+        if world_size != 1:
+            raise ValueError(
+                "taehv backend does not support torchrun multi-rank launch"
+            )
         engine = TAEHVEngine(args.checkpoint_path, device=args.device, dtype=dtype)
         max_sessions = args.max_sessions or 8
+        parallel_controller = None
     else:
         if args.max_sessions not in (None, 1):
             raise ValueError("exact backend requires --max-sessions=1")
@@ -547,15 +634,32 @@ def main(argv: list[str] | None = None) -> None:
         from sglang.multimodal_gen.runtime.server_args import set_global_server_args
 
         set_global_server_args(exact_server_args)
+        parallel_controller = _initialize_exact_parallel(exact_server_args)
         engine = ExactCausalVAEEngine(exact_server_args, args.vae_path)
+        if parallel_controller is not None:
+            engine.set_decode_parallel_size(parallel_controller.world_size)
         max_sessions = 1
     warmup_started = time.perf_counter()
+    if parallel_controller is not None:
+        torch.distributed.barrier()
     engine.warmup()
+    if parallel_controller is not None:
+        torch.distributed.barrier()
     logger.info(
         "%s startup warmup completed in %.1f ms",
         args.decoder_backend,
         (time.perf_counter() - warmup_started) * 1000,
     )
+    if parallel_controller is not None and not parallel_controller.is_driver:
+        from sglang.multimodal_gen.runtime.realtime.exact_vae_backend import (
+            run_exact_vae_follower,
+        )
+
+        run_exact_vae_follower(engine, parallel_controller)
+        return
+    if parallel_controller is not None:
+        engine.attach_parallel_driver(parallel_controller)
+
     worker = AsyncVAEWorker(
         engine,
         max_sessions=max_sessions,
@@ -572,7 +676,17 @@ def main(argv: list[str] | None = None) -> None:
         reservation_registry=reservations,
         shared_memory_dir=args.shared_memory_dir,
     )
-    uvicorn.run(app, host=args.host, port=args.port, log_level="info")
+    try:
+        uvicorn.run(app, host=args.host, port=args.port, log_level="info")
+    finally:
+        if parallel_controller is not None:
+            parallel_controller.send_stop()
+
+
+def main(argv: list[str] | None = None) -> None:
+    logging.basicConfig(level=logging.INFO)
+    args, exact_server_args = _parse_worker_args(argv)
+    _run_worker(args, exact_server_args)
 
 
 if __name__ == "__main__":

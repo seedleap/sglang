@@ -440,12 +440,25 @@ class AsyncVAEWorker:
             else:
                 # Native VAE decode is synchronous. Keep it off the protocol event
                 # loop so the next latent can be admitted while CUDA is busy.
-                frames = await asyncio.to_thread(
-                    decode,
-                    decoder,
-                    source,
-                    first_chunk=first_chunk,
+                decode_task = asyncio.create_task(
+                    asyncio.to_thread(
+                        decode,
+                        decoder,
+                        source,
+                        first_chunk=first_chunk,
+                    )
                 )
+                try:
+                    frames = await asyncio.shield(decode_task)
+                except asyncio.CancelledError:
+                    # A native CUDA call keeps running after to_thread is
+                    # cancelled. Do not reset a model-global causal cache while
+                    # that decode (or its distributed collectives) is in flight.
+                    try:
+                        await decode_task
+                    except Exception:
+                        pass
+                    raise
                 if inspect.isawaitable(frames):
                     frames = await frames
             yield frames
@@ -499,30 +512,44 @@ class AsyncVAEWorker:
                 await on_frame_batch(batch)
         return indexed
 
-    @staticmethod
-    def _normalize_frames(frames: torch.Tensor) -> torch.Tensor:
+    def _normalize_frames(self, frames: torch.Tensor) -> torch.Tensor:
         if not isinstance(frames, torch.Tensor) or frames.ndim != 5:
             raise RuntimeError("VAE engine must return a five-dimensional frame tensor")
         if frames.shape[1] not in (1, 3, 4) and frames.shape[2] in (1, 3, 4):
             frames = frames.permute(0, 2, 1, 3, 4)
         if frames.shape[1] not in (1, 3, 4):
             raise RuntimeError("VAE frame tensor must be BCTHW or BTCHW")
-        return frames.detach().clamp(0, 1).contiguous().cpu()
+        frames = frames.detach()
+        if getattr(self.engine, "gpu_rgb8_d2h", False):
+            # Keep native exact output on-device. The raw encoder below clamps
+            # and quantizes it once, avoiding an extra full-size FP32 copy.
+            return frames
+        return frames.clamp(0, 1).contiguous().cpu()
 
     def _encode_frames(
         self,
         frames: torch.Tensor,
         opened: SessionOpen,
     ) -> list[EncodedFrameBatch]:
+        encode_started = time.perf_counter()
         if frames.shape[0] != 1:
             raise RuntimeError("Realtime VAE supports one sample per session")
-        rgb_values = (frames[0, :3] * 255).clamp(0, 255)
+        # mul() owns this temporary, so the following in-place operations avoid
+        # another 1248x704x16 FP32 allocation without mutating decoder output.
+        rgb_values = frames[0, :3].mul(255)
+        rgb_values.clamp_(0, 255)
         rgb_quantization = getattr(self.engine, "rgb_quantization", "round")
         if rgb_quantization == "round":
-            rgb_values = rgb_values.round()
+            rgb_values.round_()
         elif rgb_quantization != "truncate":
             raise RuntimeError(f"unsupported VAE RGB quantization: {rgb_quantization}")
-        array = rgb_values.to(torch.uint8).permute(1, 2, 3, 0).contiguous().numpy()
+        rgb8 = rgb_values.to(torch.uint8).permute(1, 2, 3, 0).contiguous()
+        if rgb8.device.type != "cpu":
+            # Exact 720p output is ~161 MiB as float32 but ~40 MiB as RGB8.
+            # Quantize before the synchronous D2H copy to keep the wire contract
+            # while removing three quarters of the host-transfer volume.
+            rgb8 = rgb8.cpu()
+        array = rgb8.numpy()
         raw_frames = [frame.tobytes() for frame in array]
         source_height = int(array.shape[1]) if len(array) else int(frames.shape[-2])
         source_width = int(array.shape[2]) if len(array) else int(frames.shape[-1])
@@ -531,7 +558,6 @@ class AsyncVAEWorker:
         output_format = opened.output_format.lower()
         content_type = RAW_RGB_CONTENT_TYPE
         encoded_frames = raw_frames
-        encode_started = time.perf_counter()
 
         if output_format in {"webp", "jpeg"}:
             encoded_frames = [

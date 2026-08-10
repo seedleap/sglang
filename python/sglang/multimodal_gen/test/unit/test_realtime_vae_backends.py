@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -27,6 +28,10 @@ from sglang.multimodal_gen.runtime.realtime.async_vae_protocol import (
 from sglang.multimodal_gen.runtime.realtime.async_vae_worker import (
     AsyncVAEWorker,
     SessionOpen,
+)
+from sglang.multimodal_gen.runtime.realtime.exact_vae_backend import (
+    ExactCausalVAEEngine,
+    ExactVAEParallelController,
 )
 from sglang.multimodal_gen.runtime.realtime_vae_config import (
     uses_remote_vae,
@@ -158,6 +163,98 @@ def test_unified_worker_cli_selects_one_exact_backend(monkeypatch):
     assert server_args is parsed_server_args
 
 
+def test_multi_gpu_exact_worker_requires_matching_torchrun_world():
+    args = SimpleNamespace(num_gpus=2)
+
+    with pytest.raises(ValueError, match="must be launched with torchrun"):
+        realtime_vae_server._validate_exact_parallel_launch(args, world_size=1)
+
+
+def test_multi_gpu_exact_worker_requires_one_spatial_group():
+    args = SimpleNamespace(
+        num_gpus=2,
+        tp_size=1,
+        dp_size=1,
+        cfg_parallel_degree=1,
+        sp_degree=2,
+        ulysses_degree=2,
+        ring_degree=1,
+    )
+
+    realtime_vae_server._validate_exact_parallel_launch(args, world_size=2)
+    args.sp_degree = 1
+    with pytest.raises(ValueError, match="one spatial decode group"):
+        realtime_vae_server._validate_exact_parallel_launch(args, world_size=2)
+
+
+def test_exact_parallel_driver_broadcasts_shape_dtype_and_payload(monkeypatch):
+    broadcasts = []
+    monkeypatch.setattr(
+        torch.distributed,
+        "broadcast",
+        lambda tensor, src: broadcasts.append((src, tensor.clone())),
+    )
+    controller = ExactVAEParallelController(
+        rank=0,
+        world_size=2,
+        device=torch.device("cpu"),
+    )
+    latents = torch.arange(12, dtype=torch.bfloat16).reshape(1, 3, 1, 2, 2)
+
+    returned = controller.send_decode(latents, first_chunk=True)
+
+    assert returned is not latents
+    assert torch.equal(returned, latents)
+    assert broadcasts[0][0] == 0
+    assert broadcasts[0][1].tolist() == [2, 1, 1, 1, 3, 1, 2, 2]
+    assert torch.equal(broadcasts[1][1], latents)
+
+
+def test_exact_parallel_follower_materializes_rank_local_latents(monkeypatch):
+    metadata = torch.tensor([2, 0, 2, 1, 3, 1, 2, 2], dtype=torch.int64)
+    payload = torch.arange(12, dtype=torch.float16).reshape(1, 3, 1, 2, 2)
+    incoming = iter((metadata, payload))
+
+    def receive(tensor, src):
+        assert src == 0
+        tensor.copy_(next(incoming))
+
+    monkeypatch.setattr(torch.distributed, "broadcast", receive)
+    controller = ExactVAEParallelController(
+        rank=1,
+        world_size=2,
+        device=torch.device("cpu"),
+    )
+
+    command, first_chunk, received = controller.receive()
+
+    assert command == controller.DECODE
+    assert first_chunk is False
+    assert received is not None
+    assert received.dtype == torch.float16
+    assert torch.equal(received, payload)
+
+
+def test_multi_gpu_exact_warmup_exercises_720p_spatial_decode_shape(monkeypatch):
+    engine = ExactCausalVAEEngine.__new__(ExactCausalVAEEngine)
+    engine.decode_parallel_size = 2
+    decoder = _Decoder()
+    decoded_shapes = []
+    engine.create_decoder = lambda _identity: decoder
+
+    def decode(_decoder, latents, *, first_chunk):
+        assert first_chunk
+        decoded_shapes.append(tuple(latents.shape))
+
+    engine.decode = decode
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+
+    engine.warmup()
+
+    assert decoded_shapes == [engine._PARALLEL_WARMUP_SHAPE]
+    assert decoder.reset_calls == 1
+
+
 @pytest.mark.parametrize(
     ("backend", "configured", "expected"),
     [
@@ -215,6 +312,54 @@ def test_exact_worker_preserves_native_rgb24_truncation():
     encoded = worker._encode_frames(frames, opened)
 
     assert encoded[0].payloads == (bytes([127, 127, 127]),)
+
+
+def test_exact_worker_waits_for_native_decode_before_cache_reset_on_close():
+    class SlowExactEngine(_ExactLikeEngine):
+        def __init__(self):
+            super().__init__()
+            self.started = threading.Event()
+            self.release = threading.Event()
+
+        def decode(self, decoder, latents, *, first_chunk):
+            if first_chunk:
+                decoder.reset()
+            self.started.set()
+            self.release.wait(timeout=5)
+            return latents.clamp(0, 1)
+
+    async def run_test():
+        engine = SlowExactEngine()
+        worker = AsyncVAEWorker(engine, max_sessions=1)
+        await worker.open(SessionOpen("session", "generation"))
+        latents = torch.ones((1, 3, 1, 2, 2), dtype=torch.float32)
+        decode_task = asyncio.create_task(
+            worker.decode(
+                LatentChunkHeader(
+                    session_id="session",
+                    generation_id="generation",
+                    request_id="request-0",
+                    chunk_index=0,
+                    dtype="float32",
+                    shape=tuple(latents.shape),
+                    byte_length=latents.numel() * latents.element_size(),
+                    checksum="unused",
+                ),
+                latents,
+            )
+        )
+        assert await asyncio.to_thread(engine.started.wait, 1)
+
+        close_task = asyncio.create_task(worker.close_all())
+        await asyncio.sleep(0.05)
+        assert not close_task.done()
+
+        engine.release.set()
+        await close_task
+        assert decode_task.cancelled()
+        assert engine.decoders[0].reset_calls >= 2
+
+    asyncio.run(run_test())
 
 
 def test_exact_worker_releases_model_global_cache_after_decode_failure():

@@ -9,7 +9,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENTRYPOINT="${SCRIPT_DIR}/aws_b200_entrypoint.sh"
 TARGET_FPS="${MINWM_TARGET_FPS:-24}"
 SP_DEGREES="${MINWM_SP_DEGREES:-1 2 4}"
-VAE_GPU_INDEX="${MINWM_VAE_GPU_INDEX:-7}"
+VAE_GPU_INDICES="${MINWM_VAE_GPU_INDICES:-${MINWM_VAE_GPU_INDEX:-7}}"
+VAE_PARALLEL_SIZE="${MINWM_VAE_PARALLEL_SIZE:-1}"
 WARMUP_CHUNKS="${MINWM_THROUGHPUT_WARMUP_CHUNKS:-20}"
 MEASURED_CHUNKS="${MINWM_THROUGHPUT_MEASURED_CHUNKS:-200}"
 CASES_PATH="${MINWM_THROUGHPUT_CASES_PATH:-${SCRIPT_DIR}/cases_720p_compile_smoke.json}"
@@ -36,15 +37,30 @@ if float(sys.argv[1]) <= 0:
 PY
 
 read -r -a requested_degrees <<< "${SP_DEGREES}"
+if ! [[ "${VAE_PARALLEL_SIZE}" =~ ^[1-8]$ ]]; then
+  echo "MINWM_VAE_PARALLEL_SIZE must be an integer from 1 through 8" >&2
+  exit 2
+fi
+IFS=',' read -r -a vae_gpu_indices <<< "${VAE_GPU_INDICES}"
+if (( ${#vae_gpu_indices[@]} != VAE_PARALLEL_SIZE )); then
+  echo "MINWM_VAE_GPU_INDICES count must equal MINWM_VAE_PARALLEL_SIZE" >&2
+  exit 2
+fi
 for degree in "${requested_degrees[@]}"; do
   if ! [[ "${degree}" =~ ^(1|2|4)$ ]]; then
     echo "MINWM_SP_DEGREES supports only 1, 2, and 4 in the single-node overlap matrix" >&2
     exit 2
   fi
-  if (( degree > VAE_GPU_INDEX )); then
-    echo "SP${degree} overlaps the reserved VAE GPU index ${VAE_GPU_INDEX}" >&2
-    exit 2
-  fi
+  for vae_gpu_index in "${vae_gpu_indices[@]}"; do
+    if ! [[ "${vae_gpu_index}" =~ ^[0-7]$ ]]; then
+      echo "MINWM_VAE_GPU_INDICES must contain GPU indices 0 through 7" >&2
+      exit 2
+    fi
+    if (( vae_gpu_index < degree )); then
+      echo "SP${degree} overlaps reserved VAE GPU index ${vae_gpu_index}" >&2
+      exit 2
+    fi
+  done
 done
 
 mapfile -t gpu_names < <(nvidia-smi --query-gpu=name --format=csv,noheader)
@@ -72,6 +88,8 @@ nvidia-smi topo -m > "${RESULT_ROOT}/${MINWM_MATRIX_ID}-topology.txt"
   echo "minwm=${MINWM_GIT_REF:-unknown}"
   echo "target_fps=${TARGET_FPS}"
   echo "sp_degrees=${SP_DEGREES}"
+  echo "vae_gpu_indices=${VAE_GPU_INDICES}"
+  echo "vae_parallel_size=${VAE_PARALLEL_SIZE}"
   echo "warmup_chunks=${WARMUP_CHUNKS}"
   echo "measured_chunks=${MEASURED_CHUNKS}"
   echo "cases=${CASES_PATH}"
@@ -220,15 +238,24 @@ run_lane() {
 run_lane local 1 local-sp1
 
 vae_log="${RESULT_ROOT}/${MINWM_MATRIX_ID}-exact-vae-worker.log"
-CUDA_VISIBLE_DEVICES="${VAE_GPU_INDEX}" \
+vae_launcher=(python3)
+if (( VAE_PARALLEL_SIZE > 1 )); then
+  vae_launcher=(torchrun --standalone --nproc-per-node "${VAE_PARALLEL_SIZE}")
+fi
+CUDA_VISIBLE_DEVICES="${VAE_GPU_INDICES}" \
 MINWM_NATIVE_COMPONENTS= \
 PYTHONPATH=/workspace/sglang/python \
-  python3 -m sglang.multimodal_gen.runtime.entrypoints.realtime_vae_server \
+  "${vae_launcher[@]}" -m sglang.multimodal_gen.runtime.entrypoints.realtime_vae_server \
     --decoder-backend exact \
     --vae-path "${MODEL_DIR}/vae" \
     --model-path "${MODEL_DIR}" \
     --pipeline-class-name MinWMCausalDMDPipeline \
-    --num-gpus 1 \
+    --num-gpus "${VAE_PARALLEL_SIZE}" \
+    --tp-size 1 \
+    --sp-degree "${VAE_PARALLEL_SIZE}" \
+    --ulysses-degree "${VAE_PARALLEL_SIZE}" \
+    --ring-degree 1 \
+    --enable-cfg-parallel false \
     --attention-backend fa \
     --performance-mode speed \
     --enable-torch-compile false \
@@ -242,7 +269,7 @@ vae_pid=$!
 wait_for_health 31000 "${vae_pid}" "${vae_log}"
 curl --fail --silent http://127.0.0.1:31000/health \
   | tee "${RESULT_ROOT}/${MINWM_MATRIX_ID}-exact-vae-health.json"
-python3 - "${RESULT_ROOT}/${MINWM_MATRIX_ID}-exact-vae-health.json" <<'PY'
+python3 - "${RESULT_ROOT}/${MINWM_MATRIX_ID}-exact-vae-health.json" "${VAE_PARALLEL_SIZE}" <<'PY'
 import json
 import sys
 
@@ -251,6 +278,7 @@ assert health["decoder_backend"] == "exact", health
 assert health["decoder_fidelity"] == "exact", health
 assert health["max_sessions"] == 1, health
 assert health["encoded_frames_per_batch"] == 16, health
+assert health["decode_parallel_size"] == int(sys.argv[2]), health
 PY
 
 target_met=false
