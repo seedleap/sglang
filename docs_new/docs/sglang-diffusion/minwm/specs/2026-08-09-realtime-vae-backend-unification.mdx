@@ -37,10 +37,13 @@ chunk 触发清理；断线或无界 Session 原先没有独立的 remote close 
 
 ### Async TAEHV（PR #25）
 
-Async 路径位于 latent handoff 层。Denoiser 把 Chunk N 放入有界队列，worker 真正进入
-decode actor 后才返还 credit，因此 VAE(N) 与 DiT(N+1) 重叠。一个 WebSocket 覆盖
-Session open、latent、credit、frame、final 和 abort 生命周期。TAEHV 权重只读共享，
-`StreamingTAEHV` context 按 generation 隔离，因此可服务多个 Session。
+Async 路径位于 latent handoff 层。原实现等到 Chunk N 真正进入 decode actor 才返还
+credit；真机 trace 显示，这会让下一块调度等待前一块 decode，只剩很短的尾部重叠。
+统一实现改为成功进入每 Session 单槽有界队列后立即返 credit，并把 API 活动 Chunk 上限
+固定为两个。因此队列中最多只有一个待解码 Chunk，VAE(N) 可以和 DiT(N+1) 完整重叠，
+又不会形成无界预取。一个 WebSocket 覆盖 Session open、latent、credit、frame、final
+和 abort 生命周期。TAEHV 权重只读共享，`StreamingTAEHV` context 按 generation 隔离，
+因此可服务多个 Session。
 
 历史 diff 说明二者职责重复：#25 明确删除了 #6 的 `remote_vae_request` 和
 output-adapter 调用，替换成 `realtime_latents/realtime_handoff`。旧 exact server/client
@@ -65,6 +68,8 @@ Chunk N DiT -> latent handoff -> one bounded AsyncVAEWorker queue -> exact | tae
 
 - 身份：`session_id + generation_id` 隔离 decoder state；`request_id + chunk_index`
   实现严格顺序与重复检测；`event_id` 随输出 envelope 原样返回。
+- Credit：latent 通过校验并成功进入单槽队列后返回 `latent_accepted`；队列已满则显式
+  backpressure，不能等到 decode 开始才返 credit，否则会把一深度流水线串行化。
 - Exact causal cache：Chunk 0 前 reset，后续 chunk 复用；final、abort、断线和 decode
   异常都在 worker `finally` 中 reset。由于 cache 是 model-global，exact worker
   `max_sessions=1`，不得把 TAEHV 的多 Session 交错能力套用到 exact。
@@ -75,6 +80,8 @@ Chunk N DiT -> latent handoff -> one bounded AsyncVAEWorker queue -> exact | tae
 - Final：bounded request 在 adapter 中显式标记 final；worker 完成该 chunk 后自然退出。
   无界 Session 由 WebSocket abort/disconnect 清理。
 - RGB24：exact 保留原生输出路径的截断量化；TAEHV 保留现有 worker 的四舍五入量化。
+- Latent dtype：exact handoff 保留 Denoiser 产出的 dtype，避免在 MinWM decode
+  预处理前引入额外精度转换；TAEHV 继续使用 BF16 传输边界。
 - Shared memory：loopback URL 的 `auto` 优先把 latent 和返回帧放入同一共享目录；
   路径必须位于配置根目录，读取时校验大小/checksum 并删除。跨主机必须使用
   `websocket`。两个进程必须看到相同 mount 和路径。

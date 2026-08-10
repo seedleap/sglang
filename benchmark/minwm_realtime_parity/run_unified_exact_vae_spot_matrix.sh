@@ -204,6 +204,7 @@ run_lane() {
     --warmup-chunks "${WARMUP_CHUNKS}" \
     --measured-chunks "${MEASURED_CHUNKS}" \
     --kv-cache-num-frames 45 \
+    --save-first-measured-frame \
     | tee "${lane_dir}/client.log"
   local status=${PIPESTATUS[0]}
   set -e
@@ -263,6 +264,7 @@ for degree in "${requested_degrees[@]}"; do
       "${RESULT_ROOT}/${profile}/throughput.json" \
       "${RESULT_ROOT}/local-vs-remote-sp1-parity.json" <<'PY'
 import json
+import math
 import sys
 from pathlib import Path
 
@@ -275,6 +277,27 @@ first_differing_frame = next(
     (key for key in all_frame_keys if local_frames.get(key) != remote_frames.get(key)),
     None,
 )
+local_first_frame = Path(sys.argv[1]).with_name("first-measured-frame.rgb").read_bytes()
+remote_first_frame = Path(sys.argv[2]).with_name("first-measured-frame.rgb").read_bytes()
+if len(local_first_frame) != len(remote_first_frame):
+    raise SystemExit("local and remote first measured RGB frame lengths differ")
+different_bytes = 0
+absolute_error_sum = 0
+squared_error_sum = 0
+max_absolute_error = 0
+for local_value, remote_value in zip(local_first_frame, remote_first_frame):
+    error = abs(local_value - remote_value)
+    different_bytes += error != 0
+    absolute_error_sum += error
+    squared_error_sum += error * error
+    max_absolute_error = max(max_absolute_error, error)
+mean_absolute_error = absolute_error_sum / len(local_first_frame)
+mean_squared_error = squared_error_sum / len(local_first_frame)
+psnr_db = (
+    math.inf
+    if mean_squared_error == 0
+    else 20 * math.log10(255) - 10 * math.log10(mean_squared_error)
+)
 summary = {
     "local_payload_sha256": local["measured_payload_sha256"],
     "remote_payload_sha256": remote["measured_payload_sha256"],
@@ -282,6 +305,11 @@ summary = {
     == remote["measured_payload_sha256"],
     "frame_hashes_equal": local_frames == remote_frames,
     "first_differing_frame": first_differing_frame,
+    "first_frame_num_bytes": len(local_first_frame),
+    "first_frame_different_byte_fraction": different_bytes / len(local_first_frame),
+    "first_frame_mean_absolute_error": mean_absolute_error,
+    "first_frame_max_absolute_error": max_absolute_error,
+    "first_frame_psnr_db": psnr_db,
     "local_client_fps": local["client"]["steady_received_fps_ratio_of_sums"],
     "remote_client_fps": remote["client"]["steady_received_fps_ratio_of_sums"],
 }

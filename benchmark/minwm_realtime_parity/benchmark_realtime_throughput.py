@@ -3,9 +3,9 @@
 
 Run this client against two separately launched servers to compare execution
 profiles.  Keep the checkpoint, hardware, request, and action contract fixed;
-only the server implementation/profile may change.  The client deliberately
-does not retain frame payloads, so a 220-chunk run does not consume gigabytes of
-host memory.
+only the server implementation/profile may change.  The client can retain one
+measured RGB frame for numerical-parity diagnostics without keeping the full
+multi-gigabyte stream in host memory.
 """
 
 from __future__ import annotations
@@ -44,6 +44,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--warmup-chunks", type=int, default=20)
     parser.add_argument("--measured-chunks", type=int, default=200)
     parser.add_argument("--kv-cache-num-frames", type=int)
+    parser.add_argument("--save-first-measured-frame", action="store_true")
     parser.add_argument("--timeout", type=float, default=1800.0)
     return parser.parse_args()
 
@@ -225,6 +226,7 @@ async def receive_run(args: argparse.Namespace, contract: dict, case: dict) -> d
     measured_payload_sha256 = hashlib.sha256()
     measured_frame_sha256: dict[str, str] = {}
     measured_payload_samples: dict[str, str] = {}
+    first_measured_frame_saved = False
     init_started_ns = time.perf_counter_ns()
     async with websockets.connect(
         args.ws_url, max_size=None, ping_interval=None, open_timeout=args.timeout
@@ -282,6 +284,14 @@ async def receive_run(args: argparse.Namespace, contract: dict, case: dict) -> d
                     frame = payload[start : start + bytes_per_frame]
                     frame_key = f"{chunk_index}:{first_frame_index + frame_offset}"
                     measured_frame_sha256[frame_key] = hashlib.sha256(frame).hexdigest()
+                    if (
+                        args.save_first_measured_frame
+                        and not first_measured_frame_saved
+                    ):
+                        Path(args.output).with_name(
+                            "first-measured-frame.rgb"
+                        ).write_bytes(frame)
+                        first_measured_frame_saved = True
                 sample_stride = max(1, len(payload) // 4096)
                 sample = payload[::sample_stride][:4096]
                 measured_payload_samples[f"{chunk_index}:{batch_index}"] = (
