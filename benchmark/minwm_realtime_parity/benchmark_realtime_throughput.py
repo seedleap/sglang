@@ -136,6 +136,8 @@ def record_frame_batch(
     batch_frames: int,
     expected_frames: int,
 ) -> bool:
+    if state["complete"]:
+        raise AssertionError(f"chunk {chunk_index} received a batch after completion")
     known_num_batches = state["num_batches"]
     if num_batches:
         if known_num_batches not in (None, num_batches):
@@ -153,7 +155,14 @@ def record_frame_batch(
         raise AssertionError(f"chunk {chunk_index} repeated frame batch {batch_index}")
     state["seen"].add(batch_index)
     state["frames"] += batch_frames
-    if not num_batches or batch_index != num_batches - 1:
+    if state["frames"] > expected_frames:
+        raise AssertionError(
+            f"chunk {chunk_index} produced more than {expected_frames} frames"
+        )
+    if not num_batches:
+        state["complete"] = state["frames"] == expected_frames
+        return state["complete"]
+    if batch_index != num_batches - 1:
         return False
     expected_batch_indices = set(range(num_batches))
     if state["seen"] != expected_batch_indices:
@@ -167,6 +176,7 @@ def record_frame_batch(
             f"chunk {chunk_index} produced {state['frames']} frames, "
             f"expected {expected_frames}"
         )
+    state["complete"] = True
     return True
 
 
@@ -262,7 +272,12 @@ async def receive_run(args: argparse.Namespace, contract: dict, case: dict) -> d
                 )
             state = frame_batches_by_chunk.setdefault(
                 chunk_index,
-                {"num_batches": None, "seen": set(), "frames": 0},
+                {
+                    "num_batches": None,
+                    "seen": set(),
+                    "frames": 0,
+                    "complete": False,
+                },
             )
             if record_frame_batch(
                 state,

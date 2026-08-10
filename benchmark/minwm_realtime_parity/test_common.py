@@ -44,18 +44,23 @@ def _raw_header(**overrides):
     return header
 
 
-def test_streamed_frame_batch_allows_unknown_count_until_final_batch() -> None:
+def test_streamed_frame_batch_completes_unknown_count_from_frame_contract() -> None:
     payload = bytes(12)
-    state = {"num_batches": None, "seen": set(), "frames": 0}
+    state = {
+        "num_batches": None,
+        "seen": set(),
+        "frames": 0,
+        "complete": False,
+    }
 
-    for batch_index in range(3):
+    for batch_index in range(4):
         header = _raw_header(
             frame_batch_index=batch_index,
             num_frame_batches=0,
             is_final_frame_batch=False,
         )
         index, count, frames = validate_frame_batch(header, payload, chunk_index=0)
-        assert not record_frame_batch(
+        complete = record_frame_batch(
             state,
             chunk_index=0,
             batch_index=index,
@@ -63,18 +68,14 @@ def test_streamed_frame_batch_allows_unknown_count_until_final_batch() -> None:
             batch_frames=frames,
             expected_frames=4,
         )
+        assert complete == (batch_index == 3)
 
-    final_header = _raw_header(frame_batch_index=3, num_frame_batches=4)
-    index, count, frames = validate_frame_batch(final_header, payload, chunk_index=0)
-    assert record_frame_batch(
-        state,
-        chunk_index=0,
-        batch_index=index,
-        num_batches=count,
-        batch_frames=frames,
-        expected_frames=4,
-    )
-    assert state == {"num_batches": 4, "seen": {0, 1, 2, 3}, "frames": 4}
+    assert state == {
+        "num_batches": None,
+        "seen": {0, 1, 2, 3},
+        "frames": 4,
+        "complete": True,
+    }
 
 
 def test_streamed_frame_batch_rejects_final_unknown_count() -> None:
