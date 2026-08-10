@@ -25,6 +25,8 @@
 6. 官方模型卡说明 H3 在训练末期使用了 native sparse attention，但初始开源只提供 full-attention inference，稀疏实现将另行发布。本实验的 block-causal mask 是给定规格的独立实现，不能声称复原了官方训练 mask。
 7. 官方发布材料没有定义本实验的 `sink=4/window=20` 单位。后续已确认单位是 latent frames；由于不能切开三帧 block，最终有效范围固定为 6/21 latent frames。
 8. 固定的 B300 运行镜像带 FlashInfer cubin/JIT-cache 0.6.14，而当前 main 固定 `flashinfer-python==0.6.15.post1`。editable 安装会升级 Python 包但不会自动替换独立 wheel；0.6.15 没有发布同版 standalone cubin 包，因此入口安装 `jit-cache==0.6.15.post1+cu130`、移除旧的可选 cubin 0.6.14，并在不关闭版本检查的前提下做 import 验证。
+9. `--revision` 虽然进入了 `ServerArgs`，但 composed pipeline 首次调用 `maybe_download_model` 时没有下传，导致本次服务器实际解析到 HF `main` snapshot `6818f6c32d12b210915e44ad56a4228c2608f160`，而不是请求的 `bfc8ed0353f5a9733be73e6b2c98ec0948195b86`。通过 Hub file metadata 比较了两个 revision 的全部 280 个文件，唯一差异是 `README.md`，模型权重和配置完全相同，所以本次性能数据仍有效；代码随后补上了 revision 下传。
+10. H3 原生 `conditions` 不会回填通用 `SamplingParams.image_path`，所以服务日志可同时出现 `image_path: None` 和真实 FL2VA。是否做了首帧条件不能看这个通用字段，应检查 canonical payload 中的 `image/keyframe/frame_index=0`、ResolvedPlan 以及 `MiniMaxH3VisualEncodingStage`。
 
 ## 重大决策
 
@@ -63,6 +65,14 @@ H3 有 56 个 attention heads；以上组合均满足 TP-local heads 可继续�
 ### D5：结构相同的 FlexAttention block mask 可跨请求复用
 
 block mask 只依赖 packed row 的 block id、sink/window 配置、长度和设备，不依赖 Q/K/V 数值。默认保留最近 8 种结构的进程内缓存，避免每个预热后请求重复构建 15 万行量级的稀疏元数据；可用 `minimax_h3_causal_cache_block_mask=false` 关闭，以单独记录这项优化的收益。
+
+### D6：Spot 容量按 Placement Score 选择，不占用已有 Capacity Block
+
+多组既有 B200/B300 Spot 池都返回 `UnfulfillableCapacity` 后，使用 Spot Placement Score 只读查询选择 `us-west-2b` 的 B300（score=5），新建独立临时 Managed Nodegroup `minimax-h3-spot-p6b300-usw2b`。实际实例为 `i-0dc029ea2ac2d1e2c`，Kubernetes node 为 `ip-172-31-31-148.us-west-2.compute.internal`，并由 `eks.amazonaws.com/capacityType=SPOT` 和成功的 Spot ASG activity 双重确认。已有 B300 Capacity Block 节点未被使用。
+
+### D7：以 warmed request latency 判断实时，冷启动单独记录
+
+镜像拉取、editable Rust build、FlashInfer 对齐、135 GB 模型下载、8-GPU P2P 检查、模型加载和 Triton/CUTLASS autotune 都不计入请求延迟。每个 task/NFE 组合先执行一次 warmup，再计时三次。FL2VA 首次 warmup 包含 text/visual encoder JIT，正式三次请求已进入热态。
 
 ## 启动与测试
 
@@ -156,11 +166,28 @@ python benchmark/minimax_h3_causal/run_matrix.py \
 
 ## 性能结果
 
-待 GPU 运行后填写：
+### B300 BF16 parity / attention probe
+
+- Job：`minimax-h3-b300-probe-aws03-usw2b-r1`
+- GPU：单张 NVIDIA B300 SXM6 AC；代码 `67907a72595113e607345879b94ad1dcb7c5c10b`
+- 单测：6/6 通过。
+- Flex vs dense BF16 reference：max abs error `0.00390625`，mean abs error `3.9114e-05`。
+- 320-row probe：Flex latency `0.130081 ms`；首次 mask build `2417.61 ms`；缓存 lookup `0.052926 ms`。
+
+### B300 TP8/Ulysses1 端到端
+
+运行参数：1344×768，124 frames，24 fps，播放时长 5.1667 s；每项 1 warmup + 3 measured repeats。p95 使用三点线性插值；RTF 使用 p50 latency。逐秒遥测的最高显存为 `41338 MiB/GPU`（40.37 GiB）。
 
 | GPU | Topology | Task | NFE | p50 latency | p95 latency | RTF | Peak/GPU | 结论 |
 | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | --- |
-| — | — | — | — | — | — | — | — | 待测 |
+| B300 | TP8/U1 | T2VA | 2 | 2.8222 s | 2.8224 s | 0.5462 | 40.37 GiB | 3/3 实时 |
+| B300 | TP8/U1 | T2VA | 3 | 3.2251 s | 3.2253 s | 0.6242 | 40.37 GiB | 3/3 实时 |
+| B300 | TP8/U1 | T2VA | 5 | 4.2320 s | 4.4128 s | 0.8191 | 40.37 GiB | 3/3 实时 |
+| B300 | TP8/U1 | FL2VA-first | 2 | 3.0254 s | 3.0265 s | 0.5856 | 40.37 GiB | 3/3 实时 |
+| B300 | TP8/U1 | FL2VA-first | 3 | 3.6297 s | 3.6299 s | 0.7025 | 40.37 GiB | 3/3 实时 |
+| B300 | TP8/U1 | FL2VA-first | 5 | 4.8371 s | 4.8373 s | 0.9362 | 40.37 GiB | 3/3 实时 |
+
+结论：在这台真实 Spot B300 上，最低 Ulysses 配置 `TP=8/Ulysses=1` 已满足主验收点；T2VA 和仅首帧 FL2VA 的 NFE=3 都明显快于 24 fps 播放时间，NFE=5 也均达到实时。18 个输出全部通过容器校验：H.264 1344×768、124 frames、24 fps，以及 AAC-LC 32 kHz stereo。这里的“质量”只证明 causal/reference 数值一致性与输出媒体有效，不证明现有非 causal 权重在 causal mask 下保持主观生成质量；尚未运行专门的 VBench/人工盲评。
 
 ## 运行记录
 
@@ -176,6 +203,9 @@ python benchmark/minimax_h3_causal/run_matrix.py \
 | `minimax-h3-b300-probe-usw2d-r2` | p6-b300 Spot / 1 GPU | `6b411f12e7fd` | 无调度候选，已暂停 | 修正 selector 后不再出现 unknown-value 冲突，但 `us-west-2d` 池没有为 B300 创建 NodeClaim；Pod 未启动，切换同池 B200 验证。 |
 | `minimax-h3-b200-probe-usw2d-r3` | p6-b200 Spot / 1 GPU | `6b411f12e7fd` | 容量阻塞，已暂停 | 同池 B200 成功创建 NodeClaim，随后 AWS 返回 `UnfulfillableCapacity`；证明 profile 和调度约束有效，切换多 AZ 备选前暂停，Pod 未启动。 |
 | `minimax-h3-b200-probe-use2-r1` | p6-b200 Spot / 1 GPU | `cd49a3e02094` | 容量超时失败 | 标准 Karpenter `minwm-test-b200-spot` 跨 `us-east-2a/2b/2c` 创建 NodeClaim，AWS Spot fleet 持续返回 `UnfulfillableCapacity`；Pod 从未启动，最终达到 Job deadline。 |
+| `minimax-h3-b200-probe-aws03-use2-r1` | p6-b200 Spot / 1 GPU | `67907a725951` | 容量失败，已回收 | AWS03 Managed Nodegroup 成功发起 Spot launch，但 EC2 返回 `InsufficientInstanceCapacity`；Pod 未执行代码，nodegroup 恢复为 desired=0。 |
+| `minimax-h3-b300-probe-aws03-usw2b-r1` | p6-b300 Spot / 1 GPU | `67907a725951` | 成功 | 6/6 单测通过；BF16 max/mean error `0.00390625/3.9114e-05`；Flex probe `0.130081 ms`。实际实例 `i-0dc029ea2ac2d1e2c`。 |
+| `minimax-h3-b300-e2e-tp8-u1-r1` | p6-b300 Spot / 8 GPU | `67907a725951` | 成功 | T2VA/FL2VA-first × NFE 2/3/5 共 18 个 measured requests 全部实时；run status `ok=true`，媒体校验全部通过。请求 revision 与实际 HF main 只差 README，权重/配置相同。 |
 
 ## 理解检查问题
 
@@ -188,3 +218,5 @@ python benchmark/minimax_h3_causal/run_matrix.py \
 7. 当前完整序列的 block-sparse attention 与真正逐 block 持久化 KV cache，在计算图和可声称的“实时流式生成”能力上有什么区别？
 8. 为什么 5 秒请求的实时阈值暂定为 5.167 秒，而不是恰好 5.000 秒？
 9. 如果 `sink=4/window=20` 的单位从 latent frames 改成 blocks，mask 稀疏率、缓存体积和实时结论会怎样变化？
+10. 为什么日志中的通用 `image_path: None` 不能用来断言 H3 FL2VA 没有首帧条件？应该检查哪三个更接近模型语义的证据？
+11. 为什么 benchmark 同时记录请求的 revision 和最终 snapshot path？只记录命令行 revision 会漏掉哪类可复现性错误？
