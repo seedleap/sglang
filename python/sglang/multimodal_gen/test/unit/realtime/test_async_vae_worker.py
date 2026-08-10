@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import threading
+import time
 from dataclasses import replace
 
 import pytest
@@ -73,6 +75,19 @@ class _StreamingEngine(_FakeEngine):
         yield torch.zeros((1, 3, 1, 8, 8), dtype=torch.float32)
         await self.release_second.wait()
         yield torch.ones((1, 3, 1, 8, 8), dtype=torch.float32)
+
+
+class _SynchronousBlockingEngine(_FakeEngine):
+    def __init__(self):
+        super().__init__()
+        self.started = threading.Event()
+        self.release = threading.Event()
+
+    def decode(self, decoder, latents, *, first_chunk):
+        self.started.set()
+        self.release.wait(timeout=2)
+        self.calls.append((decoder, latents.clone(), first_chunk))
+        return torch.zeros((1, 3, latents.shape[2], 8, 8), dtype=torch.float32)
 
 
 def test_taehv_engine_warmup_runs_a_production_shape_decode(monkeypatch):
@@ -191,6 +206,32 @@ def test_worker_keeps_decoder_state_per_generation():
 
         assert engine.decoder_ids == {("s1", "g1"), ("s2", "g2")}
         await worker.close_all()
+
+    asyncio.run(scenario())
+
+
+def test_worker_keeps_event_loop_responsive_during_synchronous_decode():
+    async def scenario():
+        engine = _SynchronousBlockingEngine()
+        worker = AsyncVAEWorker(engine, max_sessions=1)
+        await worker.open(SessionOpen("s1", "g1"))
+        result = await worker.submit(
+            _header(),
+            torch.zeros(1, 48, 1, 2, 2, dtype=torch.bfloat16),
+        )
+        timer = threading.Timer(0.3, engine.release.set)
+        timer.start()
+        started_at = time.perf_counter()
+        await asyncio.sleep(0.02)
+        responsive_after = time.perf_counter() - started_at
+        try:
+            assert engine.started.is_set()
+            assert responsive_after < 0.2
+            await result
+        finally:
+            engine.release.set()
+            timer.cancel()
+            await worker.close_all()
 
     asyncio.run(scenario())
 

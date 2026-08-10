@@ -86,6 +86,15 @@ class DecodeResult:
 FrameBatchCallback = Callable[[EncodedFrameBatch], Awaitable[None]]
 
 
+def _next_item(iterator) -> tuple[bool, Any]:
+    """Advance a synchronous decoder iterator without leaking StopIteration."""
+
+    try:
+        return True, next(iterator)
+    except StopIteration:
+        return False, None
+
+
 @dataclass(slots=True)
 class _DecodeJob:
     header: LatentChunkHeader
@@ -421,13 +430,24 @@ class AsyncVAEWorker:
     async def _iter_decoded_frames(self, decoder, source, *, first_chunk):
         iterator_factory = getattr(self.engine, "iter_decode", None)
         if iterator_factory is None:
-            frames = self.engine.decode(
-                decoder,
-                source,
-                first_chunk=first_chunk,
-            )
-            if inspect.isawaitable(frames):
-                frames = await frames
+            decode = self.engine.decode
+            if inspect.iscoroutinefunction(decode):
+                frames = await decode(
+                    decoder,
+                    source,
+                    first_chunk=first_chunk,
+                )
+            else:
+                # Native VAE decode is synchronous. Keep it off the protocol event
+                # loop so the next latent can be admitted while CUDA is busy.
+                frames = await asyncio.to_thread(
+                    decode,
+                    decoder,
+                    source,
+                    first_chunk=first_chunk,
+                )
+                if inspect.isawaitable(frames):
+                    frames = await frames
             yield frames
             return
 
@@ -438,9 +458,12 @@ class AsyncVAEWorker:
             async for frame_batch in frames:
                 yield frame_batch
             return
-        for frame_batch in frames:
+        iterator = iter(frames)
+        while True:
+            has_value, frame_batch = await asyncio.to_thread(_next_item, iterator)
+            if not has_value:
+                return
             yield frame_batch
-            await asyncio.sleep(0)
 
     async def _encode_and_emit(
         self,

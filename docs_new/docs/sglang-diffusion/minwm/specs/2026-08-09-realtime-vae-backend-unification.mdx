@@ -42,8 +42,9 @@ credit；真机 trace 显示，这会让下一块调度等待前一块 decode，
 统一实现改为成功进入每 Session 单槽有界队列后立即返 credit，并把 API 活动 Chunk 上限
 固定为两个。因此队列中最多只有一个待解码 Chunk，VAE(N) 可以和 DiT(N+1) 完整重叠，
 又不会形成无界预取。一个 WebSocket 覆盖 Session open、latent、credit、frame、final
-和 abort 生命周期。TAEHV 权重只读共享，`StreamingTAEHV` context 按 generation 隔离，
-因此可服务多个 Session。
+和 abort 生命周期。同步 decoder 的迭代在 worker thread 中执行，避免 CUDA decode 阻塞
+协议事件循环；否则即使 credit 已返还，下一块 latent 仍会卡在 WebSocket 接收侧。TAEHV
+权重只读共享，`StreamingTAEHV` context 按 generation 隔离，因此可服务多个 Session。
 
 历史 diff 说明二者职责重复：#25 明确删除了 #6 的 `remote_vae_request` 和
 output-adapter 调用，替换成 `realtime_latents/realtime_handoff`。旧 exact server/client
@@ -70,6 +71,8 @@ Chunk N DiT -> latent handoff -> one bounded AsyncVAEWorker queue -> exact | tae
   实现严格顺序与重复检测；`event_id` 随输出 envelope 原样返回。
 - Credit：latent 通过校验并成功进入单槽队列后返回 `latent_accepted`；队列已满则显式
   backpressure，不能等到 decode 开始才返 credit，否则会把一深度流水线串行化。
+- Event loop：同步 exact/TAEHV decoder 的 `decode` 或 iterator advance 不在协议事件循环
+  上运行；credit、下一块 latent 接收、frame 发送和 abort 在 GPU decode 期间仍可响应。
 - Exact causal cache：Chunk 0 前 reset，后续 chunk 复用；final、abort、断线和 decode
   异常都在 worker `finally` 中 reset。由于 cache 是 model-global，exact worker
   `max_sessions=1`，不得把 TAEHV 的多 Session 交错能力套用到 exact。
