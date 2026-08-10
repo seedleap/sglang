@@ -37,8 +37,18 @@ _CLUSTER_PROFILES = {
     "use2-b200": {
         "context": "minwm-spot",
         "nodepool": "minwm-test-b200-spot",
+        "nodegroup": None,
         "toleration_key": "seedleap.ai/workload",
         "toleration_value": "wan22-ti2v",
+        "zone": None,
+        "hardware": ("b200",),
+    },
+    "aws03-use2-b200": {
+        "context": ("arn:aws:eks:us-east-2:107014413969:cluster/leap-world-aws03-use2"),
+        "nodepool": None,
+        "nodegroup": "loomvideo-spot-p6b200-use2",
+        "toleration_key": None,
+        "toleration_value": None,
         "zone": None,
         "hardware": ("b200",),
     },
@@ -189,13 +199,25 @@ exec bash benchmark/minimax_h3_causal/aws_entrypoint.sh
         "seedleap.ai/task": "minimax-h3-causal-realtime",
         "seedleap.ai/run-id": job_name,
     }
-    node_selector = {
-        "karpenter.sh/capacity-type": "spot",
-        "karpenter.sh/nodepool": cluster_profile["nodepool"],
-        "node.kubernetes.io/instance-type": instance_type,
-    }
+    node_selector = {"node.kubernetes.io/instance-type": instance_type}
+    if cluster_profile.get("nodegroup") is None:
+        node_selector["karpenter.sh/capacity-type"] = "spot"
+        node_selector["karpenter.sh/nodepool"] = cluster_profile["nodepool"]
+    else:
+        node_selector["eks.amazonaws.com/capacityType"] = "SPOT"
+        node_selector["eks.amazonaws.com/nodegroup"] = cluster_profile["nodegroup"]
     if cluster_profile["zone"] is not None:
         node_selector["topology.kubernetes.io/zone"] = cluster_profile["zone"]
+    tolerations = []
+    if cluster_profile["toleration_key"] is not None:
+        tolerations.append(
+            {
+                "key": cluster_profile["toleration_key"],
+                "operator": "Equal",
+                "value": cluster_profile["toleration_value"],
+                "effect": "NoSchedule",
+            }
+        )
     return {
         "apiVersion": "batch/v1",
         "kind": "Job",
@@ -221,14 +243,7 @@ exec bash benchmark/minimax_h3_causal/aws_entrypoint.sh
                     "terminationGracePeriodSeconds": 60,
                     "securityContext": {"seLinuxOptions": {"type": "spc_t"}},
                     "nodeSelector": node_selector,
-                    "tolerations": [
-                        {
-                            "key": cluster_profile["toleration_key"],
-                            "operator": "Equal",
-                            "value": cluster_profile["toleration_value"],
-                            "effect": "NoSchedule",
-                        }
-                    ],
+                    "tolerations": tolerations,
                     "volumes": [
                         {"name": "work", "emptyDir": {}},
                         {
