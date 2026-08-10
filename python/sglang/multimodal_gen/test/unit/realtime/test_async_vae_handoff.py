@@ -35,11 +35,11 @@ def _req(*, block_idx=3, image_latent=None):
     )
 
 
-def test_handoff_returns_contiguous_bf16_latents_without_decoding():
+def test_taehv_handoff_returns_contiguous_bf16_latents_without_decoding():
     stage = object.__new__(RealtimeLatentHandoffStage)
     req = _req()
 
-    out = stage.forward(req, SimpleNamespace())
+    out = stage.forward(req, SimpleNamespace(realtime_vae_backend="taehv_remote"))
 
     assert out.output is None
     assert out.realtime_latents.dtype == torch.bfloat16
@@ -61,14 +61,25 @@ def test_handoff_returns_contiguous_bf16_latents_without_decoding():
     assert out.metrics is req.metrics
 
 
+def test_exact_handoff_preserves_latent_dtype_without_decoding():
+    stage = object.__new__(RealtimeLatentHandoffStage)
+    req = _req()
+
+    out = stage.forward(req, SimpleNamespace(realtime_vae_backend="exact_remote"))
+
+    assert out.realtime_latents.dtype == req.latents.dtype
+    assert out.realtime_latents.is_contiguous()
+
+
 def test_handoff_prepends_i2v_reference_only_for_first_chunk():
     stage = object.__new__(RealtimeLatentHandoffStage)
     reference = torch.randn(1, 48, 1, 30, 52)
     first = _req(block_idx=0, image_latent=reference)
     later = _req(block_idx=1, image_latent=reference)
 
-    first_out = stage.forward(first, SimpleNamespace())
-    later_out = stage.forward(later, SimpleNamespace())
+    server_args = SimpleNamespace(realtime_vae_backend="exact_remote")
+    first_out = stage.forward(first, server_args)
+    later_out = stage.forward(later, server_args)
 
     assert first_out.realtime_latents.shape[2] == 3
     assert first_out.realtime_handoff["has_reference"] is True

@@ -223,6 +223,7 @@ async def receive_run(args: argparse.Namespace, contract: dict, case: dict) -> d
     payload_complete_ns: dict[int, int] = {}
     frame_batches_by_chunk: dict[int, dict[str, Any]] = {}
     measured_payload_sha256 = hashlib.sha256()
+    measured_frame_sha256: dict[str, str] = {}
     measured_payload_samples: dict[str, str] = {}
     init_started_ns = time.perf_counter_ns()
     async with websockets.connect(
@@ -263,13 +264,6 @@ async def receive_run(args: argparse.Namespace, contract: dict, case: dict) -> d
             batch_index, num_batches, batch_frames = validate_frame_batch(
                 header, payload, chunk_index=chunk_index
             )
-            if chunk_index >= args.warmup_chunks:
-                measured_payload_sha256.update(payload)
-                sample_stride = max(1, len(payload) // 4096)
-                sample = payload[::sample_stride][:4096]
-                measured_payload_samples[f"{chunk_index}:{batch_index}"] = (
-                    base64.b64encode(sample).decode("ascii")
-                )
             state = frame_batches_by_chunk.setdefault(
                 chunk_index,
                 {
@@ -279,6 +273,20 @@ async def receive_run(args: argparse.Namespace, contract: dict, case: dict) -> d
                     "complete": False,
                 },
             )
+            if chunk_index >= args.warmup_chunks:
+                measured_payload_sha256.update(payload)
+                bytes_per_frame = int(header["bytes_per_frame"])
+                first_frame_index = int(state["frames"])
+                for frame_offset in range(batch_frames):
+                    start = frame_offset * bytes_per_frame
+                    frame = payload[start : start + bytes_per_frame]
+                    frame_key = f"{chunk_index}:{first_frame_index + frame_offset}"
+                    measured_frame_sha256[frame_key] = hashlib.sha256(frame).hexdigest()
+                sample_stride = max(1, len(payload) // 4096)
+                sample = payload[::sample_stride][:4096]
+                measured_payload_samples[f"{chunk_index}:{batch_index}"] = (
+                    base64.b64encode(sample).decode("ascii")
+                )
             if record_frame_batch(
                 state,
                 chunk_index=chunk_index,
@@ -363,6 +371,7 @@ async def receive_run(args: argparse.Namespace, contract: dict, case: dict) -> d
         "measured_chunks": args.measured_chunks,
         "measured_frames": measured_frames,
         "measured_payload_sha256": measured_payload_sha256.hexdigest(),
+        "measured_frame_sha256": measured_frame_sha256,
         "measured_payload_samples_base64": measured_payload_samples,
         "server": server,
         "client": {

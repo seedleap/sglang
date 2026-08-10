@@ -252,12 +252,13 @@ assert health["max_sessions"] == 1, health
 PY
 
 target_met=false
+parity_met=false
 selected_degree=""
 for degree in "${requested_degrees[@]}"; do
   profile="exact-remote-sp${degree}"
   run_lane remote "${degree}" "${profile}"
   if [[ "${degree}" == "1" ]]; then
-    python3 \
+    python3 - \
       "${RESULT_ROOT}/local-sp1/throughput.json" \
       "${RESULT_ROOT}/${profile}/throughput.json" \
       "${RESULT_ROOT}/local-vs-remote-sp1-parity.json" <<'PY'
@@ -267,19 +268,34 @@ from pathlib import Path
 
 local = json.load(open(sys.argv[1]))
 remote = json.load(open(sys.argv[2]))
+local_frames = local.get("measured_frame_sha256", {})
+remote_frames = remote.get("measured_frame_sha256", {})
+all_frame_keys = sorted(set(local_frames) | set(remote_frames))
+first_differing_frame = next(
+    (key for key in all_frame_keys if local_frames.get(key) != remote_frames.get(key)),
+    None,
+)
 summary = {
     "local_payload_sha256": local["measured_payload_sha256"],
     "remote_payload_sha256": remote["measured_payload_sha256"],
     "bitwise_equal": local["measured_payload_sha256"]
     == remote["measured_payload_sha256"],
+    "frame_hashes_equal": local_frames == remote_frames,
+    "first_differing_frame": first_differing_frame,
     "local_client_fps": local["client"]["steady_received_fps_ratio_of_sums"],
     "remote_client_fps": remote["client"]["steady_received_fps_ratio_of_sums"],
 }
 Path(sys.argv[3]).write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
 print(json.dumps(summary, sort_keys=True))
-if not summary["bitwise_equal"]:
-    raise SystemExit("local exact and remote exact payload hashes differ")
 PY
+    parity_met="$(python3 - "${RESULT_ROOT}/local-vs-remote-sp1-parity.json" <<'PY'
+import json
+import sys
+
+summary = json.load(open(sys.argv[1]))
+print("true" if summary["bitwise_equal"] else "false")
+PY
+)"
   fi
   fps="$(python3 - "${RESULT_ROOT}/${profile}/throughput.json" <<'PY'
 import json
@@ -303,8 +319,9 @@ PY
   echo "MINWM_UNIFIED_EXACT_TARGET_MISS sp=${degree} fps=${fps} target=${TARGET_FPS}"
 done
 
-python3 \
-  "${RESULT_ROOT}" "${TARGET_FPS}" "${target_met}" "${selected_degree}" \
+python3 - \
+  "${RESULT_ROOT}" "${TARGET_FPS}" "${target_met}" "${parity_met}" \
+  "${selected_degree}" \
   "${MINWM_MATRIX_ID}" <<'PY'
 import json
 import sys
@@ -325,10 +342,11 @@ for result_path in sorted(root.glob("*/throughput.json")):
     }
 summary = {
     "schema_version": "minwm-unified-exact-spot-matrix/v1",
-    "matrix_id": sys.argv[5],
+    "matrix_id": sys.argv[6],
     "target_fps": float(sys.argv[2]),
     "target_met": sys.argv[3] == "true",
-    "selected_sp_degree": int(sys.argv[4]) if sys.argv[4] else None,
+    "exact_sp1_bitwise_equal": sys.argv[4] == "true",
+    "selected_sp_degree": int(sys.argv[5]) if sys.argv[5] else None,
     "lanes": lanes,
 }
 (root / "summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
@@ -339,3 +357,7 @@ if [[ "${target_met}" != "true" ]]; then
   echo "MINWM_UNIFIED_EXACT_TARGET_NOT_MET tested_sp=${SP_DEGREES} target=${TARGET_FPS}"
 fi
 echo "MINWM_UNIFIED_EXACT_MATRIX_COMPLETE results=${RESULT_ROOT}"
+if [[ "${parity_met}" != "true" ]]; then
+  echo "MINWM_UNIFIED_EXACT_PARITY_FAILED local and exact-remote SP1 payloads differ" >&2
+  exit 2
+fi

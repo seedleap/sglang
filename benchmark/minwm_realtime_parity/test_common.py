@@ -23,6 +23,7 @@ from common import (  # noqa: E402
 
 DRAGON_CASES = Path(__file__).with_name("cases_dragon_ride_60s_832x480.json")
 STEP1600_T2V_CASES = Path(__file__).with_name("cases_step1600_t2v_30s_832x480.json")
+SPOT_MATRIX_RUNNER = Path(__file__).with_name("run_unified_exact_vae_spot_matrix.sh")
 
 
 def _raw_header(**overrides):
@@ -42,6 +43,24 @@ def _raw_header(**overrides):
     }
     header.update(overrides)
     return header
+
+
+def test_spot_matrix_python_heredocs_execute_standard_input() -> None:
+    lines = SPOT_MATRIX_RUNNER.read_text().splitlines()
+    heredoc_invocations = []
+    for line_index, line in enumerate(lines):
+        if "python3" not in line:
+            continue
+        invocation = [line]
+        while invocation[-1].rstrip().endswith("\\"):
+            line_index += 1
+            invocation.append(lines[line_index])
+        if "<<'PY'" in "\n".join(invocation):
+            heredoc_invocations.append(invocation)
+
+    assert heredoc_invocations
+    for invocation in heredoc_invocations:
+        assert "python3 -" in invocation[0], "\n".join(invocation)
 
 
 def test_streamed_frame_batch_completes_unknown_count_from_frame_contract() -> None:
