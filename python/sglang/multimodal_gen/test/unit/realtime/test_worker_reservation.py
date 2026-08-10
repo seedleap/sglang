@@ -8,16 +8,16 @@ import torch
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from sglang.multimodal_gen.runtime.entrypoints.openai.realtime.realtime_video_api import (
-    _GatewayManagedConfig,
-    _consume_gateway_reservation,
-    _release_gateway_reservation,
-)
-from sglang.multimodal_gen.runtime.entrypoints.realtime_vae_server import create_app
 from sglang.multimodal_gen.runtime.entrypoints import realtime_vae_server
 from sglang.multimodal_gen.runtime.entrypoints.http_server import (
     create_app as create_denoiser_app,
 )
+from sglang.multimodal_gen.runtime.entrypoints.openai.realtime.realtime_video_api import (
+    _consume_gateway_reservation,
+    _GatewayManagedConfig,
+    _release_gateway_reservation,
+)
+from sglang.multimodal_gen.runtime.entrypoints.realtime_vae_server import create_app
 from sglang.multimodal_gen.runtime.realtime.async_vae_protocol import (
     decode_message,
     encode_message,
@@ -54,7 +54,9 @@ def test_worker_reservation_is_idempotent_bounded_and_released():
         )
         assert duplicate == first
 
-        with pytest.raises(WorkerReservationRejected, match="WORKER_CAPACITY_EXHAUSTED"):
+        with pytest.raises(
+            WorkerReservationRejected, match="WORKER_CAPACITY_EXHAUSTED"
+        ):
             await registry.reserve(
                 "token-b",
                 session_id="session-b",
@@ -97,9 +99,7 @@ def test_worker_reservation_is_idempotent_bounded_and_released():
     asyncio.run(run())
 
 
-def test_worker_process_publishes_its_epoch_to_the_shared_file(
-    tmp_path, monkeypatch
-):
+def test_worker_process_publishes_its_epoch_to_the_shared_file(tmp_path, monkeypatch):
     epoch_file = tmp_path / "worker-epoch"
     monkeypatch.delenv("WORKER_EPOCH", raising=False)
     monkeypatch.setenv("WORKER_EPOCH_FILE", str(epoch_file))
@@ -143,6 +143,8 @@ def test_worker_reservation_http_routes_expose_state_release_and_drain():
 
 def test_vae_session_open_consumes_and_close_releases_reservation():
     class Engine:
+        backend = "taehv"
+
         @staticmethod
         def create_decoder(_identity):
             return SimpleNamespace(reset=lambda: None)
@@ -156,22 +158,26 @@ def test_vae_session_open_consumes_and_close_releases_reservation():
     )
 
     with TestClient(app) as client:
-        assert client.post(
-            "/v1/realtime_worker/reservations",
-            json={
-                "token": "token-a",
-                "session_id": "session-a",
-                "generation_id": "generation-a",
-                "worker_epoch": "epoch-a",
-                "ttl_s": 30,
-            },
-        ).status_code == 204
+        assert (
+            client.post(
+                "/v1/realtime_worker/reservations",
+                json={
+                    "token": "token-a",
+                    "session_id": "session-a",
+                    "generation_id": "generation-a",
+                    "worker_epoch": "epoch-a",
+                    "ttl_s": 30,
+                },
+            ).status_code
+            == 204
+        )
         with client.websocket_connect("/v1/realtime_vae/decode") as websocket:
             websocket.send_bytes(
                 encode_message(
                     "session_open",
                     session_id="session-a",
                     generation_id="generation-a",
+                    decoder_backend="taehv",
                     coordinator_token="token-a",
                     worker_epoch="epoch-a",
                     output_format="webp",
@@ -187,8 +193,89 @@ def test_vae_session_open_consumes_and_close_releases_reservation():
         assert client.get("/v1/realtime_worker/state").json()["active_sessions"] == 0
 
 
+def test_vae_session_open_without_gateway_credentials_skips_reservation():
+    class Engine:
+        backend = "taehv"
+
+        @staticmethod
+        def create_decoder(_identity):
+            return SimpleNamespace(reset=lambda: None)
+
+    registry = WorkerReservationRegistry(worker_epoch="epoch-a", capacity=1)
+    app = create_app(
+        AsyncVAEWorker(Engine(), max_sessions=1),
+        max_message_bytes=1024 * 1024,
+        reservation_registry=registry,
+    )
+
+    with TestClient(app) as client:
+        with client.websocket_connect("/v1/realtime_vae/decode") as websocket:
+            websocket.send_bytes(
+                encode_message(
+                    "session_open",
+                    session_id="session-a",
+                    generation_id="generation-a",
+                    decoder_backend="taehv",
+                    coordinator_token=None,
+                    worker_epoch=None,
+                    output_format="webp",
+                    quality=90,
+                )
+            )
+            assert decode_message(websocket.receive_bytes())["type"] == (
+                "session_accepted"
+            )
+            state = client.get("/v1/realtime_worker/state").json()
+            assert client.get("/health").json()["active_sessions"] == 1
+            assert state["active_sessions"] == 0
+            assert state["reserved_sessions"] == 0
+        assert client.get("/v1/realtime_worker/state").json()["active_sessions"] == 0
+
+
+@pytest.mark.parametrize(
+    ("coordinator_token", "worker_epoch"),
+    [("token-a", None), (None, "epoch-a")],
+)
+def test_vae_session_open_rejects_partial_gateway_credentials(
+    coordinator_token, worker_epoch
+):
+    class Engine:
+        backend = "taehv"
+
+        @staticmethod
+        def create_decoder(_identity):
+            return SimpleNamespace(reset=lambda: None)
+
+    registry = WorkerReservationRegistry(worker_epoch="epoch-a", capacity=1)
+    app = create_app(
+        AsyncVAEWorker(Engine(), max_sessions=1),
+        max_message_bytes=1024 * 1024,
+        reservation_registry=registry,
+    )
+
+    with TestClient(app) as client:
+        with client.websocket_connect("/v1/realtime_vae/decode") as websocket:
+            websocket.send_bytes(
+                encode_message(
+                    "session_open",
+                    session_id="session-a",
+                    generation_id="generation-a",
+                    decoder_backend="taehv",
+                    coordinator_token=coordinator_token,
+                    worker_epoch=worker_epoch,
+                    output_format="webp",
+                    quality=90,
+                )
+            )
+            error = decode_message(websocket.receive_bytes())
+            assert error["type"] == "error"
+            assert "must be provided together" in error["message"]
+
+
 def test_vae_replay_connection_cannot_release_the_original_session():
     class Engine:
+        backend = "taehv"
+
         @staticmethod
         def create_decoder(_identity):
             return SimpleNamespace(reset=lambda: None)
@@ -203,6 +290,7 @@ def test_vae_replay_connection_cannot_release_the_original_session():
         "session_open",
         session_id="session-a",
         generation_id="generation-a",
+        decoder_backend="taehv",
         coordinator_token="token-a",
         worker_epoch="epoch-a",
         output_format="webp",
@@ -210,27 +298,32 @@ def test_vae_replay_connection_cannot_release_the_original_session():
     )
 
     with TestClient(app) as client:
-        assert client.post(
-            "/v1/realtime_worker/reservations",
-            json={
-                "token": "token-a",
-                "session_id": "session-a",
-                "generation_id": "generation-a",
-                "worker_epoch": "epoch-a",
-                "ttl_s": 30,
-            },
-        ).status_code == 204
+        assert (
+            client.post(
+                "/v1/realtime_worker/reservations",
+                json={
+                    "token": "token-a",
+                    "session_id": "session-a",
+                    "generation_id": "generation-a",
+                    "worker_epoch": "epoch-a",
+                    "ttl_s": 30,
+                },
+            ).status_code
+            == 204
+        )
         with client.websocket_connect("/v1/realtime_vae/decode") as original:
             original.send_bytes(opened)
-            assert decode_message(original.receive_bytes())["type"] == "session_accepted"
+            assert (
+                decode_message(original.receive_bytes())["type"] == "session_accepted"
+            )
             with client.websocket_connect("/v1/realtime_vae/decode") as replay:
                 replay.send_bytes(opened)
                 error = decode_message(replay.receive_bytes())
                 assert error["type"] == "error"
                 assert "RESERVATION_ALREADY_CONSUMED" in error["message"]
-            assert client.get("/v1/realtime_worker/state").json()[
-                "active_sessions"
-            ] == 1
+            assert (
+                client.get("/v1/realtime_worker/state").json()["active_sessions"] == 1
+            )
         assert client.get("/v1/realtime_worker/state").json()["active_sessions"] == 0
 
 
@@ -253,6 +346,7 @@ def test_vae_direct_output_sends_authoritative_media_completion(monkeypatch):
     class Worker:
         active_sessions = 0
         max_sessions = 1
+        decoder_backend = "taehv"
 
         async def open(self, _opened):
             pass
@@ -263,9 +357,7 @@ def test_vae_direct_output_sends_authoritative_media_completion(monkeypatch):
             _latents,
             *,
             on_frame_batch,
-            on_decode_started,
         ):
-            await on_decode_started()
             await on_frame_batch(
                 SimpleNamespace(
                     payloads=(b"webp",),
@@ -311,6 +403,7 @@ def test_vae_direct_output_sends_authoritative_media_completion(monkeypatch):
                     "session_open",
                     session_id="session-a",
                     generation_id="generation-a",
+                    decoder_backend="taehv",
                     output_format="webp",
                     quality=90,
                     output_url="ws://gateway/output",
@@ -392,9 +485,7 @@ def test_denoiser_gateway_open_consumes_matching_reservation():
 
 def test_denoiser_fastapi_exposes_worker_reservation_control_plane(monkeypatch):
     monkeypatch.setenv("WORKER_EPOCH", "denoiser-epoch")
-    app = create_denoiser_app(
-        SimpleNamespace(realtime_max_sessions_per_worker=4)
-    )
+    app = create_denoiser_app(SimpleNamespace(realtime_max_sessions_per_worker=4))
 
     paths = {route.path for route in app.routes if hasattr(route, "path")}
     assert {
@@ -427,7 +518,9 @@ def test_worker_reservation_consume_rejects_stale_epoch_and_identity():
                 worker_epoch="epoch-old",
                 owner_id="connection-a",
             )
-        with pytest.raises(WorkerReservationRejected, match="RESERVATION_IDENTITY_MISMATCH"):
+        with pytest.raises(
+            WorkerReservationRejected, match="RESERVATION_IDENTITY_MISMATCH"
+        ):
             await registry.consume(
                 "token-a",
                 session_id="session-other",
@@ -552,9 +645,7 @@ def test_worker_runtime_load_tracks_pending_blocked_runnable_and_service_time():
 
 def test_denoiser_registry_reports_real_session_load_instead_of_zero_defaults():
     async def run():
-        app = create_denoiser_app(
-            SimpleNamespace(realtime_max_sessions_per_worker=2)
-        )
+        app = create_denoiser_app(SimpleNamespace(realtime_max_sessions_per_worker=2))
         registry = app.state.worker_reservations
         await registry.reserve(
             "token-a",

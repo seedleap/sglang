@@ -1347,6 +1347,18 @@ run_throughput_profile() {
   local native_components="$4" torch_compile="$5" kv_frames="$6"
   local profile_dir="${LOCAL_RESULTS}/throughput/${profile}"
   local profile_results="${RESULTS}/throughput/${profile}"
+  local realtime_vae_args=()
+  if [[ -n "${MINWM_REALTIME_VAE_BACKEND:-}" ]]; then
+    if [[ -z "${MINWM_REALTIME_VAE_WORKER_URL:-}" ]]; then
+      echo "MINWM_REALTIME_VAE_WORKER_URL is required with MINWM_REALTIME_VAE_BACKEND" >&2
+      return 2
+    fi
+    realtime_vae_args+=(
+      --realtime-vae-backend "${MINWM_REALTIME_VAE_BACKEND}"
+      --realtime-vae-worker-url "${MINWM_REALTIME_VAE_WORKER_URL}"
+      --realtime-vae-transport "${MINWM_REALTIME_VAE_TRANSPORT:-auto}"
+    )
+  fi
   mkdir -p "${profile_dir}" "${profile_results}"
   MINWM_ATTENTION_IMPL="${attention_impl}" \
   MINWM_PACKED_ATTENTION_DETERMINISTIC="${packed_deterministic}" \
@@ -1358,6 +1370,7 @@ run_throughput_profile() {
     --performance-mode speed \
     --enable-torch-compile "${torch_compile}" \
     --warmup-mode off \
+    "${realtime_vae_args[@]}" \
     --port 30000 \
     > "${profile_results}/server.log" 2>&1 &
   local profile_server_pid=$!

@@ -4,15 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import threading
+import time
 from dataclasses import replace
 
 import pytest
 import torch
 
 from sglang.multimodal_gen.runtime.entrypoints import realtime_vae_server
-from sglang.multimodal_gen.runtime.realtime.async_vae_protocol import (
-    LatentChunkHeader,
-)
+from sglang.multimodal_gen.runtime.realtime.async_vae_protocol import LatentChunkHeader
 from sglang.multimodal_gen.runtime.realtime.async_vae_worker import (
     AsyncVAEWorker,
     SessionOpen,
@@ -75,6 +75,30 @@ class _StreamingEngine(_FakeEngine):
         yield torch.zeros((1, 3, 1, 8, 8), dtype=torch.float32)
         await self.release_second.wait()
         yield torch.ones((1, 3, 1, 8, 8), dtype=torch.float32)
+
+
+class _SynchronousBlockingEngine(_FakeEngine):
+    def __init__(self):
+        super().__init__()
+        self.started = threading.Event()
+        self.release = threading.Event()
+
+    def decode(self, decoder, latents, *, first_chunk):
+        self.started.set()
+        self.release.wait(timeout=2)
+        self.calls.append((decoder, latents.clone(), first_chunk))
+        return torch.zeros((1, 3, latents.shape[2], 8, 8), dtype=torch.float32)
+
+
+class _SynchronousStreamingBlockingEngine(_SynchronousBlockingEngine):
+    def iter_decode(self, decoder, latents, *, first_chunk):
+        self.started.set()
+        self.release.wait(timeout=2)
+        self.calls.append((decoder, latents.clone(), first_chunk))
+        yield torch.zeros(
+            (1, 3, latents.shape[2], 8, 8),
+            dtype=torch.float32,
+        )
 
 
 def test_taehv_engine_warmup_runs_a_production_shape_decode(monkeypatch):
@@ -147,7 +171,9 @@ def test_realtime_vae_server_warms_engine_before_serving(monkeypatch):
 
     monkeypatch.setattr(realtime_vae_server, "TAEHVEngine", Engine)
     monkeypatch.setattr(realtime_vae_server, "AsyncVAEWorker", Worker)
-    monkeypatch.setattr(realtime_vae_server, "create_app", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(
+        realtime_vae_server, "create_app", lambda *_args, **_kwargs: object()
+    )
     monkeypatch.setattr(
         realtime_vae_server.uvicorn,
         "run",
@@ -156,7 +182,13 @@ def test_realtime_vae_server_warms_engine_before_serving(monkeypatch):
     monkeypatch.setattr(
         sys,
         "argv",
-        ["realtime-vae", "--checkpoint-path", "/tmp/taehv.pth"],
+        [
+            "realtime-vae",
+            "--decoder-backend",
+            "taehv",
+            "--checkpoint-path",
+            "/tmp/taehv.pth",
+        ],
     )
 
     realtime_vae_server.main()
@@ -185,6 +217,36 @@ def test_worker_keeps_decoder_state_per_generation():
 
         assert engine.decoder_ids == {("s1", "g1"), ("s2", "g2")}
         await worker.close_all()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "engine_type",
+    [_SynchronousBlockingEngine, _SynchronousStreamingBlockingEngine],
+)
+def test_worker_keeps_event_loop_responsive_during_synchronous_decode(engine_type):
+    async def scenario():
+        engine = engine_type()
+        worker = AsyncVAEWorker(engine, max_sessions=1)
+        await worker.open(SessionOpen("s1", "g1"))
+        result = await worker.submit(
+            _header(),
+            torch.zeros(1, 48, 1, 2, 2, dtype=torch.bfloat16),
+        )
+        timer = threading.Timer(0.3, engine.release.set)
+        timer.start()
+        started_at = time.perf_counter()
+        await asyncio.sleep(0.02)
+        responsive_after = time.perf_counter() - started_at
+        try:
+            assert engine.started.is_set()
+            assert responsive_after < 0.2
+            await result
+        finally:
+            engine.release.set()
+            timer.cancel()
+            await worker.close_all()
 
     asyncio.run(scenario())
 
@@ -302,9 +364,7 @@ def test_worker_t2v_reseeds_chunk_one_and_drops_duplicate_frame():
         worker = AsyncVAEWorker(engine, max_sessions=1, queue_depth_per_session=1)
         await worker.open(SessionOpen("s", "g"))
         first_latent = torch.ones(1, 48, 1, 2, 2, dtype=torch.bfloat16)
-        second_latent = torch.full(
-            (1, 48, 2, 2, 2), 2.0, dtype=torch.bfloat16
-        )
+        second_latent = torch.full((1, 48, 2, 2, 2), 2.0, dtype=torch.bfloat16)
 
         first = await worker.decode(_header("s", "g", 0), first_latent)
         second = await worker.decode(
@@ -403,7 +463,7 @@ def test_worker_coalesces_streaming_yields_into_configured_transport_batch():
     asyncio.run(scenario())
 
 
-def test_worker_grants_next_credit_only_after_the_job_enters_decode():
+def test_worker_notifies_when_the_job_enters_decode():
     async def scenario():
         engine = _BlockingEngine()
         worker = AsyncVAEWorker(engine, max_sessions=1, queue_depth_per_session=2)

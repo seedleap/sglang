@@ -190,7 +190,8 @@ spec:
               CUDA_VISIBLE_DEVICES=1 \
                 MINWM_NATIVE_COMPONENTS= \
                 PYTHONPATH=/workspace/sglang/python \
-                python3 -m sglang.multimodal_gen.runtime.entrypoints.vae_decode_server \
+                python3 -m sglang.multimodal_gen.runtime.entrypoints.realtime_vae_server \
+                  --decoder-backend exact \
                   --vae-path "/work/minwm-realtime/${setup_run}/sglang-model/vae" \
                   --model-path "/work/minwm-realtime/${setup_run}/sglang-model" \
                   --pipeline-class-name MinWMCausalDMDPipeline \
@@ -199,8 +200,9 @@ spec:
                   --performance-mode speed \
                   --enable-torch-compile false \
                   --warmup-mode off \
-                  --vae-decoder-host 127.0.0.1 \
-                  --vae-decoder-port 31000 \
+                  --max-sessions 1 \
+                  --host 127.0.0.1 \
+                  --port 31000 \
                   > "${vae_log_local}" 2>&1 &
               vae_pid=$!
               cleanup_vae() {
@@ -229,7 +231,9 @@ spec:
               echo "MINWM_STATIC_FP8_2X_LANE_START lane=bf16-exact-vae-overlap timestamp=$(date -Iseconds)"
               env \
                 CUDA_VISIBLE_DEVICES=0 \
-                SGLANG_REALTIME_REMOTE_VAE_URL=http://127.0.0.1:31000 \
+                MINWM_REALTIME_VAE_BACKEND=exact_remote \
+                MINWM_REALTIME_VAE_WORKER_URL=ws://127.0.0.1:31000/v1/realtime_vae/decode \
+                MINWM_REALTIME_VAE_TRANSPORT=auto \
                 MINWM_RUN_ID="${bf16_overlap}" \
                 MINWM_REUSE_INPUT_RUN_ID="${setup_run}" \
                 MINWM_REUSE_MODEL_RUN_ID="${setup_run}" \
@@ -243,7 +247,9 @@ spec:
               echo "MINWM_STATIC_FP8_2X_LANE_START lane=static-exact-vae-overlap timestamp=$(date -Iseconds)"
               env \
                 CUDA_VISIBLE_DEVICES=0 \
-                SGLANG_REALTIME_REMOTE_VAE_URL=http://127.0.0.1:31000 \
+                MINWM_REALTIME_VAE_BACKEND=exact_remote \
+                MINWM_REALTIME_VAE_WORKER_URL=ws://127.0.0.1:31000/v1/realtime_vae/decode \
+                MINWM_REALTIME_VAE_TRANSPORT=auto \
                 MINWM_RUN_ID="${static_overlap}" \
                 MINWM_REUSE_INPUT_RUN_ID="${setup_run}" \
                 MINWM_REUSE_MODEL_RUN_ID="${setup_run}" \

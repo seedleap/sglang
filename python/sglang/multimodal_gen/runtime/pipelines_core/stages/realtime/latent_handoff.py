@@ -18,11 +18,12 @@ class RealtimeLatentHandoffStage(PipelineStage):
         return RoleType.DENOISER
 
     def forward(self, batch: Req, server_args: ServerArgs) -> OutputBatch:
-        del server_args
         if not isinstance(batch.latents, torch.Tensor):
             raise ValueError("Realtime latent handoff requires tensor latents")
         if not batch.realtime_session_id or not batch.realtime_generation_id:
-            raise ValueError("Realtime latent handoff requires session generation identity")
+            raise ValueError(
+                "Realtime latent handoff requires session generation identity"
+            )
 
         generated_latents = batch.latents
         has_reference = isinstance(batch.image_latent, torch.Tensor)
@@ -30,7 +31,10 @@ class RealtimeLatentHandoffStage(PipelineStage):
         if batch.block_idx == 0 and has_reference:
             handoff_latents = torch.cat([batch.image_latent, generated_latents], dim=2)
 
-        handoff_latents = handoff_latents.detach().to(dtype=torch.bfloat16).contiguous()
+        handoff_latents = handoff_latents.detach()
+        if server_args.realtime_vae_backend != "exact_remote":
+            handoff_latents = handoff_latents.to(dtype=torch.bfloat16)
+        handoff_latents = handoff_latents.contiguous()
         return OutputBatch(
             realtime_latents=handoff_latents,
             realtime_handoff={
@@ -42,6 +46,9 @@ class RealtimeLatentHandoffStage(PipelineStage):
                 "action_version": batch.realtime_action_version,
                 "prompt_version": batch.realtime_prompt_version,
                 "has_reference": has_reference,
+                "is_final_chunk": bool(
+                    batch.extra.get("realtime_is_final_chunk", False)
+                ),
                 "generated_latent_frames": int(generated_latents.shape[2]),
                 "output_format": batch.realtime_output_format,
                 "preview_max_width": batch.realtime_preview_max_width,
