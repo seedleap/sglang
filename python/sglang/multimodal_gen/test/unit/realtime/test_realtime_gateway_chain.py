@@ -130,6 +130,7 @@ def test_gateway_routes_control_and_direct_vae_media_and_queries_trace_over_http
                 )
                 accepted = decode_message(await output.recv())
                 assert accepted["type"] == "session_output_accepted"
+
                 async def send_frame(index: int):
                     await output.send(
                         encode_message(
@@ -169,9 +170,7 @@ def test_gateway_routes_control_and_direct_vae_media_and_queries_trace_over_http
                     )
                 )
                 completion_accepted = decode_message(await output.recv())
-                assert completion_accepted["type"] == (
-                    "media_chunk_complete_accepted"
-                )
+                assert completion_accepted["type"] == ("media_chunk_complete_accepted")
                 assert completion_accepted["chunk_index"] == 0
 
         coordinator = _Coordinator(
@@ -196,6 +195,7 @@ def test_gateway_routes_control_and_direct_vae_media_and_queries_trace_over_http
                     "?user_id=user-a&trace_id=trace-a"
                 )
                 async with connect(url, max_size=None, compression=None) as browser:
+
                     async def send_actions_until_closed():
                         await browser.send(
                             encode_message(
@@ -217,7 +217,7 @@ def test_gateway_routes_control_and_direct_vae_media_and_queries_trace_over_http
                     try:
                         while True:
                             messages.append(
-                                    decode_message(
+                                decode_message(
                                     await asyncio.wait_for(browser.recv(), 4)
                                 )
                             )
@@ -253,9 +253,7 @@ def test_gateway_routes_control_and_direct_vae_media_and_queries_trace_over_http
                         "/v1/realtime_video/traces/trace-a"
                     )
                 assert response.status_code == 200
-                assert response.json()["events"][0]["event"] == (
-                    "gateway.ws_accepted"
-                )
+                assert response.json()["events"][0]["event"] == ("gateway.ws_accepted")
             finally:
                 server.should_exit = True
                 await server_task

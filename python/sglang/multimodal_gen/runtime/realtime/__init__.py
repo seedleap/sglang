@@ -18,8 +18,8 @@ if os.environ.get("SGLANG_LIGHTWEIGHT_RUNTIME") != "1":
     from sglang.multimodal_gen.runtime.realtime.session import (
         BaseRealtimeState,
         RealtimeSession,
-        RealtimeSessionCapacityError,
         RealtimeSessionCache,
+        RealtimeSessionCapacityError,
     )
     from sglang.multimodal_gen.runtime.realtime.states import (
         RealtimeCameraControlState,

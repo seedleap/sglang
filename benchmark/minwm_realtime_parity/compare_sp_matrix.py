@@ -13,7 +13,6 @@ import statistics
 from pathlib import Path
 
 import numpy as np
-
 from common import load_cases, write_json
 from compare_results import metric_block
 

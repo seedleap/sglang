@@ -141,9 +141,7 @@ def action_labels_to_primitive_bits(
     return table[labels]
 
 
-def action_sinusoidal_embedding_1d(
-    dim: int, position: torch.Tensor
-) -> torch.Tensor:
+def action_sinusoidal_embedding_1d(dim: int, position: torch.Tensor) -> torch.Tensor:
     if dim % 2:
         raise ValueError("MinWM action sinusoidal embedding dimension must be even")
     half = dim // 2

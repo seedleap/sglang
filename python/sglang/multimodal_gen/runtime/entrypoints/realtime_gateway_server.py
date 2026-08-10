@@ -20,7 +20,7 @@ from uuid import uuid4
 import httpx
 import uvicorn
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosedOK
@@ -51,7 +51,6 @@ from sglang.multimodal_gen.runtime.utils.realtime_trace import (
     emit_realtime_trace_payload,
     normalize_trace_id,
 )
-
 
 WEBUI_ROOT = Path(__file__).resolve().parents[2] / "apps" / "realtime_webui"
 logger = logging.getLogger(__name__)
@@ -282,9 +281,7 @@ def create_app(
         queue_depth=output_queue_depth,
         enqueue_timeout_s=output_enqueue_timeout_s,
     )
-    admission_gate = BoundedAdmissionWaiterGate(
-        max_waiters=max_admission_waiters
-    )
+    admission_gate = BoundedAdmissionWaiterGate(max_waiters=max_admission_waiters)
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -336,7 +333,9 @@ def create_app(
             raise HTTPException(status_code=400, detail="invalid trace_id")
         raw_events = payload.get("events")
         if not isinstance(raw_events, list) or len(raw_events) > 64:
-            raise HTTPException(status_code=400, detail="events must contain at most 64 items")
+            raise HTTPException(
+                status_code=400, detail="events must contain at most 64 items"
+            )
         accepted = 0
         for raw_event in raw_events:
             if not isinstance(raw_event, dict):
@@ -410,9 +409,7 @@ def create_app(
             await websocket.close(code=1008, reason=str(exc))
         finally:
             if route is not None:
-                await registry.unbind(
-                    session_id, generation_id, token=output_token
-                )
+                await registry.unbind(session_id, generation_id, token=output_token)
 
     @app.websocket("/v1/realtime_video/generate")
     async def generate(websocket: WebSocket):
@@ -492,7 +489,10 @@ def create_app(
                                 control = decode_message(payload)
                             except ProtocolViolation:
                                 control = None
-                            if isinstance(control, dict) and control.get("type") == "init":
+                            if (
+                                isinstance(control, dict)
+                                and control.get("type") == "init"
+                            ):
                                 max_chunks = int(control.get("max_chunks") or 0)
                                 if max_chunks > 0:
                                     expected_last_chunk = max_chunks - 1
@@ -525,9 +525,7 @@ def create_app(
                     finally:
                         route.task_done()
 
-            async def send_browser_with_trace(
-                wire: bytes, *, send_source: str
-            ) -> None:
+            async def send_browser_with_trace(wire: bytes, *, send_source: str) -> None:
                 send_started = time.perf_counter()
                 send_fields = _browser_send_trace_fields(wire)
                 try:
@@ -540,9 +538,7 @@ def create_app(
                         generation_id=generation_id,
                         send_source=send_source,
                         send_ok=False,
-                        send_ms=round(
-                            (time.perf_counter() - send_started) * 1000, 3
-                        ),
+                        send_ms=round((time.perf_counter() - send_started) * 1000, 3),
                         error_type=type(exc).__name__,
                         **send_fields,
                     )
@@ -573,9 +569,7 @@ def create_app(
             output_task = asyncio.create_task(
                 output_to_browser(), name="gateway-vae-output"
             )
-            lease_task = asyncio.create_task(
-                renew_lease(), name="gateway-lease-renew"
-            )
+            lease_task = asyncio.create_task(renew_lease(), name="gateway-lease-renew")
             tasks = {
                 browser_input_task,
                 worker_control_task,
@@ -599,9 +593,7 @@ def create_app(
                             route.wait_until_output_closed(),
                             timeout=output_drain_timeout_s,
                         )
-                    await asyncio.wait_for(
-                        route.join(), timeout=output_drain_timeout_s
-                    )
+                    await asyncio.wait_for(route.join(), timeout=output_drain_timeout_s)
                 except TimeoutError:
                     logger.warning(
                         "Gateway media drain timed out for session_id=%s",
@@ -622,7 +614,9 @@ def create_app(
             pass
         except Exception as exc:
             try:
-                await sender.error(f"realtime gateway error: {str(exc).splitlines()[0]}")
+                await sender.error(
+                    f"realtime gateway error: {str(exc).splitlines()[0]}"
+                )
                 await websocket.close(code=1011, reason="gateway session failed")
             except Exception:
                 pass
@@ -633,9 +627,7 @@ def create_app(
                 if release_grace_s:
                     await asyncio.sleep(release_grace_s)
             if route is not None:
-                await registry.unregister(
-                    session_id, generation_id, token=output_token
-                )
+                await registry.unregister(session_id, generation_id, token=output_token)
             if assignment is not None:
                 try:
                     await coordinator.release(assignment)
@@ -644,7 +636,9 @@ def create_app(
                         "Coordinator release failed for session_id=%s",
                         assignment.session_id,
                     )
-            _log_gateway_trace(trace_id, "gateway.session_closed", session_id=session_id)
+            _log_gateway_trace(
+                trace_id, "gateway.session_closed", session_id=session_id
+            )
             try:
                 await websocket.close(code=1000)
             except Exception:

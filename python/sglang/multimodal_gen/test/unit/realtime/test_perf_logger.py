@@ -48,10 +48,7 @@ def _load_perf_logger_with_namespace_sglang(monkeypatch):
 
     module_name = "perf_logger_under_test"
     module_path = (
-        Path(__file__).resolve().parents[3]
-        / "runtime"
-        / "utils"
-        / "perf_logger.py"
+        Path(__file__).resolve().parents[3] / "runtime" / "utils" / "perf_logger.py"
     )
     spec = importlib.util.spec_from_file_location(module_name, module_path)
     module = importlib.util.module_from_spec(spec)

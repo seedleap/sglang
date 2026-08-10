@@ -8,7 +8,6 @@ from typing import Any
 
 import yaml
 
-
 _DISPOSABLE_LABELS = {
     "seedleap.ai/test-run",
     "seedleap.ai/ttl-after-test",

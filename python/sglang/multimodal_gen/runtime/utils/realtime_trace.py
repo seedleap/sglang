@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-import json
 import hashlib
 import itertools
+import json
 import logging
 import os
 import re
@@ -362,9 +362,7 @@ def _get_otlp_trace_logger() -> logging.Logger | None:
             from opentelemetry.sdk.resources import Resource
 
             attributes = {
-                "service.name": os.environ.get(
-                    "OTEL_SERVICE_NAME", "sglang-realtime"
-                )
+                "service.name": os.environ.get("OTEL_SERVICE_NAME", "sglang-realtime")
             }
             for item in os.environ.get("OTEL_RESOURCE_ATTRIBUTES", "").split(","):
                 key, separator, value = item.partition("=")

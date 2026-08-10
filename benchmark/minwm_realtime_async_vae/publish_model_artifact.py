@@ -15,7 +15,6 @@ import boto3
 from boto3.s3.transfer import TransferConfig
 from botocore.exceptions import ClientError
 
-
 REVISION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
 
@@ -59,7 +58,9 @@ def publish(model_dir: Path, manifest: dict, args: argparse.Namespace) -> None:
     model_prefix = f"{args.output_prefix.strip('/')}/{args.revision}/model"
     ready_key = f"{model_prefix}/_READY"
     if object_exists(client, args.output_bucket, ready_key):
-        raise RuntimeError(f"immutable artifact already exists: s3://{args.output_bucket}/{ready_key}")
+        raise RuntimeError(
+            f"immutable artifact already exists: s3://{args.output_bucket}/{ready_key}"
+        )
 
     transfer = TransferConfig(
         multipart_threshold=64 * 1024 * 1024,
@@ -111,7 +112,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-bucket", required=True)
     parser.add_argument("--output-region", default="us-west-2")
     parser.add_argument(
-        "--output-prefix", default="world-model/minwm/serving-artifacts/wan22-5b-stage3-dmd-30-gs1800"
+        "--output-prefix",
+        default="world-model/minwm/serving-artifacts/wan22-5b-stage3-dmd-30-gs1800",
     )
     parser.add_argument("--upload-concurrency", type=int, default=16)
     return parser.parse_args()
