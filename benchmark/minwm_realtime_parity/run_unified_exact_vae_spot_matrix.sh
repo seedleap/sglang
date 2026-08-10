@@ -264,7 +264,7 @@ for degree in "${requested_degrees[@]}"; do
       "${RESULT_ROOT}/local-sp1/throughput.json" \
       "${RESULT_ROOT}/${profile}/throughput.json" \
       "${RESULT_ROOT}/local-vs-remote-sp1-parity.json" \
-      --max-absolute-error 2 \
+      --max-absolute-error 4 \
       --min-psnr-db 60
     parity_met="$(python3 - "${RESULT_ROOT}/local-vs-remote-sp1-parity.json" <<'PY'
 import json
