@@ -99,6 +99,7 @@ def validate_frame_batch(
     batch_index = int(header.get("frame_batch_index", 0))
     num_batches = int(header.get("num_frame_batches", 1))
     expected_final = batch_index == num_batches - 1
+    is_final = bool(header.get("is_final_frame_batch", expected_final))
     checks = {
         "chunk_index": int(header["chunk_index"]) == chunk_index,
         "positive_num_frames": batch_frames > 0,
@@ -108,9 +109,14 @@ def validate_frame_batch(
         == expected_bytes // batch_frames,
         "raw_size": int(header.get("raw_size", len(payload))) == len(payload),
         "total_size": int(header.get("total_size", len(payload))) == len(payload),
-        "batch_index": 0 <= batch_index < num_batches,
-        "is_final_frame_batch": bool(header.get("is_final_frame_batch", expected_final))
-        == expected_final,
+        # Streamed remote decoding does not know the total until the final batch.
+        # It uses zero as the documented unknown-count sentinel.
+        "batch_index": batch_index >= 0
+        and (num_batches == 0 or batch_index < num_batches),
+        "num_frame_batches": num_batches >= 0,
+        "is_final_frame_batch": (
+            not is_final if num_batches == 0 else is_final == expected_final
+        ),
     }
     failed = [name for name, passed in checks.items() if not passed]
     if failed:
@@ -119,6 +125,49 @@ def validate_frame_batch(
             f"header={header}"
         )
     return batch_index, num_batches, batch_frames
+
+
+def record_frame_batch(
+    state: dict[str, Any],
+    *,
+    chunk_index: int,
+    batch_index: int,
+    num_batches: int,
+    batch_frames: int,
+    expected_frames: int,
+) -> bool:
+    known_num_batches = state["num_batches"]
+    if num_batches:
+        if known_num_batches not in (None, num_batches):
+            raise AssertionError(
+                f"chunk {chunk_index} changed num_frame_batches from "
+                f"{known_num_batches} to {num_batches}"
+            )
+        state["num_batches"] = num_batches
+    elif known_num_batches is not None:
+        raise AssertionError(
+            f"chunk {chunk_index} changed num_frame_batches from "
+            f"{known_num_batches} to unknown"
+        )
+    if batch_index in state["seen"]:
+        raise AssertionError(f"chunk {chunk_index} repeated frame batch {batch_index}")
+    state["seen"].add(batch_index)
+    state["frames"] += batch_frames
+    if not num_batches or batch_index != num_batches - 1:
+        return False
+    expected_batch_indices = set(range(num_batches))
+    if state["seen"] != expected_batch_indices:
+        raise AssertionError(
+            f"chunk {chunk_index} frame batches are incomplete: "
+            f"seen={sorted(state['seen'])} expected="
+            f"{sorted(expected_batch_indices)}"
+        )
+    if state["frames"] != expected_frames:
+        raise AssertionError(
+            f"chunk {chunk_index} produced {state['frames']} frames, "
+            f"expected {expected_frames}"
+        )
+    return True
 
 
 async def receive_run(args: argparse.Namespace, contract: dict, case: dict) -> dict:
@@ -213,32 +262,16 @@ async def receive_run(args: argparse.Namespace, contract: dict, case: dict) -> d
                 )
             state = frame_batches_by_chunk.setdefault(
                 chunk_index,
-                {"num_batches": num_batches, "seen": set(), "frames": 0},
+                {"num_batches": None, "seen": set(), "frames": 0},
             )
-            if state["num_batches"] != num_batches:
-                raise AssertionError(
-                    f"chunk {chunk_index} changed num_frame_batches from "
-                    f"{state['num_batches']} to {num_batches}"
-                )
-            if batch_index in state["seen"]:
-                raise AssertionError(
-                    f"chunk {chunk_index} repeated frame batch {batch_index}"
-                )
-            state["seen"].add(batch_index)
-            state["frames"] += batch_frames
-            if batch_index == num_batches - 1:
-                expected_batch_indices = set(range(num_batches))
-                if state["seen"] != expected_batch_indices:
-                    raise AssertionError(
-                        f"chunk {chunk_index} frame batches are incomplete: "
-                        f"seen={sorted(state['seen'])} expected="
-                        f"{sorted(expected_batch_indices)}"
-                    )
-                if state["frames"] != expected_frames:
-                    raise AssertionError(
-                        f"chunk {chunk_index} produced {state['frames']} frames, "
-                        f"expected {expected_frames}"
-                    )
+            if record_frame_batch(
+                state,
+                chunk_index=chunk_index,
+                batch_index=batch_index,
+                num_batches=num_batches,
+                batch_frames=batch_frames,
+                expected_frames=expected_frames,
+            ):
                 payload_complete_ns[chunk_index] = time.perf_counter_ns()
 
     expected_indices = list(range(total_chunks))

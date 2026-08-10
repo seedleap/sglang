@@ -9,6 +9,10 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from benchmark_realtime_throughput import (  # noqa: E402
+    record_frame_batch,
+    validate_frame_batch,
+)
 from common import (  # noqa: E402
     action_label_sequence,
     build_minwm_message,
@@ -17,9 +21,65 @@ from common import (  # noqa: E402
     materialize_first_frame,
 )
 
-
 DRAGON_CASES = Path(__file__).with_name("cases_dragon_ride_60s_832x480.json")
 STEP1600_T2V_CASES = Path(__file__).with_name("cases_step1600_t2v_30s_832x480.json")
+
+
+def _raw_header(**overrides):
+    header = {
+        "chunk_index": 0,
+        "num_frames": 1,
+        "content_type": "application/x-raw-rgb",
+        "width": 2,
+        "height": 2,
+        "channels": 3,
+        "bytes_per_frame": 12,
+        "raw_size": 12,
+        "total_size": 12,
+        "frame_batch_index": 0,
+        "num_frame_batches": 1,
+        "is_final_frame_batch": True,
+    }
+    header.update(overrides)
+    return header
+
+
+def test_streamed_frame_batch_allows_unknown_count_until_final_batch() -> None:
+    payload = bytes(12)
+    state = {"num_batches": None, "seen": set(), "frames": 0}
+
+    for batch_index in range(3):
+        header = _raw_header(
+            frame_batch_index=batch_index,
+            num_frame_batches=0,
+            is_final_frame_batch=False,
+        )
+        index, count, frames = validate_frame_batch(header, payload, chunk_index=0)
+        assert not record_frame_batch(
+            state,
+            chunk_index=0,
+            batch_index=index,
+            num_batches=count,
+            batch_frames=frames,
+            expected_frames=4,
+        )
+
+    final_header = _raw_header(frame_batch_index=3, num_frame_batches=4)
+    index, count, frames = validate_frame_batch(final_header, payload, chunk_index=0)
+    assert record_frame_batch(
+        state,
+        chunk_index=0,
+        batch_index=index,
+        num_batches=count,
+        batch_frames=frames,
+        expected_frames=4,
+    )
+    assert state == {"num_batches": 4, "seen": {0, 1, 2, 3}, "frames": 4}
+
+
+def test_streamed_frame_batch_rejects_final_unknown_count() -> None:
+    with pytest.raises(AssertionError, match="is_final_frame_batch"):
+        validate_frame_batch(_raw_header(num_frame_batches=0), bytes(12), chunk_index=0)
 
 
 def test_realtime_trace_events_are_out_of_band() -> None:
