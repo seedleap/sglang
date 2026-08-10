@@ -52,6 +52,15 @@ _CLUSTER_PROFILES = {
         "zone": None,
         "hardware": ("b200",),
     },
+    "aws03-usw2b-b300": {
+        "context": "aws03-usw2",
+        "nodepool": None,
+        "nodegroup": "minimax-h3-spot-p6b300-usw2b",
+        "toleration_key": "seedleap.ai/workload",
+        "toleration_value": "wan22-ti2v",
+        "zone": "us-west-2b",
+        "hardware": ("b300",),
+    },
 }
 
 

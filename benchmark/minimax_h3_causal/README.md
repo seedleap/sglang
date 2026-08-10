@@ -93,6 +93,7 @@ kubectl apply --dry-run=server -f /tmp/minimax-h3-probe.json
 | `usw2d-sp12` | `us-west-2d` | B200/B300 | EKS Auto Mode 区域备选 |
 | `use2-b200` | `us-east-2a/2b/2c` | B200 | 标准 Karpenter，多 AZ 备选 |
 | `aws03-use2-b200` | `us-east-2a/2b/2c` | B200 | Managed Nodegroup Spot，多 AZ；需先扩容 nodegroup |
+| `aws03-usw2b-b300` | `us-west-2b` | B300 | Placement Score 优选的临时 Managed Nodegroup Spot |
 
 ```bash
 python benchmark/minimax_h3_causal/submit_spot_job.py \
