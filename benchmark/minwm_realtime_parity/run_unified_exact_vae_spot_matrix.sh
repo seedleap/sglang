@@ -171,6 +171,7 @@ start_denoiser() {
       --enable-cfg-parallel false \
       --enable-torch-compile false \
       --warmup-mode off \
+      --realtime-session-idle-timeout-s 1800 \
       "${remote_args[@]}" \
       --port 30000 \
       > "${lane_dir}/server.log" 2>&1 &
