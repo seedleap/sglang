@@ -17,18 +17,18 @@ spec:
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: minwm-unified-exact-overlap-b300-20260810-01
+  name: minwm-unified-exact-overlap-b300-20260810-02
   namespace: default
   labels:
-    app.kubernetes.io/name: minwm-unified-exact-overlap-b300-20260810-01
+    app.kubernetes.io/name: minwm-unified-exact-overlap-b300-20260810-02
     seedleap.ai/owner: chenshengdong
     seedleap.ai/task: minwm-unified-exact-overlap
-    seedleap.ai/run-id: minwm-unified-exact-overlap-b300-20260810-01
+    seedleap.ai/run-id: minwm-unified-exact-overlap-b300-20260810-02
   annotations:
     seedleap.ai/capacity-type: spot
     seedleap.ai/repo: seedleap/sglang
     seedleap.ai/branch: codex/unified-realtime-vae-overlap
-    seedleap.ai/sglang-git-ref: &sglang_ref "42e0c7baf1df9882a892e3c358bb059569e74a83"
+    seedleap.ai/sglang-git-ref: &sglang_ref "e2ba5910d3d465221db0f8024ca85db52f067368"
     seedleap.ai/minwm-git-ref: &minwm_ref "2efc6485f65e8fcab506665efde79bc41406385e"
     seedleap.ai/checkpoint-version-id: "wduScksw2f3yPErnG9lBioOuE2AToyAP"
 spec:
@@ -37,10 +37,10 @@ spec:
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: minwm-unified-exact-overlap-b300-20260810-01
+        app.kubernetes.io/name: minwm-unified-exact-overlap-b300-20260810-02
         seedleap.ai/owner: chenshengdong
         seedleap.ai/task: minwm-unified-exact-overlap
-        seedleap.ai/run-id: minwm-unified-exact-overlap-b300-20260810-01
+        seedleap.ai/run-id: minwm-unified-exact-overlap-b300-20260810-02
       annotations:
         seedleap.ai/repo: seedleap/sglang
         seedleap.ai/branch: codex/unified-realtime-vae-overlap
@@ -82,7 +82,7 @@ spec:
             - name: MINWM_GIT_REF
               value: *minwm_ref
             - name: MINWM_MATRIX_ID
-              value: minwm-unified-exact-overlap-b300-20260810-01
+              value: minwm-unified-exact-overlap-b300-20260810-02
             - name: MINWM_EXPECTED_GPU_SUBSTRING
               value: B300
             - name: MINWM_TARGET_FPS
