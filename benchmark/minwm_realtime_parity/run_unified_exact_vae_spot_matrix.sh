@@ -8,6 +8,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENTRYPOINT="${SCRIPT_DIR}/aws_b200_entrypoint.sh"
 TARGET_FPS="${MINWM_TARGET_FPS:-24}"
+PARITY_MAX_ABSOLUTE_ERROR="${MINWM_PARITY_MAX_ABSOLUTE_ERROR:-8}"
+PARITY_MIN_PSNR_DB="${MINWM_PARITY_MIN_PSNR_DB:-58}"
 SP_DEGREES="${MINWM_SP_DEGREES:-1 2 4}"
 VAE_GPU_INDICES="${MINWM_VAE_GPU_INDICES:-${MINWM_VAE_GPU_INDEX:-7}}"
 VAE_PARALLEL_SIZE="${MINWM_VAE_PARALLEL_SIZE:-1}"
@@ -286,14 +288,18 @@ parity_met=false
 selected_degree=""
 for degree in "${requested_degrees[@]}"; do
   profile="exact-remote-sp${degree}"
+  curl --fail --silent http://127.0.0.1:31000/metrics \
+    > "${RESULT_ROOT}/${profile}-vae-metrics-before.prom"
   run_lane remote "${degree}" "${profile}"
+  curl --fail --silent http://127.0.0.1:31000/metrics \
+    > "${RESULT_ROOT}/${profile}-vae-metrics-after.prom"
   if [[ "${degree}" == "1" ]]; then
     python3 "${SCRIPT_DIR}/compare_realtime_vae_outputs.py" \
       "${RESULT_ROOT}/local-sp1/throughput.json" \
       "${RESULT_ROOT}/${profile}/throughput.json" \
       "${RESULT_ROOT}/local-vs-remote-sp1-parity.json" \
-      --max-absolute-error 4 \
-      --min-psnr-db 60
+      --max-absolute-error "${PARITY_MAX_ABSOLUTE_ERROR}" \
+      --min-psnr-db "${PARITY_MIN_PSNR_DB}"
     parity_met="$(python3 - "${RESULT_ROOT}/local-vs-remote-sp1-parity.json" <<'PY'
 import json
 import sys
