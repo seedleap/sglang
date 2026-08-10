@@ -164,3 +164,32 @@ def test_modelscope_selected_partition_cache_hit_requires_a_file(monkeypatch, tm
         )
 
     assert result == str(tmp_path)
+
+
+def test_maybe_download_model_forwards_revision_to_snapshot(monkeypatch, tmp_path):
+    calls = []
+
+    def snapshot_download(**kwargs):
+        calls.append(kwargs)
+        return str(tmp_path)
+
+    monkeypatch.setattr(hf_diffusers_utils, "snapshot_download", snapshot_download)
+
+    result = hf_diffusers_utils.maybe_download_model(
+        "MiniMaxAI/MiniMax-H3",
+        allow_patterns=["FL2VA/**"],
+        revision="bfc8ed0353f5a9733be73e6b2c98ec0948195b86",
+    )
+
+    assert result == str(tmp_path)
+    assert calls == [
+        {
+            "repo_id": "MiniMaxAI/MiniMax-H3",
+            "ignore_patterns": ["*.onnx", "*.msgpack"],
+            "allow_patterns": ["FL2VA/**"],
+            "local_dir": None,
+            "local_files_only": True,
+            "max_workers": 8,
+            "revision": "bfc8ed0353f5a9733be73e6b2c98ec0948195b86",
+        }
+    ]

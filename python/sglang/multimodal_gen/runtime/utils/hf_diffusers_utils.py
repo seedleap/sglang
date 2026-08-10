@@ -791,6 +791,7 @@ def maybe_download_model(
     allow_patterns: list[str] | None = None,
     force_diffusers_model: bool = False,
     skip_overlay_resolution: bool = False,
+    revision: str | None = None,
 ) -> str:
     """
     Check if the model path is a Hugging Face Hub model ID and download it if needed.
@@ -801,6 +802,7 @@ def maybe_download_model(
         download: Whether to download the model from Hugging Face Hub
         is_lora: If True, skip model completeness verification (LoRA models don't have transformer/vae directories)
         force_diffusers_model: If True, apply diffusers model check. Otherwise it should be a component model
+        revision: Optional immutable Hub revision to resolve
     Returns:
         Local path to the model
     """
@@ -866,9 +868,11 @@ def maybe_download_model(
         local_path = snapshot_download(
             repo_id=model_name_or_path,
             ignore_patterns=["*.onnx", "*.msgpack"],
+            allow_patterns=allow_patterns,
             local_dir=local_dir,
             local_files_only=True,
             max_workers=8,
+            revision=revision,
         )
         if not force_diffusers_model:
             return str(local_path)
@@ -939,6 +943,7 @@ def maybe_download_model(
                     allow_patterns=allow_patterns,
                     local_dir=local_dir,
                     max_workers=8,
+                    revision=revision,
                 )
 
             if not force_diffusers_model:
@@ -956,6 +961,7 @@ def maybe_download_model(
                         local_dir=local_dir,
                         max_workers=8,
                         force_download=True,
+                        revision=revision,
                     )
                 if not _verify_diffusers_model_complete(local_path):
                     raise ValueError(
