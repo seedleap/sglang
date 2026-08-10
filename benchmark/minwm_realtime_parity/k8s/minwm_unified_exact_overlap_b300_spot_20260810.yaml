@@ -17,18 +17,18 @@ spec:
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: minwm-unified-exact-overlap-b300-20260810-07
+  name: minwm-unified-exact-overlap-b300-20260810-08
   namespace: default
   labels:
-    app.kubernetes.io/name: minwm-unified-exact-overlap-b300-20260810-07
+    app.kubernetes.io/name: minwm-unified-exact-overlap-b300-20260810-08
     seedleap.ai/owner: chenshengdong
     seedleap.ai/task: minwm-unified-exact-overlap
-    seedleap.ai/run-id: minwm-unified-exact-overlap-b300-20260810-07
+    seedleap.ai/run-id: minwm-unified-exact-overlap-b300-20260810-08
   annotations:
     seedleap.ai/capacity-type: spot
     seedleap.ai/repo: seedleap/sglang
     seedleap.ai/branch: codex/unified-realtime-vae-overlap
-    seedleap.ai/sglang-git-ref: &sglang_ref "cdb496a58126a51987ebdddc5d31ddf25683d16f"
+    seedleap.ai/sglang-git-ref: &sglang_ref "b9dbabcc9a5affee2a6d490140f99e2b1662e4ef"
     seedleap.ai/minwm-git-ref: &minwm_ref "2efc6485f65e8fcab506665efde79bc41406385e"
     seedleap.ai/checkpoint-version-id: "wduScksw2f3yPErnG9lBioOuE2AToyAP"
 spec:
@@ -37,10 +37,10 @@ spec:
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: minwm-unified-exact-overlap-b300-20260810-07
+        app.kubernetes.io/name: minwm-unified-exact-overlap-b300-20260810-08
         seedleap.ai/owner: chenshengdong
         seedleap.ai/task: minwm-unified-exact-overlap
-        seedleap.ai/run-id: minwm-unified-exact-overlap-b300-20260810-07
+        seedleap.ai/run-id: minwm-unified-exact-overlap-b300-20260810-08
       annotations:
         seedleap.ai/repo: seedleap/sglang
         seedleap.ai/branch: codex/unified-realtime-vae-overlap
@@ -82,15 +82,17 @@ spec:
             - name: MINWM_GIT_REF
               value: *minwm_ref
             - name: MINWM_MATRIX_ID
-              value: minwm-unified-exact-overlap-b300-20260810-07
+              value: minwm-unified-exact-overlap-b300-20260810-08
             - name: MINWM_EXPECTED_GPU_SUBSTRING
               value: B300
             - name: MINWM_TARGET_FPS
               value: "24"
             - name: MINWM_SP_DEGREES
               value: "1 2 4"
-            - name: MINWM_VAE_GPU_INDEX
-              value: "7"
+            - name: MINWM_VAE_GPU_INDICES
+              value: "6,7"
+            - name: MINWM_VAE_PARALLEL_SIZE
+              value: "2"
             - name: MINWM_THROUGHPUT_WARMUP_CHUNKS
               value: "20"
             - name: MINWM_THROUGHPUT_MEASURED_CHUNKS
