@@ -75,6 +75,7 @@ class MinWMVideoArchConfig(DiTArchConfig):
     action_hidden_dim: int = 512
     action_kernel_size: int = 3
     action_history_frames: int = 4
+    action_non_proj_bias: bool = True
 
     def __post_init__(self):
         super().__post_init__()

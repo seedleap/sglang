@@ -31,6 +31,15 @@ DEFAULT_SOURCE_URI = (
     "global_step_003200/ema_student/model.pt"
 )
 
+ACTION_HIDDEN_BIAS_KEYS = (
+    "action_in.fuse.0.bias",
+    "action_in.fuse.2.bias",
+    "action_in.encode_1.conv.bias",
+    "action_in.encode_1.norm.bias",
+    "action_in.encode_2.conv.bias",
+    "action_in.encode_2.norm.bias",
+)
+
 TRANSFORMER_CONFIG = {
     "_class_name": "MinWMCausalTransformer3DModel",
     "_diffusers_version": "0.36.0",
@@ -69,6 +78,7 @@ TRANSFORMER_CONFIG = {
     "action_hidden_dim": 512,
     "action_kernel_size": 3,
     "action_history_frames": 4,
+    "action_non_proj_bias": True,
 }
 
 MODEL_INDEX = {
@@ -132,6 +142,7 @@ def validate_generator_state_dict(state_dict: dict[str, torch.Tensor]) -> dict:
         "action_in.encode_1.conv.weight": (512, 512, 3),
         "action_in.encode_2.conv.weight": (512, 512, 3),
         "action_in.proj.weight": (3072, 512),
+        "action_in.proj.bias": (3072,),
         "head.head.weight": (192, 3072),
     }
     has_move_embedding = "action_in.move_embedding.weight" in state_dict
@@ -143,6 +154,31 @@ def validate_generator_state_dict(state_dict: dict[str, torch.Tensor]) -> dict:
         if has_move_embedding
         else "primitive_rope_token_residual"
     )
+    present_hidden_biases = {
+        name for name in ACTION_HIDDEN_BIAS_KEYS if name in state_dict
+    }
+    if action_type == "primitive_rope_token_residual":
+        if present_hidden_biases and len(present_hidden_biases) != len(
+            ACTION_HIDDEN_BIAS_KEYS
+        ):
+            missing = sorted(set(ACTION_HIDDEN_BIAS_KEYS) - present_hidden_biases)
+            errors = [
+                "partial primitive RoPE action hidden biases; missing "
+                + ", ".join(missing)
+            ]
+        else:
+            errors = []
+        action_non_proj_bias = bool(present_hidden_biases)
+    else:
+        missing = sorted(set(ACTION_HIDDEN_BIAS_KEYS) - present_hidden_biases)
+        errors = (
+            ["primitive token action checkpoint is missing " + ", ".join(missing)]
+            if missing
+            else []
+        )
+        action_non_proj_bias = True
+    if present_hidden_biases:
+        required_shapes.update({name: (512,) for name in ACTION_HIDDEN_BIAS_KEYS})
     if has_move_embedding:
         required_shapes.update(
             {
@@ -150,7 +186,6 @@ def validate_generator_state_dict(state_dict: dict[str, torch.Tensor]) -> dict:
                 "action_in.look_embedding.weight": (5, 256),
             }
         )
-    errors = []
     for name, shape in required_shapes.items():
         tensor = state_dict.get(name)
         if tensor is None:
@@ -175,6 +210,7 @@ def validate_generator_state_dict(state_dict: dict[str, torch.Tensor]) -> dict:
         "parameter_count": sum(tensor.numel() for tensor in state_dict.values()),
         "block_count": len(block_indices),
         "action_type": action_type,
+        "action_non_proj_bias": action_non_proj_bias,
     }
 
 
@@ -236,6 +272,7 @@ def build_transformer_config(
     sink_size: int,
     sliding_window_num_frames: int,
     action_type: str = "primitive_token_residual",
+    action_non_proj_bias: bool = True,
     rope_position_mode: str = "absolute",
     rope_max_frame_gap: int = 1,
     prompt_first_frame_pin_enabled: bool = False,
@@ -280,6 +317,7 @@ def build_transformer_config(
             "sink_size": sink_size,
             "sliding_window_num_frames": sliding_window_num_frames,
             "action_type": action_type,
+            "action_non_proj_bias": action_non_proj_bias,
             "rope_position_mode": rope_position_mode,
             "rope_max_frame_gap": rope_max_frame_gap,
             "prompt_first_frame_pin_enabled": prompt_first_frame_pin_enabled,
@@ -353,6 +391,7 @@ def main() -> None:
         sink_size=args.sink_size,
         sliding_window_num_frames=args.sliding_window_num_frames,
         action_type=action_type,
+        action_non_proj_bias=summary["action_non_proj_bias"],
         rope_position_mode=args.rope_position_mode,
         rope_max_frame_gap=args.rope_max_frame_gap,
         prompt_first_frame_pin_enabled=args.prompt_first_frame_pin_enabled,
