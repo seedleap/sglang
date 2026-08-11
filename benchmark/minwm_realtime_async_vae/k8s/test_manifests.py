@@ -193,6 +193,29 @@ def test_gpu_workers_publish_epoch_state_and_drain_before_termination():
             assert mounts["worker-epoch"]["mountPath"] == "/var/run/minwm-worker"
 
 
+def test_denoiser_is_advertised_only_after_representative_warmup():
+    workload = find(
+        load_documents(("h100-denoiser.yaml",)),
+        "StatefulSet",
+        "minwm-async-denoiser",
+    )
+    denoiser = _container(workload, "denoiser")
+    heartbeat = _init_container(workload, "denoiser-heartbeat")
+    command = " ".join(denoiser["args"])
+    readiness = " ".join(denoiser["readinessProbe"]["exec"]["command"])
+    heartbeat_command = " ".join(heartbeat["args"])
+
+    assert "startup_warmup.py" in command
+    assert "--size 1280x704" in command
+    assert "--sink-size 8" in command
+    assert "--kv-cache-num-frames 32" in command
+    assert "--allow-empty-complete" in command
+    assert "--ready-file /var/run/minwm-worker/ready" in command
+    assert "test -s /var/run/minwm-worker/ready" in readiness
+    assert "http://127.0.0.1:30000/health" in readiness
+    assert "--ready-file=/var/run/minwm-worker/ready" in heartbeat_command
+
+
 def test_denoiser_enables_dynamic_remote_vae_handoff_without_a_static_worker_url():
     workload = find(
         load_documents(("h100-denoiser.yaml",)),
