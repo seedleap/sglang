@@ -926,3 +926,88 @@ def test_lingbot_context_cache_update_skips_unused_projection(monkeypatch):
     assert kwargs["encoder_hidden_states_image"] == "image"
     assert kwargs["c2ws_plucker_emb"] == "pose"
     assert kwargs["skip_final_projection"] is True
+
+
+def test_lingbot_condition_embedding_accepts_precomputed_time(monkeypatch):
+    model = CausalLingBotWorldTransformer3DModel.__new__(
+        CausalLingBotWorldTransformer3DModel
+    )
+    monkeypatch.setattr(
+        lingbot_world_module,
+        "get_forward_context",
+        lambda: SimpleNamespace(forward_batch=SimpleNamespace(extra={})),
+    )
+    crossattn_cache = [
+        CrossAttentionKVCache(
+            k=torch.empty(1, 1, 1, 1),
+            v=torch.empty(1, 1, 1, 1),
+            is_init=True,
+        )
+    ]
+    expected = (torch.tensor([[3.0]]), torch.tensor([[4.0]]))
+
+    temb, timestep_proj, _, image_states = model._prepare_condition_embeddings(
+        timestep=torch.tensor([[999]]),
+        encoder_hidden_states=torch.ones(1, 2, 3),
+        encoder_hidden_states_image=torch.ones(1, 2, 3),
+        crossattn_cache=crossattn_cache,
+        precomputed_time_embeddings=expected,
+    )
+
+    assert temb is expected[0]
+    assert timestep_proj is expected[1]
+    assert image_states is None
+
+
+def test_lingbot_cuda_graph_only_accepts_saturated_bounded_recompute():
+    stage = LingBotWorldCausalDMDDenoisingStage.__new__(
+        LingBotWorldCausalDMDDenoisingStage
+    )
+    stage._lingbot_cuda_graph_enabled = True
+    cache = CausalSelfAttentionKVCache(
+        k=torch.zeros(1, 8, 1, 1),
+        v=torch.zeros(1, 8, 1, 1),
+        global_end_index=torch.tensor([8]),
+        local_end_index=torch.tensor([8]),
+        global_end_index_int=8,
+        local_end_index_int=8,
+        cache_size=8,
+        allow_growth=False,
+    )
+    crossattn_cache = CrossAttentionKVCache(
+        k=torch.zeros(1, 2, 1, 1),
+        v=torch.zeros(1, 2, 1, 1),
+        is_init=True,
+    )
+    latent = SimpleNamespace(
+        is_cuda=True,
+        shape=torch.Size([1, 36, 4, 60, 104]),
+        stride=lambda: (898560, 24960, 6240, 104, 1),
+        dtype=torch.bfloat16,
+        device=torch.device("cuda"),
+    )
+    batch = SimpleNamespace(
+        enable_sequence_shard=True,
+        sequence_shard_splits=(3120, 3120),
+        realtime_causal_kv_sample_tokens=4,
+    )
+    kwargs = dict(
+        latent_model_input=latent,
+        prompt_embeds=[torch.zeros(1, 8, 4)],
+        timestep=torch.tensor([[750]]),
+        kv_cache=[cache],
+        crossattn_cache=[crossattn_cache],
+        pos_cond_kwargs={},
+        attn_metadata=None,
+    )
+
+    assert (
+        stage._lingbot_cuda_graph_key(batch, current_timestep=1, **kwargs) is not None
+    )
+    assert stage._lingbot_cuda_graph_key(batch, current_timestep=0, **kwargs) is None
+
+    cache.local_end_index_int = 7
+    assert stage._lingbot_cuda_graph_key(batch, current_timestep=1, **kwargs) is None
+    cache.local_end_index_int = 8
+    cache.allow_growth = True
+    assert stage._lingbot_cuda_graph_key(batch, current_timestep=1, **kwargs) is None

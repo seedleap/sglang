@@ -1349,12 +1349,16 @@ class CausalLingBotWorldTransformer3DModel(CausalWanTransformer3DModel):
         encoder_hidden_states: torch.Tensor,
         encoder_hidden_states_image: torch.Tensor | None,
         crossattn_cache: list[CrossAttentionKVCache] | None,
+        precomputed_time_embeddings: tuple[torch.Tensor, torch.Tensor] | None = None,
     ):
         forward_batch = get_forward_context().forward_batch
-        temb, timestep_proj = self._prepare_cached_time_embeddings(
-            timestep=timestep,
-            forward_batch=forward_batch,
-        )
+        if precomputed_time_embeddings is None:
+            temb, timestep_proj = self._prepare_cached_time_embeddings(
+                timestep=timestep,
+                forward_batch=forward_batch,
+            )
+        else:
+            temb, timestep_proj = precomputed_time_embeddings
         if self._all_crossattn_caches_initialized(crossattn_cache):
             return temb, timestep_proj, encoder_hidden_states, None
 
@@ -1439,6 +1443,74 @@ class CausalLingBotWorldTransformer3DModel(CausalWanTransformer3DModel):
             scale_shifts.append(scale_shift)
         return scale_shifts
 
+    def prepare_lingbot_cuda_graph_inputs(
+        self,
+        *,
+        hidden_states: torch.Tensor,
+        timestep: torch.Tensor,
+        c2ws_plucker_emb: torch.Tensor | None,
+        start_frame: int,
+        forward_batch,
+    ) -> dict[str, Any]:
+        """Prepare dynamic tensors consumed by a captured causal forward."""
+        _, _, num_frames, height, width = hidden_states.shape
+        p_t, p_h, p_w = self.patch_size
+        post_patch_num_frames = num_frames // p_t
+        post_patch_height = height // p_h
+        post_patch_width = width // p_w
+        sequence_shard_enabled = (
+            forward_batch is not None
+            and getattr(forward_batch, "enable_sequence_shard", False)
+            and self.sp_size > 1
+        )
+
+        prepared_c2ws = self._prepare_c2ws_plucker_emb(
+            hidden_states, c2ws_plucker_emb, forward_batch
+        )
+        if sequence_shard_enabled:
+            seq_shard_splits = compute_sequence_splits(
+                post_patch_num_frames * post_patch_height * post_patch_width,
+                self.sp_size,
+            )
+            forward_batch.sequence_shard_splits = tuple(seq_shard_splits)
+            sp_rank = get_sp_parallel_rank()
+            local_seq_len = seq_shard_splits[sp_rank]
+            if prepared_c2ws is not None:
+                prepared_c2ws = shard_sequence_varlen(
+                    prepared_c2ws, seq_shard_splits, sp_rank
+                )
+            frame_stride = post_patch_height * post_patch_width
+            token_start = start_frame * frame_stride + sum(seq_shard_splits[:sp_rank])
+            freqs_cis = self._prepare_cached_rope_for_sequence_shard(
+                forward_batch=forward_batch,
+                local_seq_len=local_seq_len,
+                token_start=token_start,
+                frame_stride=frame_stride,
+                post_patch_width=post_patch_width,
+                device=hidden_states.device,
+            )
+        else:
+            freqs_cis = self._prepare_cached_rope(
+                forward_batch=forward_batch,
+                post_patch_num_frames=post_patch_num_frames,
+                post_patch_height=post_patch_height,
+                post_patch_width=post_patch_width,
+                start_frame=start_frame,
+                device=hidden_states.device,
+            )
+
+        return {
+            "freqs_cis": freqs_cis,
+            "time_embeddings": self._prepare_cached_time_embeddings(
+                timestep=timestep,
+                forward_batch=forward_batch,
+            ),
+            "c2ws_plucker_emb": prepared_c2ws,
+            "cam_conditioner_scale_shifts": (
+                self._prepare_cam_conditioner_scale_shifts(prepared_c2ws, forward_batch)
+            ),
+        }
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -1452,6 +1524,7 @@ class CausalLingBotWorldTransformer3DModel(CausalWanTransformer3DModel):
         start_frame: int = 0,
         c2ws_plucker_emb: torch.Tensor | None = None,
         skip_final_projection: bool = False,
+        precomputed_lingbot_inputs: dict[str, Any] | None = None,
     ) -> torch.Tensor:
         forward_batch = get_forward_context().forward_batch
         sequence_shard_enabled = (
@@ -1490,7 +1563,7 @@ class CausalLingBotWorldTransformer3DModel(CausalWanTransformer3DModel):
                 self.sp_size,
             )
             forward_batch.sequence_shard_splits = tuple(seq_shard_splits)
-        if not sequence_shard_enabled:
+        if not sequence_shard_enabled and precomputed_lingbot_inputs is None:
             freqs_cis = self._prepare_cached_rope(
                 forward_batch=forward_batch,
                 post_patch_num_frames=post_patch_num_frames,
@@ -1501,9 +1574,12 @@ class CausalLingBotWorldTransformer3DModel(CausalWanTransformer3DModel):
             )
 
         hidden_states = self.patch_embedding(hidden_states).flatten(2).transpose(1, 2)
-        c2ws_plucker_emb = self._prepare_c2ws_plucker_emb(
-            hidden_states, c2ws_plucker_emb, forward_batch
-        )
+        if precomputed_lingbot_inputs is None:
+            c2ws_plucker_emb = self._prepare_c2ws_plucker_emb(
+                hidden_states, c2ws_plucker_emb, forward_batch
+            )
+        else:
+            c2ws_plucker_emb = precomputed_lingbot_inputs["c2ws_plucker_emb"]
         if sequence_shard_enabled:
             sp_rank = get_sp_parallel_rank()
             seq_shard_splits = list(forward_batch.sequence_shard_splits)
@@ -1511,27 +1587,36 @@ class CausalLingBotWorldTransformer3DModel(CausalWanTransformer3DModel):
             hidden_states = shard_sequence_varlen(
                 hidden_states, seq_shard_splits, sp_rank
             )
-            if c2ws_plucker_emb is not None:
+            if c2ws_plucker_emb is not None and precomputed_lingbot_inputs is None:
                 c2ws_plucker_emb = shard_sequence_varlen(
                     c2ws_plucker_emb, seq_shard_splits, sp_rank
                 )
             frame_stride = post_patch_height * post_patch_width
             token_start = start_frame * frame_stride + sum(seq_shard_splits[:sp_rank])
-            freqs_cis = self._prepare_cached_rope_for_sequence_shard(
-                forward_batch=forward_batch,
-                local_seq_len=local_seq_len,
-                token_start=token_start,
-                frame_stride=frame_stride,
-                post_patch_width=post_patch_width,
-                device=hidden_states.device,
-            )
+            if precomputed_lingbot_inputs is None:
+                freqs_cis = self._prepare_cached_rope_for_sequence_shard(
+                    forward_batch=forward_batch,
+                    local_seq_len=local_seq_len,
+                    token_start=token_start,
+                    frame_stride=frame_stride,
+                    post_patch_width=post_patch_width,
+                    device=hidden_states.device,
+                )
 
+        if precomputed_lingbot_inputs is not None:
+            freqs_cis = precomputed_lingbot_inputs["freqs_cis"]
+
+        if precomputed_lingbot_inputs is None:
+            time_embeddings = None
+        else:
+            time_embeddings = precomputed_lingbot_inputs["time_embeddings"]
         temb, timestep_proj, encoder_hidden_states, encoder_hidden_states_image = (
             self._prepare_condition_embeddings(
                 timestep=timestep,
                 encoder_hidden_states=encoder_hidden_states,
                 encoder_hidden_states_image=encoder_hidden_states_image,
                 crossattn_cache=crossattn_cache,
+                precomputed_time_embeddings=time_embeddings,
             )
         )
         timestep_proj = timestep_proj.unflatten(1, (6, self.hidden_size)).unflatten(
@@ -1546,9 +1631,14 @@ class CausalLingBotWorldTransformer3DModel(CausalWanTransformer3DModel):
             if current_platform.is_mps()
             else encoder_hidden_states
         )
-        cam_conditioner_scale_shifts = self._prepare_cam_conditioner_scale_shifts(
-            c2ws_plucker_emb, forward_batch
-        )
+        if precomputed_lingbot_inputs is None:
+            cam_conditioner_scale_shifts = self._prepare_cam_conditioner_scale_shifts(
+                c2ws_plucker_emb, forward_batch
+            )
+        else:
+            cam_conditioner_scale_shifts = precomputed_lingbot_inputs[
+                "cam_conditioner_scale_shifts"
+            ]
 
         for block_index, block in enumerate(self.blocks):
             hidden_states = block(

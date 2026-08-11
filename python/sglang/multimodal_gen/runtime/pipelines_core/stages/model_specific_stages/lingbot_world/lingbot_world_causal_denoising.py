@@ -3,14 +3,20 @@
 
 """LingBot-World causal DMD denoising stage."""
 
+from collections.abc import Callable
 from typing import Any
 
 import torch
 
 from sglang.multimodal_gen import envs
+from sglang.multimodal_gen.runtime.distributed import get_sp_parallel_rank
 from sglang.multimodal_gen.runtime.distributed.parallel_state import (
     get_ring_parallel_world_size,
     get_ulysses_parallel_world_size,
+)
+from sglang.multimodal_gen.runtime.layers.kvcache.causal_attention_cache import (
+    CausalSelfAttentionKVCache,
+    CrossAttentionKVCache,
 )
 from sglang.multimodal_gen.runtime.managers.forward_context import set_forward_context
 from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import Req
@@ -38,6 +44,233 @@ from sglang.multimodal_gen.runtime.server_args import ServerArgs
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 
 logger = init_logger(__name__)
+
+
+def _cuda_graph_tensor_signature(value: torch.Tensor) -> tuple:
+    return (value.shape, value.stride(), value.dtype, value.device)
+
+
+def _static_cuda_graph_tensor(value: torch.Tensor) -> torch.Tensor:
+    static = torch.empty_strided(
+        value.shape,
+        value.stride(),
+        dtype=value.dtype,
+        device=value.device,
+    )
+    static.copy_(value)
+    return static
+
+
+def _static_cuda_graph_inputs(inputs: dict[str, Any]) -> dict[str, Any]:
+    c2ws = inputs["c2ws_plucker_emb"]
+    cam_shifts = inputs["cam_conditioner_scale_shifts"]
+    return {
+        "freqs_cis": tuple(
+            _static_cuda_graph_tensor(value) for value in inputs["freqs_cis"]
+        ),
+        "time_embeddings": tuple(
+            _static_cuda_graph_tensor(value) for value in inputs["time_embeddings"]
+        ),
+        "c2ws_plucker_emb": (None if c2ws is None else _static_cuda_graph_tensor(c2ws)),
+        "cam_conditioner_scale_shifts": (
+            None
+            if cam_shifts is None
+            else [
+                (
+                    _static_cuda_graph_tensor(scale),
+                    _static_cuda_graph_tensor(shift),
+                )
+                for scale, shift in cam_shifts
+            ]
+        ),
+    }
+
+
+def _cuda_graph_input_source_key(inputs: dict[str, Any], *names: str) -> tuple:
+    def tensor_key(value: torch.Tensor) -> tuple:
+        return (id(value), value.data_ptr(), value._version)
+
+    keys = []
+    for name in names:
+        value = inputs[name]
+        if value is None:
+            keys.append((name, None))
+        elif isinstance(value, torch.Tensor):
+            keys.append((name, tensor_key(value)))
+        else:
+            keys.append(
+                (
+                    name,
+                    tuple(
+                        tensor_key(item)
+                        for group in value
+                        for item in (group if isinstance(group, tuple) else (group,))
+                    ),
+                )
+            )
+    return tuple(keys)
+
+
+def _copy_cuda_graph_tensor(target: torch.Tensor, source: torch.Tensor) -> None:
+    if _cuda_graph_tensor_signature(target) != _cuda_graph_tensor_signature(source):
+        raise RuntimeError("LingBot CUDA graph input shape changed")
+    target.copy_(source)
+
+
+class _LingBotCudaGraphRunner:
+    """One full-DiT graph bound to a saturated LingBot session cache."""
+
+    def __init__(self, key: tuple) -> None:
+        self.key = key
+        self.graph = None
+        self.output = None
+        self.static_latent = None
+        self.static_prompt = None
+        self.static_timestep = None
+        self.static_inputs = None
+        self.capture_stream = None
+        self.pool = None
+        self.replay_count = 0
+        self._last_rope_source = None
+        self._last_time_source = None
+        self._last_camera_source = None
+        self._source_inputs = None
+
+    def _copy_prepared_inputs(self, inputs: dict[str, Any]) -> None:
+        static_inputs = self.static_inputs
+        if static_inputs is None:
+            raise RuntimeError("LingBot CUDA graph has no static inputs")
+
+        rope_source = _cuda_graph_input_source_key(inputs, "freqs_cis")
+        if rope_source != self._last_rope_source:
+            for target, source in zip(
+                static_inputs["freqs_cis"], inputs["freqs_cis"], strict=True
+            ):
+                _copy_cuda_graph_tensor(target, source)
+            self._last_rope_source = rope_source
+
+        time_source = _cuda_graph_input_source_key(inputs, "time_embeddings")
+        if time_source != self._last_time_source:
+            for target, source in zip(
+                static_inputs["time_embeddings"],
+                inputs["time_embeddings"],
+                strict=True,
+            ):
+                _copy_cuda_graph_tensor(target, source)
+            self._last_time_source = time_source
+
+        camera_source = _cuda_graph_input_source_key(
+            inputs,
+            "c2ws_plucker_emb",
+            "cam_conditioner_scale_shifts",
+        )
+        if camera_source != self._last_camera_source:
+            static_c2ws = static_inputs["c2ws_plucker_emb"]
+            current_c2ws = inputs["c2ws_plucker_emb"]
+            if static_c2ws is None or current_c2ws is None:
+                if static_c2ws is not current_c2ws:
+                    raise RuntimeError("LingBot CUDA graph camera input changed")
+            else:
+                _copy_cuda_graph_tensor(static_c2ws, current_c2ws)
+
+            static_shifts = static_inputs["cam_conditioner_scale_shifts"]
+            current_shifts = inputs["cam_conditioner_scale_shifts"]
+            if static_shifts is None or current_shifts is None:
+                if static_shifts is not current_shifts:
+                    raise RuntimeError("LingBot CUDA graph camera shifts changed")
+            else:
+                if len(static_shifts) != len(current_shifts):
+                    raise RuntimeError("LingBot CUDA graph camera block count changed")
+                for static_pair, current_pair in zip(
+                    static_shifts, current_shifts, strict=True
+                ):
+                    for target, source in zip(static_pair, current_pair, strict=True):
+                        _copy_cuda_graph_tensor(target, source)
+            self._last_camera_source = camera_source
+
+        # Retain the source tensors until the next update so allocator pointer
+        # reuse cannot make a new chunk look identical to the previous source.
+        self._source_inputs = inputs
+
+    def run(
+        self,
+        *,
+        latent: torch.Tensor,
+        prompt: torch.Tensor,
+        timestep: torch.Tensor,
+        prepared_inputs: dict[str, Any],
+        capture_forward: (
+            Callable[
+                [torch.Tensor, torch.Tensor, torch.Tensor, dict[str, Any]],
+                torch.Tensor,
+            ]
+            | None
+        ),
+    ) -> torch.Tensor:
+        if self.graph is not None:
+            self.static_latent.copy_(latent)
+            self.static_prompt.copy_(prompt)
+            self.static_timestep.copy_(timestep)
+            self._copy_prepared_inputs(prepared_inputs)
+            self.graph.replay()
+            self.replay_count += 1
+            if self.replay_count == 1 or self.replay_count % 100 == 0:
+                logger.info(
+                    "LingBot CUDA graph replay rank=%d count=%d",
+                    get_sp_parallel_rank(),
+                    self.replay_count,
+                )
+            return self.output
+
+        self.static_latent = _static_cuda_graph_tensor(latent)
+        self.static_prompt = _static_cuda_graph_tensor(prompt)
+        self.static_timestep = _static_cuda_graph_tensor(timestep)
+        self.static_inputs = _static_cuda_graph_inputs(prepared_inputs)
+        self._last_rope_source = _cuda_graph_input_source_key(
+            prepared_inputs, "freqs_cis"
+        )
+        self._last_time_source = _cuda_graph_input_source_key(
+            prepared_inputs, "time_embeddings"
+        )
+        self._last_camera_source = _cuda_graph_input_source_key(
+            prepared_inputs,
+            "c2ws_plucker_emb",
+            "cam_conditioner_scale_shifts",
+        )
+        self._source_inputs = prepared_inputs
+        if capture_forward is None:
+            raise RuntimeError("LingBot CUDA graph capture callable is missing")
+
+        self.capture_stream = torch.cuda.Stream(device=latent.device)
+        current_stream = torch.cuda.current_stream(latent.device)
+        self.capture_stream.wait_stream(current_stream)
+        with torch.cuda.stream(self.capture_stream):
+            for _ in range(2):
+                capture_forward(
+                    self.static_latent,
+                    self.static_prompt,
+                    self.static_timestep,
+                    self.static_inputs,
+                )
+        current_stream.wait_stream(self.capture_stream)
+        torch.cuda.synchronize(latent.device)
+
+        self.graph = torch.cuda.CUDAGraph()
+        self.pool = torch.cuda.graph_pool_handle()
+        with torch.cuda.graph(self.graph, pool=self.pool, stream=self.capture_stream):
+            self.output = capture_forward(
+                self.static_latent,
+                self.static_prompt,
+                self.static_timestep,
+                self.static_inputs,
+            )
+        current_stream.wait_stream(self.capture_stream)
+        self.graph.replay()
+        logger.info(
+            "Captured LingBot saturated recompute CUDA graph rank=%d",
+            get_sp_parallel_rank(),
+        )
+        return self.output
 
 
 class LingBotWorldCausalDMDDenoisingStage(CausalDMDDenoisingStage):
@@ -518,6 +751,188 @@ class LingBotWorldCausalDMDDenoisingStage(CausalDMDDenoisingStage):
     ):
         return server_args.pipeline_config.get_pos_prompt_embeds(batch)
 
+    @staticmethod
+    def _single_prompt_tensor(prompt_embeds) -> torch.Tensor | None:
+        if isinstance(prompt_embeds, torch.Tensor):
+            return prompt_embeds
+        if (
+            isinstance(prompt_embeds, (list, tuple))
+            and len(prompt_embeds) == 1
+            and isinstance(prompt_embeds[0], torch.Tensor)
+        ):
+            return prompt_embeds[0]
+        return None
+
+    def _lingbot_cuda_graph_key(
+        self,
+        batch: Req,
+        *,
+        latent_model_input: torch.Tensor,
+        prompt_embeds,
+        timestep: torch.Tensor,
+        kv_cache,
+        crossattn_cache,
+        pos_cond_kwargs: dict[str, Any],
+        current_timestep: int,
+        attn_metadata,
+    ) -> tuple | None:
+        if (
+            not getattr(self, "_lingbot_cuda_graph_enabled", False)
+            or current_timestep == 0
+            or attn_metadata is not None
+            or not latent_model_input.is_cuda
+            or torch.version.hip is not None
+            or set(pos_cond_kwargs) - {"c2ws_plucker_emb"}
+        ):
+            return None
+        prompt = self._single_prompt_tensor(prompt_embeds)
+        if prompt is None or not kv_cache or not crossattn_cache:
+            return None
+        if not all(
+            isinstance(cache, CausalSelfAttentionKVCache)
+            and not cache.allow_growth
+            and cache.local_end_index_int == cache.cache_size
+            for cache in kv_cache
+        ):
+            return None
+        if not all(
+            isinstance(cache, CrossAttentionKVCache) and cache.is_init
+            for cache in crossattn_cache
+        ):
+            return None
+
+        c2ws = pos_cond_kwargs.get("c2ws_plucker_emb")
+        if c2ws is not None and not isinstance(c2ws, torch.Tensor):
+            return None
+        cache_pointers = tuple(
+            (
+                cache.k.data_ptr(),
+                cache.v.data_ptr(),
+                cache.cache_size,
+                cache.sink_tokens,
+                cache.attention_window_size,
+            )
+            for cache in kv_cache
+        )
+        crossattn_pointers = tuple(
+            (cache.k.data_ptr(), cache.v.data_ptr()) for cache in crossattn_cache
+        )
+        return (
+            cache_pointers,
+            crossattn_pointers,
+            bool(getattr(batch, "enable_sequence_shard", False)),
+            tuple(getattr(batch, "sequence_shard_splits", ()) or ()),
+            getattr(batch, "realtime_causal_kv_sample_tokens", None),
+            _cuda_graph_tensor_signature(latent_model_input),
+            _cuda_graph_tensor_signature(prompt),
+            _cuda_graph_tensor_signature(timestep),
+            None if c2ws is None else _cuda_graph_tensor_signature(c2ws),
+        )
+
+    def _forward_causal_transformer(
+        self,
+        batch: Req,
+        *,
+        latent_model_input: torch.Tensor,
+        prompt_embeds,
+        timestep: torch.Tensor,
+        kv_cache,
+        crossattn_cache,
+        current_start_tokens: int,
+        start_frame: int,
+        image_kwargs: dict,
+        pos_cond_kwargs: dict,
+        current_timestep: int,
+        attn_metadata,
+        target_dtype: torch.dtype,
+        autocast_enabled: bool,
+    ) -> torch.Tensor:
+        graph_key = self._lingbot_cuda_graph_key(
+            batch,
+            latent_model_input=latent_model_input,
+            prompt_embeds=prompt_embeds,
+            timestep=timestep,
+            kv_cache=kv_cache,
+            crossattn_cache=crossattn_cache,
+            pos_cond_kwargs=pos_cond_kwargs,
+            current_timestep=current_timestep,
+            attn_metadata=attn_metadata,
+        )
+        with (
+            torch.autocast(
+                device_type=current_platform.device_type,
+                dtype=target_dtype,
+                enabled=autocast_enabled,
+            ),
+            set_forward_context(
+                current_timestep=current_timestep,
+                attn_metadata=attn_metadata,
+                forward_batch=batch,
+            ),
+        ):
+            if graph_key is None:
+                return self.transformer(
+                    latent_model_input,
+                    prompt_embeds,
+                    timestep,
+                    kv_cache=kv_cache,
+                    crossattn_cache=crossattn_cache,
+                    current_start=current_start_tokens,
+                    start_frame=start_frame,
+                    **image_kwargs,
+                    **pos_cond_kwargs,
+                )
+
+            prompt = self._single_prompt_tensor(prompt_embeds)
+            assert prompt is not None
+            prepared_inputs = self.transformer.prepare_lingbot_cuda_graph_inputs(
+                hidden_states=latent_model_input,
+                timestep=timestep,
+                c2ws_plucker_emb=pos_cond_kwargs.get("c2ws_plucker_emb"),
+                start_frame=start_frame,
+                forward_batch=batch,
+            )
+            runner = getattr(self, "_lingbot_cuda_graph_runner", None)
+            if runner is None or runner.key != graph_key:
+                runner = _LingBotCudaGraphRunner(graph_key)
+                self._lingbot_cuda_graph_runner = runner
+
+            if runner.graph is None:
+
+                def capture_forward(
+                    static_latent: torch.Tensor,
+                    static_prompt: torch.Tensor,
+                    static_timestep: torch.Tensor,
+                    static_inputs: dict[str, Any],
+                ) -> torch.Tensor:
+                    return self.transformer(
+                        static_latent,
+                        static_prompt,
+                        static_timestep,
+                        encoder_hidden_states_image=[],
+                        kv_cache=kv_cache,
+                        crossattn_cache=crossattn_cache,
+                        current_start=current_start_tokens,
+                        start_frame=start_frame,
+                        c2ws_plucker_emb=None,
+                        precomputed_lingbot_inputs=static_inputs,
+                    )
+
+            else:
+                capture_forward = None
+
+            graph_output = runner.run(
+                latent=latent_model_input,
+                prompt=prompt,
+                timestep=timestep,
+                prepared_inputs=prepared_inputs,
+                capture_forward=capture_forward,
+            )
+            # The graph reuses its output allocation on every replay.  The
+            # scheduler still consumes the previous result when the next step
+            # starts, so return an independent snapshot.
+            return graph_output.clone()
+
     def _update_causal_context_cache(
         self,
         batch: Req,
@@ -624,6 +1039,15 @@ class LingBotWorldCausalDMDDenoisingStage(CausalDMDDenoisingStage):
 
     @torch.no_grad()
     def forward(self, batch: Req, server_args: ServerArgs) -> Req:
+        self._lingbot_cuda_graph_enabled = bool(
+            getattr(server_args, "enable_cuda_graph", False)
+        )
+        if self._lingbot_cuda_graph_enabled and bool(
+            getattr(server_args, "enable_torch_compile", False)
+        ):
+            raise ValueError(
+                "LingBot CUDA graph cannot be combined with whole-DiT torch.compile."
+            )
         # --- Condition: take current chunk's slice ---
         condition_full = batch.image_latent
         assert condition_full is not None, (
