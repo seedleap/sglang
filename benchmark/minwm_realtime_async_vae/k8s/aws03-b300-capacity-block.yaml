@@ -163,7 +163,7 @@ spec:
               --vae-fingerprint=${VAE_FINGERPRINT}
               --internal-output-url=ws://${POD_IP}:18080/v1/internal/realtime_output
               --output-queue-depth=8
-              --output-enqueue-timeout-s=5
+              --output-enqueue-timeout-s=0.05
               --output-drain-timeout-s=90
               --lease-renew-interval-s=10
               --release-grace-s=0.5
@@ -293,7 +293,7 @@ spec:
                 --realtime-max-sessions-per-worker "${REALTIME_MAX_SESSIONS}" \
                 --realtime-remote-vae-enabled \
                 --realtime-session-idle-timeout-s 60 \
-                --realtime-session-max-lifetime-s 600 \
+                --realtime-session-max-lifetime-s 45 \
                 --realtime-admission-wait-s 10 \
                 --realtime-causal-sink-size 8 \
                 --realtime-causal-kv-cache-num-frames 32 \

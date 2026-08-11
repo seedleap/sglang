@@ -176,3 +176,77 @@ def test_heartbeat_follows_process_epoch_file_across_worker_restart(tmp_path):
         assert client.posts[-1][1]["worker_epoch"] == "epoch-b"
 
     asyncio.run(run())
+
+
+def test_heartbeat_repairs_stale_epoch_file_from_runtime_state(tmp_path):
+    async def run():
+        epoch_file = tmp_path / "worker-epoch"
+        epoch_file.write_text("stale-epoch\n")
+        client = _Client(
+            state_payload={
+                "worker_epoch": "runtime-epoch",
+                "lifecycle": "ready",
+                "active_sessions": 0,
+                "runnable_sessions": 0,
+                "blocked_sessions": 0,
+                "queue_depth": 0,
+                "service_time_ms": 0,
+            }
+        )
+        reporter = WorkerHeartbeatReporter(
+            client,
+            coordinator_url="http://coordinator:18081",
+            health_url="http://127.0.0.1:30000/health",
+            state_url="http://127.0.0.1:30000/v1/realtime_worker/state",
+            worker_id="pod-123",
+            worker_epoch=None,
+            worker_epoch_file=epoch_file,
+            role="denoiser",
+            endpoint="ws://10.0.0.7:30000/v1/realtime_video/generate",
+            reservation_endpoint="http://10.0.0.7:30000/v1/realtime_worker",
+            az="us-east-2a",
+            capacity=4,
+            model_revision="model-sha",
+            vae_fingerprint="taew2_2",
+        )
+
+        assert await reporter.heartbeat_once() is True
+        assert epoch_file.read_text() == "runtime-epoch\n"
+        assert client.posts[-1][1]["worker_epoch"] == "runtime-epoch"
+
+    asyncio.run(run())
+
+
+def test_heartbeat_rejects_runtime_mismatch_for_explicit_epoch():
+    async def run():
+        client = _Client(
+            state_payload={
+                "worker_epoch": "runtime-epoch",
+                "lifecycle": "ready",
+                "active_sessions": 0,
+                "runnable_sessions": 0,
+                "blocked_sessions": 0,
+                "queue_depth": 0,
+                "service_time_ms": 0,
+            }
+        )
+        reporter = WorkerHeartbeatReporter(
+            client,
+            coordinator_url="http://coordinator:18081",
+            health_url="http://127.0.0.1:30000/health",
+            state_url="http://127.0.0.1:30000/v1/realtime_worker/state",
+            worker_id="pod-123",
+            worker_epoch="configured-epoch",
+            role="denoiser",
+            endpoint="ws://10.0.0.7:30000/v1/realtime_video/generate",
+            reservation_endpoint="http://10.0.0.7:30000/v1/realtime_worker",
+            az="us-east-2a",
+            capacity=4,
+            model_revision="model-sha",
+            vae_fingerprint="taew2_2",
+        )
+
+        with pytest.raises(RuntimeError, match="worker state epoch"):
+            await reporter.heartbeat_once()
+
+    asyncio.run(run())

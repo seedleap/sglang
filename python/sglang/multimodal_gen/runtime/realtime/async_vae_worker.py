@@ -595,7 +595,7 @@ class AsyncVAEWorker:
 class TAEHVEngine:
     """Shared immutable TAEHV weights with per-generation decoder objects."""
 
-    _DEFAULT_WARMUP_SHAPE = (1, 48, 1, 30, 52)
+    _DEFAULT_WARMUP_SPATIAL_SHAPE = (1, 30, 52)
 
     def __init__(
         self,
@@ -626,9 +626,15 @@ class TAEHVEngine:
     @torch.no_grad()
     def warmup(
         self,
-        latent_shape: tuple[int, int, int, int, int] = _DEFAULT_WARMUP_SHAPE,
+        latent_shape: tuple[int, int, int, int, int] | None = None,
     ) -> None:
         """Pay decoder/CUDA initialization before the worker becomes ready."""
+        if latent_shape is None:
+            latent_shape = (
+                1,
+                int(self.model.latent_channels),
+                *self._DEFAULT_WARMUP_SPATIAL_SHAPE,
+            )
         decoder = self.create_decoder(("warmup", "warmup"))
         latents = torch.zeros(latent_shape, dtype=self.dtype)
         for _ in self.iter_decode(decoder, latents, first_chunk=True):

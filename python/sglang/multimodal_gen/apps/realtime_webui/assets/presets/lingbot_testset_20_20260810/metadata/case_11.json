@@ -1,0 +1,317 @@
+{
+  "case_id": "case_11",
+  "category": "nonhuman_organic",
+  "human_or_nonhuman": "nonhuman",
+  "human_hands_visible": false,
+  "source_family": "wasd",
+  "source_batch": "batch_053",
+  "sample_id": "lbd_bc42d627847ec0f3709533cf",
+  "first_frame": "images/case_11_lbd_bc42d627847ec0f3709533cf.png",
+  "prompt_file": "prompts/case_11.txt",
+  "metadata_file": "metadata/case_11.json",
+  "prompt": "Continuous first-person gameplay from the viewpoint of a red deer stag. A heather-covered highland saddle stretches between low granite ridges, with a firm animal track crossing a shallow peat channel on flat stones and continuing toward a lone rowan tree; broad grass strips on either side allow alternate traversal. Branched antler tips frame the upper corners and a russet muzzle remains visible at the lower edge. The visual style is layered cut-paper diorama. At 24 FPS, move forward for 8 frames, hold a steady view for 96 frames, strafe left for 17 frames, then move backward for 8 frames. Spatial layout, lighting, viewpoint identity, and visible viewpoint anchors remain continuous throughout the sequence.",
+  "subject_primary": "animal",
+  "subject_detail": "animal/deer/red-deer-stag",
+  "subject_visible": true,
+  "visible_parts": [
+    "two branched antler tips at the upper corners",
+    "narrow russet muzzle at the lower edge"
+  ],
+  "body_plan": "quadrupedal cervid",
+  "locomotion_mode": "walking and bounding",
+  "scene_primary": "outdoor_natural",
+  "scene_description": "A heather-covered highland saddle stretches between low granite ridges, with a firm animal track crossing a shallow peat channel on flat stones and continuing toward a lone rowan tree; broad grass strips on either side allow alternate traversal.",
+  "art_style_primary": "stylized",
+  "trajectory_id": "combo_w-a-s_8-17-8_stop96after1",
+  "action_family_pattern": "wasd",
+  "action_segments": [
+    {
+      "kind": "movement",
+      "key": "w",
+      "start_frame": 0,
+      "end_frame": 7,
+      "num_frames": 8
+    },
+    {
+      "kind": "noop",
+      "key": null,
+      "start_frame": 8,
+      "end_frame": 103,
+      "num_frames": 96
+    },
+    {
+      "kind": "movement",
+      "key": "a",
+      "start_frame": 104,
+      "end_frame": 120,
+      "num_frames": 17
+    },
+    {
+      "kind": "movement",
+      "key": "s",
+      "start_frame": 121,
+      "end_frame": 128,
+      "num_frames": 8
+    }
+  ],
+  "width": 1672,
+  "height": 941,
+  "image_sha256": "d5e1d54254155dd0f7d0db0637d550d8ffa70c03370409b82a2a9d62d86cea00",
+  "source_image_uri": "s3://leap-world-us-east-2/world-model/generation/lingbot_first_person_wasd_noop_20260725/batch_053/images/lbd_bc42d627847ec0f3709533cf.png",
+  "visual_qa": "passed",
+  "prompt_policy": "positive_scene_motion_only_v1",
+  "action": {
+    "traj_id": "combo_w-a-s_8-17-8_stop96after1",
+    "fps": 24,
+    "num_frames": 129,
+    "traj_type": "3_action_segments",
+    "condition_inputs": {
+      "camera_actions": [
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [
+          "a"
+        ],
+        [
+          "a"
+        ],
+        [
+          "a"
+        ],
+        [
+          "a"
+        ],
+        [
+          "a"
+        ],
+        [
+          "a"
+        ],
+        [
+          "a"
+        ],
+        [
+          "a"
+        ],
+        [
+          "a"
+        ],
+        [
+          "a"
+        ],
+        [
+          "a"
+        ],
+        [
+          "a"
+        ],
+        [
+          "a"
+        ],
+        [
+          "a"
+        ],
+        [
+          "a"
+        ],
+        [
+          "a"
+        ],
+        [
+          "a"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ]
+      ]
+    },
+    "segments": [
+      {
+        "kind": "movement",
+        "key": "w",
+        "start_frame": 0,
+        "end_frame": 7,
+        "num_frames": 8
+      },
+      {
+        "kind": "noop",
+        "key": null,
+        "start_frame": 8,
+        "end_frame": 103,
+        "num_frames": 96
+      },
+      {
+        "kind": "movement",
+        "key": "a",
+        "start_frame": 104,
+        "end_frame": 120,
+        "num_frames": 17
+      },
+      {
+        "kind": "movement",
+        "key": "s",
+        "start_frame": 121,
+        "end_frame": 128,
+        "num_frames": 8
+      }
+    ],
+    "movement_key": "w",
+    "ending_movement_key": "s",
+    "movement_pair": "w+s",
+    "camera_key": "",
+    "action_pattern": "api:combo:w-a-s:8-17-8:stop96after1",
+    "has_stop": true,
+    "stop_frames": 96,
+    "stop_after_action_index": 0,
+    "stop_position": "after_action_1",
+    "key_sequence": [
+      "w",
+      "a",
+      "s"
+    ],
+    "movement_durations": [
+      8,
+      17,
+      8
+    ]
+  }
+}

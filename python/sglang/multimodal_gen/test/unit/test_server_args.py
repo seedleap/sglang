@@ -20,6 +20,9 @@ from sglang.multimodal_gen.configs.pipeline_configs.ltx_2 import (
     LTX2PipelineConfig,
     LTX23PipelineConfig,
 )
+from sglang.multimodal_gen.configs.pipeline_configs.lingbot_world import (
+    LingBotWorldV2CausalDMDConfig,
+)
 from sglang.multimodal_gen.configs.pipeline_configs.mova import MOVAPipelineConfig
 from sglang.multimodal_gen.configs.pipeline_configs.qwen_image import (
     QwenImagePipelineConfig,
@@ -98,6 +101,32 @@ def _from_dict_without_model_resolution(
         _mock_cuda_platform(),
     ):
         return ServerArgs.from_dict(kwargs)
+
+
+class TestRealtimeSessionTimeoutArgs(unittest.TestCase):
+    def test_zero_disables_direct_session_timeouts(self):
+        args = _from_dict_without_model_resolution(
+            {
+                "model_path": "/fake",
+                "realtime_session_idle_timeout_s": 0,
+                "realtime_session_max_lifetime_s": 0,
+            }
+        )
+
+        self.assertEqual(args.realtime_session_idle_timeout_s, 0)
+        self.assertEqual(args.realtime_session_max_lifetime_s, 0)
+
+    def test_negative_session_timeouts_are_rejected(self):
+        for field in (
+            "realtime_session_idle_timeout_s",
+            "realtime_session_max_lifetime_s",
+        ):
+            with self.subTest(field=field), self.assertRaisesRegex(
+                ValueError, "must be >= 0"
+            ):
+                _from_dict_without_model_resolution(
+                    {"model_path": "/fake", field: -1}
+                )
 
 
 class TestServerArgsPathExpansion(unittest.TestCase):
@@ -1742,6 +1771,17 @@ class TestModelIdResolution(unittest.TestCase):
         self.assertIsNotNone(info)
 
         self.assertIs(info.pipeline_config_cls, QwenImagePipelineConfig)
+
+    def test_model_id_accepts_full_hf_repo_id(self):
+        # Services often pass the full model revision string through the
+        # coordinator. It should resolve just like the short repo name.
+        info = _get_config_info(
+            "/data/cached-lingbot2",
+            model_id="robbyant/lingbot-world-v2-14b-causal-fast-diffusers",
+        )
+        self.assertIsNotNone(info)
+
+        self.assertIs(info.pipeline_config_cls, LingBotWorldV2CausalDMDConfig)
 
     def test_model_id_works_after_tilde_expansion(self):
         # simulate the full flow: user passes ~/..., engine expands and resolves

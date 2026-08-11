@@ -13,5 +13,7 @@ resources:
   - gpu-scheduled-scaling.yaml
   - gpu-capacity-scaler.yaml
   - h100-denoiser.yaml
+  - lingbot2-h100-denoiser.yaml
+  - tianpeng-direct.yaml
   - l4-vae.yaml
   - gateway-service.yaml

@@ -77,10 +77,14 @@ class _StreamingEngine(_FakeEngine):
         yield torch.ones((1, 3, 1, 8, 8), dtype=torch.float32)
 
 
-def test_taehv_engine_warmup_runs_a_production_shape_decode(monkeypatch):
+@pytest.mark.parametrize("latent_channels", [16, 48])
+def test_taehv_engine_warmup_uses_the_checkpoint_latent_channels(
+    monkeypatch, latent_channels
+):
     engine = TAEHVEngine.__new__(TAEHVEngine)
     engine.device = torch.device("cpu")
     engine.dtype = torch.bfloat16
+    engine.model = type("TAEHVModel", (), {"latent_channels": latent_channels})()
     decoder = object()
     calls = []
 
@@ -94,7 +98,9 @@ def test_taehv_engine_warmup_runs_a_production_shape_decode(monkeypatch):
 
     engine.warmup()
 
-    assert calls == [(decoder, (1, 48, 1, 30, 52), torch.bfloat16, True)]
+    assert calls == [
+        (decoder, (1, latent_channels, 1, 30, 52), torch.bfloat16, True)
+    ]
 
 
 def test_taehv_engine_decodes_model_space_latents_without_native_vae_denorm():

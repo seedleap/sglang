@@ -18,7 +18,10 @@ BASE_MANIFESTS = (
     "worker-discovery.yaml",
     "autoscaling.yaml",
     "h100-denoiser.yaml",
+    "lingbot2-h100-denoiser.yaml",
+    "tianpeng-direct.yaml",
     "l4-vae.yaml",
+    "network-policy.yaml",
     "gateway-service.yaml",
 )
 
@@ -57,7 +60,10 @@ def validate(documents: list[dict]) -> None:
     vae = find(documents, "NodePool", "minwm-async-vae-l4")
     assert requirement_values(denoiser, "karpenter.sh/capacity-type") == ["spot"]
     assert requirement_values(denoiser_8x, "karpenter.sh/capacity-type") == ["spot"]
-    assert requirement_values(vae, "karpenter.sh/capacity-type") == ["spot"]
+    assert requirement_values(vae, "karpenter.sh/capacity-type") == [
+        "spot",
+        "on-demand",
+    ]
     assert requirement_values(denoiser, "node.kubernetes.io/instance-type") == [
         "p5.48xlarge"
     ]
@@ -77,10 +83,14 @@ def validate(documents: list[dict]) -> None:
     assert 1 <= int(vae["spec"]["limits"]["nvidia.com/gpu"]) <= 8
 
     workloads = (
-        find(documents, "StatefulSet", "minwm-async-denoiser"),
-        find(documents, "Deployment", "minwm-async-vae"),
+        (find(documents, "StatefulSet", "minwm-async-denoiser"), "2"),
+        (find(documents, "StatefulSet", "lingbot2-async-denoiser"), 4),
+        (find(documents, "StatefulSet", "tianpeng-direct-async-denoiser"), "2"),
+        (find(documents, "Deployment", "minwm-async-vae"), "1"),
+        (find(documents, "Deployment", "lingbot2-async-vae"), "1"),
+        (find(documents, "Deployment", "tianpeng-direct-async-vae"), "1"),
     )
-    for workload in workloads:
+    for workload, expected_gpus in workloads:
         labels = workload["metadata"]["labels"]
         assert labels["seedleap.ai/test-run"] == "minwm-async-vae-benchmark"
         assert labels["seedleap.ai/ttl-after-test"] == "required"
@@ -88,8 +98,11 @@ def validate(documents: list[dict]) -> None:
         resources = container["resources"]
         assert resources.get("requests")
         assert resources.get("limits")
-        assert resources["requests"]["nvidia.com/gpu"] == "1"
-        assert resources["limits"]["nvidia.com/gpu"] == "1"
+        assert resources["requests"]["nvidia.com/gpu"] == expected_gpus
+        assert resources["limits"]["nvidia.com/gpu"] == expected_gpus
+
+    tianpeng = find(documents, "StatefulSet", "tianpeng-direct-async-denoiser")
+    assert tianpeng["spec"]["replicas"] == 1
 
     denoiser = find(documents, "StatefulSet", "minwm-async-denoiser")
     containers = denoiser["spec"]["template"]["spec"]["containers"]
@@ -105,9 +118,13 @@ def validate(documents: list[dict]) -> None:
     assert heartbeat["restartPolicy"] == "Always"
     assert "realtime_worker_heartbeat" in " ".join(heartbeat["args"])
 
-    gateway_service = find(documents, "Service", "minwm-realtime-public")
+    gateway_service = find(documents, "Service", "zing-lingbot-public")
     assert gateway_service["spec"]["selector"] == {
         "app.kubernetes.io/name": "minwm-realtime-gateway"
+    }
+    direct_service = find(documents, "Service", "tianpeng-direct-public")
+    assert direct_service["spec"]["selector"] == {
+        "app.kubernetes.io/name": "tianpeng-direct-realtime-gateway"
     }
 
     assert find(documents, "Namespace", "minwm-realtime")

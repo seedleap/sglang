@@ -5,19 +5,20 @@ const path = require("path");
 const root = __dirname;
 const html = fs.readFileSync(path.join(root, "index.html"), "utf8");
 const css = fs.readFileSync(path.join(root, "styles.css"), "utf8");
+const app = fs.readFileSync(path.join(root, "app.js"), "utf8");
 
 assert.equal(
   (html.match(/class="model-player"/g) || []).length,
   2,
   "comparison UI should render exactly two model players",
 );
-assert.match(html, /id="minwmViewport"/, "left player should expose a MinWM canvas");
+assert.match(html, /id="minwmViewport"/, "left player should expose a Zing canvas");
 assert.match(html, /id="lingbot2Viewport"/, "right player should expose a LingBot2 canvas");
-assert.match(html, /class="model-player" data-model-key="minwm"[\s\S]*?<strong>MinWM<\/strong>/);
+assert.match(html, /class="model-player" data-model-key="minwm"[\s\S]*?<strong>Zing<\/strong>/);
 assert.match(html, /class="model-player" data-model-key="lingbot2"[\s\S]*?<strong>LingBot2<\/strong>/);
 assert.ok(
   html.indexOf('data-model-key="minwm"') < html.indexOf('data-model-key="lingbot2"'),
-  "MinWM should remain on the left of LingBot2",
+  "Zing should remain on the left of LingBot2",
 );
 assert.equal((html.match(/id="connectBtn"/g) || []).length, 1, "Generate remains shared");
 assert.equal((html.match(/class="stage-controls"/g) || []).length, 1, "camera controls remain shared");
@@ -25,8 +26,50 @@ assert.equal((html.match(/id="firstFrame"/g) || []).length, 1, "reference picker
 assert.equal((html.match(/id="prompt"/g) || []).length, 1, "prompt remains shared");
 assert.equal((html.match(/id="fullscreenBtn"/g) || []).length, 1, "comparison fullscreen remains shared");
 assert.equal((html.match(/class="model-player-telemetry"/g) || []).length, 2, "each player needs its own telemetry");
+assert.equal((html.match(/class="model-parameter-panel"/g) || []).length, 2, "each player needs independent parameters");
+assert.match(
+  html,
+  /<div class="model-parameters-grid"[^>]*\shidden(?:\s|>)/,
+  "model parameters should stay in the DOM for request defaults but remain hidden from users",
+);
+assert.match(html, /id="size" value="1280x704"/, "MinWM should keep the 720p default");
+assert.match(html, /id="lingbot2Size" value="832x480"/, "LingBot2 should use its native default size");
+assert.match(html, /id="fps" type="number" value="24"/, "Zing should keep its 24 FPS default");
+assert.match(html, /id="lingbot2Fps" type="number" value="16"/, "LingBot2 should use its official 16 FPS default");
+assert.match(html, /id="lingbot2SinkSize" type="number" value="9"/, "LingBot2 should match the official sink size");
+assert.match(html, /id="lingbot2WindowFrames" type="number" value="18"/, "LingBot2 should match the official attention window");
+assert.match(app, /const DEFAULT_LINGBOT2_TARGET_FPS\s*=\s*configuredModelNumber\("lingbot2", "targetFps", 16\)/);
+assert.match(app, /const DEFAULT_LINGBOT2_SINK_SIZE\s*=\s*configuredModelNumber\("lingbot2", "sinkSize", 9\)/);
+assert.match(app, /const DEFAULT_LINGBOT2_WINDOW_FRAMES\s*=\s*configuredModelNumber\("lingbot2", "windowFrames", 18\)/);
+assert.doesNotMatch(
+  app,
+  /for \(const key of \["minwm", "lingbot2"\]\) \{\s*modelControl\(key, "fps"\)\.value = UI_CONFIG\.targetFps/s,
+  "selecting a shared preset must not overwrite LingBot2's independent official FPS",
+);
+assert.doesNotMatch(html, />MinWM</, "the former MinWM product name should not remain visible");
+const comparisonIndex = html.indexOf('class="model-player-grid"');
+const cameraControlsIndex = html.indexOf('class="stage-controls"');
+const parameterGridIndex = html.indexOf('class="model-parameters-grid"');
+assert.ok(
+  comparisonIndex < cameraControlsIndex && cameraControlsIndex < parameterGridIndex,
+  "shared camera controls should sit below both videos and above both parameter panels",
+);
 assert.match(html, /id="minwmDisplayLagText"/, "MinWM should expose independent display lag");
 assert.match(html, /id="lingbot2DisplayLagText"/, "LingBot2 should expose independent display lag");
+assert.match(html, /<span>FPS<b id="minwmRateText">-<\/b><\/span>/, "MinWM should show its own FPS");
+assert.match(html, /<span>FPS<b id="lingbot2RateText">-<\/b><\/span>/, "LingBot2 should show its own FPS");
+for (const id of [
+  "size", "fps", "numFrames", "seed", "steps", "guidance", "sinkSize",
+  "windowFrames", "transportFormat", "transportQuality", "playbackMode",
+  "superResolution", "upscalingScale", "upscalingModel", "frameInterpolation", "continuous",
+]) {
+  assert.equal((html.match(new RegExp(`id="${id}"`, "g")) || []).length, 1, `Zing control ${id} should exist once`);
+  const lingbotId = `lingbot2${id[0].toUpperCase()}${id.slice(1)}`;
+  assert.equal((html.match(new RegExp(`id="${lingbotId}"`, "g")) || []).length, 1, `LingBot2 control ${lingbotId} should exist once`);
+}
+const sidebarHtml = html.slice(html.indexOf('<section class="panel controls"'), html.indexOf('</section>', html.indexOf('<section class="panel controls"')));
+assert.match(sidebarHtml, /id="presetList"/, "shared presets should live in the left sidebar");
+assert.doesNotMatch(sidebarHtml, /id="size"|id="lingbot2Size"/, "model parameters should not remain in the shared sidebar");
 assert.doesNotMatch(html, /class="stage-telemetry"/, "shared stream telemetry is misleading");
 assert.doesNotMatch(html, /class="spec-grid"/, "generic LingBot capability cards should be removed");
 assert.match(
@@ -36,18 +79,37 @@ assert.match(
 );
 assert.doesNotMatch(html, /SP2|CUDA Graph|4 GPU profile/, "hardware profile should not be visible");
 assert.match(css, /\.model-player-grid\s*\{/);
+assert.match(
+  css,
+  /\.model-parameters-grid\[hidden\]\s*\{[\s\S]*?display:\s*none/,
+  "author styles must not override the hidden parameter panel",
+);
 assert.match(css, /grid-template-columns:\s*repeat\(2,/);
 assert.match(css, /@media[^}]*max-width[\s\S]*\.model-player-grid\s*\{[\s\S]*grid-template-columns:\s*1fr/);
 assert.match(css, /\.stage\s*\{[\s\S]*container-type:\s*inline-size/);
 assert.match(css, /@container[^}]*max-width:\s*1180px[\s\S]*\.topbar\s*\{[\s\S]*flex-wrap:\s*wrap/);
 assert.match(css, /\.stage:fullscreen\s*\{/);
 assert.match(css, /\.stage:fullscreen\s*\{[\s\S]*?height:\s*100vh/);
+assert.match(
+  app,
+  /const previewFrame = document\.querySelector\("\.stage"\)/,
+  "fullscreen must target the complete comparison stage so fullscreen-only rules apply",
+);
+assert.match(
+  css,
+  /\.stage:fullscreen \.model-parameters-grid,[\s\S]*?\.stage:fullscreen \.session-notice\s*\{[\s\S]*?display:\s*none/,
+  "fullscreen must hide model parameters and notices while preserving both videos",
+);
 assert.match(html, /model_session\.js\?v=dual-model-v4/);
 assert.match(html, /dual_model_controller\.js\?v=dual-model-v3/);
-assert.match(html, /app\.js\?v=realtime-production-gateway-v21/);
+assert.match(html, /app\.js\?v=realtime-production-gateway-v28/);
 assert.match(html, /fullscreen_controller\.js\?v=dual-fullscreen-v1/);
+assert.match(
+  html,
+  /assets\/presets\/lingbot_testset_20_20260810\/presets\.js\?v=20260810/,
+  "the reviewed 20-case LingBot preset catalog should load before app.js",
+);
 
-const app = fs.readFileSync(path.join(root, "app.js"), "utf8");
 const server = fs.readFileSync(path.join(root, "server.py"), "utf8");
 assert.match(app, /const connectionReport = await dualModelController\.connect\(init\)/);
 assert.match(app, /const delivery = dualModelController\.sendEvent\(kind, payload\)/);
@@ -88,6 +150,18 @@ assert.doesNotMatch(
 assert.match(app, /enabled:\s*\(init\)\s*=>\s*init\.generation_mode\s*!==\s*"t2v"/);
 assert.match(app, /function drawRecordingComparisonPreview\(/);
 assert.match(app, /createFullscreenController/);
+const placeholderIndex = app.indexOf("await drawInitialReferencePlaceholders(firstFrame);");
+const connectIndex = app.indexOf("dualModelController.connect(init)", placeholderIndex);
+assert.ok(
+  placeholderIndex >= 0 && connectIndex > placeholderIndex,
+  "I2V should retain the selected reference while both models prepare their first generated frame",
+);
+const visiblePlaceholderIndex = app.indexOf("drawVisibleReferencePlaceholders();");
+const firstFrameReadIndex = app.indexOf("firstFrame = await readFirstFrame()", visiblePlaceholderIndex);
+assert.ok(
+  visiblePlaceholderIndex >= 0 && firstFrameReadIndex > visiblePlaceholderIndex,
+  "Generate should paint the already-visible reference before waiting for its request bytes",
+);
 assert.match(server, /BACKEND_ENV_PREFIXES = \{/);
 assert.match(server, /"minwm": "MINWM"/);
 assert.match(server, /"lingbot2": "LINGBOT2"/);

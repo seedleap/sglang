@@ -193,7 +193,7 @@ spec:
               --endpoint=ws://$(POD_IP):30000/v1/realtime_video/generate
               --reservation-endpoint=http://$(POD_IP):30000/v1/realtime_worker
               --node-name=$(NODE_NAME)
-              --capacity=4
+              --capacity=1
               --model-revision=REPLACE_WITH_MODEL_ID
               --vae-fingerprint=taew2_2-d053e216
               --interval-s=5
@@ -211,7 +211,7 @@ spec:
             requests: {cpu: 25m, memory: 64Mi}
             limits: {cpu: 200m, memory: 256Mi}
           volumeMounts:
-            - {name: worker-epoch, mountPath: /var/run/minwm-worker, readOnly: true}
+            - {name: worker-epoch, mountPath: /var/run/minwm-worker}
       containers:
         - name: denoiser
           image: REPLACE_WITH_DENOISER_IMAGE_DIGEST
@@ -224,7 +224,7 @@ spec:
             - name: POD_NAME
               valueFrom: {fieldRef: {fieldPath: metadata.name}}
             - {name: MODEL_REVISION, value: REPLACE_WITH_MODEL_ID}
-            - {name: REALTIME_MAX_SESSIONS, value: "4"}
+            - {name: REALTIME_MAX_SESSIONS, value: "1"}
             - name: REALTIME_UI_CONFIG_JSON
               value: '{"generationModes":["i2v","t2v"],"defaultGenerationMode":"i2v","t2vFrameStep":4,"t2vDefaultNumFrames":121}'
             - name: MINWM_MODEL
@@ -255,18 +255,22 @@ spec:
                 --pipeline-class-name MinWMCausalDMDPipeline \
                 --attention-backend fa \
                 --performance-mode speed \
-                --num-gpus 1 \
-                --sp-degree 1 \
+                --num-gpus 2 \
+                --tp-size 1 \
+                --sp-degree 2 \
+                --ulysses-degree 2 \
+                --ring-degree 1 \
+                --enable-cuda-graph \
                 --enable-cfg-parallel false \
                 --enable-torch-compile false \
                 --warmup-mode off \
-                --batching-max-size 4 \
+                --batching-max-size 1 \
                 --batching-delay-ms 2 \
                 --realtime-max-sessions "${REALTIME_MAX_SESSIONS}" \
                 --realtime-max-sessions-per-worker "${REALTIME_MAX_SESSIONS}" \
                 --realtime-remote-vae-enabled \
                 --realtime-session-idle-timeout-s 60 \
-                --realtime-session-max-lifetime-s 600 \
+                --realtime-session-max-lifetime-s 45 \
                 --realtime-admission-wait-s 10 \
                 --realtime-causal-sink-size 8 \
                 --realtime-causal-kv-cache-num-frames 32 \
@@ -329,15 +333,15 @@ spec:
             failureThreshold: 6
           resources:
             requests:
-              cpu: "6"
-              memory: 160Gi
+              cpu: "24"
+              memory: 300Gi
               ephemeral-storage: 24Gi
-              nvidia.com/gpu: "1"
+              nvidia.com/gpu: "2"
             limits:
-              cpu: "7"
-              memory: 220Gi
+              cpu: "40"
+              memory: 400Gi
               ephemeral-storage: 32Gi
-              nvidia.com/gpu: "1"
+              nvidia.com/gpu: "2"
           volumeMounts:
             - {name: model-cache, mountPath: /model-cache, readOnly: true}
             - {name: shm, mountPath: /dev/shm}

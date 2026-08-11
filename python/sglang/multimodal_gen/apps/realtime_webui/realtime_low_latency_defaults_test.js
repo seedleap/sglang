@@ -93,8 +93,8 @@ assert.match(
 );
 assert.match(
   appJs,
-  /async function applyPreset\(preset, options = \{\}\) \{[\s\S]*?\$\("prompt"\)\.value = preset\.prompt;[\s\S]*?\$\("fps"\)\.value/,
-  "preset application should hydrate prompt and reference",
+  /async function applyPreset\(preset, options = \{\}\) \{[\s\S]*?\$\("prompt"\)\.value = preset\.prompt;[\s\S]*?modelControl\("minwm", "fps"\)\.value/,
+  "preset application should hydrate shared prompt/reference without overwriting LingBot2 defaults",
 );
 assert.doesNotMatch(
   appJs,
@@ -113,7 +113,7 @@ assert.match(
 );
 assert.match(
   appJs,
-  /playbackParam === "live" \|\| playbackParam === "timeline" \|\| playbackParam === "adaptive" \|\| playbackParam === "smooth_timeline"/,
+  /playbackParam === "live"[\s\S]*?playbackParam === "timeline"[\s\S]*?playbackParam === "adaptive"[\s\S]*?playbackParam === "smooth_timeline"/,
   "webui should accept playback=adaptive and playback=smooth_timeline from the URL",
 );
 assert.match(

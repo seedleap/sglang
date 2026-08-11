@@ -1618,13 +1618,19 @@ class ServerArgs(DisaggServerArgsMixin):
             "--realtime-session-idle-timeout-s",
             type=float,
             default=ServerArgs.realtime_session_idle_timeout_s,
-            help="Close a realtime session after this many seconds without valid client activity.",
+            help=(
+                "Close a realtime session after this many seconds without valid "
+                "client activity. Set to 0 to disable the idle timeout."
+            ),
         )
         parser.add_argument(
             "--realtime-session-max-lifetime-s",
             type=float,
             default=ServerArgs.realtime_session_max_lifetime_s,
-            help="Hard maximum lifetime of one realtime generation session.",
+            help=(
+                "Hard maximum lifetime of one realtime generation session. "
+                "Set to 0 to disable the hard lifetime limit."
+            ),
         )
         parser.add_argument(
             "--realtime-admission-wait-s",
@@ -2266,10 +2272,10 @@ class ServerArgs(DisaggServerArgsMixin):
             raise ValueError("realtime_max_sessions_per_worker must be >= 1")
         if self.realtime_session_lease_ttl_s <= 0:
             raise ValueError("realtime_session_lease_ttl_s must be > 0")
-        if self.realtime_session_idle_timeout_s <= 0:
-            raise ValueError("realtime_session_idle_timeout_s must be > 0")
-        if self.realtime_session_max_lifetime_s <= 0:
-            raise ValueError("realtime_session_max_lifetime_s must be > 0")
+        if self.realtime_session_idle_timeout_s < 0:
+            raise ValueError("realtime_session_idle_timeout_s must be >= 0")
+        if self.realtime_session_max_lifetime_s < 0:
+            raise ValueError("realtime_session_max_lifetime_s must be >= 0")
         if self.realtime_admission_wait_s < 0:
             raise ValueError("realtime_admission_wait_s must be >= 0")
         if self.realtime_vae_timeout_s <= 0:

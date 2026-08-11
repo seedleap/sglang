@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>sglang-diffusion Realtime Studio</title>
-    <link rel="stylesheet" href="./styles.css?v=dual-fullscreen-v2" />
+    <link rel="stylesheet" href="./styles.css?v=dual-layout-v5" />
   </head>
   <body>
     <main class="shell">
@@ -32,67 +32,8 @@
         <div class="section-title">Generate the scene</div>
         <label>Prompt<textarea id="prompt" rows="4">A cinematic handheld shot of a quiet city street at dusk, soft reflections, natural motion.</textarea></label>
         <button id="enhanceBtn" class="wide">Enhance</button>
-        <div class="split">
-          <label>Size<input id="size" value="1280x704" /></label>
-          <label>FPS<input id="fps" type="number" value="24" min="1" max="60" /></label>
-        </div>
-        <div class="split">
-          <label>Frames
-            <input id="numFrames" type="number" value="9" min="5" step="4" />
-            <span id="t2vFrameHint" class="field-hint" hidden></span>
-          </label>
-          <label>Seed<input id="seed" type="number" value="42" /></label>
-        </div>
-        <div class="split">
-          <label>Steps<input id="steps" type="number" value="4" min="1" /></label>
-          <label>Guidance<input id="guidance" type="number" value="1" step="0.1" /></label>
-        </div>
-        <div class="split">
-          <label>Sink<input id="sinkSize" type="number" value="9" min="0" /></label>
-          <label>Window<input id="windowFrames" type="number" value="18" min="1" /></label>
-        </div>
-        <div class="split">
-          <label>Transport
-            <select id="transportFormat">
-              <option value="webp" selected>WebP preview</option>
-              <option value="jpeg">JPEG preview</option>
-              <option value="">Lossless delta</option>
-              <option value="raw">Raw RGB</option>
-            </select>
-          </label>
-          <label>Quality<input id="transportQuality" type="number" value="55" min="1" max="100" /></label>
-        </div>
-        <label>Playback
-          <select id="playbackMode">
-            <option value="adaptive">Adaptive (buffered, fast input)</option>
-            <option value="live">Low latency (may skip)</option>
-            <option value="smooth_timeline" selected>Smooth timeline (catch-up, no skip)</option>
-            <option value="timeline">Full timeline (no frame skipping)</option>
-          </select>
-        </label>
-        <div class="split output-options">
-          <label class="toggle-row"><input id="superResolution" type="checkbox" />Super resolution</label>
-          <label>Scale
-            <select id="upscalingScale">
-              <option value="2" selected>2x</option>
-              <option value="4">4x</option>
-            </select>
-          </label>
-        </div>
-        <label>SR model
-          <select id="upscalingModel">
-            <option value="">Quality x2</option>
-            <option
-              value="https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesr-general-x4v3.pth"
-              selected
-            >
-              Fast general
-            </option>
-            <option value="/scratch/realesr-animevideov3.pth">Fast anime</option>
-          </select>
-        </label>
-        <label class="toggle-row"><input id="frameInterpolation" type="checkbox" />Smooth 2x frames</label>
-        <label class="toggle-row"><input id="continuous" type="checkbox" checked /><span id="continuousLabelText">Continuous session</span></label>
+        <div class="section-title">Presets</div>
+        <div id="presetList" class="preset-list preset-list-sidebar"></div>
         <div class="actions">
           <button id="connectBtn" class="primary">Generate</button>
           <button id="stopBtn">Close session</button>
@@ -157,9 +98,10 @@
             <span class="stage-stat">output <b id="outputSizeText">1280x704</b></span>
             <span class="stage-stat">action <b id="actionStateText">-</b></span>
           </div>
+          <div id="sessionNotice" class="session-notice" role="alert" hidden>连接已断开，请重新连接</div>
           <div class="model-player-grid" aria-label="Model comparison">
             <article class="model-player" data-model-key="minwm">
-              <header class="model-player-title"><strong>MinWM</strong></header>
+              <header class="model-player-title"><strong>Zing</strong></header>
               <div class="preview-frame">
                 <canvas id="minwmViewport" width="1280" height="720" tabindex="0"></canvas>
                 <div id="minwmPreviewOverlay" class="preview-overlay" aria-hidden="true">
@@ -167,9 +109,9 @@
                   <span class="preview-unavailable-text"></span>
                 </div>
               </div>
-              <div class="model-player-telemetry" aria-label="MinWM stream metrics">
+              <div class="model-player-telemetry" aria-label="Zing stream metrics">
                 <span>Chunk<b id="minwmChunkText">-</b></span>
-                <span>Rate<b id="minwmRateText">-</b></span>
+                <span>FPS<b id="minwmRateText">-</b></span>
                 <span>Buffer<b id="minwmBufferText">0ms · q 0</b></span>
                 <span>Frames<b id="minwmFramesText">0 · 0.0 MB</b></span>
                 <span>Decode<b id="minwmDecodeText">-</b></span>
@@ -187,7 +129,7 @@
               </div>
               <div class="model-player-telemetry" aria-label="LingBot2 stream metrics">
                 <span>Chunk<b id="lingbot2ChunkText">-</b></span>
-                <span>Rate<b id="lingbot2RateText">-</b></span>
+                <span>FPS<b id="lingbot2RateText">-</b></span>
                 <span>Buffer<b id="lingbot2BufferText">0ms · q 0</b></span>
                 <span>Frames<b id="lingbot2FramesText">0 · 0.0 MB</b></span>
                 <span>Decode<b id="lingbot2DecodeText">-</b></span>
@@ -219,12 +161,53 @@
               </div>
             </div>
           </div>
+          <div class="model-parameters-grid" aria-label="Model parameters" hidden>
+            <div class="model-parameter-panel" aria-label="Zing parameters">
+              <div class="model-parameter-title"><strong>Zing parameters</strong></div>
+              <div class="model-parameter-grid">
+                <label>Size<input id="size" value="1280x704" /></label>
+                <label>FPS<input id="fps" type="number" value="24" min="1" max="60" /></label>
+                <label>Frames<input id="numFrames" type="number" value="9" min="5" step="4" /><span id="t2vFrameHint" class="field-hint" hidden></span></label>
+                <label>Seed<input id="seed" type="number" value="42" /></label>
+                <label>Steps<input id="steps" type="number" value="4" min="1" /></label>
+                <label>Guidance<input id="guidance" type="number" value="1" step="0.1" /></label>
+                <label>Sink<input id="sinkSize" type="number" value="9" min="0" /></label>
+                <label>Window<input id="windowFrames" type="number" value="18" min="1" /></label>
+                <label>Transport<select id="transportFormat"><option value="webp" selected>WebP preview</option><option value="jpeg">JPEG preview</option><option value="">Lossless delta</option><option value="raw">Raw RGB</option></select></label>
+                <label>Quality<input id="transportQuality" type="number" value="55" min="1" max="100" /></label>
+                <label class="parameter-span-2">Playback<select id="playbackMode"><option value="adaptive">Adaptive (buffered, fast input)</option><option value="live">Low latency (may skip)</option><option value="smooth_timeline" selected>Smooth timeline (catch-up, no skip)</option><option value="timeline">Full timeline (no frame skipping)</option></select></label>
+                <label class="toggle-row"><input id="superResolution" type="checkbox" />Super resolution</label>
+                <label>Scale<select id="upscalingScale"><option value="2" selected>2x</option><option value="4">4x</option></select></label>
+                <label class="parameter-span-2">SR model<select id="upscalingModel"><option value="">Quality x2</option><option value="https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesr-general-x4v3.pth" selected>Fast general</option><option value="/scratch/realesr-animevideov3.pth">Fast anime</option></select></label>
+                <label class="toggle-row"><input id="frameInterpolation" type="checkbox" />Smooth 2x frames</label>
+                <label class="toggle-row"><input id="continuous" type="checkbox" checked /><span id="continuousLabelText">Continuous session</span></label>
+              </div>
+            </div>
+            <div class="model-parameter-panel" aria-label="LingBot2 parameters">
+              <div class="model-parameter-title"><strong>LingBot2 parameters</strong></div>
+              <div class="model-parameter-grid">
+                <label>Size<input id="lingbot2Size" value="832x480" /></label>
+                <label>FPS<input id="lingbot2Fps" type="number" value="16" min="1" max="60" /></label>
+                <label>Frames<input id="lingbot2NumFrames" type="number" value="9" min="5" step="4" /></label>
+                <label>Seed<input id="lingbot2Seed" type="number" value="42" /></label>
+                <label>Steps<input id="lingbot2Steps" type="number" value="4" min="1" /></label>
+                <label>Guidance<input id="lingbot2Guidance" type="number" value="1" step="0.1" /></label>
+                <label>Sink<input id="lingbot2SinkSize" type="number" value="9" min="0" /></label>
+                <label>Window<input id="lingbot2WindowFrames" type="number" value="18" min="1" /></label>
+                <label>Transport<select id="lingbot2TransportFormat"><option value="webp" selected>WebP preview</option><option value="jpeg">JPEG preview</option><option value="">Lossless delta</option><option value="raw">Raw RGB</option></select></label>
+                <label>Quality<input id="lingbot2TransportQuality" type="number" value="55" min="1" max="100" /></label>
+                <label class="parameter-span-2">Playback<select id="lingbot2PlaybackMode"><option value="adaptive">Adaptive (buffered, fast input)</option><option value="live">Low latency (may skip)</option><option value="smooth_timeline" selected>Smooth timeline (catch-up, no skip)</option><option value="timeline">Full timeline (no frame skipping)</option></select></label>
+                <label class="toggle-row"><input id="lingbot2SuperResolution" type="checkbox" />Super resolution</label>
+                <label>Scale<select id="lingbot2UpscalingScale"><option value="2" selected>2x</option><option value="4">4x</option></select></label>
+                <label class="parameter-span-2">SR model<select id="lingbot2UpscalingModel"><option value="">Quality x2</option><option value="https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesr-general-x4v3.pth" selected>Fast general</option><option value="/scratch/realesr-animevideov3.pth">Fast anime</option></select></label>
+                <label class="toggle-row"><input id="lingbot2FrameInterpolation" type="checkbox" />Smooth 2x frames</label>
+                <label class="toggle-row"><input id="lingbot2Continuous" type="checkbox" checked />Continuous session</label>
+              </div>
+            </div>
+          </div>
         </section>
 
         <section class="panel presets" aria-label="Presets and camera">
-          <div id="modelSectionTitle" class="section-title">LingBot</div>
-          <div class="section-title">Presets</div>
-          <div id="presetList" class="preset-list"></div>
           <div class="section-title">History</div>
           <div id="historyList" class="history-list"></div>
         </section>
@@ -261,9 +244,11 @@
   <script src="./playback_controller.js?v=realtime-playback-v29"></script>
   <script src="./model_session.js?v=dual-model-v4"></script>
   <script src="./dual_model_controller.js?v=dual-model-v3"></script>
+  <script src="./session_lifetime.js?v=session-lifetime-v1"></script>
   <script src="./fullscreen_controller.js?v=dual-fullscreen-v1"></script>
   <script src="./trace_topology.js?v=realtime-trace-topology-v6"></script>
   <script src="./trace_transport.js?v=realtime-trace-http-v2"></script>
-  <script src="./app.js?v=realtime-production-gateway-v21"></script>
+  <script src="./assets/presets/lingbot_testset_20_20260810/presets.js?v=20260810"></script>
+  <script src="./app.js?v=realtime-production-gateway-v28"></script>
 </body>
 </html>

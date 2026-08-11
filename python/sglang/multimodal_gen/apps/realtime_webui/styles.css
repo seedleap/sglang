@@ -358,6 +358,84 @@ button:focus-visible {
   text-overflow: ellipsis;
 }
 
+.model-parameters-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1px;
+  min-width: 0;
+  border-top: 1px solid rgba(232, 234, 223, 0.12);
+  background: rgba(232, 234, 223, 0.12);
+}
+
+.model-parameters-grid[hidden] {
+  display: none;
+}
+
+.model-parameter-panel {
+  padding: 12px;
+  background: #151912;
+}
+
+.model-parameter-title {
+  margin-bottom: 8px;
+  color: #fffdf7;
+  font-size: 11px;
+}
+
+.model-parameter-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.model-parameter-grid label {
+  min-width: 0;
+  margin: 0;
+  color: rgba(232, 234, 223, 0.65);
+  font-size: 10px;
+}
+
+.model-parameter-grid input,
+.model-parameter-grid select {
+  min-width: 0;
+  padding: 7px 8px;
+  font-size: 11px;
+}
+
+.model-parameter-grid .toggle-row {
+  display: flex;
+  min-height: 32px;
+  align-items: center;
+  gap: 7px;
+  margin: 0;
+  color: rgba(232, 234, 223, 0.8);
+}
+
+.model-parameter-grid .toggle-row input {
+  flex: 0 0 16px;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+}
+
+.parameter-span-2 {
+  grid-column: 1 / -1;
+}
+
+.session-notice {
+  padding: 10px 14px;
+  border-top: 1px solid rgba(185, 84, 60, 0.42);
+  border-bottom: 1px solid rgba(185, 84, 60, 0.42);
+  background: rgba(185, 84, 60, 0.18);
+  color: #fffdf7;
+  font-size: 12px;
+  text-align: center;
+}
+
+.session-notice[hidden] {
+  display: none;
+}
+
 .preview-frame::before {
   content: "";
   position: absolute;
@@ -589,6 +667,11 @@ button:focus-visible {
   min-height: 0;
 }
 
+.stage:fullscreen .model-parameters-grid,
+.stage:fullscreen .session-notice {
+  display: none;
+}
+
 .stage:fullscreen .preview-frame {
   width: 100%;
   height: 100%;
@@ -669,7 +752,8 @@ button:focus-visible {
 }
 
 @media (max-width: 900px) {
-  .model-player-grid {
+  .model-player-grid,
+  .model-parameters-grid {
     grid-template-columns: 1fr;
   }
 
@@ -829,6 +913,11 @@ button:focus-visible {
   margin-bottom: 12px;
   overflow: auto;
   padding-right: 3px;
+}
+
+.preset-list-sidebar {
+  grid-template-columns: 1fr;
+  max-height: 360px;
 }
 .preset {
   display: grid;

@@ -1,0 +1,479 @@
+{
+  "case_id": "case_01",
+  "category": "human_hands_visible",
+  "human_or_nonhuman": "human",
+  "human_hands_visible": true,
+  "source_family": "wasd",
+  "source_batch": "batch_060",
+  "sample_id": "lbd_835e051d1792f424495669ad",
+  "first_frame": "images/case_01_lbd_835e051d1792f424495669ad.png",
+  "prompt_file": "prompts/case_01.txt",
+  "metadata_file": "metadata/case_01.json",
+  "prompt": "Continuous first-person gameplay from the viewpoint of an orchard maintenance worker. A narrow-gauge orchard railway yard has a smooth packed-earth service lane between apple rows and a small timber loading shed; dormant flatcars sit on a siding while a low stone culvert leads the route toward sunlit hills. Bare forearms and the edge of a faded olive work shirt remain visible along the lower frame. The visual style is colored-pencil and watercolor illustration. At 24 FPS, strafe right for 121 frames, then move forward for 8 frames. Spatial layout, lighting, viewpoint identity, and visible viewpoint anchors remain continuous throughout the sequence.",
+  "subject_primary": "human",
+  "subject_detail": "human/orchard maintenance worker",
+  "subject_visible": true,
+  "visible_parts": [
+    "lower edge of a faded olive work shirt",
+    "both relaxed bare forearms at the lower frame edge"
+  ],
+  "body_plan": "bipedal human",
+  "locomotion_mode": "walking",
+  "scene_primary": "outdoor_built",
+  "scene_description": "A narrow-gauge orchard railway yard has a smooth packed-earth service lane between apple rows and a small timber loading shed; dormant flatcars sit on a siding while a low stone culvert leads the route toward sunlit hills.",
+  "art_style_primary": "stylized",
+  "trajectory_id": "combo_d-w_121-8_nostop",
+  "action_family_pattern": "wasd",
+  "action_segments": [
+    {
+      "kind": "movement",
+      "key": "d",
+      "start_frame": 0,
+      "end_frame": 120,
+      "num_frames": 121
+    },
+    {
+      "kind": "movement",
+      "key": "w",
+      "start_frame": 121,
+      "end_frame": 128,
+      "num_frames": 8
+    }
+  ],
+  "width": 1672,
+  "height": 941,
+  "image_sha256": "c10d044a4417e1a2beea85bea7c40e8dccf1fe7c3d7f50f3ae3f079098725227",
+  "source_image_uri": "s3://leap-world-us-east-2/world-model/generation/lingbot_first_person_wasd_noop_20260725/batch_060/images/lbd_835e051d1792f424495669ad.png",
+  "visual_qa": "passed",
+  "prompt_policy": "positive_scene_motion_only_v1",
+  "action": {
+    "traj_id": "combo_d-w_121-8_nostop",
+    "fps": 24,
+    "num_frames": 129,
+    "traj_type": "2_action_segments",
+    "condition_inputs": {
+      "camera_actions": [
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ]
+      ]
+    },
+    "segments": [
+      {
+        "kind": "movement",
+        "key": "d",
+        "start_frame": 0,
+        "end_frame": 120,
+        "num_frames": 121
+      },
+      {
+        "kind": "movement",
+        "key": "w",
+        "start_frame": 121,
+        "end_frame": 128,
+        "num_frames": 8
+      }
+    ],
+    "movement_key": "d",
+    "ending_movement_key": "w",
+    "movement_pair": "d+w",
+    "camera_key": "",
+    "action_pattern": "api:combo:d-w:121-8:nostop",
+    "has_stop": false,
+    "stop_frames": 0,
+    "stop_after_action_index": null,
+    "stop_position": null,
+    "key_sequence": [
+      "d",
+      "w"
+    ],
+    "movement_durations": [
+      121,
+      8
+    ]
+  }
+}

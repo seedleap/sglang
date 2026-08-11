@@ -54,10 +54,12 @@ spec:
               --port=18080
               --coordinator-url=http://minwm-realtime-coordinator:18081
               --model-revision=${MODEL_REVISION}
+              --lingbot2-model-revision=${LINGBOT2_MODEL_REVISION}
               --vae-fingerprint=${VAE_FINGERPRINT}
+              --lingbot2-vae-fingerprint=${LINGBOT2_VAE_FINGERPRINT}
               --internal-output-url=ws://${POD_IP}:18080/v1/internal/realtime_output
               --output-queue-depth=8
-              --output-enqueue-timeout-s=5
+              --output-enqueue-timeout-s=0.05
               --output-drain-timeout-s=90
               --lease-renew-interval-s=10
               --release-grace-s=0.5
@@ -71,8 +73,12 @@ spec:
               value: REPLACE_WITH_MODEL_ID
             - name: VAE_FINGERPRINT
               value: taew2_2-d053e216
+            - name: LINGBOT2_MODEL_REVISION
+              value: robbyant/lingbot-world-v2-14b-causal-fast-diffusers
+            - name: LINGBOT2_VAE_FINGERPRINT
+              value: taew2_1-d26151e7
             - name: REALTIME_UI_CONFIG_JSON
-              value: '{"generationModes":["i2v","t2v"],"defaultGenerationMode":"i2v","t2vFrameStep":4,"t2vDefaultNumFrames":121}'
+              value: '{"generationModes":["i2v","t2v"],"defaultGenerationMode":"i2v","t2vFrameStep":4,"t2vDefaultNumFrames":121,"singleExperience":true,"singleExperienceUserIds":{"minwm":"showcase:zing","lingbot2":"showcase:lingbot2"},"dualModels":{"minwm":{"label":"Zing"},"lingbot2":{"label":"LingBot2","targetFps":16,"sinkSize":9,"windowFrames":18}}}'
             - name: TRACE_LOG_GROUP
               value: REPLACE_WITH_TRACE_LOG_GROUP
             - name: AWS_REGION

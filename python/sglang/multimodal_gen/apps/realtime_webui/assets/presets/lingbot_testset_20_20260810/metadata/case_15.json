@@ -1,0 +1,397 @@
+{
+  "case_id": "case_15",
+  "category": "nonhuman_organic",
+  "human_or_nonhuman": "nonhuman",
+  "human_hands_visible": false,
+  "source_family": "mixed",
+  "source_batch": "batch_057",
+  "sample_id": "lbd_c2c4534ee9d81726bd85bcc1",
+  "first_frame": "images/case_15_lbd_c2c4534ee9d81726bd85bcc1.png",
+  "prompt_file": "prompts/case_15.txt",
+  "metadata_file": "metadata/case_15.json",
+  "prompt": "Continuous first-person gameplay from the viewpoint of a working horse. A heritage freight depot plaza begins at an iron-framed notice wall and spreads into fan-shaped cobbles, with a near route around a loading ramp, a middle route between rail setts, and a far route toward a timber depot door. Chestnut ears and a leather browband remain visible along the upper edge. The visual style is realistic large-format location photography. At 24 FPS, strafe left for 65 frames, turn the view right for 16 frames, then hold a steady view for 48 frames. Spatial layout, lighting, viewpoint identity, and visible viewpoint anchors remain continuous throughout the sequence.",
+  "subject_primary": "animal",
+  "subject_detail": "animal/horse/working-horse",
+  "subject_visible": true,
+  "visible_parts": [
+    "chestnut horse ears at the upper frame edges",
+    "leather browband at the upper edge"
+  ],
+  "body_plan": "large equine quadruped",
+  "locomotion_mode": "walking",
+  "scene_primary": "outdoor_built",
+  "scene_description": "A heritage freight depot plaza begins at an iron-framed notice wall and spreads into fan-shaped cobbles, with a near route around a loading ramp, a middle route between rail setts, and a far route toward a timber depot door.",
+  "art_style_primary": "realistic",
+  "trajectory_id": "combo_a-l_65-16_stop48after2",
+  "action_family_pattern": "wasd_to_ijkl",
+  "action_segments": [
+    {
+      "kind": "movement",
+      "key": "a",
+      "start_frame": 0,
+      "end_frame": 64,
+      "num_frames": 65
+    },
+    {
+      "kind": "movement",
+      "key": "l",
+      "start_frame": 65,
+      "end_frame": 80,
+      "num_frames": 16
+    },
+    {
+      "kind": "noop",
+      "key": null,
+      "start_frame": 81,
+      "end_frame": 128,
+      "num_frames": 48
+    }
+  ],
+  "width": 1672,
+  "height": 941,
+  "image_sha256": "f86f05d776c22c310d0e9d7df9104eb4a3b5b4004fb532b08b02504679cffc45",
+  "source_image_uri": "s3://leap-world-us-east-2/world-model/generation/lingbot_first_person_wasd_ijkl_mixed_noop_v3_20260727/batch_057/images/lbd_c2c4534ee9d81726bd85bcc1.png",
+  "visual_qa": "passed",
+  "prompt_policy": "positive_scene_motion_only_v1",
+  "action": {
+    "traj_id": "combo_a-l_65-16_stop48after2",
+    "fps": 24,
+    "num_frames": 129,
+    "traj_type": "2_action_segments",
+    "condition_inputs": {
+      "camera_actions": [
+        [
+          "a"
+        ],
+        [
+          "a"
+        ],
+        [
+          "a"
+        ],
+        [
+          "a"
+        ],
+        [
+          "a"
+        ],
+        [
+          "a"
+        ],
+        [
+          "a"
+        ],
+        [
+          "a"
+        ],
+        [
+          "a"
+        ],
+        [
+          "a"
+        ],
+        [
+          "a"
+        ],
+        [
+          "a"
+        ],
+        [
+          "a"
+        ],
+        [
+          "a"
+        ],
+        [
+          "a"
+        ],
+        [
+          "a"
+        ],
+        [
+          "a"
+        ],
+        [
+          "a"
+        ],
+        [
+          "a"
+        ],
+        [
+          "a"
+        ],
+        [
+          "a"
+        ],
+        [
+          "a"
+        ],
+        [
+          "a"
+        ],
+        [
+          "a"
+        ],
+        [
+          "a"
+        ],
+        [
+          "a"
+        ],
+        [
+          "a"
+        ],
+        [
+          "a"
+        ],
+        [
+          "a"
+        ],
+        [
+          "a"
+        ],
+        [
+          "a"
+        ],
+        [
+          "a"
+        ],
+        [
+          "a"
+        ],
+        [
+          "a"
+        ],
+        [
+          "a"
+        ],
+        [
+          "a"
+        ],
+        [
+          "a"
+        ],
+        [
+          "a"
+        ],
+        [
+          "a"
+        ],
+        [
+          "a"
+        ],
+        [
+          "a"
+        ],
+        [
+          "a"
+        ],
+        [
+          "a"
+        ],
+        [
+          "a"
+        ],
+        [
+          "a"
+        ],
+        [
+          "a"
+        ],
+        [
+          "a"
+        ],
+        [
+          "a"
+        ],
+        [
+          "a"
+        ],
+        [
+          "a"
+        ],
+        [
+          "a"
+        ],
+        [
+          "a"
+        ],
+        [
+          "a"
+        ],
+        [
+          "a"
+        ],
+        [
+          "a"
+        ],
+        [
+          "a"
+        ],
+        [
+          "a"
+        ],
+        [
+          "a"
+        ],
+        [
+          "a"
+        ],
+        [
+          "a"
+        ],
+        [
+          "a"
+        ],
+        [
+          "a"
+        ],
+        [
+          "a"
+        ],
+        [
+          "a"
+        ],
+        [
+          "a"
+        ],
+        [
+          "l"
+        ],
+        [
+          "l"
+        ],
+        [
+          "l"
+        ],
+        [
+          "l"
+        ],
+        [
+          "l"
+        ],
+        [
+          "l"
+        ],
+        [
+          "l"
+        ],
+        [
+          "l"
+        ],
+        [
+          "l"
+        ],
+        [
+          "l"
+        ],
+        [
+          "l"
+        ],
+        [
+          "l"
+        ],
+        [
+          "l"
+        ],
+        [
+          "l"
+        ],
+        [
+          "l"
+        ],
+        [
+          "l"
+        ],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        []
+      ]
+    },
+    "segments": [
+      {
+        "kind": "movement",
+        "key": "a",
+        "start_frame": 0,
+        "end_frame": 64,
+        "num_frames": 65
+      },
+      {
+        "kind": "movement",
+        "key": "l",
+        "start_frame": 65,
+        "end_frame": 80,
+        "num_frames": 16
+      },
+      {
+        "kind": "noop",
+        "key": null,
+        "start_frame": 81,
+        "end_frame": 128,
+        "num_frames": 48
+      }
+    ],
+    "movement_key": "a",
+    "ending_movement_key": "l",
+    "movement_pair": "a+l",
+    "camera_key": "",
+    "action_pattern": "api:combo:a-l:65-16:stop48after2",
+    "has_stop": true,
+    "stop_frames": 48,
+    "stop_after_action_index": 1,
+    "stop_position": "after_action_2",
+    "key_sequence": [
+      "a",
+      "l"
+    ],
+    "movement_durations": [
+      65,
+      16
+    ]
+  }
+}

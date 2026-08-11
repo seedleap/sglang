@@ -32,6 +32,11 @@ spec:
                   - minwm-realtime-gateway
                   - minwm-async-denoiser
                   - minwm-async-vae
+                  - lingbot2-async-denoiser
+                  - lingbot2-async-vae
+                  - tianpeng-direct-realtime-gateway
+                  - tianpeng-direct-async-denoiser
+                  - tianpeng-direct-async-vae
       ports:
         - {protocol: TCP, port: 18081}
 ---
@@ -56,6 +61,24 @@ spec:
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
+  name: lingbot2-async-denoiser
+  namespace: minwm-realtime
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: lingbot2-async-denoiser
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: minwm-realtime-gateway
+      ports:
+        - {protocol: TCP, port: 30000}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
   name: minwm-async-vae
   namespace: minwm-realtime
 spec:
@@ -68,6 +91,74 @@ spec:
         - podSelector:
             matchLabels:
               app.kubernetes.io/name: minwm-async-denoiser
+      ports:
+        - {protocol: TCP, port: 18081}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: lingbot2-async-vae
+  namespace: minwm-realtime
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: lingbot2-async-vae
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: lingbot2-async-denoiser
+      ports:
+        - {protocol: TCP, port: 18081}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: tianpeng-direct-realtime-gateway
+  namespace: minwm-realtime
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: tianpeng-direct-realtime-gateway
+  policyTypes: [Ingress]
+  ingress:
+    - ports:
+        - {protocol: TCP, port: 18080}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: tianpeng-direct-async-denoiser
+  namespace: minwm-realtime
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: tianpeng-direct-async-denoiser
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: tianpeng-direct-realtime-gateway
+      ports:
+        - {protocol: TCP, port: 30000}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: tianpeng-direct-async-vae
+  namespace: minwm-realtime
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: tianpeng-direct-async-vae
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: tianpeng-direct-async-denoiser
       ports:
         - {protocol: TCP, port: 18081}
 ---

@@ -1,0 +1,420 @@
+{
+  "case_id": "case_04",
+  "category": "human_hands_visible",
+  "human_or_nonhuman": "human",
+  "human_hands_visible": true,
+  "source_family": "ijkl",
+  "source_batch": "batch_051",
+  "sample_id": "lbd_93a2a3510f059ea688c8d58f",
+  "first_frame": "images/case_04_lbd_93a2a3510f059ea688c8d58f.png",
+  "prompt_file": "prompts/case_04.txt",
+  "metadata_file": "metadata/case_04.json",
+  "prompt": "Continuous first-person gameplay from the viewpoint of a small-boat captain. Sheltered riverboat basin with broad water lane between timber pilings and brick warehouses, an open lock gate ahead. Bare forearms and a weathered wooden tiller remain visible along the lower frame. The visual style is realistic river documentary photography. At 24 FPS, turn the view left for 17 frames, hold a steady view for 36 frames, then tilt the view downward for 76 frames. Spatial layout, lighting, viewpoint identity, and visible viewpoint anchors remain continuous throughout the sequence.",
+  "subject_primary": "human",
+  "subject_detail": "human/small-boat-captain/adult",
+  "subject_visible": true,
+  "visible_parts": [
+    "weathered wooden tiller and bare forearms at lower frame edge"
+  ],
+  "body_plan": "bipedal human",
+  "locomotion_mode": "walking",
+  "scene_primary": "outdoor_built",
+  "scene_description": "Sheltered riverboat basin with broad water lane between timber pilings and brick warehouses, an open lock gate ahead.",
+  "art_style_primary": "realistic",
+  "trajectory_id": "combo_j-k_17-76_stop36after1",
+  "action_family_pattern": "ijkl",
+  "action_segments": [
+    {
+      "kind": "movement",
+      "key": "j",
+      "start_frame": 0,
+      "end_frame": 16,
+      "num_frames": 17
+    },
+    {
+      "kind": "noop",
+      "key": null,
+      "start_frame": 17,
+      "end_frame": 52,
+      "num_frames": 36
+    },
+    {
+      "kind": "movement",
+      "key": "k",
+      "start_frame": 53,
+      "end_frame": 128,
+      "num_frames": 76
+    }
+  ],
+  "width": 1672,
+  "height": 941,
+  "image_sha256": "77bbd657344a44d6246f3bbe1c57019838e3155f63982d732a369a88c9241293",
+  "source_image_uri": "s3://leap-world-us-east-2/world-model/generation/lingbot_first_person_ijkl_noop_20260725/batch_051/images/lbd_93a2a3510f059ea688c8d58f.png",
+  "visual_qa": "passed",
+  "prompt_policy": "positive_scene_motion_only_v1",
+  "action": {
+    "traj_id": "combo_j-k_17-76_stop36after1",
+    "fps": 24,
+    "num_frames": 129,
+    "traj_type": "2_action_segments",
+    "condition_inputs": {
+      "camera_actions": [
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [
+          "k"
+        ],
+        [
+          "k"
+        ],
+        [
+          "k"
+        ],
+        [
+          "k"
+        ],
+        [
+          "k"
+        ],
+        [
+          "k"
+        ],
+        [
+          "k"
+        ],
+        [
+          "k"
+        ],
+        [
+          "k"
+        ],
+        [
+          "k"
+        ],
+        [
+          "k"
+        ],
+        [
+          "k"
+        ],
+        [
+          "k"
+        ],
+        [
+          "k"
+        ],
+        [
+          "k"
+        ],
+        [
+          "k"
+        ],
+        [
+          "k"
+        ],
+        [
+          "k"
+        ],
+        [
+          "k"
+        ],
+        [
+          "k"
+        ],
+        [
+          "k"
+        ],
+        [
+          "k"
+        ],
+        [
+          "k"
+        ],
+        [
+          "k"
+        ],
+        [
+          "k"
+        ],
+        [
+          "k"
+        ],
+        [
+          "k"
+        ],
+        [
+          "k"
+        ],
+        [
+          "k"
+        ],
+        [
+          "k"
+        ],
+        [
+          "k"
+        ],
+        [
+          "k"
+        ],
+        [
+          "k"
+        ],
+        [
+          "k"
+        ],
+        [
+          "k"
+        ],
+        [
+          "k"
+        ],
+        [
+          "k"
+        ],
+        [
+          "k"
+        ],
+        [
+          "k"
+        ],
+        [
+          "k"
+        ],
+        [
+          "k"
+        ],
+        [
+          "k"
+        ],
+        [
+          "k"
+        ],
+        [
+          "k"
+        ],
+        [
+          "k"
+        ],
+        [
+          "k"
+        ],
+        [
+          "k"
+        ],
+        [
+          "k"
+        ],
+        [
+          "k"
+        ],
+        [
+          "k"
+        ],
+        [
+          "k"
+        ],
+        [
+          "k"
+        ],
+        [
+          "k"
+        ],
+        [
+          "k"
+        ],
+        [
+          "k"
+        ],
+        [
+          "k"
+        ],
+        [
+          "k"
+        ],
+        [
+          "k"
+        ],
+        [
+          "k"
+        ],
+        [
+          "k"
+        ],
+        [
+          "k"
+        ],
+        [
+          "k"
+        ],
+        [
+          "k"
+        ],
+        [
+          "k"
+        ],
+        [
+          "k"
+        ],
+        [
+          "k"
+        ],
+        [
+          "k"
+        ],
+        [
+          "k"
+        ],
+        [
+          "k"
+        ],
+        [
+          "k"
+        ],
+        [
+          "k"
+        ],
+        [
+          "k"
+        ],
+        [
+          "k"
+        ],
+        [
+          "k"
+        ],
+        [
+          "k"
+        ],
+        [
+          "k"
+        ]
+      ]
+    },
+    "segments": [
+      {
+        "kind": "movement",
+        "key": "j",
+        "start_frame": 0,
+        "end_frame": 16,
+        "num_frames": 17
+      },
+      {
+        "kind": "noop",
+        "key": null,
+        "start_frame": 17,
+        "end_frame": 52,
+        "num_frames": 36
+      },
+      {
+        "kind": "movement",
+        "key": "k",
+        "start_frame": 53,
+        "end_frame": 128,
+        "num_frames": 76
+      }
+    ],
+    "movement_key": "j",
+    "ending_movement_key": "k",
+    "movement_pair": "j+k",
+    "camera_key": "",
+    "action_pattern": "api:combo:j-k:17-76:stop36after1",
+    "has_stop": true,
+    "stop_frames": 36,
+    "stop_after_action_index": 0,
+    "stop_position": "after_action_1",
+    "key_sequence": [
+      "j",
+      "k"
+    ],
+    "movement_durations": [
+      17,
+      76
+    ]
+  }
+}

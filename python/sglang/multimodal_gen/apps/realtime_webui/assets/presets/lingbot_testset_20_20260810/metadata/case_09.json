@@ -1,0 +1,492 @@
+{
+  "case_id": "case_09",
+  "category": "human_body_hidden",
+  "human_or_nonhuman": "human",
+  "human_hands_visible": false,
+  "source_family": "mixed",
+  "source_batch": "batch_061",
+  "sample_id": "lbd_f7bb008efd71cfa37570eadf",
+  "first_frame": "images/case_09_lbd_f7bb008efd71cfa37570eadf.png",
+  "prompt_file": "prompts/case_09.txt",
+  "metadata_file": "metadata/case_09.json",
+  "prompt": "Continuous first-person gameplay from the viewpoint of a subway signal technician. An inactive subway service gallery runs beside twin rails behind a safety line, with white tile pilasters, relay cabinets, a gently curving service path, and a visible crossover portal ahead. The environment fills the frame from an eye-level human viewpoint. The visual style is hand-painted gouache illustration. At 24 FPS, move backward for 48 frames, turn the view left for 19 frames, then move forward for 62 frames. Spatial layout, lighting, viewpoint identity, and visible viewpoint anchors remain continuous throughout the sequence.",
+  "subject_primary": "human",
+  "subject_detail": "human/subway signal technician",
+  "subject_visible": false,
+  "visible_parts": [],
+  "body_plan": "upright bipedal human",
+  "locomotion_mode": "walking",
+  "scene_primary": "underground",
+  "scene_description": "An inactive subway service gallery runs beside twin rails behind a safety line, with white tile pilasters, relay cabinets, a gently curving service path, and a visible crossover portal ahead.",
+  "art_style_primary": "stylized",
+  "trajectory_id": "combo_s-j-w_48-19-62_nostop",
+  "action_family_pattern": "wasd_to_ijkl_to_wasd",
+  "action_segments": [
+    {
+      "kind": "movement",
+      "key": "s",
+      "start_frame": 0,
+      "end_frame": 47,
+      "num_frames": 48
+    },
+    {
+      "kind": "movement",
+      "key": "j",
+      "start_frame": 48,
+      "end_frame": 66,
+      "num_frames": 19
+    },
+    {
+      "kind": "movement",
+      "key": "w",
+      "start_frame": 67,
+      "end_frame": 128,
+      "num_frames": 62
+    }
+  ],
+  "width": 1672,
+  "height": 941,
+  "image_sha256": "bc48515cd1fb431cdfd7fa485754f4036f5aa3c4f5282e3c817adedc9067724b",
+  "source_image_uri": "s3://leap-world-us-east-2/world-model/generation/lingbot_first_person_wasd_ijkl_mixed_noop_v3_20260727/batch_061/images/lbd_f7bb008efd71cfa37570eadf.png",
+  "visual_qa": "passed",
+  "prompt_policy": "positive_scene_motion_only_v1",
+  "action": {
+    "traj_id": "combo_s-j-w_48-19-62_nostop",
+    "fps": 24,
+    "num_frames": 129,
+    "traj_type": "3_action_segments",
+    "condition_inputs": {
+      "camera_actions": [
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ]
+      ]
+    },
+    "segments": [
+      {
+        "kind": "movement",
+        "key": "s",
+        "start_frame": 0,
+        "end_frame": 47,
+        "num_frames": 48
+      },
+      {
+        "kind": "movement",
+        "key": "j",
+        "start_frame": 48,
+        "end_frame": 66,
+        "num_frames": 19
+      },
+      {
+        "kind": "movement",
+        "key": "w",
+        "start_frame": 67,
+        "end_frame": 128,
+        "num_frames": 62
+      }
+    ],
+    "movement_key": "s",
+    "ending_movement_key": "w",
+    "movement_pair": "s+w",
+    "camera_key": "",
+    "action_pattern": "api:combo:s-j-w:48-19-62:nostop",
+    "has_stop": false,
+    "stop_frames": 0,
+    "stop_after_action_index": null,
+    "stop_position": null,
+    "key_sequence": [
+      "s",
+      "j",
+      "w"
+    ],
+    "movement_durations": [
+      48,
+      19,
+      62
+    ]
+  }
+}

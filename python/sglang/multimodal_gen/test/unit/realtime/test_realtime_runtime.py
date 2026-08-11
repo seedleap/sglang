@@ -1389,6 +1389,79 @@ def test_session_watchdog_closes_idle_session():
     assert asyncio.run(run()) == "session idle timeout"
 
 
+def test_session_watchdog_exempts_internal_startup_warmup_from_max_lifetime():
+    async def run():
+        store = realtime_video_api.InMemorySessionLeaseStore(1, 0.5)
+        controller = realtime_video_api.RealtimeAdmissionController(store)
+        session = GenerateSession()
+        lease = await controller.admit("startup-warmup", session.id, session.generation_id)
+        try:
+            return await realtime_video_api._session_watchdog(
+                session,
+                controller,
+                lease,
+                idle_timeout_s=0.05,
+                max_lifetime_s=0.01,
+                lease_ttl_s=0.5,
+                enforce_max_lifetime=False,
+            )
+        finally:
+            await controller.release(lease)
+
+    assert asyncio.run(run()) == "session idle timeout"
+
+
+def test_session_watchdog_exempts_startup_warmup_after_init_sets_trace_id():
+    async def run():
+        store = realtime_video_api.InMemorySessionLeaseStore(1, 0.5)
+        controller = realtime_video_api.RealtimeAdmissionController(store)
+        session = GenerateSession()
+        lease = await controller.admit(
+            "startup-warmup", session.id, session.generation_id
+        )
+        try:
+            session.trace_id = "startup-warmup-after-init"
+            return await realtime_video_api._session_watchdog(
+                session,
+                controller,
+                lease,
+                idle_timeout_s=0.05,
+                max_lifetime_s=0.01,
+                lease_ttl_s=0.5,
+                enforce_max_lifetime=True,
+            )
+        finally:
+            await controller.release(lease)
+
+    assert asyncio.run(run()) == "session idle timeout"
+
+
+def test_session_watchdog_allows_unbounded_direct_sessions():
+    async def run():
+        store = realtime_video_api.InMemorySessionLeaseStore(1, 0.03)
+        controller = realtime_video_api.RealtimeAdmissionController(store)
+        session = GenerateSession()
+        lease = await controller.admit("direct-user", session.id, session.generation_id)
+        task = asyncio.create_task(
+            realtime_video_api._session_watchdog(
+                session,
+                controller,
+                lease,
+                idle_timeout_s=0,
+                max_lifetime_s=0,
+                lease_ttl_s=0.03,
+            )
+        )
+        await asyncio.sleep(0.08)
+        assert not task.done()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await controller.release(lease)
+
+    asyncio.run(run())
+
+
 def test_initialization_is_cancelled_when_preinit_watchdog_expires():
     async def run():
         cancelled = asyncio.Event()

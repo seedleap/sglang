@@ -137,6 +137,23 @@ def test_gateway_output_route_uses_media_completion_as_authoritative_marker():
     asyncio.run(run())
 
 
+def test_gateway_output_route_prioritizes_media_completion_under_backpressure():
+    async def run():
+        registry = GatewayOutputRegistry(queue_depth=1, enqueue_timeout_s=0.5)
+        route = await registry.register("s", "g", token="secret")
+
+        await route.put(_frame(0, 0))
+        completion = _media_complete(0)
+        await asyncio.wait_for(route.put(completion), timeout=0.05)
+
+        assert route.dropped_messages == 1
+        assert await route.get() == completion
+        route.task_done()
+        await route.wait_until_chunk_completed(0)
+
+    asyncio.run(run())
+
+
 def test_gateway_rejects_a_second_live_registration_for_same_session():
     async def run():
         registry = GatewayOutputRegistry(queue_depth=1)

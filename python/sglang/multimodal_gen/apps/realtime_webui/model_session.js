@@ -212,7 +212,10 @@
       const message = this.unpack(packed);
       message.__received_at = this.now();
       if (message.type === "error") {
-        throw new Error(message.content || `${this.key} server error`);
+        const error = new Error(message.content || `${this.key} server error`);
+        error.reason = message.reason || "";
+        error.retryAfterS = Number(message.retry_after_s || 0);
+        throw error;
       }
       if (message.type === "frame_batch") {
         const payload = message.payload;

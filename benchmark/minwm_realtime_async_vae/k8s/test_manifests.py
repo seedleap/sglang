@@ -27,11 +27,11 @@ def _init_container(workload, name):
 
 
 def _gpu_workload(documents, name):
-    kind = "StatefulSet" if name == "minwm-async-denoiser" else "Deployment"
+    kind = "StatefulSet" if name.endswith("-denoiser") else "Deployment"
     return find(documents, kind, name)
 
 
-def test_gpu_nodepools_are_spot_only_and_bounded():
+def test_gpu_nodepools_are_capacity_bounded():
     documents = load_documents()
     validate(documents)
     for pool_name in (
@@ -85,6 +85,14 @@ def test_h100_pool_uses_one_fully_utilized_eight_gpu_node():
         "karpenter.sh/nodepool": "REPLACE_WITH_DENOISER_NODEPOOL",
         "karpenter.sh/capacity-type": "spot",
     }
+    denoiser = _container(deployment, "denoiser")
+    command = " ".join(denoiser["args"])
+    assert denoiser["resources"]["requests"]["nvidia.com/gpu"] == "2"
+    assert denoiser["resources"]["limits"]["nvidia.com/gpu"] == "2"
+    assert "--num-gpus 2" in command
+    assert "--sp-degree 2" in command
+    assert "--ulysses-degree 2" in command
+    assert "--enable-cuda-graph" in command
 
 
 def test_denoiser_restarts_all_gpu_pods_as_one_parallel_batch():
@@ -118,6 +126,13 @@ def test_vae_deployment_can_land_on_either_l4_or_l40s_pool():
     selector = deployment["spec"]["template"]["spec"]["nodeSelector"]
     assert selector["seedleap.ai/vae-worker"] == "true"
     assert "karpenter.sh/nodepool" not in selector
+    assert "karpenter.sh/capacity-type" not in selector
+
+    l4_pool = find(base_documents, "NodePool", "minwm-async-vae-l4")
+    assert requirement_values(l4_pool, "karpenter.sh/capacity-type") == [
+        "spot",
+        "on-demand",
+    ]
 
     for documents, name in (
         (base_documents, "minwm-async-vae-l4"),
@@ -137,6 +152,89 @@ def test_vae_pipeline_keeps_one_waiting_latent_and_sends_low_latency_batches():
     assert "--encoded-frames-per-batch=1" in args
 
 
+def test_each_model_has_a_dedicated_l4_vae_worker():
+    documents = load_documents(("l4-vae.yaml",))
+    minwm = find(documents, "Deployment", "minwm-async-vae")
+    lingbot2 = find(documents, "Deployment", "lingbot2-async-vae")
+    direct = find(documents, "Deployment", "tianpeng-direct-async-vae")
+    nodepool = find(documents, "NodePool", "minwm-async-vae-l4")
+
+    assert sum(
+        int(workload["spec"]["replicas"])
+        for workload in (minwm, lingbot2, direct)
+    ) == 3
+    assert requirement_values(nodepool, "node.kubernetes.io/instance-type") == [
+        "g6.2xlarge"
+    ]
+    assert "taew2_2.pth" in " ".join(_container(minwm, "vae")["args"])
+    assert "taew2_1.pth" in " ".join(_container(lingbot2, "vae")["args"])
+    assert "--vae-fingerprint=taew2_1-d26151e7" in " ".join(
+        _init_container(lingbot2, "vae-heartbeat")["args"]
+    )
+    assert "taew2_2.pth" in " ".join(_container(direct, "vae")["args"])
+    assert "--vae-fingerprint=taew2_2-product-direct-d053e216" in " ".join(
+        _init_container(direct, "vae-heartbeat")["args"]
+    )
+
+
+def test_tianpeng_direct_api_is_sp2_without_session_timeout():
+    documents = load_documents(("tianpeng-direct.yaml",))
+    workload = find(documents, "StatefulSet", "tianpeng-direct-async-denoiser")
+    denoiser = _container(workload, "denoiser")
+    command = " ".join(denoiser["args"])
+    heartbeat = " ".join(_init_container(workload, "denoiser-heartbeat")["args"])
+
+    assert workload["spec"]["replicas"] == 1
+    assert denoiser["resources"]["requests"]["nvidia.com/gpu"] == "2"
+    assert "--num-gpus 2" in command
+    assert "--sp-degree 2" in command
+    assert "--ulysses-degree 2" in command
+    assert "--enable-cuda-graph" not in command
+    assert "--batching-max-size 1" in command
+    assert "--realtime-session-idle-timeout-s 0" in command
+    assert "--realtime-session-max-lifetime-s 0" in command
+    assert "--capacity=4" in heartbeat
+    assert "--vae-fingerprint=taew2_2-product-direct-d053e216" in heartbeat
+
+    gateway = find(documents, "Deployment", "tianpeng-direct-realtime-gateway")
+    gateway_command = " ".join(_container(gateway, "gateway")["args"])
+    assert "--model-revision=wan22-5b-varlen-product-ws1-720p-0810-5bfc5d2-gs1500-direct" in gateway_command
+    service = find(documents, "Service", "tianpeng-direct-public")
+    assert service["spec"]["type"] == "LoadBalancer"
+
+
+def test_lingbot_denoiser_is_coordinator_managed_sp4_with_remote_vae():
+    documents = load_documents(("lingbot2-h100-denoiser.yaml",))
+    workload = find(documents, "StatefulSet", "lingbot2-async-denoiser")
+    denoiser = _container(workload, "denoiser")
+    command = " ".join(denoiser["args"])
+    heartbeat = " ".join(_init_container(workload, "denoiser-heartbeat")["args"])
+
+    assert workload["spec"]["replicas"] == 1
+    assert denoiser["resources"]["requests"]["nvidia.com/gpu"] == 4
+    assert denoiser["resources"]["limits"]["nvidia.com/gpu"] == 4
+    assert "--num-gpus 4" in command
+    assert "--sp-degree 4" in command
+    assert "--ulysses-degree 4" in command
+    assert "--ring-degree 1" in command
+    assert "--realtime-remote-vae-enabled" in command
+    assert "--realtime-session-max-lifetime-s 45" in command
+    lingbot_env = {
+        item["name"]: item.get("value") for item in denoiser.get("env", [])
+    }
+    assert lingbot_env["SGLANG_LINGBOT_LAZY_VAE_ENCODE_BLACK_FRAMES"] == "0"
+    assert "--role=denoiser" in heartbeat
+    assert "--model-revision=robbyant/lingbot-world-v2-14b-causal-fast-diffusers" in heartbeat
+    assert "--vae-fingerprint=taew2_1-d26151e7" in heartbeat
+    assert "python3 -m sglang.multimodal_gen.runtime.launch_server" in command
+    assert "startup_warmup.py" in command
+    assert "--allow-empty-complete" in command
+    assert "child=$!" in command
+    assert workload["spec"]["template"]["spec"]["containers"][0][
+        "readinessProbe"
+    ]["httpGet"] == {"path": "/health", "port": "api"}
+
+
 def test_gpu_workers_publish_epoch_state_and_drain_before_termination():
     for filename, workload_name, worker_name, heartbeat_name, port in (
         (
@@ -149,6 +247,34 @@ def test_gpu_workers_publish_epoch_state_and_drain_before_termination():
         (
             "l4-vae.yaml",
             "minwm-async-vae",
+            "vae",
+            "vae-heartbeat",
+            18081,
+        ),
+        (
+            "lingbot2-h100-denoiser.yaml",
+            "lingbot2-async-denoiser",
+            "denoiser",
+            "denoiser-heartbeat",
+            30000,
+        ),
+        (
+            "l4-vae.yaml",
+            "lingbot2-async-vae",
+            "vae",
+            "vae-heartbeat",
+            18081,
+        ),
+        (
+            "tianpeng-direct.yaml",
+            "tianpeng-direct-async-denoiser",
+            "denoiser",
+            "denoiser-heartbeat",
+            30000,
+        ),
+        (
+            "l4-vae.yaml",
+            "tianpeng-direct-async-vae",
             "vae",
             "vae-heartbeat",
             18081,
@@ -191,6 +317,7 @@ def test_gpu_workers_publish_epoch_state_and_drain_before_termination():
         for container in (worker, heartbeat):
             mounts = {mount["name"]: mount for mount in container["volumeMounts"]}
             assert mounts["worker-epoch"]["mountPath"] == "/var/run/minwm-worker"
+            assert mounts["worker-epoch"].get("readOnly") is not True
 
 
 def test_denoiser_enables_dynamic_remote_vae_handoff_without_a_static_worker_url():
@@ -205,11 +332,45 @@ def test_denoiser_enables_dynamic_remote_vae_handoff_without_a_static_worker_url
     assert "--realtime-vae-worker-url" not in command
 
 
-def test_wan22_5b_uses_the_matching_taehv_checkpoint():
-    for filename in ("h100-denoiser.yaml", "l4-vae.yaml"):
-        manifest = (Path(__file__).parent / filename).read_text()
-        assert "taew2_2.pth" in manifest
-        assert "taew2_1.pth" not in manifest
+def test_realtime_sessions_have_a_45_second_hard_lifetime():
+    workload = find(
+        load_documents(("h100-denoiser.yaml",)),
+        "StatefulSet",
+        "minwm-async-denoiser",
+    )
+    command = " ".join(_container(workload, "denoiser")["args"])
+
+    assert "--realtime-session-max-lifetime-s 45" in command
+
+
+def test_public_gateway_uses_the_new_zing_lingbot_domain_service():
+    service = find(
+        load_documents(("gateway-service.yaml",)),
+        "Service",
+        "zing-lingbot-public",
+    )
+
+    assert service["spec"]["type"] == "LoadBalancer"
+    assert service["spec"]["selector"] == {
+        "app.kubernetes.io/name": "minwm-realtime-gateway"
+    }
+
+
+def test_each_model_uses_the_matching_taehv_checkpoint():
+    denoiser_manifest = (Path(__file__).parent / "h100-denoiser.yaml").read_text()
+    assert "taew2_2.pth" in denoiser_manifest
+    assert "taew2_1.pth" not in denoiser_manifest
+
+    documents = load_documents(("l4-vae.yaml",))
+    minwm = find(documents, "Deployment", "minwm-async-vae")
+    minwm_command = " ".join(_container(minwm, "vae")['args'])
+    assert "taew2_2.pth" in minwm_command
+    assert "taew2_1.pth" not in minwm_command
+
+    lingbot2 = find(documents, "Deployment", "lingbot2-async-vae")
+    lingbot2_command = " ".join(_container(lingbot2, "vae")['args'])
+    assert "taew2_1.pth" in lingbot2_command
+    assert "taew2_2.pth" not in lingbot2_command
 
 
 def test_webui_enables_i2v_and_t2v_in_production_manifest():
@@ -404,10 +565,47 @@ def test_denoiser_restarts_as_one_batch_with_two_bounded_cold_load_slots():
     }
 
 
+def test_one_node_model_startup_is_serialized_across_all_three_denoisers():
+    workloads = (
+        find(
+            load_documents(("h100-denoiser.yaml",)),
+            "StatefulSet",
+            "minwm-async-denoiser",
+        ),
+        find(
+            load_documents(("tianpeng-direct.yaml",)),
+            "StatefulSet",
+            "tianpeng-direct-async-denoiser",
+        ),
+        find(
+            load_documents(("lingbot2-h100-denoiser.yaml",)),
+            "StatefulSet",
+            "lingbot2-async-denoiser",
+        ),
+    )
+
+    for workload in workloads:
+        pod_spec = workload["spec"]["template"]["spec"]
+        denoiser = _container(workload, "denoiser")
+        command = " ".join(denoiser["args"])
+        assert "denoiser-" in command
+        assert "flock -x 9" in command
+        assert "flock -u 9" in command
+        assert any(
+            mount["name"] == "startup-lock" for mount in denoiser["volumeMounts"]
+        )
+        lock_volume = next(
+            volume
+            for volume in pod_spec["volumes"]
+            if volume["name"] == "startup-lock"
+        )
+        assert lock_volume["hostPath"]["path"] == "/var/run/minwm-startup-lock"
+
+
 def test_public_nlb_selects_only_the_gateway_control_plane():
     documents = load_documents(("gateway.yaml", "gateway-service.yaml"))
     gateway = find(documents, "Deployment", "minwm-realtime-gateway")
-    service = find(documents, "Service", "minwm-realtime-public")
+    service = find(documents, "Service", "zing-lingbot-public")
 
     assert gateway["spec"]["replicas"] == 2
     assert service["spec"]["type"] == "LoadBalancer"
@@ -732,7 +930,9 @@ def test_internal_worker_ports_are_restricted_by_network_policy():
     expected = {
         "minwm-realtime-coordinator": 18081,
         "minwm-async-denoiser": 30000,
+        "lingbot2-async-denoiser": 30000,
         "minwm-async-vae": 18081,
+        "lingbot2-async-vae": 18081,
         "minwm-realtime-adot": 4317,
     }
     for name, port in expected.items():
@@ -753,6 +953,10 @@ def test_internal_worker_ports_are_restricted_by_network_policy():
     assert vae["spec"]["ingress"][0]["from"][0]["podSelector"] == {
         "matchLabels": {"app.kubernetes.io/name": "minwm-async-denoiser"}
     }
+    lingbot2_vae = find(documents, "NetworkPolicy", "lingbot2-async-vae")
+    assert lingbot2_vae["spec"]["ingress"][0]["from"][0]["podSelector"] == {
+        "matchLabels": {"app.kubernetes.io/name": "lingbot2-async-denoiser"}
+    }
 
 
 def test_gateway_output_queue_absorbs_one_complete_frame_burst():
@@ -761,7 +965,7 @@ def test_gateway_output_queue_absorbs_one_complete_frame_burst():
 
     assert "--output-queue-depth=8" in gateway
     assert "--output-queue-depth=8" in b300
-    assert "--output-enqueue-timeout-s=5" in gateway
+    assert "--output-enqueue-timeout-s=0.05" in gateway
     assert "--output-drain-timeout-s=90" in gateway
 
 

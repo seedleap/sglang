@@ -345,14 +345,24 @@ async def _session_watchdog(
     idle_timeout_s: float,
     max_lifetime_s: float,
     lease_ttl_s: float,
+    enforce_max_lifetime: bool = True,
 ) -> str:
     interval_s = min(5.0, max(0.1, lease_ttl_s / 3.0))
     while True:
         await asyncio.sleep(interval_s)
         now = time.monotonic()
-        if now - session.created_at >= max_lifetime_s:
+        internal_startup_warmup = str(session.trace_id).startswith("startup-warmup-")
+        if (
+            enforce_max_lifetime
+            and not internal_startup_warmup
+            and max_lifetime_s > 0
+            and now - session.created_at >= max_lifetime_s
+        ):
             return "maximum session lifetime reached"
-        if now - session.last_client_activity_at >= idle_timeout_s:
+        if (
+            idle_timeout_s > 0
+            and now - session.last_client_activity_at >= idle_timeout_s
+        ):
             return "session idle timeout"
         try:
             await controller.renew(lease)
@@ -1538,6 +1548,9 @@ async def generate(websocket: WebSocket):
                     idle_timeout_s=server_args.realtime_session_idle_timeout_s,
                     max_lifetime_s=server_args.realtime_session_max_lifetime_s,
                     lease_ttl_s=server_args.realtime_session_lease_ttl_s,
+                    enforce_max_lifetime=not session.trace_id.startswith(
+                        "startup-warmup-"
+                    ),
                 )
             )
         log_realtime_trace(

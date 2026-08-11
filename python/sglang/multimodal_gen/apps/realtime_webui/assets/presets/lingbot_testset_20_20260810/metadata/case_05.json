@@ -1,0 +1,478 @@
+{
+  "case_id": "case_05",
+  "category": "human_hands_visible",
+  "human_or_nonhuman": "human",
+  "human_hands_visible": true,
+  "source_family": "mixed",
+  "source_batch": "batch_057",
+  "sample_id": "lbd_a14c89306ffafa3fc8b767ab",
+  "first_frame": "images/case_05_lbd_a14c89306ffafa3fc8b767ab.png",
+  "prompt_file": "prompts/case_05.txt",
+  "metadata_file": "metadata/case_05.json",
+  "prompt": "Continuous first-person gameplay from the viewpoint of a beginner swimmer. A tree-lined neighborhood pool has a wide tan paver corridor curving gently around a shallow teaching basin, with low stone planters on the outer side and an empty row of kickboards on a rack beside the water. Bare forearms remain visible along the lower frame. The visual style is hand-painted gouache illustration. At 24 FPS, strafe right for 121 frames, then turn the view right for 8 frames. Spatial layout, lighting, viewpoint identity, and visible viewpoint anchors remain continuous throughout the sequence.",
+  "subject_primary": "human",
+  "subject_detail": "human/teen/beginner swimmer",
+  "subject_visible": true,
+  "visible_parts": [
+    "two relaxed bare forearms at the lower frame edge"
+  ],
+  "body_plan": "bipedal human",
+  "locomotion_mode": "walking",
+  "scene_primary": "outdoor_natural",
+  "scene_description": "A tree-lined neighborhood pool has a wide tan paver corridor curving gently around a shallow teaching basin, with low stone planters on the outer side and an empty row of kickboards on a rack beside the water.",
+  "art_style_primary": "stylized",
+  "trajectory_id": "combo_d-l_121-8_nostop",
+  "action_family_pattern": "wasd_to_ijkl",
+  "action_segments": [
+    {
+      "kind": "movement",
+      "key": "d",
+      "start_frame": 0,
+      "end_frame": 120,
+      "num_frames": 121
+    },
+    {
+      "kind": "movement",
+      "key": "l",
+      "start_frame": 121,
+      "end_frame": 128,
+      "num_frames": 8
+    }
+  ],
+  "width": 1672,
+  "height": 941,
+  "image_sha256": "a2c9de619b48cd1a5de838e0010af65e961425834d33ad2d81e6f3cbdac6cc0a",
+  "source_image_uri": "s3://leap-world-us-east-2/world-model/generation/lingbot_first_person_wasd_ijkl_mixed_noop_v3_20260727/batch_057/images/lbd_a14c89306ffafa3fc8b767ab.png",
+  "visual_qa": "passed",
+  "prompt_policy": "positive_scene_motion_only_v1",
+  "action": {
+    "traj_id": "combo_d-l_121-8_nostop",
+    "fps": 24,
+    "num_frames": 129,
+    "traj_type": "2_action_segments",
+    "condition_inputs": {
+      "camera_actions": [
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "d"
+        ],
+        [
+          "l"
+        ],
+        [
+          "l"
+        ],
+        [
+          "l"
+        ],
+        [
+          "l"
+        ],
+        [
+          "l"
+        ],
+        [
+          "l"
+        ],
+        [
+          "l"
+        ],
+        [
+          "l"
+        ]
+      ]
+    },
+    "segments": [
+      {
+        "kind": "movement",
+        "key": "d",
+        "start_frame": 0,
+        "end_frame": 120,
+        "num_frames": 121
+      },
+      {
+        "kind": "movement",
+        "key": "l",
+        "start_frame": 121,
+        "end_frame": 128,
+        "num_frames": 8
+      }
+    ],
+    "movement_key": "d",
+    "ending_movement_key": "l",
+    "movement_pair": "d+l",
+    "camera_key": "",
+    "action_pattern": "api:combo:d-l:121-8:nostop",
+    "has_stop": false,
+    "stop_frames": 0,
+    "stop_after_action_index": null,
+    "stop_position": null,
+    "key_sequence": [
+      "d",
+      "l"
+    ],
+    "movement_durations": [
+      121,
+      8
+    ]
+  }
+}

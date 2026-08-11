@@ -7,6 +7,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import quote, urlsplit
@@ -101,16 +102,29 @@ class WorkerHeartbeatReporter:
         if not state.is_success:
             return False
         runtime_state = state.json()
+        runtime_epoch = str(runtime_state.get("worker_epoch") or "").strip()
+        if not runtime_epoch:
+            return False
         if self.worker_epoch_file is not None:
             try:
                 expected_epoch = self.worker_epoch_file.read_text().strip()
             except FileNotFoundError:
-                return False
+                expected_epoch = ""
+            if runtime_epoch != expected_epoch:
+                temporary = self.worker_epoch_file.with_name(
+                    f".{self.worker_epoch_file.name}.{os.getpid()}.tmp"
+                )
+                temporary.write_text(f"{runtime_epoch}\n")
+                os.replace(temporary, self.worker_epoch_file)
+                logger.warning(
+                    "repaired stale worker epoch file from local runtime state"
+                )
+                expected_epoch = runtime_epoch
         else:
             expected_epoch = self.worker_epoch
         if not expected_epoch:
             return False
-        if runtime_state.get("worker_epoch") != expected_epoch:
+        if runtime_epoch != expected_epoch:
             raise RuntimeError("worker state epoch does not match heartbeat epoch")
         runtime_payload = {
             key: runtime_state[key]

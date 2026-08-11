@@ -29,6 +29,7 @@ DENOISER_RESTART_BATCH_SIZE="${DENOISER_RESTART_BATCH_SIZE:-2}"
 DENOISER_NODEPOOL="${DENOISER_NODEPOOL:-}"
 NAMESPACE="minwm-realtime"
 ROLLOUT_TIMEOUT="${ROLLOUT_TIMEOUT:-45m}"
+DEPLOY_DRY_RUN_ONLY="${DEPLOY_DRY_RUN_ONLY:-false}"
 
 if ! [[ "${MODEL_ARTIFACT_REVISION}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]; then
   echo "MODEL_ARTIFACT_REVISION is not immutable-path safe" >&2
@@ -88,6 +89,10 @@ for SUSPEND in \
     exit 1
   fi
 done
+if [[ "${DEPLOY_DRY_RUN_ONLY}" != "true" && "${DEPLOY_DRY_RUN_ONLY}" != "false" ]]; then
+  echo "DEPLOY_DRY_RUN_ONLY must be true or false" >&2
+  exit 1
+fi
 if [[ "${GPU_EVENT_SCALER_SUSPEND}" == "true" ]]; then
   GPU_EVENT_SCALER_REPLICAS=0
 else
@@ -111,9 +116,14 @@ SNAPSHOT_WORKLOADS=(
   deployment/minwm-realtime-adot
   deployment/minwm-realtime-coordinator
   deployment/minwm-realtime-gateway
+  deployment/tianpeng-direct-realtime-gateway
   deployment/minwm-realtime-gpu-capacity-scaler
   statefulset/minwm-async-denoiser
+  statefulset/lingbot2-async-denoiser
+  statefulset/tianpeng-direct-async-denoiser
   deployment/minwm-async-vae
+  deployment/lingbot2-async-vae
+  deployment/tianpeng-direct-async-vae
 )
 
 cleanup() {
@@ -486,6 +496,11 @@ fi
 kubectl apply --server-side --force-conflicts --dry-run=server \
   --field-manager=minwm-production -f "${DRY_RUN_RENDERED}" >/dev/null
 
+if [[ "${DEPLOY_DRY_RUN_ONLY}" == "true" ]]; then
+  echo "Production manifest server-side dry-run passed; no cluster resources were changed."
+  exit 0
+fi
+
 for workload in "${SNAPSHOT_WORKLOADS[@]}"; do
   snapshot_workload "${workload}"
 done
@@ -540,10 +555,15 @@ fi
 wait_for_rollout "deployment/minwm-realtime-adot"
 wait_for_rollout "deployment/minwm-realtime-coordinator"
 wait_for_rollout "deployment/minwm-realtime-gateway"
+wait_for_rollout "deployment/tianpeng-direct-realtime-gateway"
 wait_for_rollout "deployment/minwm-realtime-gpu-capacity-scaler"
 wait_for_rollout "statefulset/minwm-async-denoiser"
+wait_for_rollout "statefulset/lingbot2-async-denoiser"
+wait_for_rollout "statefulset/tianpeng-direct-async-denoiser"
 unprotect_denoiser_nodes
 wait_for_rollout "deployment/minwm-async-vae"
+wait_for_rollout "deployment/lingbot2-async-vae"
+wait_for_rollout "deployment/tianpeng-direct-async-vae"
 
 if (( LEGACY_DENOISER_SCALED_DOWN == 1 )); then
   kubectl delete deployment/minwm-async-denoiser \

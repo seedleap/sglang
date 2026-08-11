@@ -188,7 +188,11 @@ class GatewayOutputRoute:
             )
             if completed.is_set():
                 raise OutputProtocolError("duplicate completion")
-            await self._put_with_bounded_drop(wire)
+            # Completion is a control marker used to release upstream decode
+            # credit. Never leave it waiting behind stale media for the full
+            # enqueue timeout; that timeout matches the VAE acknowledgement
+            # budget and can otherwise tear down a healthy model session.
+            self._put_latest_nowait(wire)
             completed.set()
             return
 
@@ -225,6 +229,9 @@ class GatewayOutputRoute:
         # A slow browser/network path should not tear down the model session.
         # Keep Gateway memory bounded by discarding the oldest unsent message and
         # enqueueing the newest data after the timeout budget is exhausted.
+        self._put_latest_nowait(wire)
+
+    def _put_latest_nowait(self, wire: bytes) -> None:
         while self._queue.full():
             self._drop_oldest_queued_message()
         try:

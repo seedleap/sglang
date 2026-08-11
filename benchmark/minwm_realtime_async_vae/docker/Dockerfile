@@ -2,6 +2,7 @@ ARG PYTHON_IMAGE
 ARG GPU_IMAGE
 
 FROM ${PYTHON_IMAGE} AS cpu-runtime
+USER 0
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PYTHONPATH=/opt/sglang/python \
@@ -65,6 +66,9 @@ RUN install -d -m 0755 /opt/taehv
 ADD --checksum=sha256:d053e216ca50e2bb837bbcd79b85f0366bea00e5938025572382a773b74c559a \
     https://raw.githubusercontent.com/madebyollin/taehv/093b918971d59001a0bad6dfd6e0409b5e1752cf/taew2_2.pth \
     /opt/taehv/taew2_2.pth
+ADD --checksum=sha256:d26151e76cdc2c9424bef988de874b33d9a53f30ef3060cd556c429c469c797e \
+    https://raw.githubusercontent.com/madebyollin/taehv/093b918971d59001a0bad6dfd6e0409b5e1752cf/taew2_1.pth \
+    /opt/taehv/taew2_1.pth
 WORKDIR /opt/sglang
 
 FROM gpu-runtime AS denoiser

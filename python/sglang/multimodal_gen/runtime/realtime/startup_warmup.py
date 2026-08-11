@@ -13,6 +13,7 @@ from uuid import uuid4
 import msgspec.msgpack
 from PIL import Image
 import websockets
+from websockets.exceptions import ConnectionClosedOK
 
 
 def build_warmup_request(
@@ -54,14 +55,28 @@ def create_reference_frame() -> bytes:
     return buffer.getvalue()
 
 
-async def wait_for_first_frame(websocket, *, timeout_s: float) -> dict:
+def _is_generation_complete_close(exc: ConnectionClosedOK) -> bool:
+    close = exc.rcvd or exc.sent
+    if close is None:
+        return False
+    return int(close.code) == 1000 and close.reason == "generation complete"
+
+
+async def wait_for_first_frame(
+    websocket, *, timeout_s: float, allow_empty_complete: bool = False
+) -> dict:
     deadline = time.monotonic() + timeout_s
     pending_header: dict | None = None
     while True:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise TimeoutError("realtime warmup timed out before the first frame")
-        packed = await asyncio.wait_for(websocket.recv(), timeout=remaining)
+        try:
+            packed = await asyncio.wait_for(websocket.recv(), timeout=remaining)
+        except ConnectionClosedOK as exc:
+            if allow_empty_complete and _is_generation_complete_close(exc):
+                return {"chunk_index": 0, "empty_complete": True}
+            raise
         if pending_header is not None:
             if not isinstance(packed, bytes) or not packed:
                 raise RuntimeError("realtime warmup received an empty frame payload")
@@ -82,7 +97,9 @@ async def wait_for_first_frame(websocket, *, timeout_s: float) -> dict:
             pending_header = message
 
 
-async def warmup(*, url: str, model: str, timeout_s: float) -> dict:
+async def warmup(
+    *, url: str, model: str, timeout_s: float, allow_empty_complete: bool = False
+) -> dict:
     request = build_warmup_request(
         model=model,
         first_frame=create_reference_frame(),
@@ -96,7 +113,11 @@ async def warmup(*, url: str, model: str, timeout_s: float) -> dict:
         ping_timeout=20,
     ) as websocket:
         await websocket.send(msgspec.msgpack.encode(request))
-        return await wait_for_first_frame(websocket, timeout_s=timeout_s)
+        return await wait_for_first_frame(
+            websocket,
+            timeout_s=timeout_s,
+            allow_empty_complete=allow_empty_complete,
+        )
 
 
 def parse_args() -> argparse.Namespace:
@@ -108,13 +129,29 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model", required=True)
     parser.add_argument("--timeout-s", type=float, default=120.0)
     parser.add_argument("--ready-file", type=Path, required=True)
+    parser.add_argument(
+        "--allow-empty-complete",
+        action="store_true",
+        help=(
+            "Treat a normal generation-complete close as successful warmup. "
+            "Use this for async denoiser-only workers that hand latents to a "
+            "remote VAE and therefore do not send video frames themselves."
+        ),
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
     started_at = time.monotonic()
-    result = asyncio.run(warmup(url=args.url, model=args.model, timeout_s=args.timeout_s))
+    result = asyncio.run(
+        warmup(
+            url=args.url,
+            model=args.model,
+            timeout_s=args.timeout_s,
+            allow_empty_complete=args.allow_empty_complete,
+        )
+    )
     elapsed_s = time.monotonic() - started_at
     args.ready_file.parent.mkdir(parents=True, exist_ok=True)
     temporary = args.ready_file.with_suffix(".tmp")

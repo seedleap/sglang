@@ -17,6 +17,11 @@ function configuredNumber(name, fallback) {
   return Number.isFinite(value) ? value : fallback;
 }
 
+function configuredModelNumber(key, name, fallback) {
+  const value = Number(DUAL_MODEL_CONFIG[key]?.[name]);
+  return Number.isFinite(value) ? value : fallback;
+}
+
 function configuredGenerationModes() {
   const requestedModes = Array.isArray(UI_CONFIG.generationModes)
     ? UI_CONFIG.generationModes
@@ -38,6 +43,9 @@ const SMOOTH_PREVIEW_OUTPUT_QUALITY = 70;
 const SR_PREVIEW_OUTPUT_QUALITY = 70;
 const HEAVY_PREVIEW_OUTPUT_QUALITY = 60;
 const DEFAULT_TARGET_FPS = configuredNumber("targetFps", 24);
+const DEFAULT_LINGBOT2_TARGET_FPS = configuredModelNumber("lingbot2", "targetFps", 16);
+const DEFAULT_LINGBOT2_SINK_SIZE = configuredModelNumber("lingbot2", "sinkSize", 9);
+const DEFAULT_LINGBOT2_WINDOW_FRAMES = configuredModelNumber("lingbot2", "windowFrames", 18);
 const DEFAULT_PREVIEW_MAX_WIDTH = configuredNumber("previewMaxWidth", 832);
 const MAX_AUTO_PREVIEW_WIDTH = configuredNumber("maxAutoPreviewWidth", 1280);
 const DEFAULT_FRAME_INTERPOLATION_EXP = 1;
@@ -71,6 +79,8 @@ const RECENT_DROP_DISPLAY_MS = 1800;
 const CONTROL_TRANSITION_FLUSH_DELAY_MS = 50;
 const CONTROL_HELD_STATE_HEARTBEAT_MS = 100;
 const SESSION_HEARTBEAT_MS = 15000;
+const SESSION_MAX_LIFETIME_MS = 45_000;
+const EXPERIENCE_BUSY_MESSAGE = "当前正有人体验，请等待45s";
 const BROWSER_USER_ID_STORAGE_KEY = "sglang-realtime-user-id";
 const MIN_RENDER_TIMER_FPS = 30;
 const MAX_RENDER_TIMER_FPS = 60;
@@ -119,18 +129,24 @@ const RECORDING_STAGE_HEIGHT =
 const RECORDING_STAGE_PADDING = 18;
 
 function applyRuntimeUiConfig() {
-  $("fps").value = String(DEFAULT_TARGET_FPS);
-  $("guidance").value = String(
-    configuredNumber("guidanceScale", Number($("guidance").value)),
-  );
-  $("sinkSize").value = String(
-    configuredNumber("sinkSize", Number($("sinkSize").value)),
-  );
-  $("windowFrames").value = String(
-    configuredNumber("windowFrames", Number($("windowFrames").value)),
-  );
-  if (UI_CONFIG.modelLabel) {
-    $("modelSectionTitle").textContent = String(UI_CONFIG.modelLabel);
+  for (const key of ["minwm", "lingbot2"]) {
+    const isLingBot2 = key === "lingbot2";
+    modelControl(key, "fps").value = String(
+      isLingBot2 ? DEFAULT_LINGBOT2_TARGET_FPS : DEFAULT_TARGET_FPS,
+    );
+    modelControl(key, "guidance").value = String(
+      configuredNumber("guidanceScale", Number(modelControl(key, "guidance").value)),
+    );
+    modelControl(key, "sinkSize").value = String(
+      isLingBot2
+        ? DEFAULT_LINGBOT2_SINK_SIZE
+        : configuredNumber("sinkSize", Number(modelControl(key, "sinkSize").value)),
+    );
+    modelControl(key, "windowFrames").value = String(
+      isLingBot2
+        ? DEFAULT_LINGBOT2_WINDOW_FRAMES
+        : configuredNumber("windowFrames", Number(modelControl(key, "windowFrames").value)),
+    );
   }
   if (UI_CONFIG.titleSuffix) {
     const suffix = String(UI_CONFIG.titleSuffix);
@@ -143,6 +159,15 @@ function applyRuntimeUiConfig() {
     });
   }
   configureGenerationModeSelect();
+}
+
+function modelControlId(key, id) {
+  if (key !== "lingbot2") return id;
+  return `lingbot2${id[0].toUpperCase()}${id.slice(1)}`;
+}
+
+function modelControl(key, id) {
+  return $(modelControlId(key, id));
 }
 
 function configureGenerationModeSelect() {
@@ -172,7 +197,7 @@ function updateT2VFrameHint() {
     ? Math.max(0, frames) / fps
     : 0;
   $("t2vFrameHint").textContent = (
-    `MinWM requires 1 + N × ${T2V_FRAME_STEP}; `
+    `Zing requires 1 + N × ${T2V_FRAME_STEP}; `
     + `${frames || 0} frames ≈ ${duration.toFixed(2)}s at ${fps || 0}fps.`
   );
 }
@@ -214,7 +239,7 @@ function readT2VNumFrames() {
     || (numFrames - 1) % T2V_FRAME_STEP !== 0
   ) {
     throw new Error(
-      `MinWM T2V Frames must equal 1 + N × ${T2V_FRAME_STEP}`,
+      `Zing T2V Frames must equal 1 + N × ${T2V_FRAME_STEP}`,
     );
   }
   return numFrames;
@@ -361,6 +386,7 @@ const examplePresets = [
 const presets = [
   ...reactorPresets,
   ...examplePresets,
+  ...(globalThis.LINGBOT_TESTSET_20_20260810 || []),
 ];
 
 let ws = null;
@@ -368,6 +394,7 @@ let selectedPreset = null;
 let selectedReferenceBytes = null;
 let selectedReferenceUrl = "";
 let selectedReferenceLabel = "";
+let selectedReferencePreviewReady = false;
 let lastGenerationMode = null;
 let savedI2VNumFrames = "9";
 let savedT2VNumFrames = String(DEFAULT_T2V_NUM_FRAMES);
@@ -449,7 +476,7 @@ let activeWorkspaceView = "preview";
 let traceRenderFrame = 0;
 
 const stage = document.querySelector(".stage");
-const previewFrame = document.querySelector(".model-player-grid");
+const previewFrame = document.querySelector(".stage");
 const fullscreenController = window.SGLangFullscreen?.createFullscreenController?.({
   documentRef: document,
   target: stage,
@@ -496,6 +523,9 @@ const lingbot2Session = new RealtimeModelSession({
     if (state === "error") {
       addHistory(`LingBot2 error · ${details.message || details.reason || "unknown"}`);
     }
+    if (state === "closed" && isSessionLifetimeReason(details.reason)) {
+      expireSessionLifetime({ closeSessions: true });
+    }
   },
   onStats: (stats) => {
     const root = document.querySelector('[data-model-key="lingbot2"]');
@@ -506,6 +536,10 @@ const lingbot2Session = new RealtimeModelSession({
     markModelEventApplied("lingbot2", stats.lastAppliedEventId);
   },
   onError: (error) => {
+    if (isExperienceBusyError(error)) {
+      handleExperienceBusy();
+      return;
+    }
     addHistory(`LingBot2 session failed · ${error.message || "unknown"}`);
   },
 });
@@ -536,17 +570,20 @@ const dualModelController = new DualModelController({
         || DEFAULT_LINGBOT2_MODEL
       ),
       transformInit: (init) => {
+        const modelParams = readModelRequestParams("lingbot2", {
+          generationMode: init.generation_mode,
+          firstFrame: init.first_frame,
+        });
         const interactiveInit = {
           ...init,
+          ...modelParams,
           realtime_interactive_event_grace_ms: 1800,
         };
-        const is720p = init.size === "1280x704" || init.size === "1280x720";
+        const is720p = interactiveInit.size === "1280x704" || interactiveInit.size === "1280x720";
         if (!is720p) return interactiveInit;
         return {
           ...interactiveInit,
           size: "1280x720",
-          realtime_causal_sink_size: 3,
-          realtime_causal_kv_cache_num_frames: 12,
         };
       },
       enabled: (init) => init.generation_mode !== "t2v",
@@ -555,6 +592,53 @@ const dualModelController = new DualModelController({
     },
   },
 });
+let sessionLifetimeExpired = false;
+const sessionLifetimeGuard = new SessionLifetimeGuard({
+  durationMs: SESSION_MAX_LIFETIME_MS,
+  onExpire: () => expireSessionLifetime({ closeSessions: true }),
+});
+
+function isSessionLifetimeReason(reason) {
+  return String(reason || "").toLowerCase().includes("maximum session lifetime reached");
+}
+
+function resetSessionLifetimeUi() {
+  sessionLifetimeGuard.cancel();
+  sessionLifetimeExpired = false;
+  $("sessionNotice").hidden = true;
+}
+
+function showSessionNotice(message) {
+  $("sessionNotice").textContent = message;
+  $("sessionNotice").hidden = false;
+}
+
+function isExperienceBusyError(error) {
+  const reason = String(error?.reason || "");
+  const message = String(error?.message || error || "");
+  return reason === "USER_SESSION_LIMIT" || message.includes("USER_SESSION_LIMIT");
+}
+
+function handleExperienceBusy() {
+  sessionLifetimeGuard.cancel();
+  dualModelController.close("showcase session is occupied");
+  $("connectBtn").disabled = false;
+  setStatus("Busy", "error");
+  setPreviewState("idle");
+  showSessionNotice(EXPERIENCE_BUSY_MESSAGE);
+  addHistory(EXPERIENCE_BUSY_MESSAGE);
+}
+
+function expireSessionLifetime({ closeSessions = false } = {}) {
+  if (sessionLifetimeExpired) return;
+  sessionLifetimeExpired = true;
+  sessionLifetimeGuard.cancel();
+  if (closeSessions) dualModelController.close("maximum session lifetime reached");
+  showSessionNotice("连接已断开，请重新连接");
+  $("connectBtn").disabled = false;
+  setStatus("Disconnected", "error");
+  addHistory("连接已断开，请重新连接");
+}
 
 function setStatus(text, kind = "") {
   $("statusText").textContent = text;
@@ -625,6 +709,10 @@ function traceWebSocketUrl(baseUrl) {
 function backendWebSocketUrl(key, traceId) {
   const configuredUrl = DUAL_MODEL_CONFIG[key]?.wsUrl;
   const baseUrl = configuredUrl || $("serverUrl").value;
+  const configuredUserId = UI_CONFIG.singleExperienceUserIds?.[key];
+  const backendUserId = UI_CONFIG.singleExperience && configuredUserId
+    ? String(configuredUserId)
+    : `${browserUserId}:${key}`;
   try {
     const url = new URL(baseUrl, window.location.href);
     if (!configuredUrl) {
@@ -632,7 +720,7 @@ function backendWebSocketUrl(key, traceId) {
       url.search = "";
     }
     if (traceId) url.searchParams.set("trace_id", traceId);
-    url.searchParams.set("user_id", browserUserId);
+    url.searchParams.set("user_id", backendUserId);
     return url.toString();
   } catch {
     return baseUrl;
@@ -1110,7 +1198,7 @@ function renderModelTelemetry(key, stats = {}) {
   if (droppedFrames) bufferParts.push(`drop ${droppedFrames}`);
   $(`${prefix}ChunkText`).textContent = stats.lastChunk == null ? "-" : `#${stats.lastChunk}`;
   $(`${prefix}RateText`).textContent = totalFrames > 0
-    ? `${renderFps} render · ${sourceFps.toFixed(1)} source`
+    ? `${sourceFps.toFixed(1)} source · ${renderFps} render`
     : "-";
   $(`${prefix}BufferText`).textContent = bufferParts.join(" · ");
   $(`${prefix}FramesText`).textContent = `${totalFrames} · ${(Number(stats.bytes || 0) / 1048576).toFixed(1)} MB`;
@@ -1122,35 +1210,37 @@ function renderModelTelemetry(key, stats = {}) {
     : "-";
 }
 
-function requestedInputFps() {
-  return Number($("fps").value || DEFAULT_TARGET_FPS);
+function requestedInputFps(key = "minwm") {
+  return Number(modelControl(key, "fps").value || DEFAULT_TARGET_FPS);
 }
 
-function frameInterpolationMultiplier() {
-  return $("frameInterpolation").checked ? 2 ** DEFAULT_FRAME_INTERPOLATION_EXP : 1;
+function frameInterpolationMultiplier(key = "minwm") {
+  return modelControl(key, "frameInterpolation").checked
+    ? 2 ** DEFAULT_FRAME_INTERPOLATION_EXP
+    : 1;
 }
 
-function previewPlaybackTargetFps() {
-  return requestedInputFps() * frameInterpolationMultiplier();
+function previewPlaybackTargetFps(key = "minwm") {
+  return requestedInputFps(key) * frameInterpolationMultiplier(key);
 }
 
 function syncPlaybackTargetFps() {
-  const targetFps = previewPlaybackTargetFps();
-  playbackController.setTargetFps(targetFps);
-  lingbot2Session.configure({ targetFps });
+  playbackController.setTargetFps(previewPlaybackTargetFps("minwm"));
+  lingbot2Session.configure({ targetFps: previewPlaybackTargetFps("lingbot2") });
   updateStats();
 }
 
-function selectedPlaybackMode() {
-  const value = $("playbackMode")?.value;
+function selectedPlaybackMode(key = "minwm") {
+  const value = modelControl(key, "playbackMode")?.value;
   if (value === "timeline" || value === "adaptive" || value === "smooth_timeline") return value;
   return "live";
 }
 
 function syncPlaybackMode({ addToHistory = true } = {}) {
-  const mode = selectedPlaybackMode();
+  const mode = selectedPlaybackMode("minwm");
+  const lingbot2Mode = selectedPlaybackMode("lingbot2");
   playbackController.setMode(mode);
-  lingbot2Session.configure({ mode });
+  lingbot2Session.configure({ mode: lingbot2Mode });
   if (addToHistory) {
     const historyText =
       mode === "timeline"
@@ -1160,7 +1250,7 @@ function syncPlaybackMode({ addToHistory = true } = {}) {
         : mode === "adaptive"
         ? "playback · adaptive (buffered, fast input)"
         : "playback · low latency (may skip old frames)";
-    addHistory(historyText);
+    addHistory(`${historyText} · LingBot2 ${lingbot2Mode}`);
   }
   trimDecodeQueue();
   updateStats();
@@ -1775,7 +1865,7 @@ function drawRecordingComparisonPreview(minwmSource, lingbot2Source) {
   const width = (RECORDING_STAGE_WIDTH - inset * 2 - gap) / 2;
   const height = RECORDING_STAGE_PREVIEW_HEIGHT - titleHeight;
   const players = [
-    { label: "MinWM", source: minwmSource, x: inset },
+    { label: "Zing", source: minwmSource, x: inset },
     { label: "LingBot2", source: lingbot2Source, x: inset + width + gap },
   ];
   for (const player of players) {
@@ -1913,14 +2003,14 @@ function drawRecordingTelemetry() {
   fillRecordingRect(0, y, RECORDING_STAGE_WIDTH, RECORDING_STAGE_TELEMETRY_HEIGHT, "#11140f");
   const rows = [
     [
-      ["MinWM chunk", recordingElementText("minwmChunkText", "-")],
-      ["MinWM rate", recordingElementText("minwmRateText", "-")],
-      ["MinWM frames", recordingElementText("minwmFramesText", "-")],
+      ["Zing chunk", recordingElementText("minwmChunkText", "-")],
+      ["Zing rate", recordingElementText("minwmRateText", "-")],
+      ["Zing frames", recordingElementText("minwmFramesText", "-")],
     ],
     [
-      ["MinWM buffer", recordingElementText("minwmBufferText", "-")],
-      ["MinWM decode", recordingElementText("minwmDecodeText", "-")],
-      ["MinWM lag", recordingElementText("minwmDisplayLagText", "-")],
+      ["Zing buffer", recordingElementText("minwmBufferText", "-")],
+      ["Zing decode", recordingElementText("minwmDecodeText", "-")],
+      ["Zing lag", recordingElementText("minwmDisplayLagText", "-")],
     ],
   ];
   const cellWidth = RECORDING_STAGE_WIDTH / 3;
@@ -3245,6 +3335,62 @@ async function readFirstFrame() {
   return undefined;
 }
 
+function drawPlaceholderImage(targetCanvas, image, sizeText) {
+  const requestedSize = parseSizeValue(sizeText);
+  const width = requestedSize?.width || image.width || image.naturalWidth || 1280;
+  const height = requestedSize?.height || image.height || image.naturalHeight || 720;
+  if (targetCanvas.width !== width || targetCanvas.height !== height) {
+    targetCanvas.width = width;
+    targetCanvas.height = height;
+  }
+  const targetContext = targetCanvas.getContext("2d", { alpha: false });
+  const sourceWidth = image.width || image.naturalWidth || width;
+  const sourceHeight = image.height || image.naturalHeight || height;
+  const scale = Math.min(width / sourceWidth, height / sourceHeight);
+  const drawWidth = sourceWidth * scale;
+  const drawHeight = sourceHeight * scale;
+  targetContext.fillStyle = "#11140f";
+  targetContext.fillRect(0, 0, width, height);
+  targetContext.imageSmoothingEnabled = true;
+  targetContext.imageSmoothingQuality = "high";
+  targetContext.drawImage(
+    image,
+    (width - drawWidth) / 2,
+    (height - drawHeight) / 2,
+    drawWidth,
+    drawHeight,
+  );
+}
+
+function drawVisibleReferencePlaceholders() {
+  if (!selectedReferencePreviewReady) return;
+  const referencePreview = $("referencePreview");
+  drawPlaceholderImage(canvas, referencePreview, modelControl("minwm", "size").value);
+  drawPlaceholderImage(
+    lingbot2Canvas,
+    referencePreview,
+    modelControl("lingbot2", "size").value,
+  );
+}
+
+async function drawInitialReferencePlaceholders(firstFrame) {
+  if (!firstFrame?.byteLength || typeof createImageBitmap !== "function") return;
+  let image;
+  try {
+    image = await createImageBitmap(new Blob([firstFrame]));
+    drawPlaceholderImage(canvas, image, modelControl("minwm", "size").value);
+    drawPlaceholderImage(
+      lingbot2Canvas,
+      image,
+      modelControl("lingbot2", "size").value,
+    );
+  } catch (error) {
+    addHistory(`reference placeholder unavailable · ${error?.message || error}`);
+  } finally {
+    image?.close?.();
+  }
+}
+
 async function fetchReferenceBytes(url) {
   try {
     const response = await fetch(url, { cache: "force-cache", mode: "cors" });
@@ -3266,6 +3412,7 @@ async function fetchReferenceBytes(url) {
 function drawReferencePreviewFromImageSource(src, label) {
   const preview = $("referencePreview");
   const previewCtx = preview.getContext("2d", { alpha: false });
+  selectedReferencePreviewReady = false;
   previewCtx.fillStyle = "#e5e7df";
   previewCtx.fillRect(0, 0, preview.width, preview.height);
   $("referenceName").textContent = label;
@@ -3275,9 +3422,11 @@ function drawReferencePreviewFromImageSource(src, label) {
     const w = img.width * scale, h = img.height * scale;
     previewCtx.fillRect(0, 0, preview.width, preview.height);
     previewCtx.drawImage(img, (preview.width - w) / 2, (preview.height - h) / 2, w, h);
+    selectedReferencePreviewReady = true;
     if (src.startsWith("blob:")) URL.revokeObjectURL(src);
   };
   img.onerror = () => {
+    selectedReferencePreviewReady = false;
     previewCtx.fillStyle = "#11140f";
     previewCtx.fillRect(0, 0, preview.width, preview.height);
     previewCtx.fillStyle = "#8c9288";
@@ -3351,6 +3500,7 @@ function abortCurrentSession(reason = "session closed by client", {
 }
 
 function closeSession(reason = "session closed by client", clearFrames = true) {
+  sessionLifetimeGuard.cancel();
   clearQueueOnClose = clearFrames;
   dualModelController.close(reason);
 }
@@ -3373,6 +3523,7 @@ function waitForSocketClose(socket, timeoutMs = RECONNECT_CLOSE_TIMEOUT_MS) {
 }
 
 async function connect() {
+  resetSessionLifetimeUi();
   $("connectBtn").disabled = true;
   setStatus("Preparing");
   setPreviewState("waiting");
@@ -3403,6 +3554,7 @@ async function connect() {
       if (!$("firstFrame").files[0] && !selectedReferenceBytes && !selectedReferenceUrl) {
         await setPresetReference(presets[0]);
       }
+      drawVisibleReferencePlaceholders();
       firstFrame = await readFirstFrame();
       if (!firstFrame) {
         setStatus("Pick a reference", "error");
@@ -3414,30 +3566,16 @@ async function connect() {
     } else {
       numFrames = continuousT2V ? undefined : readT2VNumFrames();
     }
-    const previewTransportParams = readPreviewTransportParams();
-    const frameInterpolationParams = readFrameInterpolationParams();
-    const superResolutionParams = readSuperResolutionParams();
+    await drawInitialReferencePlaceholders(firstFrame);
     const init = compact({
       type: "init",
-      generation_mode: generationMode,
       model: $("model").value,
-      prompt: $("prompt").value,
-      size: $("size").value,
-      fps: Number($("fps").value || DEFAULT_TARGET_FPS),
-      num_frames: continuousT2V ? undefined : numFrames,
-      seed: Number($("seed").value),
-      num_inference_steps: Number($("steps").value),
-      guidance_scale: Number($("guidance").value),
-      realtime_causal_sink_size: readOptionalInteger("sinkSize"),
-      realtime_causal_kv_cache_num_frames: readOptionalInteger("windowFrames"),
-      max_chunks: generationMode === "t2v" || $("continuous").checked
-        ? undefined
-        : 1,
       trace_id: currentTrace.traceId,
-      first_frame: firstFrame,
-      ...previewTransportParams,
-      ...frameInterpolationParams,
-      ...superResolutionParams,
+      ...readModelRequestParams("minwm", {
+        generationMode,
+        firstFrame,
+        numFrames: continuousT2V ? undefined : numFrames,
+      }),
     });
     const referenceImage = await createReferenceImageMeta(firstFrame);
     beginSessionArtifact(init, referenceImage);
@@ -3456,8 +3594,10 @@ async function connect() {
           .join(" · ")}`,
       );
     }
+    sessionLifetimeGuard.start();
     setStatus("Live", "live");
   } catch (error) {
+    sessionLifetimeGuard.cancel();
     $("connectBtn").disabled = false;
     setStatus("Init failed", "error");
     if (!renderedPreviewFrames) setPreviewState("idle");
@@ -3516,7 +3656,7 @@ function openPrimarySession(init, url) {
       }
       clearQueueOnClose = false;
       const reason = event.reason ? ` · ${event.reason}` : "";
-      const closeText = `MinWM socket closed code=${event.code}${reason}`;
+      const closeText = `Zing socket closed code=${event.code}${reason}`;
       const normalClose = event.code === 1000 || event.code === 1001;
       if (socketServerError) {
         setStatus("Server closed", "error");
@@ -3535,9 +3675,12 @@ function openPrimarySession(init, url) {
         normal_close: normalClose,
         expected_close: socketCloseExpected,
       });
+      if (isSessionLifetimeReason(event.reason)) {
+        expireSessionLifetime({ closeSessions: true });
+      }
       void traceHttpClient?.flushClientEvents().catch(() => {});
       if (!renderedPreviewFrames) setPreviewState("idle");
-      if (!opened) reject(new Error(`MinWM closed before startup (${event.code})`));
+      if (!opened) reject(new Error(`Zing closed before startup (${event.code})`));
       socketCloseExpected = false;
     };
     socket.onerror = () => {
@@ -3548,7 +3691,7 @@ function openPrimarySession(init, url) {
         socketHadError = true;
         $("connectBtn").disabled = false;
       }
-      if (!opened) reject(new Error("MinWM websocket transport error"));
+      if (!opened) reject(new Error("Zing websocket transport error"));
     };
     socket.onmessage = (event) => {
       if (epoch !== streamEpoch) return;
@@ -3588,6 +3731,10 @@ function receive(data, epoch) {
         payload_bytes: data.byteLength || data.size || 0,
       });
       socketServerError = message.content || "unknown";
+      if (isExperienceBusyError(message)) {
+        handleExperienceBusy();
+        return;
+      }
       setStatus(socketServerError, "error");
       addHistory(`server error: ${socketServerError}`);
       recordTrajectoryEvent("server_error", { content: socketServerError });
@@ -3788,7 +3935,7 @@ function sendEvent(kind, payload, historyText = null) {
 }
 
 function modelLabel(key) {
-  return key === "lingbot2" ? "LingBot2" : "MinWM";
+  return key === "lingbot2" ? "LingBot2" : "Zing";
 }
 
 function formatModelDelivery(sent = {}) {
@@ -3853,7 +4000,9 @@ async function applyPreset(preset, options = {}) {
     ?? Boolean(ws && ws.readyState === WebSocket.OPEN);
   selectedPreset = preset;
   $("prompt").value = preset.prompt;
-  $("fps").value = UI_CONFIG.targetFps == null ? preset.fps : DEFAULT_TARGET_FPS;
+  modelControl("minwm", "fps").value = UI_CONFIG.targetFps == null
+    ? preset.fps
+    : DEFAULT_TARGET_FPS;
   updateOutputSizeText();
   syncPlaybackTargetFps();
   await setPresetReference(preset);
@@ -3991,40 +4140,52 @@ function readOptionalInteger(id) {
   return Number(value);
 }
 
-function readPreviewTransportParams() {
-  const outputFormat = $("transportFormat").value;
-  const outputQuality = Number($("transportQuality").value || DEFAULT_PREVIEW_OUTPUT_QUALITY);
+function readPreviewTransportParams(key = "minwm") {
+  const outputFormat = modelControl(key, "transportFormat").value;
+  const outputQuality = Number(
+    modelControl(key, "transportQuality").value || DEFAULT_PREVIEW_OUTPUT_QUALITY,
+  );
   if (!outputFormat) return {};
   const params = {
     realtime_output_format: outputFormat,
   };
-  const baseSize = parseSizeValue($("size").value);
+  const baseSize = parseSizeValue(modelControl(key, "size").value);
   params.realtime_preview_max_width = previewMaxWidthForSize(baseSize);
   if (outputFormat === "webp" || outputFormat === "jpeg") {
     params.output_compression = outputQuality;
-    if ($("superResolution").checked && $("frameInterpolation").checked) {
+    if (
+      modelControl(key, "superResolution").checked
+      && modelControl(key, "frameInterpolation").checked
+    ) {
       if (baseSize?.width) params.realtime_preview_max_width = baseSize.width;
     }
   }
   return params;
 }
 
-function tunePreviewQualityForPostprocess() {
-  if ($("transportFormat").value !== "webp") return;
-  const currentQuality = Number($("transportQuality").value || DEFAULT_PREVIEW_OUTPUT_QUALITY);
+function tunePreviewQualityForPostprocess(key = "minwm") {
+  if (modelControl(key, "transportFormat").value !== "webp") return;
+  const currentQuality = Number(
+    modelControl(key, "transportQuality").value || DEFAULT_PREVIEW_OUTPUT_QUALITY,
+  );
   let qualityCap = MAX_WEBP_PREVIEW_OUTPUT_QUALITY;
-  if ($("frameInterpolation").checked && $("superResolution").checked) {
+  if (
+    modelControl(key, "frameInterpolation").checked
+    && modelControl(key, "superResolution").checked
+  ) {
     qualityCap = HEAVY_PREVIEW_OUTPUT_QUALITY;
-  } else if ($("frameInterpolation").checked) {
+  } else if (modelControl(key, "frameInterpolation").checked) {
     qualityCap = SMOOTH_PREVIEW_OUTPUT_QUALITY;
-  } else if ($("superResolution").checked) {
+  } else if (modelControl(key, "superResolution").checked) {
     qualityCap = SR_PREVIEW_OUTPUT_QUALITY;
   }
-  if (currentQuality > qualityCap) $("transportQuality").value = String(qualityCap);
+  if (currentQuality > qualityCap) {
+    modelControl(key, "transportQuality").value = String(qualityCap);
+  }
 }
 
-function readFrameInterpolationParams() {
-  if (!$("frameInterpolation").checked) return {};
+function readFrameInterpolationParams(key = "minwm") {
+  if (!modelControl(key, "frameInterpolation").checked) return {};
   return {
     enable_frame_interpolation: true,
     frame_interpolation_exp: DEFAULT_FRAME_INTERPOLATION_EXP,
@@ -4032,19 +4193,41 @@ function readFrameInterpolationParams() {
   };
 }
 
-function readUpscalingScale() {
-  return Number($("upscalingScale").value || DEFAULT_UPSCALING_SCALE);
+function readUpscalingScale(key = "minwm") {
+  return Number(modelControl(key, "upscalingScale").value || DEFAULT_UPSCALING_SCALE);
 }
 
-function readSuperResolutionParams() {
-  if (!$("superResolution").checked) return {};
+function readSuperResolutionParams(key = "minwm") {
+  if (!modelControl(key, "superResolution").checked) return {};
   const params = {
     enable_upscaling: true,
-    upscaling_scale: readUpscalingScale(),
+    upscaling_scale: readUpscalingScale(key),
   };
-  const modelPath = $("upscalingModel").value;
+  const modelPath = modelControl(key, "upscalingModel").value;
   if (modelPath) params.upscaling_model_path = modelPath;
   return params;
+}
+
+function readModelRequestParams(key, { generationMode, firstFrame, numFrames } = {}) {
+  const continuous = modelControl(key, "continuous").checked;
+  const requestedFrames = numFrames ?? Number(modelControl(key, "numFrames").value);
+  return compact({
+    generation_mode: generationMode,
+    prompt: $("prompt").value,
+    size: modelControl(key, "size").value,
+    fps: requestedInputFps(key),
+    num_frames: generationMode === "t2v" && continuous ? undefined : requestedFrames,
+    seed: Number(modelControl(key, "seed").value),
+    num_inference_steps: Number(modelControl(key, "steps").value),
+    guidance_scale: Number(modelControl(key, "guidance").value),
+    realtime_causal_sink_size: readOptionalInteger(modelControlId(key, "sinkSize")),
+    realtime_causal_kv_cache_num_frames: readOptionalInteger(modelControlId(key, "windowFrames")),
+    max_chunks: generationMode === "t2v" || continuous ? undefined : 1,
+    first_frame: firstFrame,
+    ...readPreviewTransportParams(key),
+    ...readFrameInterpolationParams(key),
+    ...readSuperResolutionParams(key),
+  });
 }
 
 function parseSizeValue(sizeText) {
@@ -4101,11 +4284,11 @@ function updateOutputSizeFromHeader(header) {
   }
 }
 
-function updateSuperResolutionControls() {
-  const disabled = !$("superResolution").checked;
-  $("upscalingScale").disabled = disabled;
-  $("upscalingModel").disabled = disabled;
-  updateOutputSizeText();
+function updateSuperResolutionControls(key = "minwm") {
+  const disabled = !modelControl(key, "superResolution").checked;
+  modelControl(key, "upscalingScale").disabled = disabled;
+  modelControl(key, "upscalingModel").disabled = disabled;
+  if (key === "minwm") updateOutputSizeText();
 }
 
 function setPreviewScale(value) {
@@ -4197,21 +4380,28 @@ async function applyQueryParams() {
     $("generationMode").value = generationMode;
     updateGenerationModeUi();
   }
-  $("transportFormat").value = params.get("transport") || DEFAULT_PREVIEW_OUTPUT_FORMAT;
-  $("transportQuality").value = params.get("quality") || String(DEFAULT_PREVIEW_OUTPUT_QUALITY);
   const playbackParam = params.get("playback");
-  if (playbackParam === "live" || playbackParam === "timeline" || playbackParam === "adaptive" || playbackParam === "smooth_timeline") {
-    $("playbackMode").value = playbackParam;
-  }
   const srParam = params.get("sr");
-  $("superResolution").checked = srParam === "1" || srParam === "true";
   const smoothParam = params.get("smooth");
-  $("frameInterpolation").checked = smoothParam === "1" || smoothParam === "true";
-  $("upscalingScale").value = params.get("sr_scale") || String(DEFAULT_UPSCALING_SCALE);
-  $("upscalingModel").value = params.get("sr_model") || DEFAULT_UPSCALING_MODEL;
-  tunePreviewQualityForPostprocess();
+  for (const key of ["minwm", "lingbot2"]) {
+    modelControl(key, "transportFormat").value = params.get("transport") || DEFAULT_PREVIEW_OUTPUT_FORMAT;
+    modelControl(key, "transportQuality").value = params.get("quality") || String(DEFAULT_PREVIEW_OUTPUT_QUALITY);
+    if (
+      playbackParam === "live"
+      || playbackParam === "timeline"
+      || playbackParam === "adaptive"
+      || playbackParam === "smooth_timeline"
+    ) {
+      modelControl(key, "playbackMode").value = playbackParam;
+    }
+    modelControl(key, "superResolution").checked = srParam === "1" || srParam === "true";
+    modelControl(key, "frameInterpolation").checked = smoothParam === "1" || smoothParam === "true";
+    modelControl(key, "upscalingScale").value = params.get("sr_scale") || String(DEFAULT_UPSCALING_SCALE);
+    modelControl(key, "upscalingModel").value = params.get("sr_model") || DEFAULT_UPSCALING_MODEL;
+    tunePreviewQualityForPostprocess(key);
+    updateSuperResolutionControls(key);
+  }
   setPreviewScale(params.get("preview_scale") || params.get("zoom"));
-  updateSuperResolutionControls();
   syncPlaybackTargetFps();
   syncPlaybackMode({ addToHistory: false });
 
@@ -4343,7 +4533,8 @@ applyRuntimeUiConfig();
 renderPresets();
 drawIdle();
 setPreviewScale(DEFAULT_PREVIEW_SCALE);
-updateSuperResolutionControls();
+updateSuperResolutionControls("minwm");
+updateSuperResolutionControls("lingbot2");
 applyQueryParams()
   .then(async (query) => {
     if (!query.preset) {
@@ -4380,19 +4571,27 @@ $("firstFrame").onchange = () => drawReferencePreview($("firstFrame").files[0]);
 $("generationMode").addEventListener("change", updateGenerationModeUi);
 $("continuous").addEventListener("change", updateGenerationModeUi);
 $("numFrames").addEventListener("input", updateT2VFrameHint);
-$("size").addEventListener("input", () => updateOutputSizeText());
-$("fps").addEventListener("input", () => {
-  syncPlaybackTargetFps();
-  updateT2VFrameHint();
-});
-$("playbackMode").addEventListener("change", () => syncPlaybackMode());
-$("superResolution").addEventListener("change", updateSuperResolutionControls);
-$("upscalingScale").addEventListener("change", () => updateOutputSizeText());
-$("frameInterpolation").addEventListener("change", () => {
-  tunePreviewQualityForPostprocess();
-  syncPlaybackTargetFps();
-});
-$("superResolution").addEventListener("change", tunePreviewQualityForPostprocess);
+for (const key of ["minwm", "lingbot2"]) {
+  modelControl(key, "size").addEventListener("input", () => {
+    if (key === "minwm") updateOutputSizeText();
+  });
+  modelControl(key, "fps").addEventListener("input", () => {
+    syncPlaybackTargetFps();
+    if (key === "minwm") updateT2VFrameHint();
+  });
+  modelControl(key, "playbackMode").addEventListener("change", () => syncPlaybackMode());
+  modelControl(key, "superResolution").addEventListener("change", () => {
+    updateSuperResolutionControls(key);
+    tunePreviewQualityForPostprocess(key);
+  });
+  modelControl(key, "upscalingScale").addEventListener("change", () => {
+    if (key === "minwm") updateOutputSizeText();
+  });
+  modelControl(key, "frameInterpolation").addEventListener("change", () => {
+    tunePreviewQualityForPostprocess(key);
+    syncPlaybackTargetFps();
+  });
+}
 $("previewScale").addEventListener("input", () => setPreviewScale($("previewScale").value));
 canvas.addEventListener("pointerdown", () => canvas.focus({ preventScroll: true }));
 lingbot2Canvas.addEventListener("pointerdown", () => canvas.focus({ preventScroll: true }));
