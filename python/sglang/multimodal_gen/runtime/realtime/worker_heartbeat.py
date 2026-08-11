@@ -61,6 +61,7 @@ class WorkerHeartbeatReporter:
         model_revision: str,
         vae_fingerprint: str,
         worker_epoch_file: Path | None = None,
+        ready_file: Path | None = None,
     ) -> None:
         endpoint_parts = urlsplit(endpoint)
         if endpoint_parts.scheme not in ("ws", "wss") or not endpoint_parts.netloc:
@@ -79,6 +80,7 @@ class WorkerHeartbeatReporter:
         if worker_epoch is None and worker_epoch_file is None:
             raise ValueError("worker_epoch or worker_epoch_file is required")
         self.worker_epoch_file = worker_epoch_file
+        self.ready_file = ready_file
         self.worker_epoch = (
             resolve_worker_epoch(worker_epoch) if worker_epoch is not None else None
         )
@@ -94,6 +96,12 @@ class WorkerHeartbeatReporter:
         }
 
     async def heartbeat_once(self) -> bool:
+        if self.ready_file is not None:
+            try:
+                if self.ready_file.stat().st_size == 0:
+                    return False
+            except FileNotFoundError:
+                return False
         health = await self.client.get(self.health_url)
         if not health.is_success:
             return False
@@ -159,6 +167,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--worker-id", required=True)
     parser.add_argument("--worker-epoch")
     parser.add_argument("--worker-epoch-file", type=Path)
+    parser.add_argument("--ready-file", type=Path)
     parser.add_argument("--role", choices=("denoiser", "vae"), required=True)
     parser.add_argument("--endpoint", required=True)
     parser.add_argument("--reservation-endpoint", required=True)
@@ -204,6 +213,7 @@ async def _run(args: argparse.Namespace) -> None:
             worker_id=args.worker_id,
             worker_epoch=args.worker_epoch,
             worker_epoch_file=args.worker_epoch_file,
+            ready_file=args.ready_file,
             role=args.role,
             endpoint=args.endpoint,
             reservation_endpoint=args.reservation_endpoint,
