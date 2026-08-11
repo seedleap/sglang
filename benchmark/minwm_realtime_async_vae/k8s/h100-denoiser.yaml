@@ -189,6 +189,7 @@ spec:
               --state-url=http://127.0.0.1:30000/v1/realtime_worker/state
               --worker-id=$(POD_UID)
               --worker-epoch-file=/var/run/minwm-worker/epoch
+              --ready-file=/var/run/minwm-worker/ready
               --role=denoiser
               --endpoint=ws://$(POD_IP):30000/v1/realtime_video/generate
               --reservation-endpoint=http://$(POD_IP):30000/v1/realtime_worker
@@ -246,6 +247,7 @@ spec:
               test -f "${MINWM_MODEL}/_READY"
               test -f "${MINWM_MODEL}/model_index.json"
               test -d "${MINWM_MODEL}/transformer"
+              rm -f /var/run/minwm-worker/ready
               ordinal="${POD_NAME##*-}"
               slot=$((ordinal % DENOISER_STARTUP_PARALLELISM))
               exec 9>"/var/run/minwm-startup-lock/denoiser-${slot}.lock"
@@ -289,6 +291,19 @@ spec:
                 fi
                 sleep 2
               done
+              if ! python3 /opt/sglang/python/sglang/multimodal_gen/runtime/realtime/startup_warmup.py \
+                --model "${MODEL_REVISION}" \
+                --size 1280x704 \
+                --guidance-scale 0 \
+                --sink-size 8 \
+                --kv-cache-num-frames 32 \
+                --timeout-s 300 \
+                --allow-empty-complete \
+                --ready-file /var/run/minwm-worker/ready; then
+                kill -TERM "${child}" 2>/dev/null || true
+                wait "${child}" || true
+                exit 1
+              fi
               flock -u 9
               wait "${child}"
           ports:
@@ -317,7 +332,13 @@ spec:
             timeoutSeconds: 5
             failureThreshold: 270
           readinessProbe:
-            httpGet: {path: /health, port: api}
+            exec:
+              command:
+                - /bin/sh
+                - -ec
+                - >-
+                  test -s /var/run/minwm-worker/ready &&
+                  curl --fail --silent --max-time 2 http://127.0.0.1:30000/health >/dev/null
             periodSeconds: 10
             timeoutSeconds: 5
             failureThreshold: 6
