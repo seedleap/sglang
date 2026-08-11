@@ -102,7 +102,7 @@ assert.match(
 );
 assert.match(html, /model_session\.js\?v=dual-model-v4/);
 assert.match(html, /dual_model_controller\.js\?v=dual-model-v3/);
-assert.match(html, /app\.js\?v=realtime-production-gateway-v28/);
+assert.match(html, /app\.js\?v=realtime-production-gateway-v29/);
 assert.match(html, /fullscreen_controller\.js\?v=dual-fullscreen-v1/);
 assert.match(
   html,

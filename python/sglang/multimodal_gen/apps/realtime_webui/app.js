@@ -593,6 +593,8 @@ const dualModelController = new DualModelController({
   },
 });
 let sessionLifetimeExpired = false;
+let sessionCountdownTimer = 0;
+let sessionCountdownDeadlineMs = 0;
 const sessionLifetimeGuard = new SessionLifetimeGuard({
   durationMs: SESSION_MAX_LIFETIME_MS,
   onExpire: () => expireSessionLifetime({ closeSessions: true }),
@@ -604,8 +606,48 @@ function isSessionLifetimeReason(reason) {
 
 function resetSessionLifetimeUi() {
   sessionLifetimeGuard.cancel();
+  stopSessionCountdown();
   sessionLifetimeExpired = false;
   $("sessionNotice").hidden = true;
+}
+
+function formatSessionCountdown(seconds) {
+  const safeSeconds = Math.max(0, Math.floor(seconds));
+  const minutes = Math.floor(safeSeconds / 60);
+  const remainder = safeSeconds % 60;
+  return `${String(minutes).padStart(2, "0")}:${String(remainder).padStart(2, "0")}`;
+}
+
+function updateSessionCountdown() {
+  const remainingSeconds = Math.max(
+    0,
+    Math.ceil((sessionCountdownDeadlineMs - Date.now()) / 1000),
+  );
+  $("sessionCountdownText").textContent = formatSessionCountdown(remainingSeconds);
+  $("sessionCountdown").classList.toggle("is-ending", remainingSeconds <= 10);
+  if (remainingSeconds === 0 && sessionCountdownTimer) {
+    window.clearInterval(sessionCountdownTimer);
+    sessionCountdownTimer = 0;
+  }
+}
+
+function startSessionCountdown() {
+  stopSessionCountdown();
+  sessionCountdownDeadlineMs = Date.now() + SESSION_MAX_LIFETIME_MS;
+  $("sessionCountdown").hidden = false;
+  updateSessionCountdown();
+  sessionCountdownTimer = window.setInterval(updateSessionCountdown, 1000);
+}
+
+function stopSessionCountdown() {
+  if (sessionCountdownTimer) window.clearInterval(sessionCountdownTimer);
+  sessionCountdownTimer = 0;
+  sessionCountdownDeadlineMs = 0;
+  $("sessionCountdown").hidden = true;
+  $("sessionCountdown").classList.remove("is-ending");
+  $("sessionCountdownText").textContent = formatSessionCountdown(
+    Math.ceil(SESSION_MAX_LIFETIME_MS / 1000),
+  );
 }
 
 function showSessionNotice(message) {
@@ -621,6 +663,7 @@ function isExperienceBusyError(error) {
 
 function handleExperienceBusy() {
   sessionLifetimeGuard.cancel();
+  stopSessionCountdown();
   dualModelController.close("showcase session is occupied");
   $("connectBtn").disabled = false;
   setStatus("Busy", "error");
@@ -633,6 +676,7 @@ function expireSessionLifetime({ closeSessions = false } = {}) {
   if (sessionLifetimeExpired) return;
   sessionLifetimeExpired = true;
   sessionLifetimeGuard.cancel();
+  stopSessionCountdown();
   if (closeSessions) dualModelController.close("maximum session lifetime reached");
   showSessionNotice("连接已断开，请重新连接");
   $("connectBtn").disabled = false;
@@ -3501,6 +3545,7 @@ function abortCurrentSession(reason = "session closed by client", {
 
 function closeSession(reason = "session closed by client", clearFrames = true) {
   sessionLifetimeGuard.cancel();
+  stopSessionCountdown();
   clearQueueOnClose = clearFrames;
   dualModelController.close(reason);
 }
@@ -3595,9 +3640,11 @@ async function connect() {
       );
     }
     sessionLifetimeGuard.start();
+    startSessionCountdown();
     setStatus("Live", "live");
   } catch (error) {
     sessionLifetimeGuard.cancel();
+    stopSessionCountdown();
     $("connectBtn").disabled = false;
     setStatus("Init failed", "error");
     if (!renderedPreviewFrames) setPreviewState("idle");

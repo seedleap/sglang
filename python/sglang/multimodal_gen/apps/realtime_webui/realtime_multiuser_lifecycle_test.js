@@ -60,5 +60,25 @@ assert.match(
   /id="sessionNotice"[^>]*role="alert"/,
   "session expiry should be exposed as an accessible visible notice",
 );
+assert.match(
+  indexHtml,
+  /id="sessionCountdown"[^>]*role="timer"[^>]*hidden/,
+  "the remaining play time should be exposed as a hidden timer until Generate succeeds",
+);
+assert.match(
+  appJs,
+  /sessionLifetimeGuard\.start\(\);\s*startSessionCountdown\(\);/,
+  "the countdown should start only after the dual-model connection succeeds",
+);
+assert.match(
+  appJs,
+  /window\.setInterval\(updateSessionCountdown, 1000\)/,
+  "the countdown should refresh once per second",
+);
+assert.match(
+  appJs,
+  /function closeSession[\s\S]*?sessionLifetimeGuard\.cancel\(\);\s*stopSessionCountdown\(\);/,
+  "closing a session should stop and hide the countdown",
+);
 
 console.log("realtime multi-user lifecycle ok");
