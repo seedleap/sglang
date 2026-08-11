@@ -102,6 +102,38 @@ async def _test_worker_registers_capacity_only_after_local_health_is_ready():
     ]
 
 
+def test_worker_waits_for_startup_warmup_ready_file(tmp_path):
+    async def run():
+        ready_file = tmp_path / "ready"
+        client = _Client()
+        reporter = WorkerHeartbeatReporter(
+            client,
+            coordinator_url="http://coordinator:18081",
+            health_url="http://127.0.0.1:30000/health",
+            state_url="http://127.0.0.1:30000/v1/realtime_worker/state",
+            worker_id="pod-123",
+            worker_epoch="epoch-a",
+            role="denoiser",
+            endpoint="ws://10.0.0.7:30000/v1/realtime_video/generate",
+            reservation_endpoint="http://10.0.0.7:30000/v1/realtime_worker",
+            az="us-east-2a",
+            capacity=4,
+            model_revision="model-sha",
+            vae_fingerprint="taew2_2",
+            ready_file=ready_file,
+        )
+
+        assert await reporter.heartbeat_once() is False
+        assert client.posts == []
+        ready_file.touch()
+        assert await reporter.heartbeat_once() is False
+        assert client.posts == []
+        ready_file.write_text("ready\n")
+        assert await reporter.heartbeat_once() is True
+
+    asyncio.run(run())
+
+
 def test_worker_rejects_public_or_malformed_endpoints():
     with pytest.raises(ValueError, match="WebSocket endpoint"):
         WorkerHeartbeatReporter(
