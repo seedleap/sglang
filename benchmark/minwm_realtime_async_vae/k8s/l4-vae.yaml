@@ -20,7 +20,9 @@ spec:
         seedleap.ai/vae-worker: "true"
         seedleap.ai/test-run: minwm-async-vae-benchmark
     spec:
-      expireAfter: 24h
+      # Let AWS Spot interruption, node repair, and empty-node consolidation
+      # replace workers; do not rotate healthy VAE nodes on a 24-hour timer.
+      expireAfter: Never
       nodeClassRef:
         group: karpenter.k8s.aws
         kind: EC2NodeClass

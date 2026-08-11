@@ -20,7 +20,9 @@ spec:
         seedleap.ai/denoiser-worker: "true"
         seedleap.ai/test-run: minwm-async-vae-benchmark
     spec:
-      expireAfter: 24h
+      # Spot interruption is handled by Karpenter's interruption queue. Avoid an
+      # additional periodic restart for healthy, long-lived GPU workers.
+      expireAfter: Never
       nodeClassRef:
         group: karpenter.k8s.aws
         kind: EC2NodeClass
@@ -62,7 +64,9 @@ spec:
         seedleap.ai/denoiser-worker: "true"
         seedleap.ai/test-run: minwm-async-vae-benchmark
     spec:
-      expireAfter: 24h
+      # Spot interruption is handled by Karpenter's interruption queue. Avoid an
+      # additional periodic restart for healthy, long-lived GPU workers.
+      expireAfter: Never
       nodeClassRef:
         group: karpenter.k8s.aws
         kind: EC2NodeClass

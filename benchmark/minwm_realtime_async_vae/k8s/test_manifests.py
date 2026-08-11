@@ -925,6 +925,15 @@ def test_gpu_workers_register_only_internal_pod_endpoints():
     ]
 
 
+def test_gpu_node_pools_do_not_expire_healthy_nodes_by_age():
+    documents = load_documents(("h100-denoiser.yaml", "l4-vae.yaml"))
+    node_pools = [document for document in documents if document.get("kind") == "NodePool"]
+
+    assert node_pools
+    for node_pool in node_pools:
+        assert node_pool["spec"]["template"]["spec"]["expireAfter"] == "Never"
+
+
 def test_internal_worker_ports_are_restricted_by_network_policy():
     documents = load_documents(("network-policy.yaml",))
     expected = {
