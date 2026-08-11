@@ -30,6 +30,7 @@ from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.l
 )
 from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.lingbot_world.lingbot_world_causal_denoising import (
     LingBotWorldCausalDMDDenoisingStage,
+    _cuda_graph_input_source_key,
 )
 from sglang.multimodal_gen.runtime.realtime.states import RealtimeCausalDiTState
 
@@ -1011,3 +1012,12 @@ def test_lingbot_cuda_graph_only_accepts_saturated_bounded_recompute():
     cache.local_end_index_int = 8
     cache.allow_growth = True
     assert stage._lingbot_cuda_graph_key(batch, current_timestep=1, **kwargs) is None
+
+
+def test_lingbot_cuda_graph_source_key_accepts_inference_tensors():
+    with torch.inference_mode():
+        value = torch.ones(2)
+
+    key = _cuda_graph_input_source_key({"value": value}, "value")
+
+    assert key == (("value", (id(value), value.data_ptr(), None)),)

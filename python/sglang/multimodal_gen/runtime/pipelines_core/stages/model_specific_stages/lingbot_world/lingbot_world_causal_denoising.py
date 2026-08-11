@@ -88,7 +88,16 @@ def _static_cuda_graph_inputs(inputs: dict[str, Any]) -> dict[str, Any]:
 
 def _cuda_graph_input_source_key(inputs: dict[str, Any], *names: str) -> tuple:
     def tensor_key(value: torch.Tensor) -> tuple:
-        return (id(value), value.data_ptr(), value._version)
+        # Tensors allocated under torch.inference_mode() deliberately do not
+        # expose a version counter.  Identity and storage address are enough
+        # for the request-scoped prepared-input caches used here; retain the
+        # version when PyTorch makes it available so ordinary in-place updates
+        # still invalidate the copy cache.
+        try:
+            version = value._version
+        except RuntimeError:
+            version = None
+        return (id(value), value.data_ptr(), version)
 
     keys = []
     for name in names:
