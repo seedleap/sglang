@@ -8,7 +8,7 @@ import logging
 import os
 from pathlib import Path
 
-from aiohttp import ClientSession, ClientTimeout, WSMsgType, web
+from aiohttp import ClientError, ClientSession, ClientTimeout, WSMsgType, web
 
 from prompt_rewriter import PromptRewriter
 from world_creator import WorldCreator
@@ -224,18 +224,22 @@ async def _generated_world_image(request):
 
 async def _proxy_http(request):
     upstream_url = f"{UPSTREAM_HTTP}{request.rel_url}"
-    async with request.app[SESSION].request(
-        request.method,
-        upstream_url,
-        headers=_forward_headers(request.headers),
-        data=request.content,
-        allow_redirects=False,
-    ) as response:
-        return web.Response(
-            status=response.status,
-            headers=_forward_headers(response.headers),
-            body=await response.read(),
-        )
+    try:
+        async with request.app[SESSION].request(
+            request.method,
+            upstream_url,
+            headers=_forward_headers(request.headers),
+            data=request.content,
+            allow_redirects=False,
+        ) as response:
+            return web.Response(
+                status=response.status,
+                headers=_forward_headers(response.headers),
+                body=await response.read(),
+            )
+    except ClientError as error:
+        logging.warning("Upstream HTTP unavailable: %s", upstream_url, exc_info=error)
+        raise web.HTTPBadGateway(text="upstream HTTP unavailable") from error
 
 
 def _backend_upstream(backend, transport, path, query=""):
@@ -259,18 +263,22 @@ def _named_backend_url(request, transport):
 
 async def _proxy_backend_http(request):
     upstream_url = _named_backend_url(request, "http")
-    async with request.app[SESSION].request(
-        request.method,
-        upstream_url,
-        headers=_forward_headers(request.headers),
-        data=request.content,
-        allow_redirects=False,
-    ) as response:
-        return web.Response(
-            status=response.status,
-            headers=_forward_headers(response.headers),
-            body=await response.read(),
-        )
+    try:
+        async with request.app[SESSION].request(
+            request.method,
+            upstream_url,
+            headers=_forward_headers(request.headers),
+            data=request.content,
+            allow_redirects=False,
+        ) as response:
+            return web.Response(
+                status=response.status,
+                headers=_forward_headers(response.headers),
+                body=await response.read(),
+            )
+    except ClientError as error:
+        logging.warning("Backend HTTP unavailable: %s", upstream_url, exc_info=error)
+        raise web.HTTPBadGateway(text="backend HTTP unavailable") from error
 
 
 async def _relay_websocket(source, destination):
@@ -284,15 +292,16 @@ async def _relay_websocket(source, destination):
 
 
 async def _proxy_websocket(request):
-    downstream = web.WebSocketResponse(max_msg_size=0)
-    await downstream.prepare(request)
     upstream_url = f"{UPSTREAM_WS}{request.rel_url}"
+    downstream = None
 
     try:
         async with request.app[SESSION].ws_connect(
             upstream_url,
             max_msg_size=0,
         ) as upstream:
+            downstream = web.WebSocketResponse(max_msg_size=0)
+            await downstream.prepare(request)
             relays = {
                 asyncio.create_task(_relay_websocket(downstream, upstream)),
                 asyncio.create_task(_relay_websocket(upstream, downstream)),
@@ -304,13 +313,15 @@ async def _proxy_websocket(request):
             for task in pending:
                 task.cancel()
             await asyncio.gather(*done, *pending, return_exceptions=True)
+    except ClientError as error:
+        logging.warning("Upstream websocket unavailable: %s", upstream_url, exc_info=error)
+        raise web.HTTPBadGateway(text="upstream websocket unavailable") from error
     except Exception:
-        await downstream.close(
-            code=1011,
-            message=b"upstream websocket unavailable",
-        )
+        if downstream is None:
+            raise
+        await downstream.close(code=1011, message=b"upstream websocket unavailable")
     finally:
-        if not downstream.closed:
+        if downstream is not None and not downstream.closed:
             await downstream.close()
 
     return downstream
@@ -318,14 +329,15 @@ async def _proxy_websocket(request):
 
 async def _proxy_backend_websocket(request):
     upstream_url = _named_backend_url(request, "ws")
-    downstream = web.WebSocketResponse(max_msg_size=0)
-    await downstream.prepare(request)
+    downstream = None
 
     try:
         async with request.app[SESSION].ws_connect(
             upstream_url,
             max_msg_size=0,
         ) as upstream:
+            downstream = web.WebSocketResponse(max_msg_size=0)
+            await downstream.prepare(request)
             relays = {
                 asyncio.create_task(_relay_websocket(downstream, upstream)),
                 asyncio.create_task(_relay_websocket(upstream, downstream)),
@@ -337,13 +349,15 @@ async def _proxy_backend_websocket(request):
             for task in pending:
                 task.cancel()
             await asyncio.gather(*done, *pending, return_exceptions=True)
+    except ClientError as error:
+        logging.warning("Backend websocket unavailable: %s", upstream_url, exc_info=error)
+        raise web.HTTPBadGateway(text="backend websocket unavailable") from error
     except Exception:
-        await downstream.close(
-            code=1011,
-            message=b"upstream websocket unavailable",
-        )
+        if downstream is None:
+            raise
+        await downstream.close(code=1011, message=b"upstream websocket unavailable")
     finally:
-        if not downstream.closed:
+        if downstream is not None and not downstream.closed:
             await downstream.close()
 
     return downstream
