@@ -95,7 +95,7 @@ metadata:
   annotations:
     seedleap.ai/capacity-type: spot
     seedleap.ai/repo: seedleap/sglang
-    seedleap.ai/sglang-git-ref: &sglang_ref REPLACE_WITH_PUSHED_COMMIT
+    seedleap.ai/sglang-git-ref: &sglang_ref d4fb1a823b171a1fd368b74ae0248b0484811877
     seedleap.ai/minwm-git-ref: &minwm_ref 2efc6485f65e8fcab506665efde79bc41406385e
     seedleap.ai/checkpoint-version-id: wduScksw2f3yPErnG9lBioOuE2AToyAP
 spec:
