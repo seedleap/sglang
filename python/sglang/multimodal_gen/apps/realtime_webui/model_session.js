@@ -87,6 +87,9 @@
         bytes: 0,
         renderedFrames: 0,
         lastChunk: null,
+        lastReceivedChunk: null,
+        lastReceivedFrameBatchIndex: null,
+        frameBatchGapCount: 0,
         lastEventId: 0,
         lastSentEventId: 0,
         lastAppliedEventId: 0,
@@ -119,6 +122,9 @@
         bytes: 0,
         renderedFrames: 0,
         lastChunk: null,
+        lastReceivedChunk: null,
+        lastReceivedFrameBatchIndex: null,
+        frameBatchGapCount: 0,
         lastEventId: 0,
         lastSentEventId: 0,
         lastAppliedEventId: 0,
@@ -254,8 +260,29 @@
     }
 
     enqueueDecode(header, payload, epoch) {
+      this.observeFrameBatch(header);
       this.decodeQueue.push({ header, payload, epoch });
       this.pumpDecode();
+    }
+
+    observeFrameBatch(header) {
+      const chunkIndex = Number(header.chunk_index || 0);
+      const frameBatchIndex = Number(header.frame_batch_index || 0);
+      if (this.stats.lastReceivedChunk === null) {
+        this.stats.frameBatchGapCount += Math.max(0, frameBatchIndex);
+      } else if (chunkIndex === this.stats.lastReceivedChunk) {
+        const expected = Number(this.stats.lastReceivedFrameBatchIndex || 0) + 1;
+        if (frameBatchIndex > expected) {
+          this.stats.frameBatchGapCount += frameBatchIndex - expected;
+        }
+      } else if (chunkIndex > this.stats.lastReceivedChunk) {
+        this.stats.frameBatchGapCount += Math.max(0, frameBatchIndex);
+        if (chunkIndex > this.stats.lastReceivedChunk + 1) {
+          this.stats.frameBatchGapCount += chunkIndex - this.stats.lastReceivedChunk - 1;
+        }
+      }
+      this.stats.lastReceivedChunk = chunkIndex;
+      this.stats.lastReceivedFrameBatchIndex = frameBatchIndex;
     }
 
     async pumpDecode() {

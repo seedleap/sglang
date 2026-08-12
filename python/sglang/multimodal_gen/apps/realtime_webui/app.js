@@ -426,6 +426,9 @@ let streamEpoch = 0;
 let lastDecodeMs = 0;
 let lastDisplayLagMs = 0;
 let lastRenderedChunk = null;
+let lastReceivedChunk = null;
+let lastReceivedFrameBatchIndex = null;
+let frameBatchGapCount = 0;
 let encodedDecodeErrors = 0;
 let socketHadError = false;
 let socketCloseExpected = false;
@@ -1105,6 +1108,9 @@ function resetStreamStats() {
   droppedDecodeFrames = 0;
   lastDecodeDropAt = 0;
   lastDecodeDropCount = 0;
+  lastReceivedChunk = null;
+  lastReceivedFrameBatchIndex = null;
+  frameBatchGapCount = 0;
   encodedDecodeErrors = 0;
   renderedPreviewFrames = 0;
   lastSentEventId = 0;
@@ -1257,6 +1263,7 @@ function updateStats() {
     frames,
     bytes,
     lastChunk: lastRenderedChunk,
+    frameBatchGapCount,
     lastDecodeMs,
     lastDisplayLagMs,
     renderFps: fpsSamples.length,
@@ -1289,10 +1296,12 @@ function renderModelTelemetry(key, stats = {}) {
   const queueFrames = Number(stats.queueFrames ?? stats.queueLength ?? 0);
   const droppedFrames = Number(stats.droppedFrames || 0);
   const decodeQueueLength = Number(stats.decodeQueueLength || 0);
+  const frameBatchGapCount = Number(stats.frameBatchGapCount || 0);
   const totalFrames = Number(stats.frames || 0);
   const bufferParts = [formatMs(bufferMs), `q ${queueFrames}`];
   if (decodeQueueLength) bufferParts.push(`decode ${decodeQueueLength}`);
   if (droppedFrames) bufferParts.push(`drop ${droppedFrames}`);
+  if (frameBatchGapCount) bufferParts.push(`gap ${frameBatchGapCount}`);
   $(`${prefix}ChunkText`).textContent = stats.lastChunk == null ? "-" : `#${stats.lastChunk}`;
   $(`${prefix}RateText`).textContent = totalFrames > 0
     ? `${serverFps.toFixed(1)} source · ${deliveryFps.toFixed(1)} recv · ${renderFps} render`
@@ -3877,6 +3886,7 @@ function receive(data, epoch) {
         content_type: message.content_type || "",
         num_frames: Number(message.num_frames || 0),
         payload_bytes: payload?.byteLength || payload?.size || payload?.length || 0,
+        frame_batch_gap_count: observeFrameBatchGap(message),
       });
       recordFrameBatchReceived(message, payload?.byteLength || payload?.size || payload?.length || 0);
       enqueueDecodeBatch(message, payload, epoch);
@@ -3904,6 +3914,7 @@ function receive(data, epoch) {
     content_type: header.content_type || "",
     num_frames: Number(header.num_frames || 0),
     payload_bytes: data.byteLength || data.size || data.length || 0,
+    frame_batch_gap_count: observeFrameBatchGap(header),
   });
   recordFrameBatchReceived(header, data?.byteLength || data?.size || data?.length || 0);
   enqueueDecodeBatch(header, data, epoch);
@@ -3970,7 +3981,27 @@ function recordFrameBatchReceived(header, payloadBytes) {
     preview_width: header.preview_width,
     preview_height: header.preview_height,
     payload_bytes: payloadBytes,
+    frame_batch_gap_count: frameBatchGapCount,
   });
+}
+
+function observeFrameBatchGap(header) {
+  const chunkIndex = Number(header.chunk_index || 0);
+  const frameBatchIndex = Number(header.frame_batch_index || 0);
+  if (lastReceivedChunk === null) {
+    frameBatchGapCount += Math.max(0, frameBatchIndex);
+  } else if (chunkIndex === lastReceivedChunk) {
+    const expected = Number(lastReceivedFrameBatchIndex || 0) + 1;
+    if (frameBatchIndex > expected) frameBatchGapCount += frameBatchIndex - expected;
+  } else if (chunkIndex > lastReceivedChunk) {
+    frameBatchGapCount += Math.max(0, frameBatchIndex);
+    if (chunkIndex > lastReceivedChunk + 1) {
+      frameBatchGapCount += chunkIndex - lastReceivedChunk - 1;
+    }
+  }
+  lastReceivedChunk = chunkIndex;
+  lastReceivedFrameBatchIndex = frameBatchIndex;
+  return frameBatchGapCount;
 }
 
 function recordChunkFirstRendered(chunkIndex, details = {}) {

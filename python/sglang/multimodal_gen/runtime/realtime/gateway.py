@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import asyncio
 import hmac
+import time
+from collections import deque
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -64,6 +66,14 @@ _WORKER_CONTROL_MESSAGES = {
     "control_ack",
     "heartbeat",
 }
+
+
+@dataclass(frozen=True, slots=True)
+class _QueuedOutput:
+    wire: bytes
+    message_type: str
+    frame_count: int
+    enqueued_at: float
 
 
 def worker_message_allowed(wire: bytes) -> bool:
@@ -126,8 +136,13 @@ class GatewayOutputRoute:
     generation_id: str
     token: str
     queue_depth: int
-    enqueue_timeout_s: float
-    _queue: asyncio.Queue[bytes | None] = field(init=False)
+    trace_id: str = ""
+    _queue: deque[_QueuedOutput | None] = field(init=False)
+    _queue_ready: asyncio.Event = field(init=False)
+    _queue_drained: asyncio.Event = field(init=False)
+    _unfinished_tasks: int = field(default=0, init=False)
+    _queued_media_frames: int = field(default=0, init=False)
+    _queued_bytes: int = field(default=0, init=False)
     _last_chunk_index: int = field(default=-1, init=False)
     _last_frame_batch_index: int = field(default=-1, init=False)
     _seen_chunks: set[int] = field(default_factory=set, init=False)
@@ -136,11 +151,15 @@ class GatewayOutputRoute:
         default_factory=dict, init=False
     )
     dropped_messages: int = field(default=0, init=False)
+    dropped_frames: int = field(default=0, init=False)
     bound: bool = field(default=False, init=False)
     closed: bool = field(default=False, init=False)
 
     def __post_init__(self) -> None:
-        self._queue = asyncio.Queue(maxsize=self.queue_depth)
+        self._queue = deque()
+        self._queue_ready = asyncio.Event()
+        self._queue_drained = asyncio.Event()
+        self._queue_drained.set()
         self._output_closed = asyncio.Event()
         self._output_closed.set()
 
@@ -188,11 +207,17 @@ class GatewayOutputRoute:
             )
             if completed.is_set():
                 raise OutputProtocolError("duplicate completion")
-            # Completion is a control marker used to release upstream decode
-            # credit. Never leave it waiting behind stale media for the full
-            # enqueue timeout; that timeout matches the VAE acknowledgement
-            # budget and can otherwise tear down a healthy model session.
-            self._put_latest_nowait(wire)
+            # Control markers are tiny and are not counted against the media
+            # frame capacity. They must survive media shedding because the
+            # upstream VAE uses them to release decode credit.
+            self._append_output(
+                _QueuedOutput(
+                    wire=wire,
+                    message_type=message_type,
+                    frame_count=0,
+                    enqueued_at=time.monotonic(),
+                )
+            )
             completed.set()
             return
 
@@ -208,7 +233,15 @@ class GatewayOutputRoute:
                 raise OutputProtocolError("duplicate frame batch")
         elif frame_batch_index != 0:
             raise OutputProtocolError("new chunk must start at frame batch zero")
-        await self._put_with_bounded_drop(wire)
+        frame_count = max(1, int(message.get("num_frames") or 1))
+        self._put_media_latest(
+            _QueuedOutput(
+                wire=wire,
+                message_type=message_type,
+                frame_count=frame_count,
+                enqueued_at=time.monotonic(),
+            )
+        )
         self._last_chunk_index = chunk_index
         self._last_frame_batch_index = frame_batch_index
         self._seen_chunks.add(chunk_index)
@@ -217,57 +250,98 @@ class GatewayOutputRoute:
                 chunk_index, asyncio.Event()
             ).set()
 
-    async def _put_with_bounded_drop(self, wire: bytes) -> None:
-        try:
-            await asyncio.wait_for(
-                self._queue.put(wire), timeout=self.enqueue_timeout_s
-            )
-            return
-        except TimeoutError:
-            pass
+    def _put_media_latest(self, output: _QueuedOutput) -> None:
+        # Never propagate browser/network backpressure into the VAE worker.
+        # Drop whole encoded frame batches from the oldest edge until the new
+        # batch fits. A single oversized batch remains indivisible and may
+        # temporarily exceed the configured frame capacity.
+        while (
+            self._queued_media_frames
+            and self._queued_media_frames + output.frame_count > self.queue_depth
+        ):
+            if not self._drop_oldest_media():
+                break
+        self._append_output(output)
 
-        # A slow browser/network path should not tear down the model session.
-        # Keep Gateway memory bounded by discarding the oldest unsent message and
-        # enqueueing the newest data after the timeout budget is exhausted.
-        self._put_latest_nowait(wire)
-
-    def _put_latest_nowait(self, wire: bytes) -> None:
-        while self._queue.full():
-            self._drop_oldest_queued_message()
-        try:
-            self._queue.put_nowait(wire)
-        except asyncio.QueueFull as exc:
-            raise OutputBackpressureError(
-                "Gateway output queue remained full"
-            ) from exc
-
-    def _drop_oldest_queued_message(self) -> None:
-        try:
-            dropped = self._queue.get_nowait()
-        except asyncio.QueueEmpty as exc:
-            raise OutputBackpressureError(
-                "Gateway output queue remained full"
-            ) from exc
-        if dropped is None:
-            try:
-                self._queue.put_nowait(None)
-            except asyncio.QueueFull:
-                pass
+    def _append_output(self, output: _QueuedOutput) -> None:
+        if self.closed:
             raise OutputRouteClosed("output route is closed")
-        self._queue.task_done()
-        self.dropped_messages += 1
+        self._queue.append(output)
+        self._unfinished_tasks += 1
+        self._queue_drained.clear()
+        self._queued_media_frames += output.frame_count
+        self._queued_bytes += len(output.wire)
+        self._queue_ready.set()
+
+    def _drop_oldest_media(self) -> bool:
+        for index, output in enumerate(self._queue):
+            if output is None or output.message_type != "frame_batch":
+                continue
+            del self._queue[index]
+            self._queued_media_frames -= output.frame_count
+            self._queued_bytes -= len(output.wire)
+            self._finish_task()
+            self.dropped_messages += 1
+            self.dropped_frames += output.frame_count
+            return True
+        return False
+
+    def queue_metrics(self) -> dict[str, int | float]:
+        oldest_frame_at = next(
+            (
+                output.enqueued_at
+                for output in self._queue
+                if output is not None and output.message_type == "frame_batch"
+            ),
+            None,
+        )
+        oldest_frame_age_ms = (
+            max(0.0, (time.monotonic() - oldest_frame_at) * 1000.0)
+            if oldest_frame_at is not None
+            else 0.0
+        )
+        return {
+            "gateway_queue_depth": self._queued_media_frames,
+            "gateway_queue_messages": sum(
+                1 for output in self._queue if output is not None
+            ),
+            "gateway_queue_bytes": self._queued_bytes,
+            "gateway_oldest_frame_age_ms": round(oldest_frame_age_ms, 3),
+            "gateway_dropped_frames": self.dropped_frames,
+            "gateway_dropped_messages": self.dropped_messages,
+            "gateway_queue_capacity_frames": self.queue_depth,
+        }
 
     async def get(self) -> bytes:
-        wire = await self._queue.get()
-        if wire is None:
-            raise OutputRouteClosed("output route is closed")
-        return wire
+        while True:
+            if self._queue:
+                output = self._queue.popleft()
+                if not self._queue:
+                    self._queue_ready.clear()
+                if output is None:
+                    raise OutputRouteClosed("output route is closed")
+                self._queued_media_frames -= output.frame_count
+                self._queued_bytes -= len(output.wire)
+                return output.wire
+            if self.closed:
+                raise OutputRouteClosed("output route is closed")
+            self._queue_ready.clear()
+            if self._queue:
+                continue
+            await self._queue_ready.wait()
 
     def task_done(self) -> None:
-        self._queue.task_done()
+        self._finish_task()
+
+    def _finish_task(self) -> None:
+        if self._unfinished_tasks <= 0:
+            raise ValueError("task_done() called too many times")
+        self._unfinished_tasks -= 1
+        if self._unfinished_tasks == 0:
+            self._queue_drained.set()
 
     async def join(self) -> None:
-        await self._queue.join()
+        await self._queue_drained.wait()
 
     async def close(self) -> None:
         if self.closed:
@@ -276,26 +350,24 @@ class GatewayOutputRoute:
         self.unbind_output()
         for event in self._chunk_completed.values():
             event.set()
-        while not self._queue.empty():
-            try:
-                self._queue.get_nowait()
-                self._queue.task_done()
-            except asyncio.QueueEmpty:
-                break
-        try:
-            self._queue.put_nowait(None)
-        except asyncio.QueueFull:
-            pass
+        while self._queue:
+            output = self._queue.popleft()
+            if output is not None:
+                self._queued_media_frames -= output.frame_count
+                self._queued_bytes -= len(output.wire)
+                self._finish_task()
+        self._queue.append(None)
+        self._queue_ready.set()
 
 
 class GatewayOutputRegistry:
     def __init__(
-        self, *, queue_depth: int = 2, enqueue_timeout_s: float = 1.0
+        self, *, queue_depth: int = 64, enqueue_timeout_s: float = 0.0
     ) -> None:
         if queue_depth < 1:
             raise ValueError("queue_depth must be positive")
-        if enqueue_timeout_s <= 0:
-            raise ValueError("enqueue_timeout_s must be positive")
+        if enqueue_timeout_s < 0:
+            raise ValueError("enqueue_timeout_s must be non-negative")
         self.queue_depth = queue_depth
         self.enqueue_timeout_s = enqueue_timeout_s
         self._routes: dict[str, GatewayOutputRoute] = {}
@@ -307,6 +379,7 @@ class GatewayOutputRegistry:
         generation_id: str,
         *,
         token: str,
+        trace_id: str = "",
     ) -> GatewayOutputRoute:
         if not session_id or not generation_id or not token:
             raise OutputProtocolError("output route identity is required")
@@ -319,7 +392,7 @@ class GatewayOutputRegistry:
                 generation_id=generation_id,
                 token=token,
                 queue_depth=self.queue_depth,
-                enqueue_timeout_s=self.enqueue_timeout_s,
+                trace_id=trace_id,
             )
             self._routes[session_id] = route
             return route

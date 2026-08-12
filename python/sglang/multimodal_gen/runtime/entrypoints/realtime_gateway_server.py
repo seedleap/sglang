@@ -267,8 +267,8 @@ def create_app(
     lingbot2_upstream_url: str | None = None,
     lingbot2_model_revision: str = "robbyant/lingbot-world-v2-14b-causal-fast-diffusers",
     lingbot2_vae_fingerprint: str | None = None,
-    output_queue_depth: int = 2,
-    output_enqueue_timeout_s: float = 1.0,
+    output_queue_depth: int = 64,
+    output_enqueue_timeout_s: float = 0.0,
     output_drain_timeout_s: float = 5.0,
     lease_renew_interval_s: float = 10.0,
     release_grace_s: float = 0.5,
@@ -422,7 +422,19 @@ def create_app(
             while True:
                 wire = await websocket.receive_bytes()
                 message = decode_message(wire)
+                enqueue_started = time.perf_counter()
                 await route.put(wire)
+                _log_gateway_trace(
+                    route.trace_id,
+                    "gateway.output_enqueued",
+                    session_id=session_id,
+                    generation_id=generation_id,
+                    enqueue_ms=round(
+                        (time.perf_counter() - enqueue_started) * 1000, 3
+                    ),
+                    **route.queue_metrics(),
+                    **_browser_send_trace_fields(wire),
+                )
                 if message.get("type") == "media_chunk_complete":
                     await websocket.send_bytes(
                         encode_message(
@@ -488,7 +500,10 @@ def create_app(
                 vae_worker_id=assignment.vae.worker_id,
             )
             route = await registry.register(
-                session_id, generation_id, token=output_token
+                session_id,
+                generation_id,
+                token=output_token,
+                trace_id=trace_id,
             )
             upstream_url = build_denoiser_url(
                 assignment.denoiser.endpoint,
@@ -556,18 +571,29 @@ def create_app(
                 while True:
                     wire = await route.get()
                     try:
-                        await send_browser_with_trace(wire, send_source="vae")
+                        await send_browser_with_trace(
+                            wire,
+                            send_source="vae",
+                            queue_fields=route.queue_metrics(),
+                        )
                     finally:
                         route.task_done()
 
             async def send_browser_with_trace(
-                wire: bytes, *, send_source: str
+                wire: bytes,
+                *,
+                send_source: str,
+                queue_fields: dict[str, Any] | None = None,
             ) -> None:
                 send_started = time.perf_counter()
                 send_fields = _browser_send_trace_fields(wire)
+                queue_fields = queue_fields or {}
                 try:
                     await sender.send(wire)
                 except Exception as exc:
+                    browser_send_ms = round(
+                        (time.perf_counter() - send_started) * 1000, 3
+                    )
                     _log_gateway_trace(
                         trace_id,
                         "gateway.browser_send_complete",
@@ -575,13 +601,16 @@ def create_app(
                         generation_id=generation_id,
                         send_source=send_source,
                         send_ok=False,
-                        send_ms=round(
-                            (time.perf_counter() - send_started) * 1000, 3
-                        ),
+                        send_ms=browser_send_ms,
+                        browser_send_ms=browser_send_ms,
                         error_type=type(exc).__name__,
+                        **queue_fields,
                         **send_fields,
                     )
                     raise
+                browser_send_ms = round(
+                    (time.perf_counter() - send_started) * 1000, 3
+                )
                 _log_gateway_trace(
                     trace_id,
                     "gateway.browser_send_complete",
@@ -589,7 +618,9 @@ def create_app(
                     generation_id=generation_id,
                     send_source=send_source,
                     send_ok=True,
-                    send_ms=round((time.perf_counter() - send_started) * 1000, 3),
+                    send_ms=browser_send_ms,
+                    browser_send_ms=browser_send_ms,
+                    **queue_fields,
                     **send_fields,
                 )
 
@@ -738,8 +769,8 @@ def _parse_args() -> argparse.Namespace:
         "--internal-output-url",
         default=os.environ.get("REALTIME_GATEWAY_OUTPUT_URL"),
     )
-    parser.add_argument("--output-queue-depth", type=int, default=2)
-    parser.add_argument("--output-enqueue-timeout-s", type=float, default=5.0)
+    parser.add_argument("--output-queue-depth", type=int, default=64)
+    parser.add_argument("--output-enqueue-timeout-s", type=float, default=0.0)
     parser.add_argument("--output-drain-timeout-s", type=float, default=5.0)
     parser.add_argument("--lease-renew-interval-s", type=float, default=10.0)
     parser.add_argument("--release-grace-s", type=float, default=0.5)

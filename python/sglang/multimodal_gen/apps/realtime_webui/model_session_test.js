@@ -185,6 +185,23 @@ async function main() {
   await flush();
   assert.equal(decodedHeaders.at(-1).chunk_index, 4,
     "split frame_batch_header payloads must be decoded as media, not MsgPack");
+  assert.equal(session.snapshot().frameBatchGapCount, 0);
+
+  socket.message({
+    type: "frame_batch",
+    chunk_index: 4,
+    frame_batch_index: 2,
+    event_id: 7,
+    num_frames: 1,
+    content_type: "image/webp",
+    payload: new Uint8Array([5]),
+  });
+  await flush();
+  assert.equal(
+    session.snapshot().frameBatchGapCount,
+    1,
+    "model telemetry should expose skipped frame batches for playback diagnosis",
+  );
 
   const reconnecting = session.connect({ type: "init", trace_id: "trace:lingbot2:next" }, "/lingbot2");
   const replacementSocket = FakeSocket.instances.at(-1);
