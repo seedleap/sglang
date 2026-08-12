@@ -68,8 +68,11 @@
         </label>
 
         <button id="enhanceBtn" class="complete-world" type="button">
-          <span>Prompt 补全</span>
-          <small>补齐首帧与完整世界描述</small>
+          <span class="complete-world-title">
+            <i class="world-completion-spinner" aria-hidden="true"></i>
+            <b id="enhanceBtnLabel">Prompt 补全</b>
+          </span>
+          <small id="enhanceBtnHint">补齐首帧与完整世界描述</small>
         </button>
         <p id="worldDraftStatus" class="world-draft-status" role="status" aria-live="polite">需要首帧图片和世界描述才能进入世界</p>
         <div class="entry-actions">
@@ -275,6 +278,6 @@
     <script src="./fullscreen_controller.js?v=dual-fullscreen-v1"></script>
     <script src="./trace_topology.js?v=realtime-trace-topology-v6"></script>
     <script src="./trace_transport.js?v=realtime-trace-http-v2"></script>
-    <script src="./app.js?v=world-studio-v8"></script>
+    <script src="./app.js?v=world-studio-v9"></script>
   </body>
 </html>

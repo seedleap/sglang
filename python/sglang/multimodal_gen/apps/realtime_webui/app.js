@@ -3580,6 +3580,25 @@ function setWorldDraftStatus(message, state = "") {
   else delete status.dataset.state;
 }
 
+function setWorldCompletionBusy(pending, completingFromImage = false) {
+  worldCompletionPending = pending;
+  const button = $("enhanceBtn");
+  button.disabled = pending;
+  button.classList.toggle("is-loading", pending);
+  button.setAttribute("aria-busy", pending ? "true" : "false");
+  $("enhanceBtnLabel").textContent = pending ? "正在补全…" : "Prompt 补全";
+  $("enhanceBtnHint").textContent = pending
+    ? (completingFromImage ? "正在理解首帧并生成完整描述" : "正在生成世界描述和首帧")
+    : "补齐首帧与完整世界描述";
+  $("clearWorldBtn").disabled = pending;
+  $("prompt").readOnly = pending;
+  $("firstFrame").disabled = pending;
+  document.querySelectorAll(".preset").forEach((preset) => {
+    preset.disabled = pending;
+  });
+  updateWorldDraftState();
+}
+
 function updateWorldDraftState() {
   const hasImage = hasFirstFrame();
   const hasDescription = hasWorldDescription();
@@ -3642,14 +3661,14 @@ async function completeWorldDraft() {
     $("prompt").focus({ preventScroll: true });
     return;
   }
-  worldCompletionPending = true;
   let finalStatus = null;
-  $("enhanceBtn").disabled = true;
-  $("connectBtn").disabled = true;
+  const completingFromImage = hasFirstFrame();
+  setWorldCompletionBusy(true, completingFromImage);
   setWorldDraftStatus(
-    hasFirstFrame() ? "正在理解首帧并补全世界描述…" : "正在生成世界描述和首帧，请稍候…",
+    completingFromImage ? "正在理解首帧并补全世界描述…" : "正在生成世界描述和首帧，请稍候…",
     "working",
   );
+  await new Promise((resolve) => requestAnimationFrame(() => resolve()));
   try {
     const form = new FormData();
     if (seedText) form.append("world_description", seedText);
@@ -3692,9 +3711,7 @@ async function completeWorldDraft() {
     };
     addHistory(`world completion failed · ${error.message || error}`);
   } finally {
-    worldCompletionPending = false;
-    $("enhanceBtn").disabled = false;
-    updateWorldDraftState();
+    setWorldCompletionBusy(false);
     if (finalStatus) setWorldDraftStatus(finalStatus.message, finalStatus.state);
   }
 }
@@ -4413,13 +4430,6 @@ async function queryServerModelInfo(options = {}) {
   return info;
 }
 
-function enhancePrompt() {
-  const suffix = " high-fidelity temporal consistency, stable camera geometry, natural motion, clean lighting.";
-  if (!$("prompt").value.includes("temporal consistency")) {
-    $("prompt").value = `${$("prompt").value.trim()},${suffix}`;
-  }
-}
-
 function compact(obj) {
   return Object.fromEntries(
     Object.entries(obj).filter(([, v]) => v !== undefined && v !== "" && v !== null)
@@ -5005,7 +5015,6 @@ function setupVoicePromptInput() {
 }
 
 setupVoicePromptInput();
-$("enhanceBtn").onclick = enhancePrompt;
 $("recordBtn").onclick = () => {
   if (recordingActive) {
     stopRecording();

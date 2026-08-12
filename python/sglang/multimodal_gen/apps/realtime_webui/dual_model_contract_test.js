@@ -102,7 +102,7 @@ assert.match(
 );
 assert.match(html, /model_session\.js\?v=dual-model-v5/);
 assert.match(html, /dual_model_controller\.js\?v=dual-model-v3/);
-assert.match(html, /app\.js\?v=world-studio-v8/);
+assert.match(html, /app\.js\?v=world-studio-v9/);
 assert.doesNotMatch(
   app,
   /window\.location\.hostname === "localhost"/,
@@ -121,6 +121,10 @@ assert.match(html, /id="firstFrameState"/, "first-frame completeness should be v
 assert.match(html, /id="worldDescriptionState"/, "description completeness should be visible");
 assert.match(app, /function clearWorldDraft\(\)/);
 assert.match(app, /async function completeWorldDraft\(\)/);
+assert.match(app, /function setWorldCompletionBusy\(pending, completingFromImage = false\)/);
+assert.match(app, /classList\.toggle\("is-loading", pending\)/);
+assert.doesNotMatch(app, /function enhancePrompt\(\)/, "legacy local prompt suffix must not bypass world completion");
+assert.doesNotMatch(app, /\$\("enhanceBtn"\)\.onclick = enhancePrompt/);
 assert.match(app, /\$\("connectBtn"\)\.disabled = !complete \|\| worldCompletionPending/);
 assert.match(
   app,
