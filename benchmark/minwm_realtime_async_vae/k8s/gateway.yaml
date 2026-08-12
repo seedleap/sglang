@@ -101,6 +101,8 @@ spec:
           readinessProbe:
             httpGet: {path: /readyz, port: http}
             periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 6
           livenessProbe:
             httpGet: {path: /healthz, port: http}
             periodSeconds: 15

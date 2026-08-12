@@ -345,8 +345,8 @@ function smoothTimelineModePreservesBacklogAndCatchesUp() {
   const catchUp = controller.snapshot();
   assert.equal(decision.action, "draw");
   assert.equal(catchUp.droppedFrames, 0);
-  assert.ok(catchUp.playbackRate > 1.5, `playback rate ${catchUp.playbackRate}`);
-  assert.ok(catchUp.renderFps > 40, `render fps ${catchUp.renderFps}`);
+  assert.equal(catchUp.playbackRate, 1.1, `playback rate ${catchUp.playbackRate}`);
+  assert.ok(catchUp.renderFps > 27 && catchUp.renderFps < 28, `render fps ${catchUp.renderFps}`);
 }
 
 function smoothTimelineModePreservesFramesAcrossEventCutover() {
@@ -676,6 +676,19 @@ function lowLatencyModePreservesNewestChunkAndCutsOldActionImmediately() {
   assert.equal(controller.queue.some((frame) => frame.eventId < 5), false);
 }
 
+function smoothTimelineCatchupCeilingCanBeAdjustedAtRuntime() {
+  const controller = new RealtimePlaybackController({
+    mode: "smooth_timeline",
+    targetFps: 24,
+  });
+
+  assert.equal(controller.snapshot().smoothTimelinePlaybackRateMax, 1.1);
+  controller.setSmoothTimelinePlaybackRateMax(1.35);
+  assert.equal(controller.snapshot().smoothTimelinePlaybackRateMax, 1.35);
+  controller.setSmoothTimelinePlaybackRateMax(99);
+  assert.equal(controller.snapshot().smoothTimelinePlaybackRateMax, 2.5);
+}
+
 stableSourceDoesNotDrop();
 slowServerPacesAtSourceFps();
 smallBufferStartsFromFirstChunk();
@@ -705,3 +718,4 @@ deliveryCadenceExpandsAdaptiveLeadWindow();
 switchingBackToLiveTrimsTimelineBacklog();
 lowLatencyModeFollowsMeasuredSourceInsteadOfDrainingAtTargetFps();
 lowLatencyModePreservesNewestChunkAndCutsOldActionImmediately();
+smoothTimelineCatchupCeilingCanBeAdjustedAtRuntime();

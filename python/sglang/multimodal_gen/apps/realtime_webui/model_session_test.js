@@ -205,6 +205,65 @@ async function main() {
   });
   assert.equal(other.snapshot().queueFrames, 0, "model playback queues remain independent");
 
+  const stableCanvas = fakeCanvas();
+  const stableStates = [];
+  const stableSession = new RealtimeModelSession({
+    key: "lingbot2-stable-start",
+    canvas: stableCanvas,
+    startupMinChunk: 1,
+    pack: (value) => value,
+    unpack: (value) => value,
+    WebSocketCtor: FakeSocket,
+    PlaybackController: FakePlaybackController,
+    decodeBatch: async (header) => [{
+      image: { width: 640, height: 360, close() {} },
+      chunk: header.chunk_index,
+      receivedAt: 100,
+      decodeMs: 2,
+    }],
+    requestFrame: () => {},
+    now: () => 150,
+    onState: (state) => stableStates.push(state),
+  });
+  const stableConnecting = stableSession.connect(
+    { type: "init", trace_id: "trace:stable" },
+    "/lingbot2",
+  );
+  const stableSocket = FakeSocket.instances.at(-1);
+  stableSocket.open();
+  await stableConnecting;
+  assert.equal(
+    stableStates.includes("live"),
+    false,
+    "a gated LingBot2 session must retain the prior canvas until a stable chunk arrives",
+  );
+  stableSocket.message({
+    type: "frame_batch",
+    chunk_index: 0,
+    event_id: 0,
+    num_frames: 1,
+    content_type: "image/webp",
+    payload: new Uint8Array([1]),
+  });
+  await flush();
+  stableSession.render(160);
+  assert.equal(stableCanvas.draws.length, 0, "the unstable startup chunk must not flash");
+  assert.equal(stableStates.includes("live"), false);
+
+  stableSocket.message({
+    type: "frame_batch",
+    chunk_index: 1,
+    event_id: 0,
+    num_frames: 1,
+    content_type: "image/webp",
+    payload: new Uint8Array([2]),
+  });
+  await flush();
+  stableSession.render(170);
+  assert.equal(stableCanvas.draws.length, 1);
+  assert.equal(stableStates.includes("live"), true);
+  stableSession.close("test complete", { notify: false });
+
   session.setUnavailable("T2V unavailable");
   assert.equal(replacementSocket.readyState, FakeSocket.CLOSED);
   assert.ok(states.includes("unavailable"), "disabled model should expose an unavailable state");

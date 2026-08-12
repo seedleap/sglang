@@ -20,7 +20,7 @@ from uuid import uuid4
 import httpx
 import uvicorn
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosedOK
@@ -273,6 +273,9 @@ def create_app(
     lease_renew_interval_s: float = 10.0,
     release_grace_s: float = 0.5,
     max_admission_waiters: int = 64,
+    readiness_coordinator_timeout_s: float = 1.0,
+    readiness_coordinator_grace_s: float = 30.0,
+    readiness_clock=time.monotonic,
     connect_factory=connect,
     ui_config: dict[str, Any] | None = None,
     trace_query=None,
@@ -281,6 +284,10 @@ def create_app(
         raise ValueError("release_grace_s must be non-negative")
     if output_drain_timeout_s <= 0:
         raise ValueError("output_drain_timeout_s must be positive")
+    if readiness_coordinator_timeout_s <= 0:
+        raise ValueError("readiness_coordinator_timeout_s must be positive")
+    if readiness_coordinator_grace_s < 0:
+        raise ValueError("readiness_coordinator_grace_s must be non-negative")
     registry = GatewayOutputRegistry(
         queue_depth=output_queue_depth,
         enqueue_timeout_s=output_enqueue_timeout_s,
@@ -299,6 +306,7 @@ def create_app(
     app = FastAPI(title="SGLang Realtime Gateway", lifespan=lifespan)
     app.state.output_registry = registry
     app.state.admission_gate = admission_gate
+    last_coordinator_ready_at: float | None = None
 
     @app.get("/healthz")
     async def healthz():
@@ -306,13 +314,28 @@ def create_app(
 
     @app.get("/readyz")
     async def readyz():
+        nonlocal last_coordinator_ready_at
         try:
-            await coordinator.health()
+            await asyncio.wait_for(
+                coordinator.health(),
+                timeout=readiness_coordinator_timeout_s,
+            )
         except Exception as exc:
+            now = readiness_clock()
+            if (
+                last_coordinator_ready_at is not None
+                and now - last_coordinator_ready_at <= readiness_coordinator_grace_s
+            ):
+                return {
+                    "status": "ready",
+                    "coordinator": "degraded",
+                    "last_success_age_s": round(now - last_coordinator_ready_at, 3),
+                }
             raise HTTPException(
                 status_code=503, detail="coordinator unavailable"
             ) from exc
-        return {"status": "ready"}
+        last_coordinator_ready_at = readiness_clock()
+        return {"status": "ready", "coordinator": "ready"}
 
     @app.get("/backends/minwm/v1/models")
     @app.get("/v1/models")
@@ -721,6 +744,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--lease-renew-interval-s", type=float, default=10.0)
     parser.add_argument("--release-grace-s", type=float, default=0.5)
     parser.add_argument("--max-admission-waiters", type=int, default=64)
+    parser.add_argument("--readiness-coordinator-timeout-s", type=float, default=1.0)
+    parser.add_argument("--readiness-coordinator-grace-s", type=float, default=30.0)
     parser.add_argument("--trace-log-group")
     parser.add_argument(
         "--ui-config-json",
@@ -765,6 +790,8 @@ def main() -> None:
         lease_renew_interval_s=args.lease_renew_interval_s,
         release_grace_s=args.release_grace_s,
         max_admission_waiters=args.max_admission_waiters,
+        readiness_coordinator_timeout_s=args.readiness_coordinator_timeout_s,
+        readiness_coordinator_grace_s=args.readiness_coordinator_grace_s,
         ui_config=ui_config,
         trace_query=trace_query,
     )

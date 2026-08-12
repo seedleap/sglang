@@ -188,8 +188,18 @@ assert.match(
 );
 assert.match(
   appJs,
-  /smoothTimelinePlaybackRateMax:\s*2\.5/,
-  "smooth timeline should catch up quickly without dropping old backlog",
+  /configuredNumber\("smoothCatchupRateMax",\s*1\.1\)/,
+  "smooth timeline should default to a gentle 1.1x catch-up rate",
+);
+assert.match(
+  indexHtml,
+  /id="smoothCatchupRate"[^>]*min="1"[^>]*max="2\.5"[^>]*value="1\.1"/,
+  "webui should expose the smooth timeline catch-up ceiling above the videos",
+);
+assert.match(
+  indexHtml,
+  /id="zingFrameInterpolation"[^>]*type="checkbox"/,
+  "webui should expose an opt-in Zing frame interpolation control",
 );
 assert.match(
   appJs,

@@ -27,6 +27,7 @@
       workerUrl = DEFAULT_WORKER_URL,
       requestFrame = (callback) => global.requestAnimationFrame(callback),
       now = () => performance.now(),
+      startupMinChunk = 0,
       onState = () => {},
       onStats = () => {},
       onFrame = () => {},
@@ -43,6 +44,8 @@
       this.workerUrl = workerUrl;
       this.requestFrame = requestFrame;
       this.now = now;
+      this.startupMinChunk = Math.max(0, Number(startupMinChunk) || 0);
+      this.awaitingStableFrame = false;
       this.onState = onState;
       this.onStats = onStats;
       this.onFrame = onFrame;
@@ -83,9 +86,12 @@
       this.setState("idle");
     }
 
-    configure({ mode, targetFps } = {}) {
+    configure({ mode, targetFps, smoothTimelinePlaybackRateMax } = {}) {
       if (mode) this.playback.setMode?.(mode);
       if (targetFps) this.playback.setTargetFps?.(targetFps);
+      if (smoothTimelinePlaybackRateMax) {
+        this.playback.setSmoothTimelinePlaybackRateMax?.(smoothTimelinePlaybackRateMax);
+      }
     }
 
     connect(init, url) {
@@ -97,6 +103,7 @@
       this.decodeQueue = [];
       this.decodeInProgress = false;
       this.renderSamples = [];
+      this.awaitingStableFrame = this.startupMinChunk > 0;
       this.stats = {
         frames: 0,
         bytes: 0,
@@ -122,7 +129,7 @@
           if (epoch !== this.epoch) return;
           opened = true;
           socket.send(this.pack(init));
-          this.setState("live");
+          if (!this.awaitingStableFrame) this.setState("live");
           this.scheduleRender();
           resolve();
         };
@@ -344,6 +351,14 @@
       for (const dropped of decision.droppedFrames || []) closeFrame(dropped);
       if (decision.action === "draw") {
         const frame = decision.frame;
+        if (this.awaitingStableFrame && Number(frame.chunk || 0) < this.startupMinChunk) {
+          closeFrame(frame);
+          if (this.socket || this.decodeInProgress || this.decodeQueue.length || this.snapshot().queueFrames) {
+            this.scheduleRender();
+          }
+          return;
+        }
+        this.awaitingStableFrame = false;
         this.drawFrame(frame.image);
         this.renderSamples.push(now);
         this.renderSamples = this.renderSamples.filter((sample) => now - sample < 1000);
