@@ -24,6 +24,7 @@ CASES_PATH="${MINWM_THROUGHPUT_CASES_PATH:-${SCRIPT_DIR}/cases_720p_compile_smok
 THROUGHPUT_CASE="${MINWM_THROUGHPUT_CASE:-00_forward_080_pottery_720p}"
 SHM_ROOT="${MINWM_REALTIME_VAE_SHM_DIR:-/dev/shm/sglang-realtime-vae}"
 RESULT_ROOT="${MINWM_RESULTS_ROOT%/}/${MINWM_MATRIX_ID}"
+ARCHIVE_ROOT="${MINWM_ARCHIVE_ROOT:-}"
 SETUP_RUN="${MINWM_MATRIX_ID}-setup"
 MODEL_DIR="/work/minwm-realtime/${SETUP_RUN}/sglang-model"
 
@@ -88,6 +89,14 @@ done
 
 nvidia-smi -q > "${RESULT_ROOT}/${MINWM_MATRIX_ID}-nvidia-smi.txt"
 nvidia-smi topo -m > "${RESULT_ROOT}/${MINWM_MATRIX_ID}-topology.txt"
+nvidia-smi topo -p2p r > "${RESULT_ROOT}/${MINWM_MATRIX_ID}-p2p-read.txt" 2>&1 || true
+nvidia-smi topo -p2p w > "${RESULT_ROOT}/${MINWM_MATRIX_ID}-p2p-write.txt" 2>&1 || true
+lscpu -e=CPU,NODE,SOCKET,CORE,ONLINE > "${RESULT_ROOT}/${MINWM_MATRIX_ID}-cpu-numa.txt"
+python3 - <<'PY' > "${RESULT_ROOT}/${MINWM_MATRIX_ID}-software.json"
+import json, platform, torch
+print(json.dumps({"platform": platform.platform(), "python": platform.python_version(),
+                  "torch": torch.__version__, "cuda": torch.version.cuda}, sort_keys=True))
+PY
 {
   echo "matrix=${MINWM_MATRIX_ID}"
   echo "pod=${POD_NAME:-unknown}"
@@ -125,6 +134,14 @@ monitor_pid=""
 vae_pid=""
 mps_started=false
 
+persist_results() {
+  [[ -n "${ARCHIVE_ROOT}" ]] || return 0
+  local archive_dir="${ARCHIVE_ROOT%/}/${MINWM_MATRIX_ID}"
+  mkdir -p "${archive_dir}"
+  cp -a "${RESULT_ROOT}/." "${archive_dir}/"
+  date -Iseconds > "${archive_dir}/last-flush.txt"
+}
+
 stop_denoiser() {
   if [[ -n "${denoiser_pid}" ]]; then
     kill "${denoiser_pid}" 2>/dev/null || true
@@ -149,6 +166,7 @@ cleanup() {
     echo quit | nvidia-cuda-mps-control >/dev/null 2>&1 || true
     mps_started=false
   fi
+  persist_results || true
 }
 trap cleanup EXIT INT TERM
 
@@ -260,10 +278,13 @@ run_lane() {
   set -e
   stop_denoiser
   if (( status != 0 )); then
+    persist_results || true
     echo "MINWM_UNIFIED_EXACT_MATRIX_LANE_END lane=${profile} status=${status} timestamp=$(date -Iseconds)" >&2
     tail -300 "${lane_dir}/server.log" >&2
     return "${status}"
   fi
+  date -Iseconds > "${lane_dir}/COMPLETE"
+  persist_results
   echo "MINWM_UNIFIED_EXACT_MATRIX_LANE_END lane=${profile} status=0 timestamp=$(date -Iseconds)"
 }
 
@@ -414,6 +435,7 @@ summary = {
 (root / "summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
 print(json.dumps(summary, indent=2, sort_keys=True))
 PY
+persist_results
 
 if [[ "${target_met}" != "true" ]]; then
   echo "MINWM_UNIFIED_EXACT_TARGET_NOT_MET tested_sp=${SP_DEGREES} target=${TARGET_FPS}"

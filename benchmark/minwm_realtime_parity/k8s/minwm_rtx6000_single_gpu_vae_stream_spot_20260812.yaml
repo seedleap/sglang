@@ -7,7 +7,7 @@ metadata:
     seedleap.ai/task: minwm-rtx6000-vae-stream-overlap
 spec:
   limits:
-    nvidia.com/gpu: "1"
+    nvidia.com/gpu: "2"
   disruption:
     consolidationPolicy: WhenEmpty
     consolidateAfter: 2m
@@ -34,7 +34,7 @@ spec:
           values: [us-east-2a, us-east-2b]
         - key: node.kubernetes.io/instance-type
           operator: In
-          values: [g7e.4xlarge]
+          values: [g7e.12xlarge]
       taints:
         - key: seedleap.ai/capacity-pool
           value: minwm-rtx6000-vae-stream-spot
@@ -115,7 +115,6 @@ spec:
       nodeSelector:
         seedleap.ai/capacity-pool: minwm-rtx6000-vae-stream-spot
         karpenter.sh/capacity-type: spot
-        node.kubernetes.io/instance-type: g7e.4xlarge
       tolerations:
         - key: seedleap.ai/capacity-pool
           operator: Equal
@@ -139,8 +138,8 @@ spec:
             - {name: SGLANG_GIT_REF, value: *sglang_ref}
             - {name: MINWM_GIT_REF, value: *minwm_ref}
             - {name: MINWM_MATRIX_ID, value: minwm-rtx6000-vae-stream-20260812-01}
-            - {name: MINWM_EXPECTED_GPU_SUBSTRING, value: RTX PRO Server 6000}
-            - {name: MINWM_EXPECTED_GPU_COUNT, value: "1"}
+            - {name: MINWM_EXPECTED_GPU_SUBSTRING, value: RTX PRO 6000}
+            - {name: MINWM_EXPECTED_GPU_COUNT, value: "2"}
             - {name: MINWM_SP_DEGREES, value: "1"}
             - {name: MINWM_VAE_GPU_INDICES, value: "0"}
             - {name: MINWM_VAE_PARALLEL_SIZE, value: "1"}
@@ -151,8 +150,8 @@ spec:
             - {name: MINWM_TARGET_FPS, value: "0.1"}
             - {name: MINWM_THROUGHPUT_WARMUP_CHUNKS, value: "1"}
             - {name: MINWM_THROUGHPUT_MEASURED_CHUNKS, value: "68"}
-            - {name: MINWM_THROUGHPUT_CASES_PATH, value: /workspace/sglang/benchmark/minwm_realtime_parity/cases_720p_compile_smoke.json}
-            - {name: MINWM_THROUGHPUT_CASE, value: 00_forward_080_pottery_720p}
+            - {name: MINWM_THROUGHPUT_CASES_PATH, value: /workspace/sglang/benchmark/minwm_realtime_parity/cases_480p_compile_smoke.json}
+            - {name: MINWM_THROUGHPUT_CASE, value: 00_forward_080_pottery_480p}
             - {name: MINWM_STAGE_FROM_MOUNT, value: "1"}
             - {name: MINWM_CHECKPOINT_MOUNT_PATH, value: /s3/world-model/evals/minwm/checkpoint-staging/wan22-5B-stage3-dmd-8-0721-6a531f0e067/global_step_003200/ema_student/model.pt}
             - {name: MINWM_PRETRAINED_MOUNT_PATH, value: /s3/world-model/checkpoints/minWM/Wan2.2-TI2V-5B-from-diffusers}
@@ -164,7 +163,8 @@ spec:
             - {name: MINWM_CHECKPOINT_BYTES, value: "10007171771"}
             - {name: MINWM_CHECKPOINT_CRC64, value: I0IQ+p0pREI=}
             - {name: MINWM_PRETRAINED_S3, value: s3://leap-world-us-east-2/world-model/checkpoints/minWM/Wan2.2-TI2V-5B-from-diffusers}
-            - {name: MINWM_RESULTS_ROOT, value: /s3/world-model/evals/minwm/realtime-vae/20260812/rtx6000-stream-overlap}
+            - {name: MINWM_RESULTS_ROOT, value: /work/results}
+            - {name: MINWM_ARCHIVE_ROOT, value: /s3/world-model/evals/minwm/realtime-vae/20260813/rtx6000-stream-overlap}
           command:
             - /bin/bash
             - -lc
@@ -177,10 +177,10 @@ spec:
               }
               clone_at minWM /workspace/minWM "${MINWM_GIT_REF}"
               clone_at sglang /workspace/sglang "${SGLANG_GIT_REF}"
-              exec bash /workspace/sglang/benchmark/minwm_realtime_parity/run_rtx6000_vae_stream_matrix.sh
+              exec bash /workspace/sglang/benchmark/minwm_realtime_parity/run_unified_exact_vae_spot_matrix.sh
           resources:
-            requests: {cpu: "14", memory: 112Gi, nvidia.com/gpu: "1"}
-            limits: {cpu: "15", memory: 120Gi, nvidia.com/gpu: "1"}
+            requests: {cpu: "44", memory: 460Gi, nvidia.com/gpu: "2"}
+            limits: {cpu: "46", memory: 480Gi, nvidia.com/gpu: "2"}
           volumeMounts:
             - {name: s3, mountPath: /s3}
             - {name: work, mountPath: /work}
