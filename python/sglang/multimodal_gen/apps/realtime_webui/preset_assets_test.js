@@ -55,6 +55,26 @@ for (const name of assetNames) {
 
 assert.strictEqual(assetNames.length, 21);
 
+const featuredPresetMatch = appJs.match(
+  /const FEATURED_PRESET_NAMES = \[([\s\S]*?)\];/,
+);
+assert.ok(featuredPresetMatch, "featured preset ordering must be explicit");
+const featuredPresetNames = [
+  ...featuredPresetMatch[1].matchAll(/"([^"]+)"/g),
+].map((match) => match[1]);
+assert.deepStrictEqual(featuredPresetNames, [
+  "Misted Kingdom",
+  "Penguin Colony",
+  "Seaside Adventurer",
+  "Dragon Ride",
+  "Spring Valley",
+]);
+assert.match(
+  appJs,
+  /\.\.\.FEATURED_PRESET_NAMES\.map\([\s\S]*?\.\.\.reactorPresets\.filter/,
+  "featured presets must render before all remaining presets",
+);
+
 assert.ok(
   !appJs.includes("globalThis.LINGBOT_TESTSET_20_20260810"),
   "presets without packaged first-frame images must not be exposed",

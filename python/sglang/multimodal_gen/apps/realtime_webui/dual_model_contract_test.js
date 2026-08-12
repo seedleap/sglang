@@ -102,7 +102,7 @@ assert.match(
 );
 assert.match(html, /model_session\.js\?v=dual-model-v5/);
 assert.match(html, /dual_model_controller\.js\?v=dual-model-v3/);
-assert.match(html, /app\.js\?v=world-studio-v9/);
+assert.match(html, /app\.js\?v=world-studio-v10/);
 assert.doesNotMatch(
   app,
   /window\.location\.hostname === "localhost"/,

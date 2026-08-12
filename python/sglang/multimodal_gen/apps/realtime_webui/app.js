@@ -391,8 +391,19 @@ const examplePresets = [
   { name: "Kid A", tone: "accent", size: "832x480", fps: DEFAULT_TARGET_FPS, prompt: "A cold surreal mountain range with sharp icy peaks, black-red storm clouds, glacial light, slow lateral pan, abstract digital texture, uneasy atmospheric scale.", referenceUrl: `${PRESET_ASSET_BASE_URL}/artwork-kid-a.jpg`, source: "Radiohead Kid A artwork", mime: "image/jpeg" },
 ];
 
+const FEATURED_PRESET_NAMES = [
+  "Misted Kingdom",
+  "Penguin Colony",
+  "Seaside Adventurer",
+  "Dragon Ride",
+  "Spring Valley",
+];
+const featuredPresetNames = new Set(FEATURED_PRESET_NAMES);
 const presets = [
-  ...reactorPresets,
+  ...FEATURED_PRESET_NAMES.map((name) =>
+    reactorPresets.find((preset) => preset.name === name)
+  ),
+  ...reactorPresets.filter((preset) => !featuredPresetNames.has(preset.name)),
   ...examplePresets,
 ];
 
