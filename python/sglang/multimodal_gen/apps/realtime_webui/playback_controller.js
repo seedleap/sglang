@@ -290,8 +290,15 @@
       return this.queue.length;
     }
 
+    get playbackCadenceFps() {
+      if (this.mode === "smooth_timeline" && this.hasServerSample) {
+        return this.serverFps;
+      }
+      return this.sourceFps;
+    }
+
     get bufferDurationMs() {
-      return this.queue.length / Math.max(1, this.sourceFps) * 1000;
+      return this.queue.length / Math.max(1, this.playbackCadenceFps) * 1000;
     }
 
     get targetLeadMs() {
@@ -370,8 +377,15 @@
           )
         : (this.hasDeliverySample ? this.deliveryFps : this.targetFps);
       this.sourceFps = clamp(effectiveFps, this.config.minSourceFps, this.targetFps);
+      // Delivery gaps describe transport jitter, not the media duration of a chunk.
+      // Let server stats drive playback cadence whenever they are available.
       const shouldUpdateCadence =
-        !isDelivery || (finitePositive(durationMs) && durationMs >= this.latestChunkDurationMs);
+        !isDelivery ||
+        (
+          this.mode === "smooth_timeline"
+            ? !this.hasServerSample
+            : finitePositive(durationMs) && durationMs >= this.latestChunkDurationMs
+        );
       if (shouldUpdateCadence) {
         this.latestChunkFrames = Math.max(1, Number(frameCount || this.latestChunkFrames));
         this.latestChunkDurationMs = clamp(
@@ -452,7 +466,7 @@
       }
       if (this.mode === "smooth_timeline" && !this.queue.length) {
         this.playbackRate = 1;
-        this.renderFps = this.sourceFps;
+        this.renderFps = this.playbackCadenceFps;
         return;
       }
       const bufferMs = this.bufferDurationMs;
@@ -502,7 +516,7 @@
         );
       }
       this.lastRateUpdateAt = now;
-      const baseRenderFps = this.sourceFps;
+      const baseRenderFps = this.playbackCadenceFps;
       this.renderFps = clamp(
         baseRenderFps * this.playbackRate,
         this.config.minSourceFps,

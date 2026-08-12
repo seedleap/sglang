@@ -1237,6 +1237,8 @@ function renderModelTelemetry(key, stats = {}) {
   const prefix = key === "lingbot2" ? "lingbot2" : "minwm";
   const renderFps = Number(stats.renderFps || 0);
   const sourceFps = Number(stats.sourceFps || 0);
+  const serverFps = Number(stats.serverFps || sourceFps);
+  const deliveryFps = Number(stats.deliveryFps || sourceFps);
   const bufferMs = Number(stats.bufferMs || 0);
   const queueFrames = Number(stats.queueFrames ?? stats.queueLength ?? 0);
   const droppedFrames = Number(stats.droppedFrames || 0);
@@ -1247,7 +1249,7 @@ function renderModelTelemetry(key, stats = {}) {
   if (droppedFrames) bufferParts.push(`drop ${droppedFrames}`);
   $(`${prefix}ChunkText`).textContent = stats.lastChunk == null ? "-" : `#${stats.lastChunk}`;
   $(`${prefix}RateText`).textContent = totalFrames > 0
-    ? `${sourceFps.toFixed(1)} source · ${renderFps} render`
+    ? `${serverFps.toFixed(1)} source · ${deliveryFps.toFixed(1)} recv · ${renderFps} render`
     : "-";
   $(`${prefix}BufferText`).textContent = bufferParts.join(" · ");
   $(`${prefix}FramesText`).textContent = `${totalFrames} · ${(Number(stats.bytes || 0) / 1048576).toFixed(1)} MB`;

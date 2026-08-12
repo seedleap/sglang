@@ -578,6 +578,36 @@ function deliveryFpsCapsOptimisticServerFps() {
   assert.ok(snapshot.sourceFps < 7, `source fps ${snapshot.sourceFps}`);
 }
 
+function smoothTimelineDoesNotTurnDeliveryJitterIntoPlaybackSlowdown() {
+  const controller = new RealtimePlaybackController({
+    mode: "smooth_timeline",
+    targetFps: 24,
+    holdForTargetLead: true,
+  });
+  enqueueChunk(controller, {
+    chunk: 0,
+    frameCount: 16,
+    durationMs: 670,
+    now: 1000,
+    receivedAt: 1000,
+  });
+  enqueueChunk(controller, {
+    chunk: 1,
+    frameCount: 16,
+    durationMs: 670,
+    now: 3400,
+    receivedAt: 3400,
+  });
+
+  const snapshot = controller.snapshot();
+
+  assert.ok(snapshot.serverFps > 22, `server fps ${snapshot.serverFps}`);
+  assert.ok(snapshot.deliveryFps < 7, `delivery fps ${snapshot.deliveryFps}`);
+  assert.ok(snapshot.sourceFps < 7, `effective fps ${snapshot.sourceFps}`);
+  assert.ok(snapshot.bufferMs < 1600, `buffer ms ${snapshot.bufferMs}`);
+  assert.ok(snapshot.renderFps > 22, `render fps ${snapshot.renderFps}`);
+}
+
 function deliveryCadenceExpandsAdaptiveLeadWindow() {
   const controller = new RealtimePlaybackController({
     mode: "adaptive",
@@ -714,6 +744,7 @@ adaptiveModeCutsActiveInputWithoutOldFrameGrace();
 adaptiveModeDropsBufferedFramesForActiveInputCutover();
 adaptiveModeRendersCutoverFrameWithoutWaitingForBufferLead();
 deliveryFpsCapsOptimisticServerFps();
+smoothTimelineDoesNotTurnDeliveryJitterIntoPlaybackSlowdown();
 deliveryCadenceExpandsAdaptiveLeadWindow();
 switchingBackToLiveTrimsTimelineBacklog();
 lowLatencyModeFollowsMeasuredSourceInsteadOfDrainingAtTargetFps();
