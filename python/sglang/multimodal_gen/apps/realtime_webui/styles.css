@@ -1557,6 +1557,10 @@ body.world-studio {
 .world-studio .send-update svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.8; }
 .world-studio .send-update:hover:not(:disabled) { border-color: var(--ws-accent); background: var(--ws-accent); color: #09251d; transform: none; }
 .world-studio .prompt-helper { margin: 7px 0 0; color: var(--ws-muted); font-size: 9px; }
+.world-studio .prompt-helper[data-state="working"] { color: #a7cfc2; }
+.world-studio .prompt-helper[data-state="persistent"] { color: var(--ws-accent); }
+.world-studio .prompt-helper[data-state="one_time"] { color: #e7c58f; }
+.world-studio .prompt-helper[data-state="error"] { color: #f1aa9c; }
 
 .world-studio .session-notice { margin-bottom: 10px; border: 1px solid rgba(228, 134, 116, 0.32); border-radius: 10px; padding: 9px 12px; background: rgba(228, 134, 116, 0.08); color: #f1aa9c; font-size: 11px; text-align: center; }
 .world-studio .session-notice[hidden],

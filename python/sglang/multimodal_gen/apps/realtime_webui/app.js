@@ -601,6 +601,23 @@ const dualModelController = new DualModelController({
     },
   },
 });
+const promptRewriteController = new PromptRewriteController({
+  rewrite: rewriteRuntimePrompt,
+  sendPrompt: (prompt, metadata) => {
+    const eventId = sendEvent(
+      "prompt",
+      prompt,
+      metadata.phase === "restore"
+        ? "persistent prompt restored"
+        : `${metadata.changeType} prompt update`,
+    );
+    if (metadata.phase === "restore" && eventId) {
+      setPromptRewriteStatus("已恢复上一条持久指令", "persistent");
+    }
+    return eventId;
+  },
+  restoreDelayMs: 10000,
+});
 let sessionLifetimeExpired = false;
 let sessionCountdownTimer = 0;
 let sessionCountdownDeadlineMs = 0;
@@ -671,6 +688,7 @@ function isExperienceBusyError(error) {
 }
 
 function handleExperienceBusy() {
+  promptRewriteController.endSession();
   sessionLifetimeGuard.cancel();
   stopSessionCountdown();
   dualModelController.close("showcase session is occupied");
@@ -684,6 +702,7 @@ function handleExperienceBusy() {
 function expireSessionLifetime({ closeSessions = false } = {}) {
   if (sessionLifetimeExpired) return;
   sessionLifetimeExpired = true;
+  promptRewriteController.endSession();
   sessionLifetimeGuard.cancel();
   stopSessionCountdown();
   if (closeSessions) dualModelController.close("maximum session lifetime reached");
@@ -3553,6 +3572,7 @@ function abortCurrentSession(reason = "session closed by client", {
   keepConnectDisabled = false,
   resetControls = true,
 } = {}) {
+  promptRewriteController.endSession();
   recordTrajectoryEvent(expectedClose ? "session_close_requested" : "session_abort_requested", {
     reason,
     clear_frames: clearFrames,
@@ -3586,6 +3606,7 @@ function abortCurrentSession(reason = "session closed by client", {
 }
 
 function closeSession(reason = "session closed by client", clearFrames = true) {
+  promptRewriteController.endSession();
   sessionLifetimeGuard.cancel();
   stopSessionCountdown();
   clearQueueOnClose = clearFrames;
@@ -3610,6 +3631,8 @@ function waitForSocketClose(socket, timeoutMs = RECONNECT_CLOSE_TIMEOUT_MS) {
 }
 
 async function connect() {
+  promptRewriteController.endSession();
+  setPromptRewriteStatus("进入世界后可发送新指令", "");
   resetSessionLifetimeUi();
   $("connectBtn").disabled = true;
   setModelConnectionState("minwm", "connecting");
@@ -3685,6 +3708,7 @@ async function connect() {
           .join(" · ")}`,
       );
     }
+    promptRewriteController.beginSession(init.prompt);
     sessionLifetimeGuard.start();
     startSessionCountdown();
     setStatus("Live", "live");
@@ -4109,6 +4133,7 @@ async function applyPreset(preset, options = {}) {
   syncPlaybackTargetFps();
   await setPresetReference(preset);
   if (sendRuntimeEvents) {
+    promptRewriteController.beginSession(preset.prompt);
     sendEvent("prompt", preset.prompt, `prompt update · ${preset.name}`);
   }
   addHistory(`preset ${preset.name}`);
@@ -4682,16 +4707,59 @@ $("stopBtn").onclick = () => {
   setModelConnectionState("lingbot2", "closed");
 };
 
-function sendRuntimePromptUpdate() {
+function setPromptRewriteStatus(message, state = "") {
+  const status = $("promptRewriteStatus");
+  status.textContent = message;
+  if (state) status.dataset.state = state;
+  else delete status.dataset.state;
+}
+
+async function rewriteRuntimePrompt(payload) {
+  const response = await fetch("./api/prompt/rewrite", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  let result = null;
+  try {
+    result = await response.json();
+  } catch {
+    result = null;
+  }
+  if (!response.ok) {
+    throw new Error(result?.error || `prompt rewrite failed (${response.status})`);
+  }
+  return result;
+}
+
+let runtimePromptRewritePending = false;
+
+async function sendRuntimePromptUpdate() {
   const input = $("runtimePrompt");
   const prompt = input.value.trim();
   if (!prompt) {
     input.focus();
     return;
   }
-  const eventId = sendEvent("prompt", prompt);
-  if (eventId) {
+  if (runtimePromptRewritePending) return;
+  runtimePromptRewritePending = true;
+  $("sendPromptBtn").disabled = true;
+  setPromptRewriteStatus("正在理解并改写指令…", "working");
+  try {
+    const result = await promptRewriteController.submit(prompt);
+    if (result.ignored) return;
     input.value = "";
+    if (result.change_type === "one_time") {
+      setPromptRewriteStatus("已发送 · 一次性指令，10 秒后恢复持久状态", "one_time");
+    } else {
+      setPromptRewriteStatus("已发送 · 持久指令", "persistent");
+    }
+  } catch (error) {
+    setPromptRewriteStatus(error.message || "指令改写失败，请重试", "error");
+    addHistory(`prompt rewrite failed · ${error.message || error}`);
+  } finally {
+    runtimePromptRewritePending = false;
+    $("sendPromptBtn").disabled = false;
     input.focus();
   }
 }

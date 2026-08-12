@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>World Studio · 实时模型对比</title>
-    <link rel="stylesheet" href="./styles.css?v=world-studio-v2" />
+    <link rel="stylesheet" href="./styles.css?v=world-studio-v3" />
   </head>
   <body class="world-studio">
     <header class="app-header">
@@ -174,7 +174,7 @@
                   <span>LIVE DIRECTION</span>
                   <h3>世界过程中的新指令</h3>
                 </div>
-                <small>将同时发送至 Zing 与 LingBot2</small>
+                <small>AI 改写后同时发送至 Zing 与 LingBot2</small>
               </div>
               <div class="prompt-composer">
                 <textarea id="runtimePrompt" rows="2" placeholder="例如：向左转，靠近山谷中的城堡……"></textarea>
@@ -187,7 +187,7 @@
                   <span>发送更新</span>
                 </button>
               </div>
-              <p class="prompt-helper">支持文字或语音输入，Enter 发送，Shift + Enter 换行。</p>
+              <p id="promptRewriteStatus" class="prompt-helper" role="status" aria-live="polite">支持文字或语音输入，AI 将判断为持久或一次性指令。</p>
             </div>
 
             <div class="model-parameters-grid" aria-label="Model parameters" hidden>
@@ -264,9 +264,10 @@
     <script src="./model_session.js?v=dual-model-v5"></script>
     <script src="./dual_model_controller.js?v=dual-model-v3"></script>
     <script src="./session_lifetime.js?v=session-lifetime-v1"></script>
+    <script src="./prompt_rewrite_controller.js?v=prompt-rewrite-v1"></script>
     <script src="./fullscreen_controller.js?v=dual-fullscreen-v1"></script>
     <script src="./trace_topology.js?v=realtime-trace-topology-v6"></script>
     <script src="./trace_transport.js?v=realtime-trace-http-v2"></script>
-    <script src="./app.js?v=world-studio-v4"></script>
+    <script src="./app.js?v=world-studio-v5"></script>
   </body>
 </html>

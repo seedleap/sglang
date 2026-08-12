@@ -4,10 +4,13 @@
 
 import asyncio
 import json
+import logging
 import os
 from pathlib import Path
 
 from aiohttp import ClientSession, ClientTimeout, WSMsgType, web
+
+from prompt_rewriter import PromptRewriter
 
 
 ROOT = Path(__file__).resolve().parent
@@ -18,6 +21,7 @@ BACKEND_ENV_PREFIXES = {
     "lingbot2": "LINGBOT2",
 }
 SESSION = web.AppKey("upstream_session", ClientSession)
+PROMPT_REWRITER = web.AppKey("prompt_rewriter", PromptRewriter)
 HOP_BY_HOP_HEADERS = {
     "connection",
     "keep-alive",
@@ -59,6 +63,53 @@ async def _runtime_config(_request):
         content_type="application/javascript",
         headers={"Cache-Control": "no-store"},
     )
+
+
+async def _rewrite_prompt(request):
+    """Rewrite one Live Direction without exposing Vertex credentials."""
+
+    try:
+        body = await request.json()
+    except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as error:
+        raise web.HTTPBadRequest(
+            text=json.dumps({"error": "request body must be valid JSON"}),
+            content_type="application/json",
+        ) from error
+    if not isinstance(body, dict):
+        raise web.HTTPBadRequest(
+            text=json.dumps({"error": "request body must be a JSON object"}),
+            content_type="application/json",
+        )
+    instruction = str(body.get("instruction", "")).strip()
+    previous_prompt = str(body.get("previous_prompt", "")).strip()
+    if not instruction or not previous_prompt:
+        raise web.HTTPBadRequest(
+            text=json.dumps(
+                {"error": "instruction and previous_prompt are required"}
+            ),
+            content_type="application/json",
+        )
+    if len(instruction) > 2000 or len(previous_prompt) > 20000:
+        raise web.HTTPRequestEntityTooLarge(
+            max_size=22000,
+            actual_size=len(instruction) + len(previous_prompt),
+        )
+
+    rewriter = request.app[PROMPT_REWRITER]
+    if not rewriter.configured:
+        raise web.HTTPServiceUnavailable(
+            text=json.dumps({"error": "prompt rewriter is not configured"}),
+            content_type="application/json",
+        )
+    try:
+        result = await rewriter.rewrite(instruction, previous_prompt)
+    except Exception as error:
+        logging.exception("Live Direction prompt rewrite failed")
+        raise web.HTTPBadGateway(
+            text=json.dumps({"error": "prompt rewrite failed; please try again"}),
+            content_type="application/json",
+        ) from error
+    return web.json_response(result.model_dump(mode="json"))
 
 
 async def _proxy_http(request):
@@ -190,15 +241,22 @@ async def _proxy_backend_websocket(request):
 
 async def _session_context(app):
     app[SESSION] = ClientSession(timeout=ClientTimeout(total=None))
+    if app[PROMPT_REWRITER].configured:
+        try:
+            await app[PROMPT_REWRITER]._get_client()
+        except Exception:
+            logging.exception("Unable to initialize the Live Direction rewriter")
     yield
     await app[SESSION].close()
 
 
 def create_app():
     app = web.Application(client_max_size=1024**3)
+    app[PROMPT_REWRITER] = PromptRewriter()
     app.cleanup_ctx.append(_session_context)
     app.router.add_get("/", _index)
     app.router.add_get("/runtime-config.js", _runtime_config)
+    app.router.add_post("/api/prompt/rewrite", _rewrite_prompt)
     app.router.add_get(
         "/backends/{backend}/v1/realtime_video/generate",
         _proxy_backend_websocket,
