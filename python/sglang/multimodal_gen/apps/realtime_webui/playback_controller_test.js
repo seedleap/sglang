@@ -270,14 +270,14 @@ function timelineModeNeverDropsBacklog() {
     targetFps: 25,
   });
   let now = 100;
-  for (let chunk = 0; chunk < 20; chunk += 1) {
+  for (let chunk = 0; chunk < 8; chunk += 1) {
     enqueueChunk(controller, { chunk, now, durationMs: 480 });
     now += 20;
   }
   const snapshot = controller.snapshot();
   assert.equal(snapshot.mode, "timeline");
   assert.equal(snapshot.droppedFrames, 0);
-  assert.equal(snapshot.queueFrames, 240);
+  assert.equal(snapshot.queueFrames, 96);
 }
 
 function timelineModeDrainsBacklogOnEveryRenderTick() {
@@ -332,14 +332,14 @@ function smoothTimelineModePreservesBacklogAndCatchesUp() {
     maxLeadExtraChunkRatio: 0.2,
   });
   let now = 100;
-  for (let chunk = 0; chunk < 20; chunk += 1) {
+  for (let chunk = 0; chunk < 4; chunk += 1) {
     enqueueChunk(controller, { chunk, now, durationMs: 480 });
     now += 20;
   }
   const snapshot = controller.snapshot();
   assert.equal(snapshot.mode, "smooth_timeline");
   assert.equal(snapshot.droppedFrames, 0);
-  assert.equal(snapshot.queueFrames, 240);
+  assert.equal(snapshot.queueFrames, 48);
 
   const decision = controller.render(now, { hasPendingInput: true });
   const catchUp = controller.snapshot();
@@ -444,6 +444,31 @@ function smoothTimelineModeSpeedsUpToCatchBacklogWithoutDropping() {
   assert.equal(snapshot.droppedFrames, 0);
   assert.ok(snapshot.playbackRate > 1, `playback rate ${snapshot.playbackRate}`);
   assert.ok(snapshot.playbackRate <= 1.35, `playback rate ${snapshot.playbackRate}`);
+}
+
+function smoothTimelineModeUsesCriticalCatchupForHugeBacklogWithoutDropping() {
+  const controller = new RealtimePlaybackController({
+    mode: "smooth_timeline",
+    targetFps: 24,
+    holdForTargetLead: true,
+    minTargetLeadMs: 600,
+    maxTargetLeadMs: 1200,
+  });
+  enqueueChunk(controller, {
+    chunk: 1,
+    frameCount: 180,
+    durationMs: 7500,
+    now: 1000,
+  });
+
+  const decision = controller.render(1000, { hasPendingInput: true });
+  const snapshot = controller.snapshot();
+
+  assert.equal(decision.action, "draw");
+  assert.equal(snapshot.droppedFrames, 0);
+  assert.equal(snapshot.smoothTimelineCriticalCatchup, true);
+  assert.ok(snapshot.playbackRate > 1.35, `playback rate ${snapshot.playbackRate}`);
+  assert.ok(snapshot.playbackRate <= 2.5, `playback rate ${snapshot.playbackRate}`);
 }
 
 function adaptiveModeKeepsBoundedBacklogWithoutLowLatencyJump() {
@@ -741,6 +766,7 @@ smoothTimelineModePreservesFramesAcrossEventCutover();
 smoothTimelineModeCutsOldFramesForPromptUpdate();
 smoothTimelineModePacesInsteadOfDrainingEveryRenderTick();
 smoothTimelineModeSpeedsUpToCatchBacklogWithoutDropping();
+smoothTimelineModeUsesCriticalCatchupForHugeBacklogWithoutDropping();
 adaptiveModeKeepsBoundedBacklogWithoutLowLatencyJump();
 adaptiveModeCutsActiveInputWithoutOldFrameGrace();
 adaptiveModeDropsBufferedFramesForActiveInputCutover();

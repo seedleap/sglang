@@ -36,6 +36,10 @@
     smoothTimelineEmergencyReleaseMs: 900,
     smoothTimelineEmergencyPlaybackRateMax: 1.35,
     smoothTimelineEmergencyPlaybackRateSlewPerSecond: 0.7,
+    smoothTimelineCriticalLeadMs: 5000,
+    smoothTimelineCriticalReleaseMs: 1800,
+    smoothTimelineCriticalPlaybackRateMax: 2.5,
+    smoothTimelineCriticalPlaybackRateSlewPerSecond: 2.5,
     emergencyPlaybackRateMin: 0.86,
     emergencyPlaybackRateMax: 1.3,
     playbackRateSlewPerSecond: 0.35,
@@ -97,6 +101,7 @@
       this.lastFinalReceiveAt = 0;
       this.receiveStalled = false;
       this.smoothTimelineEmergencyCatchup = false;
+      this.smoothTimelineCriticalCatchup = false;
     }
 
     setMode(mode) {
@@ -346,6 +351,7 @@
         playbackRate: this.playbackRate,
         smoothTimelinePlaybackRateMax: this.config.smoothTimelinePlaybackRateMax,
         smoothTimelineEmergencyCatchup: this.smoothTimelineEmergencyCatchup,
+        smoothTimelineCriticalCatchup: this.smoothTimelineCriticalCatchup,
         droppedFrames: this.droppedFrames,
         lastDropAt: this.lastDropAt,
         lastDropCount: this.lastDropCount,
@@ -482,6 +488,18 @@
       const error = (bufferMs - targetLeadMs) / targetLeadMs;
       if (this.mode === "smooth_timeline") {
         if (
+          !this.smoothTimelineCriticalCatchup &&
+          bufferMs >= this.config.smoothTimelineCriticalLeadMs
+        ) {
+          this.smoothTimelineCriticalCatchup = true;
+          this.smoothTimelineEmergencyCatchup = true;
+        } else if (
+          this.smoothTimelineCriticalCatchup &&
+          bufferMs <= this.config.smoothTimelineCriticalReleaseMs
+        ) {
+          this.smoothTimelineCriticalCatchup = false;
+        }
+        if (
           !this.smoothTimelineEmergencyCatchup &&
           bufferMs >= this.config.smoothTimelineEmergencyLeadMs
         ) {
@@ -494,6 +512,7 @@
         }
       } else {
         this.smoothTimelineEmergencyCatchup = false;
+        this.smoothTimelineCriticalCatchup = false;
       }
       const emergency =
         bufferMs > this.maxLeadMs ||
@@ -509,7 +528,13 @@
           )
         : this.config.playbackRateMin;
       const maxRate = this.mode === "smooth_timeline"
-        ? this.smoothTimelineEmergencyCatchup
+        ? this.smoothTimelineCriticalCatchup
+          ? Math.max(
+              this.config.smoothTimelinePlaybackRateMax,
+              this.config.smoothTimelineEmergencyPlaybackRateMax,
+              this.config.smoothTimelineCriticalPlaybackRateMax,
+            )
+          : this.smoothTimelineEmergencyCatchup
           ? Math.max(
               this.config.smoothTimelinePlaybackRateMax,
               this.config.smoothTimelineEmergencyPlaybackRateMax,
@@ -536,7 +561,9 @@
         this.playbackRate = desiredRate;
       } else {
         const dtSeconds = Math.max(0.001, (now - this.lastRateUpdateAt) / 1000);
-        const slewPerSecond = this.mode === "smooth_timeline" && this.smoothTimelineEmergencyCatchup
+        const slewPerSecond = this.mode === "smooth_timeline" && this.smoothTimelineCriticalCatchup
+          ? this.config.smoothTimelineCriticalPlaybackRateSlewPerSecond
+          : this.mode === "smooth_timeline" && this.smoothTimelineEmergencyCatchup
           ? this.config.smoothTimelineEmergencyPlaybackRateSlewPerSecond
           : this.receiveStalled
           ? this.config.receiveStallPlaybackRateSlewPerSecond
