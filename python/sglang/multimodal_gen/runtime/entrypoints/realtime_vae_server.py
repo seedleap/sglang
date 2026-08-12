@@ -103,6 +103,9 @@ def create_app(
                 "decode_parallel_size": getattr(
                     worker.engine, "decode_parallel_size", 1
                 ),
+                "dedicated_cuda_stream": bool(
+                    getattr(worker.engine, "use_dedicated_cuda_stream", False)
+                ),
             }
         )
 
@@ -494,6 +497,14 @@ def _add_worker_cli_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--max-message-mb", type=int, default=64)
     parser.add_argument("--shared-memory-dir")
     parser.add_argument("--worker-epoch")
+    parser.add_argument(
+        "--dedicated-cuda-stream",
+        action="store_true",
+        help=(
+            "Run exact VAE decode/postprocess on a dedicated CUDA stream. "
+            "Opt-in; the default preserves the current stream behavior."
+        ),
+    )
 
 
 def _parse_worker_args(argv: list[str] | None):
@@ -635,7 +646,11 @@ def _run_worker(args, exact_server_args) -> None:
 
         set_global_server_args(exact_server_args)
         parallel_controller = _initialize_exact_parallel(exact_server_args)
-        engine = ExactCausalVAEEngine(exact_server_args, args.vae_path)
+        engine = ExactCausalVAEEngine(
+            exact_server_args,
+            args.vae_path,
+            use_dedicated_cuda_stream=args.dedicated_cuda_stream,
+        )
         if parallel_controller is not None:
             engine.set_decode_parallel_size(parallel_controller.world_size)
         max_sessions = 1

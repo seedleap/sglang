@@ -154,12 +154,14 @@ def test_unified_worker_cli_selects_one_exact_backend(monkeypatch):
             "MinWMCausalDMDPipeline",
             "--max-sessions",
             "1",
+            "--dedicated-cuda-stream",
         ]
     )
 
     assert worker_args.decoder_backend == "exact"
     assert worker_args.vae_path == "/models/minwm/vae"
     assert worker_args.max_sessions == 1
+    assert worker_args.dedicated_cuda_stream is True
     assert server_args is parsed_server_args
 
 

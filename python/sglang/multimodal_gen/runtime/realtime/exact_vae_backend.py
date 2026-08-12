@@ -126,7 +126,13 @@ class ExactCausalVAEEngine:
     # two identical model replicas and report healthy.
     _PARALLEL_WARMUP_SHAPE = (1, 48, 5, 44, 78)
 
-    def __init__(self, server_args: ServerArgs, vae_path: str) -> None:
+    def __init__(
+        self,
+        server_args: ServerArgs,
+        vae_path: str,
+        *,
+        use_dedicated_cuda_stream: bool = False,
+    ) -> None:
         self.server_args = server_args
         vae_config = getattr(server_args.pipeline_config, "vae_config", None)
         if CausalVaeDecodingStage._taehv_checkpoint_path(vae_config) is not None:
@@ -155,6 +161,12 @@ class ExactCausalVAEEngine:
         self._reset_causal_state = self.stage._get_causal_decode_reset_fn()
         self._parallel_driver: ExactVAEParallelController | None = None
         self.decode_parallel_size = 1
+        self.use_dedicated_cuda_stream = bool(use_dedicated_cuda_stream)
+        self._decode_stream = None
+        if self.use_dedicated_cuda_stream:
+            if not torch.cuda.is_available():
+                raise ValueError("dedicated exact VAE CUDA stream requires CUDA")
+            self._decode_stream = torch.cuda.Stream()
         logger.info("exact realtime VAE backend loaded %s", vae_path)
 
     def attach_parallel_driver(self, controller: ExactVAEParallelController) -> None:
@@ -229,16 +241,44 @@ class ExactCausalVAEEngine:
         *,
         first_chunk: bool,
     ) -> torch.Tensor:
+        if self._decode_stream is None:
+            return self._decode_and_postprocess(
+                decoder,
+                latents,
+                first_chunk=first_chunk,
+            )
+
+        if latents.device.type == "cuda":
+            producer_stream = torch.cuda.current_stream(latents.device)
+            self._decode_stream.wait_stream(producer_stream)
+        with torch.cuda.stream(self._decode_stream):
+            frames = self._decode_and_postprocess(
+                decoder,
+                latents,
+                first_chunk=first_chunk,
+            )
+            complete = torch.cuda.Event()
+            complete.record(self._decode_stream)
+        # The worker may hand the tensor to a CPU encoder thread immediately.
+        # Keep the synchronization boundary explicit instead of relying on an
+        # implicit default-stream or D2H synchronization.
+        complete.synchronize()
+        return frames
+
+    def _decode_and_postprocess(
+        self,
+        decoder: _ExactDecoder,
+        latents: torch.Tensor,
+        *,
+        first_chunk: bool,
+    ) -> torch.Tensor:
         frames = self.stage.decode_causal(
             latents,
             self.server_args,
             first_chunk=first_chunk,
             decode_state=decoder.decode_state,
         )
-        return self.server_args.pipeline_config.post_decoding(
-            frames,
-            self.server_args,
-        )
+        return self.server_args.pipeline_config.post_decoding(frames, self.server_args)
 
 
 @torch.no_grad()

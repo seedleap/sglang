@@ -1,0 +1,194 @@
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: minwm-rtx6000-vae-stream-spot
+  labels:
+    seedleap.ai/owner: chenshengdong
+    seedleap.ai/task: minwm-rtx6000-vae-stream-overlap
+spec:
+  limits:
+    nvidia.com/gpu: "1"
+  disruption:
+    consolidationPolicy: WhenEmpty
+    consolidateAfter: 2m
+  template:
+    metadata:
+      labels:
+        seedleap.ai/capacity-pool: minwm-rtx6000-vae-stream-spot
+        seedleap.ai/task: minwm-rtx6000-vae-stream-overlap
+    spec:
+      expireAfter: 5h
+      nodeClassRef:
+        group: karpenter.k8s.aws
+        kind: EC2NodeClass
+        name: ray-gpu-ec2-all
+      requirements:
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: [spot]
+        - key: kubernetes.io/arch
+          operator: In
+          values: [amd64]
+        - key: topology.kubernetes.io/zone
+          operator: In
+          values: [us-east-2a, us-east-2b]
+        - key: node.kubernetes.io/instance-type
+          operator: In
+          values: [g7e.4xlarge]
+      taints:
+        - key: seedleap.ai/capacity-pool
+          value: minwm-rtx6000-vae-stream-spot
+          effect: NoSchedule
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: minwm-rtx6000-vae-stream-device-plugin
+  namespace: kube-system
+  labels:
+    seedleap.ai/owner: chenshengdong
+    seedleap.ai/task: minwm-rtx6000-vae-stream-overlap
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: minwm-rtx6000-vae-stream-device-plugin
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: minwm-rtx6000-vae-stream-device-plugin
+    spec:
+      priorityClassName: system-node-critical
+      nodeSelector:
+        seedleap.ai/capacity-pool: minwm-rtx6000-vae-stream-spot
+      tolerations:
+        - key: seedleap.ai/capacity-pool
+          operator: Equal
+          value: minwm-rtx6000-vae-stream-spot
+          effect: NoSchedule
+      containers:
+        - name: nvidia-device-plugin
+          image: nvcr.io/nvidia/k8s-device-plugin:v0.19.1
+          args: [--fail-on-init-error=false]
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: device-plugins
+              mountPath: /var/lib/kubelet/device-plugins
+      volumes:
+        - name: device-plugins
+          hostPath:
+            path: /var/lib/kubelet/device-plugins
+            type: Directory
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: minwm-rtx6000-vae-stream-20260812-01
+  namespace: ray
+  labels:
+    app.kubernetes.io/name: minwm-rtx6000-vae-stream-20260812-01
+    seedleap.ai/owner: chenshengdong
+    seedleap.ai/task: minwm-rtx6000-vae-stream-overlap
+    seedleap.ai/run-id: minwm-rtx6000-vae-stream-20260812-01
+  annotations:
+    seedleap.ai/capacity-type: spot
+    seedleap.ai/repo: seedleap/sglang
+    seedleap.ai/sglang-git-ref: &sglang_ref REPLACE_WITH_PUSHED_COMMIT
+    seedleap.ai/minwm-git-ref: &minwm_ref 2efc6485f65e8fcab506665efde79bc41406385e
+    seedleap.ai/checkpoint-version-id: wduScksw2f3yPErnG9lBioOuE2AToyAP
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 18000
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: minwm-rtx6000-vae-stream-20260812-01
+        seedleap.ai/owner: chenshengdong
+        seedleap.ai/task: minwm-rtx6000-vae-stream-overlap
+        seedleap.ai/run-id: minwm-rtx6000-vae-stream-20260812-01
+    spec:
+      restartPolicy: Never
+      terminationGracePeriodSeconds: 90
+      nodeSelector:
+        seedleap.ai/capacity-pool: minwm-rtx6000-vae-stream-spot
+        karpenter.sh/capacity-type: spot
+        node.kubernetes.io/instance-type: g7e.4xlarge
+      tolerations:
+        - key: seedleap.ai/capacity-pool
+          operator: Equal
+          value: minwm-rtx6000-vae-stream-spot
+          effect: NoSchedule
+      containers:
+        - name: benchmark
+          image: 829115578968.dkr.ecr.us-east-2.amazonaws.com/leap-world/minwm-training@sha256:bedc07ea3ba55059a8c1c569c3b177c4d00d41f37d4fa9105375531534ef5f2a
+          imagePullPolicy: IfNotPresent
+          workingDir: /workspace
+          env:
+            - name: GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef: {name: github-token, key: token}
+            - name: POD_NAME
+              valueFrom:
+                fieldRef: {fieldPath: metadata.name}
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef: {fieldPath: spec.nodeName}
+            - {name: SGLANG_GIT_REF, value: *sglang_ref}
+            - {name: MINWM_GIT_REF, value: *minwm_ref}
+            - {name: MINWM_MATRIX_ID, value: minwm-rtx6000-vae-stream-20260812-01}
+            - {name: MINWM_EXPECTED_GPU_SUBSTRING, value: RTX PRO Server 6000}
+            - {name: MINWM_EXPECTED_GPU_COUNT, value: "1"}
+            - {name: MINWM_SP_DEGREES, value: "1"}
+            - {name: MINWM_VAE_GPU_INDICES, value: "0"}
+            - {name: MINWM_VAE_PARALLEL_SIZE, value: "1"}
+            - {name: MINWM_ALLOW_SHARED_VAE_GPU, value: "true"}
+            - {name: MINWM_DEDICATED_VAE_CUDA_STREAM, value: "true"}
+            - {name: MINWM_ENABLE_CUDA_MPS, value: "true"}
+            - {name: MINWM_MATRIX_REPETITIONS, value: "3"}
+            - {name: MINWM_TARGET_FPS, value: "0.1"}
+            - {name: MINWM_THROUGHPUT_WARMUP_CHUNKS, value: "1"}
+            - {name: MINWM_THROUGHPUT_MEASURED_CHUNKS, value: "68"}
+            - {name: MINWM_THROUGHPUT_CASES_PATH, value: /workspace/sglang/benchmark/minwm_realtime_parity/cases_720p_compile_smoke.json}
+            - {name: MINWM_THROUGHPUT_CASE, value: 00_forward_080_pottery_720p}
+            - {name: MINWM_STAGE_FROM_MOUNT, value: "1"}
+            - {name: MINWM_CHECKPOINT_MOUNT_PATH, value: /s3/world-model/evals/minwm/checkpoint-staging/wan22-5B-stage3-dmd-8-0721-6a531f0e067/global_step_003200/ema_student/model.pt}
+            - {name: MINWM_PRETRAINED_MOUNT_PATH, value: /s3/world-model/checkpoints/minWM/Wan2.2-TI2V-5B-from-diffusers}
+            - {name: MINWM_CHECKPOINT_S3_EAST, value: s3://leap-world-us-east-2/world-model/evals/minwm/checkpoint-staging/wan22-5B-stage3-dmd-8-0721-6a531f0e067/global_step_003200/ema_student/model.pt}
+            - {name: MINWM_CHECKPOINT_VERSION_EAST, value: wduScksw2f3yPErnG9lBioOuE2AToyAP}
+            - {name: MINWM_CHECKPOINT_SOURCE_URI, value: s3://leap-world-us-west-2/world-model/minwm/checkpoints/run-archive/rolling/Wan21/Action2V/dmd/wan22-5B-stage3-dmd-8-0721-6a531f0e067/global_step_003200/ema_student/model.pt}
+            - {name: MINWM_CHECKPOINT_SOURCE_VERSION, value: x.2zYaRRNzyqngI7O_cYSrsK3NvgPKKt}
+            - {name: MINWM_CHECKPOINT_SOURCE_ETAG, value: 5c29d614972e06fd0df859abfd1d6f4d-191}
+            - {name: MINWM_CHECKPOINT_BYTES, value: "10007171771"}
+            - {name: MINWM_CHECKPOINT_CRC64, value: I0IQ+p0pREI=}
+            - {name: MINWM_PRETRAINED_S3, value: s3://leap-world-us-east-2/world-model/checkpoints/minWM/Wan2.2-TI2V-5B-from-diffusers}
+            - {name: MINWM_RESULTS_ROOT, value: /s3/world-model/evals/minwm/realtime-vae/20260812/rtx6000-stream-overlap}
+          command:
+            - /bin/bash
+            - -lc
+            - |
+              set -euo pipefail
+              clone_at() {
+                git clone --no-checkout "https://x-access-token:${GITHUB_TOKEN}@github.com/seedleap/$1.git" "$2"
+                git -C "$2" checkout --detach "$3"
+                [[ "$(git -C "$2" rev-parse HEAD)" == "$3" ]]
+              }
+              clone_at minWM /workspace/minWM "${MINWM_GIT_REF}"
+              clone_at sglang /workspace/sglang "${SGLANG_GIT_REF}"
+              exec bash /workspace/sglang/benchmark/minwm_realtime_parity/run_rtx6000_vae_stream_matrix.sh
+          resources:
+            requests: {cpu: "14", memory: 112Gi, nvidia.com/gpu: "1"}
+            limits: {cpu: "15", memory: 120Gi, nvidia.com/gpu: "1"}
+          volumeMounts:
+            - {name: s3, mountPath: /s3}
+            - {name: work, mountPath: /work}
+            - {name: shm, mountPath: /dev/shm}
+      volumes:
+        - name: s3
+          persistentVolumeClaim: {claimName: s3-claim}
+        - name: work
+          emptyDir: {}
+        - name: shm
+          emptyDir: {medium: Memory, sizeLimit: 48Gi}

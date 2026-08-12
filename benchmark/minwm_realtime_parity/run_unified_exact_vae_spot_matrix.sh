@@ -13,6 +13,11 @@ PARITY_MIN_PSNR_DB="${MINWM_PARITY_MIN_PSNR_DB:-58}"
 SP_DEGREES="${MINWM_SP_DEGREES:-1 2 4}"
 VAE_GPU_INDICES="${MINWM_VAE_GPU_INDICES:-${MINWM_VAE_GPU_INDEX:-7}}"
 VAE_PARALLEL_SIZE="${MINWM_VAE_PARALLEL_SIZE:-1}"
+EXPECTED_GPU_COUNT="${MINWM_EXPECTED_GPU_COUNT:-8}"
+ALLOW_SHARED_VAE_GPU="${MINWM_ALLOW_SHARED_VAE_GPU:-false}"
+DEDICATED_VAE_CUDA_STREAM="${MINWM_DEDICATED_VAE_CUDA_STREAM:-false}"
+REPETITIONS="${MINWM_MATRIX_REPETITIONS:-1}"
+ENABLE_CUDA_MPS="${MINWM_ENABLE_CUDA_MPS:-false}"
 WARMUP_CHUNKS="${MINWM_THROUGHPUT_WARMUP_CHUNKS:-20}"
 MEASURED_CHUNKS="${MINWM_THROUGHPUT_MEASURED_CHUNKS:-200}"
 CASES_PATH="${MINWM_THROUGHPUT_CASES_PATH:-${SCRIPT_DIR}/cases_720p_compile_smoke.json}"
@@ -37,6 +42,10 @@ import sys
 if float(sys.argv[1]) <= 0:
     raise SystemExit("MINWM_TARGET_FPS must be positive")
 PY
+if ! [[ "${REPETITIONS}" =~ ^[1-9][0-9]*$ ]]; then
+  echo "MINWM_MATRIX_REPETITIONS must be a positive integer" >&2
+  exit 2
+fi
 
 read -r -a requested_degrees <<< "${SP_DEGREES}"
 if ! [[ "${VAE_PARALLEL_SIZE}" =~ ^[1-8]$ ]]; then
@@ -58,7 +67,7 @@ for degree in "${requested_degrees[@]}"; do
       echo "MINWM_VAE_GPU_INDICES must contain GPU indices 0 through 7" >&2
       exit 2
     fi
-    if (( vae_gpu_index < degree )); then
+    if [[ "${ALLOW_SHARED_VAE_GPU}" != "true" ]] && (( vae_gpu_index < degree )); then
       echo "SP${degree} overlaps reserved VAE GPU index ${vae_gpu_index}" >&2
       exit 2
     fi
@@ -66,8 +75,8 @@ for degree in "${requested_degrees[@]}"; do
 done
 
 mapfile -t gpu_names < <(nvidia-smi --query-gpu=name --format=csv,noheader)
-if (( ${#gpu_names[@]} != 8 )); then
-  echo "expected an isolated eight-GPU p5/p6 node, found ${#gpu_names[@]} GPUs" >&2
+if (( ${#gpu_names[@]} != EXPECTED_GPU_COUNT )); then
+  echo "expected an isolated ${EXPECTED_GPU_COUNT}-GPU node, found ${#gpu_names[@]} GPUs" >&2
   exit 1
 fi
 for gpu_name in "${gpu_names[@]}"; do
@@ -84,7 +93,7 @@ nvidia-smi topo -m > "${RESULT_ROOT}/${MINWM_MATRIX_ID}-topology.txt"
   echo "pod=${POD_NAME:-unknown}"
   echo "node=${NODE_NAME:-unknown}"
   echo "capacity=spot"
-  echo "gpu_request=8"
+  echo "gpu_request=${EXPECTED_GPU_COUNT}"
   echo "gpu_expected=${MINWM_EXPECTED_GPU_SUBSTRING}"
   echo "sglang=${SGLANG_GIT_REF:-unknown}"
   echo "minwm=${MINWM_GIT_REF:-unknown}"
@@ -92,6 +101,10 @@ nvidia-smi topo -m > "${RESULT_ROOT}/${MINWM_MATRIX_ID}-topology.txt"
   echo "sp_degrees=${SP_DEGREES}"
   echo "vae_gpu_indices=${VAE_GPU_INDICES}"
   echo "vae_parallel_size=${VAE_PARALLEL_SIZE}"
+  echo "allow_shared_vae_gpu=${ALLOW_SHARED_VAE_GPU}"
+  echo "dedicated_vae_cuda_stream=${DEDICATED_VAE_CUDA_STREAM}"
+  echo "cuda_mps=${ENABLE_CUDA_MPS}"
+  echo "repetitions=${REPETITIONS}"
   echo "warmup_chunks=${WARMUP_CHUNKS}"
   echo "measured_chunks=${MEASURED_CHUNKS}"
   echo "cases=${CASES_PATH}"
@@ -110,6 +123,7 @@ echo "MINWM_UNIFIED_EXACT_MATRIX_LANE_END lane=setup status=0 timestamp=$(date -
 denoiser_pid=""
 monitor_pid=""
 vae_pid=""
+mps_started=false
 
 stop_denoiser() {
   if [[ -n "${denoiser_pid}" ]]; then
@@ -131,8 +145,24 @@ cleanup() {
     wait "${vae_pid}" 2>/dev/null || true
     vae_pid=""
   fi
+  if [[ "${mps_started}" == "true" ]]; then
+    echo quit | nvidia-cuda-mps-control >/dev/null 2>&1 || true
+    mps_started=false
+  fi
 }
 trap cleanup EXIT INT TERM
+
+if [[ "${ENABLE_CUDA_MPS}" == "true" ]]; then
+  if ! command -v nvidia-cuda-mps-control >/dev/null; then
+    echo "MINWM_ENABLE_CUDA_MPS=true but nvidia-cuda-mps-control is unavailable" >&2
+    exit 1
+  fi
+  export CUDA_MPS_PIPE_DIRECTORY="${RESULT_ROOT}/mps-pipe"
+  export CUDA_MPS_LOG_DIRECTORY="${RESULT_ROOT}/mps-log"
+  mkdir -p "${CUDA_MPS_PIPE_DIRECTORY}" "${CUDA_MPS_LOG_DIRECTORY}"
+  nvidia-cuda-mps-control -d
+  mps_started=true
+fi
 
 wait_for_health() {
   local port="$1" pid="$2" log_path="$3"
@@ -237,12 +267,19 @@ run_lane() {
   echo "MINWM_UNIFIED_EXACT_MATRIX_LANE_END lane=${profile} status=0 timestamp=$(date -Iseconds)"
 }
 
-run_lane local 1 local-sp1
+run_lane local 1 local-sp1-warmup
+for repetition in $(seq 1 "${REPETITIONS}"); do
+  run_lane local 1 "local-sp1-r${repetition}"
+done
 
 vae_log="${RESULT_ROOT}/${MINWM_MATRIX_ID}-exact-vae-worker.log"
 vae_launcher=(python3)
 if (( VAE_PARALLEL_SIZE > 1 )); then
   vae_launcher=(torchrun --standalone --nproc-per-node "${VAE_PARALLEL_SIZE}")
+fi
+vae_stream_args=()
+if [[ "${DEDICATED_VAE_CUDA_STREAM}" == "true" ]]; then
+  vae_stream_args+=(--dedicated-cuda-stream)
 fi
 CUDA_VISIBLE_DEVICES="${VAE_GPU_INDICES}" \
 MINWM_NATIVE_COMPONENTS= \
@@ -263,6 +300,7 @@ PYTHONPATH=/workspace/sglang/python \
     --enable-torch-compile false \
     --warmup-mode off \
     --max-sessions 1 \
+    "${vae_stream_args[@]}" \
     --shared-memory-dir "${SHM_ROOT}" \
     --host 127.0.0.1 \
     --port 31000 \
@@ -290,13 +328,15 @@ for degree in "${requested_degrees[@]}"; do
   profile="exact-remote-sp${degree}"
   curl --fail --silent http://127.0.0.1:31000/metrics \
     > "${RESULT_ROOT}/${profile}-vae-metrics-before.prom"
-  run_lane remote "${degree}" "${profile}"
+  for repetition in $(seq 1 "${REPETITIONS}"); do
+    run_lane remote "${degree}" "${profile}-r${repetition}"
+  done
   curl --fail --silent http://127.0.0.1:31000/metrics \
     > "${RESULT_ROOT}/${profile}-vae-metrics-after.prom"
   if [[ "${degree}" == "1" ]]; then
     python3 "${SCRIPT_DIR}/compare_realtime_vae_outputs.py" \
-      "${RESULT_ROOT}/local-sp1/throughput.json" \
-      "${RESULT_ROOT}/${profile}/throughput.json" \
+      "${RESULT_ROOT}/local-sp1-r1/throughput.json" \
+      "${RESULT_ROOT}/${profile}-r1/throughput.json" \
       "${RESULT_ROOT}/local-vs-remote-sp1-parity.json" \
       --max-absolute-error "${PARITY_MAX_ABSOLUTE_ERROR}" \
       --min-psnr-db "${PARITY_MIN_PSNR_DB}"
@@ -309,12 +349,19 @@ print("true" if summary["numerical_parity"] else "false")
 PY
 )"
   fi
-  fps="$(python3 - "${RESULT_ROOT}/${profile}/throughput.json" <<'PY'
+  fps="$(python3 - "${RESULT_ROOT}" "${profile}" "${REPETITIONS}" <<'PY'
 import json
+import statistics
 import sys
+from pathlib import Path
 
-result = json.load(open(sys.argv[1]))
-print(result["client"]["steady_received_fps_ratio_of_sums"])
+root = Path(sys.argv[1])
+values = [
+    json.loads((root / f"{sys.argv[2]}-r{i}" / "throughput.json").read_text())
+    ["client"]["steady_received_fps_ratio_of_sums"]
+    for i in range(1, int(sys.argv[3]) + 1)
+]
+print(statistics.median(values))
 PY
 )"
   if python3 - "${fps}" "${TARGET_FPS}" <<'PY'
