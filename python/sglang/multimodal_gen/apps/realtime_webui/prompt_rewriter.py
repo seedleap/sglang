@@ -11,7 +11,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import re
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -68,20 +67,6 @@ Resolve all contradictions. Do not preserve a trait that the requested change re
 Set change_type=persistent for a continuing state edit: environment, weather, time, lighting, viewpoint, composition, subject identity/type/appearance, clothing, equipment, style, layout, or another stable visual state. Set change_type=one_time for a transient shot action/event: summoning, casting or releasing a skill, attacking, jumping, exploding, or transforming as an action beat. Summons and skill releases are always one_time even when visible throughout this shot. Choose exactly one type."""
 
 
-_FORBIDDEN_PROCESS_WORDS = re.compile(
-    r"\b(reference|source|previous|original|input|instruction)\b",
-    flags=re.IGNORECASE,
-)
-_PROCESS_WORD_REPLACEMENTS = {
-    "reference": "depicted",
-    "source": "origin",
-    "previous": "prior",
-    "original": "established",
-    "input": "provided",
-    "instruction": "request",
-}
-
-
 def build_user_message(previous_prompt: str, instruction: str) -> str:
     """Build a clearly delimited model input without altering either value."""
 
@@ -111,36 +96,14 @@ def _extract_payload(response: Any) -> Any:
 
 def _validate_output(payload: Any) -> PromptRewriteOutput:
     if isinstance(payload, PromptRewriteOutput):
-        result = payload
+        return payload
     elif isinstance(payload, BaseModel):
-        result = PromptRewriteOutput.model_validate(payload.model_dump())
+        return PromptRewriteOutput.model_validate(payload.model_dump())
     elif isinstance(payload, (bytes, bytearray)):
-        result = PromptRewriteOutput.model_validate_json(payload.decode("utf-8"))
+        return PromptRewriteOutput.model_validate_json(payload.decode("utf-8"))
     elif isinstance(payload, str):
-        result = PromptRewriteOutput.model_validate_json(payload)
-    else:
-        result = PromptRewriteOutput.model_validate(payload)
-    forbidden = sorted(
-        {
-            match.group(0).lower()
-            for match in _FORBIDDEN_PROCESS_WORDS.finditer(result.prompt)
-        }
-    )
-    if forbidden:
-        raise ValueError(
-            "remove these process-oriented words: " + ", ".join(forbidden)
-        )
-    return result
-
-
-def _remove_forbidden_process_words(result: PromptRewriteOutput) -> PromptRewriteOutput:
-    """Apply a narrow final repair when Gemini uses a forbidden transition word."""
-
-    prompt = _FORBIDDEN_PROCESS_WORDS.sub(
-        lambda match: _PROCESS_WORD_REPLACEMENTS[match.group(0).lower()],
-        result.prompt,
-    )
-    return result.model_copy(update={"prompt": prompt})
+        return PromptRewriteOutput.model_validate_json(payload)
+    return PromptRewriteOutput.model_validate(payload)
 
 
 class PromptRewriter:
@@ -228,61 +191,47 @@ class PromptRewriter:
     async def rewrite(
         self, instruction: str, previous_prompt: str
     ) -> PromptRewriteOutput:
-        """Rewrite one instruction, retrying only invalid/failed model output."""
+        """Rewrite once, retrying only malformed structured model output."""
 
         from google.genai import types
 
         client = await self._get_client()
         user_message = build_user_message(previous_prompt, instruction)
         attempt_message = user_message
-        last_error: Exception | None = None
         for _attempt in range(1, self.max_attempts + 1):
-            try:
-                response = await asyncio.wait_for(
-                    client.aio.models.generate_content(
-                        model=self.model,
-                        contents=[attempt_message],
-                        config=types.GenerateContentConfig(
-                            system_instruction=SYSTEM_PROMPT,
-                            temperature=0.1,
-                            max_output_tokens=1024,
-                            response_mime_type="application/json",
-                            response_json_schema=PromptRewriteOutput.model_json_schema(),
-                            thinking_config=types.ThinkingConfig(
-                                thinking_budget=0,
-                                include_thoughts=False,
-                            ),
+            # API failures and timeouts are latency-sensitive failures: surface them
+            # immediately instead of silently paying for another model call.
+            response = await asyncio.wait_for(
+                client.aio.models.generate_content(
+                    model=self.model,
+                    contents=[attempt_message],
+                    config=types.GenerateContentConfig(
+                        system_instruction=SYSTEM_PROMPT,
+                        temperature=0.1,
+                        max_output_tokens=1024,
+                        response_mime_type="application/json",
+                        response_json_schema=PromptRewriteOutput.model_json_schema(),
+                        thinking_config=types.ThinkingConfig(
+                            thinking_budget=0,
+                            include_thoughts=False,
                         ),
                     ),
-                    timeout=self.request_timeout_seconds,
-                )
-                payload = _extract_payload(response)
-                try:
-                    return _validate_output(payload)
-                except ValueError:
-                    if _attempt == self.max_attempts:
-                        if isinstance(payload, PromptRewriteOutput):
-                            result = payload
-                        elif isinstance(payload, BaseModel):
-                            result = PromptRewriteOutput.model_validate(
-                                payload.model_dump()
-                            )
-                        elif isinstance(payload, str):
-                            result = PromptRewriteOutput.model_validate_json(payload)
-                        else:
-                            result = PromptRewriteOutput.model_validate(payload)
-                        return _validate_output(
-                            _remove_forbidden_process_words(result)
-                        )
-                    raise
-            except Exception as exc:  # SDK exception types change between releases.
-                last_error = exc
+                ),
+                timeout=self.request_timeout_seconds,
+            )
+            try:
+                return _validate_output(_extract_payload(response))
+            except (TypeError, ValueError) as exc:
+                if _attempt == self.max_attempts:
+                    raise RuntimeError(
+                        "Gemini returned invalid structured output after "
+                        f"{self.max_attempts} attempt(s)"
+                    ) from exc
                 attempt_message = (
                     user_message
-                    + "\n\nQUALITY CORRECTION FOR THE NEXT ATTEMPT:\n"
+                    + "\n\nSTRUCTURE CORRECTION FOR THE NEXT ATTEMPT:\n"
                     + str(exc)
-                    + "\nRewrite the complete prompt and correct every listed issue."
+                    + "\nReturn valid JSON with exactly prompt and change_type. "
+                    + "change_type must be persistent or one_time."
                 )
-        raise RuntimeError(
-            f"Gemini prompt rewrite failed after {self.max_attempts} attempt(s)"
-        ) from last_error
+        raise AssertionError("unreachable")
