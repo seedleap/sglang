@@ -520,6 +520,7 @@ const lingbot2Session = new RealtimeModelSession({
   unpack,
   workerUrl: DECODER_WORKER_URL,
   onState: (state, details) => {
+    setModelConnectionState("lingbot2", state);
     if (state === "error") {
       addHistory(`LingBot2 error · ${details.message || details.reason || "unknown"}`);
     }
@@ -687,6 +688,21 @@ function expireSessionLifetime({ closeSessions = false } = {}) {
 function setStatus(text, kind = "") {
   $("statusText").textContent = text;
   $("statusDot").className = "dot" + (kind ? ` ${kind}` : "");
+}
+
+function setModelConnectionState(key, state) {
+  const root = document.querySelector(`[data-model-key="${key}"]`);
+  if (root) root.dataset.sessionState = state;
+  const label = document.getElementById(`${key}ConnectionText`);
+  if (!label) return;
+  label.textContent = {
+    connecting: "连接中",
+    live: "已连接",
+    unavailable: "不可用",
+    error: "连接异常",
+    closed: "已断开",
+    idle: "待连接",
+  }[state] || "待连接";
 }
 
 function setPreviewState(state) {
@@ -3457,7 +3473,7 @@ function drawReferencePreviewFromImageSource(src, label) {
   const preview = $("referencePreview");
   const previewCtx = preview.getContext("2d", { alpha: false });
   selectedReferencePreviewReady = false;
-  previewCtx.fillStyle = "#e5e7df";
+  previewCtx.fillStyle = "#101515";
   previewCtx.fillRect(0, 0, preview.width, preview.height);
   $("referenceName").textContent = label;
   const img = new Image();
@@ -3467,6 +3483,7 @@ function drawReferencePreviewFromImageSource(src, label) {
     previewCtx.fillRect(0, 0, preview.width, preview.height);
     previewCtx.drawImage(img, (preview.width - w) / 2, (preview.height - h) / 2, w, h);
     selectedReferencePreviewReady = true;
+    drawVisibleReferencePlaceholders();
     if (src.startsWith("blob:")) URL.revokeObjectURL(src);
   };
   img.onerror = () => {
@@ -3570,6 +3587,8 @@ function waitForSocketClose(socket, timeoutMs = RECONNECT_CLOSE_TIMEOUT_MS) {
 async function connect() {
   resetSessionLifetimeUi();
   $("connectBtn").disabled = true;
+  setModelConnectionState("minwm", "connecting");
+  setModelConnectionState("lingbot2", "connecting");
   setStatus("Preparing");
   setPreviewState("waiting");
   addHistory("preparing session");
@@ -3602,6 +3621,8 @@ async function connect() {
       drawVisibleReferencePlaceholders();
       firstFrame = await readFirstFrame();
       if (!firstFrame) {
+        setModelConnectionState("minwm", "idle");
+        setModelConnectionState("lingbot2", "idle");
         setStatus("Pick a reference", "error");
         setPreviewState("idle");
         addHistory("reference image required for I2V");
@@ -3646,6 +3667,7 @@ async function connect() {
     sessionLifetimeGuard.cancel();
     stopSessionCountdown();
     $("connectBtn").disabled = false;
+    setModelConnectionState("minwm", "error");
     setStatus("Init failed", "error");
     if (!renderedPreviewFrames) setPreviewState("idle");
     addHistory(error.message || "init failed");
@@ -3667,6 +3689,7 @@ function openPrimarySession(init, url) {
     socket.onopen = () => {
       if (epoch !== streamEpoch) return;
       opened = true;
+      setModelConnectionState("minwm", "live");
       markClientTrace("client.ws_open", { url });
       recordTrajectoryEvent("socket_open", { url });
       const initPayload = pack(init);
@@ -3705,6 +3728,7 @@ function openPrimarySession(init, url) {
       const reason = event.reason ? ` · ${event.reason}` : "";
       const closeText = `Zing socket closed code=${event.code}${reason}`;
       const normalClose = event.code === 1000 || event.code === 1001;
+      setModelConnectionState("minwm", normalClose ? "closed" : "error");
       if (socketServerError) {
         setStatus("Server closed", "error");
         addHistory(`${closeText} · ${socketServerError}`);
@@ -3735,6 +3759,7 @@ function openPrimarySession(init, url) {
       markClientTrace("client.ws_error");
       recordTrajectoryEvent("socket_error", { backend: "minwm", ready_state: socket.readyState });
       if (!socketCloseExpected) {
+        setModelConnectionState("minwm", "error");
         socketHadError = true;
         $("connectBtn").disabled = false;
       }
@@ -4046,6 +4071,11 @@ async function applyPreset(preset, options = {}) {
   const sendRuntimeEvents = options.sendRuntimeEvents
     ?? Boolean(ws && ws.readyState === WebSocket.OPEN);
   selectedPreset = preset;
+  document.querySelectorAll(".preset").forEach((button) => {
+    const selected = button.dataset.presetName === preset.name;
+    button.classList.toggle("is-selected", selected);
+    button.setAttribute("aria-pressed", selected ? "true" : "false");
+  });
   $("prompt").value = preset.prompt;
   modelControl("minwm", "fps").value = UI_CONFIG.targetFps == null
     ? preset.fps
@@ -4384,6 +4414,9 @@ function renderPresets() {
   presets.forEach((preset) => {
     const btn = document.createElement("button");
     btn.className = "preset";
+    btn.type = "button";
+    btn.dataset.presetName = preset.name;
+    btn.setAttribute("aria-pressed", "false");
     btn.dataset.tone = preset.tone;
     const thumb = document.createElement("img");
     thumb.className = "preset-thumb";
@@ -4392,9 +4425,23 @@ function renderPresets() {
     thumb.loading = "lazy";
     thumb.onerror = () => thumb.replaceWith(createPresetThumbFallback(preset));
     const title = document.createElement("b");
-    title.textContent = preset.name;
+    title.textContent = ({
+      "Dragon Ride": "山谷飞龙",
+      "Misted Kingdom": "雾谷骑行",
+      "Storm Crossing": "风暴航行",
+      "Citadel Approach": "峡谷越野",
+      "Spring Valley": "春日山谷",
+      "Reef Patrol": "珊瑚巡游",
+      "Alpine Run": "高山漂流",
+      "Ice Kayak": "冰湖泛舟",
+      "Penguin Colony": "企鹅冰原",
+      "Mars Mountain": "火星远征",
+      "Seaside Adventurer": "海岸冒险",
+      "Roman Chariot": "罗马战车",
+      "Asylum Corridor": "废墟走廊",
+    })[preset.name] || preset.name;
     const meta = document.createElement("span");
-    meta.textContent = `${preset.source} · ${preset.size} · ${preset.fps}fps`;
+    meta.textContent = "点击选择这个世界";
     btn.append(thumb, title, meta);
     btn.onclick = () => applyPreset(preset).catch(showError);
     $("presetList").appendChild(btn);
@@ -4599,8 +4646,96 @@ renderTraceTopology();
 updateRecordButton();
 updateRecordFolderButton();
 $("connectBtn").onclick = connect;
-$("stopBtn").onclick = () => closeSession();
-$("sendPromptBtn").onclick = () => sendEvent("prompt", $("prompt").value);
+$("stopBtn").onclick = () => {
+  closeSession();
+  setModelConnectionState("minwm", "closed");
+  setModelConnectionState("lingbot2", "closed");
+};
+
+function sendRuntimePromptUpdate() {
+  const input = $("runtimePrompt");
+  const prompt = input.value.trim();
+  if (!prompt) {
+    input.focus();
+    return;
+  }
+  const eventId = sendEvent("prompt", prompt);
+  if (eventId) {
+    input.value = "";
+    input.focus();
+  }
+}
+
+$("sendPromptBtn").onclick = sendRuntimePromptUpdate;
+$("runtimePrompt").addEventListener("keydown", (event) => {
+  if (event.key !== "Enter" || event.shiftKey || event.isComposing) return;
+  event.preventDefault();
+  sendRuntimePromptUpdate();
+});
+
+function setupVoicePromptInput() {
+  const button = $("voicePromptBtn");
+  const status = $("voicePromptStatus");
+  const input = $("runtimePrompt");
+  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SpeechRecognition) {
+    button.disabled = true;
+    button.title = "当前浏览器不支持语音输入";
+    status.textContent = "暂不支持";
+    return;
+  }
+
+  const recognition = new SpeechRecognition();
+  recognition.lang = "zh-CN";
+  recognition.continuous = false;
+  recognition.interimResults = true;
+  let listening = false;
+  let prefix = "";
+
+  function setListening(next) {
+    listening = next;
+    button.classList.toggle("is-listening", next);
+    button.setAttribute("aria-pressed", next ? "true" : "false");
+    status.textContent = next ? "正在聆听" : "点击说话";
+  }
+
+  recognition.onstart = () => {
+    prefix = input.value.trim();
+    setListening(true);
+  };
+  recognition.onresult = (event) => {
+    let transcript = "";
+    for (let index = 0; index < event.results.length; index += 1) {
+      transcript += event.results[index][0]?.transcript || "";
+    }
+    const spacer = prefix && transcript ? " " : "";
+    input.value = `${prefix}${spacer}${transcript}`.trimStart();
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  };
+  recognition.onerror = (event) => {
+    setListening(false);
+    if (event.error !== "aborted" && event.error !== "no-speech") {
+      status.textContent = "请重试";
+      window.setTimeout(() => {
+        if (!listening) status.textContent = "点击说话";
+      }, 1600);
+    }
+  };
+  recognition.onend = () => {
+    setListening(false);
+    input.focus();
+  };
+  button.onclick = () => {
+    try {
+      if (listening) recognition.stop();
+      else recognition.start();
+    } catch (error) {
+      status.textContent = "请重试";
+    }
+  };
+}
+
+setupVoicePromptInput();
 $("enhanceBtn").onclick = enhancePrompt;
 $("recordBtn").onclick = () => {
   if (recordingActive) {

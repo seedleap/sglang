@@ -102,13 +102,20 @@ assert.match(
 );
 assert.match(html, /model_session\.js\?v=dual-model-v4/);
 assert.match(html, /dual_model_controller\.js\?v=dual-model-v3/);
-assert.match(html, /app\.js\?v=realtime-production-gateway-v29/);
+assert.match(html, /app\.js\?v=world-studio-v1/);
 assert.match(html, /fullscreen_controller\.js\?v=dual-fullscreen-v1/);
 assert.match(
   html,
   /assets\/presets\/lingbot_testset_20_20260810\/presets\.js\?v=20260810/,
   "the reviewed 20-case LingBot preset catalog should load before app.js",
 );
+assert.match(html, /id="runtimePrompt"/, "runtime prompt updates should use a dedicated composer");
+assert.match(html, /id="voicePromptBtn"/, "runtime prompt composer should expose voice input");
+assert.match(html, /data-action="w"[^>]*>W<\/button>/, "movement controls should use compact keycaps");
+assert.match(html, /data-action="i"[^>]*>I<\/button>/, "look controls should use compact keycaps");
+assert.match(app, /function sendRuntimePromptUpdate\(\)/);
+assert.match(app, /window\.SpeechRecognition \|\| window\.webkitSpeechRecognition/);
+assert.match(app, /recognition\.lang = "zh-CN"/);
 
 const server = fs.readFileSync(path.join(root, "server.py"), "utf8");
 assert.match(app, /const connectionReport = await dualModelController\.connect\(init\)/);

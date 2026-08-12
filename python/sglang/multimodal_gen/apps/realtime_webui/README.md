@@ -23,6 +23,13 @@ The interface shape follows camera-control-first video playgrounds such as
 Reactor LingBot: reference image, scene prompt, enhancement, clip controls,
 move/look camera controls, recordings history, and model telemetry.
 
+The dual-model root page is presented as **World Studio**: visitors choose a
+world or upload a first frame, provide the initial world description, and
+compare Zing with LingBot2 side by side. Model and transport parameters remain
+in hidden compatibility controls and use deployment defaults. During a live
+world, a separate text/voice composer sends prompt updates to both models, and
+the compact WASD/IJKL keycaps retain the existing shared camera-action path.
+
 ## I2V and T2V
 
 Deployments opt in to the mode selector through runtime config:
