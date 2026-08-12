@@ -55,23 +55,8 @@ for (const name of assetNames) {
 
 assert.strictEqual(assetNames.length, 21);
 
-const testsetModule = path.join(root, "assets", "presets", "lingbot_testset_20_20260810", "presets.js");
-assert.ok(fs.existsSync(testsetModule), "the 20260810 LingBot testset preset module should be packaged");
-const testsetPresets = require(testsetModule);
-assert.strictEqual(testsetPresets.length, 20, "the complete 20-case LingBot testset should be available");
-for (const preset of testsetPresets) {
-  assert.match(preset.id, /^lingbot-testset-20260810-case-\d{2}$/);
-  assert.ok(preset.prompt.length > 80, `${preset.id} should include its complete prompt`);
-  assert.strictEqual(preset.size, "1280x704");
-  assert.strictEqual(preset.fps, 24);
-  assert.match(preset.referenceUrl, /^\.\/assets\/presets\/lingbot_testset_20_20260810\/images\//);
-  const imageName = path.basename(preset.referenceUrl);
-  const imagePath = path.join(path.dirname(testsetModule), "images", imageName);
-  assert.ok(fs.existsSync(imagePath), `${preset.id} image should be packaged with the WebUI`);
-  assert.ok(fs.statSync(imagePath).size > 0, `${preset.id} image should not be empty`);
-}
 assert.ok(
-  appJs.includes("globalThis.LINGBOT_TESTSET_20_20260810"),
-  "app.js should append the packaged LingBot testset presets",
+  !appJs.includes("globalThis.LINGBOT_TESTSET_20_20260810"),
+  "presets without packaged first-frame images must not be exposed",
 );
 console.log("preset asset contract checks passed");

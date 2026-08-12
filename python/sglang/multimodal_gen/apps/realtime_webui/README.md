@@ -29,6 +29,12 @@ compare Zing with LingBot2 side by side. Model and transport parameters remain
 in hidden compatibility controls and use deployment defaults. During a live
 world, a separate text/voice composer sends prompt updates to both models, and
 the compact WASD/IJKL keycaps retain the existing shared camera-action path.
+Only presets with packaged first-frame images are shown in the world list;
+metadata-only test cases are deliberately excluded from the visitor UI.
+
+For the isolated live dual-model preview, run `./run_live_dual.sh` and open
+`http://127.0.0.1:18083/`. Override `REALTIME_DUAL_GATEWAY_HTTP` and
+`REALTIME_DUAL_GATEWAY_WS` when the deployment owner rotates the gateway URL.
 
 ## I2V and T2V
 

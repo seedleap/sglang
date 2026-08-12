@@ -102,12 +102,17 @@ assert.match(
 );
 assert.match(html, /model_session\.js\?v=dual-model-v4/);
 assert.match(html, /dual_model_controller\.js\?v=dual-model-v3/);
-assert.match(html, /app\.js\?v=world-studio-v1/);
+assert.match(html, /app\.js\?v=world-studio-v2/);
+assert.doesNotMatch(
+  app,
+  /window\.location\.hostname === "localhost"/,
+  "localhost previews should use the same-origin dual-backend proxy",
+);
 assert.match(html, /fullscreen_controller\.js\?v=dual-fullscreen-v1/);
-assert.match(
+assert.doesNotMatch(
   html,
   /assets\/presets\/lingbot_testset_20_20260810\/presets\.js\?v=20260810/,
-  "the reviewed 20-case LingBot preset catalog should load before app.js",
+  "metadata-only presets without first-frame images should stay out of the visitor UI",
 );
 assert.match(html, /id="runtimePrompt"/, "runtime prompt updates should use a dedicated composer");
 assert.match(html, /id="voicePromptBtn"/, "runtime prompt composer should expose voice input");

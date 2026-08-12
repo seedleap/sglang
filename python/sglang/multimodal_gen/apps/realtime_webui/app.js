@@ -386,7 +386,6 @@ const examplePresets = [
 const presets = [
   ...reactorPresets,
   ...examplePresets,
-  ...(globalThis.LINGBOT_TESTSET_20_20260810 || []),
 ];
 
 let ws = null;
@@ -4134,9 +4133,6 @@ function modelsUrlFromServerUrl(serverUrl) {
 
 function realtimeServerUrlFromLocation() {
   if (!window.location.host) return "";
-  if (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1") {
-    return "";
-  }
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
   return `${protocol}//${window.location.host}/backends/minwm/v1/realtime_video/generate`;
 }
