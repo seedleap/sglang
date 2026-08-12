@@ -72,6 +72,14 @@ def test_h100_pool_uses_one_fully_utilized_eight_gpu_node():
     assert requirement_values(packed, "node.kubernetes.io/instance-type") == [
         "p5.48xlarge"
     ]
+    assert requirement_values(single, "karpenter.sh/capacity-type") == [
+        "spot",
+        "on-demand",
+    ]
+    assert requirement_values(packed, "karpenter.sh/capacity-type") == [
+        "spot",
+        "on-demand",
+    ]
     assert requirement_values(packed, "topology.kubernetes.io/zone") == [
         "us-east-2a",
         "us-east-2b",
@@ -81,10 +89,7 @@ def test_h100_pool_uses_one_fully_utilized_eight_gpu_node():
     assert int(packed["spec"]["limits"]["cpu"]) >= 192
     assert deployment["spec"]["replicas"] == "REPLACE_WITH_DENOISER_BASE_REPLICAS"
     selector = deployment["spec"]["template"]["spec"]["nodeSelector"]
-    assert selector == {
-        "karpenter.sh/nodepool": "REPLACE_WITH_DENOISER_NODEPOOL",
-        "karpenter.sh/capacity-type": "spot",
-    }
+    assert selector == {"karpenter.sh/nodepool": "REPLACE_WITH_DENOISER_NODEPOOL"}
     denoiser = _container(deployment, "denoiser")
     command = " ".join(denoiser["args"])
     assert denoiser["resources"]["requests"]["nvidia.com/gpu"] == "2"
@@ -185,6 +190,10 @@ def test_tianpeng_direct_api_is_sp2_without_session_timeout():
     heartbeat = " ".join(_init_container(workload, "denoiser-heartbeat")["args"])
 
     assert workload["spec"]["replicas"] == 1
+    assert workload["spec"]["updateStrategy"]["type"] == "OnDelete"
+    assert workload["spec"]["template"]["spec"]["nodeSelector"] == {
+        "karpenter.sh/nodepool": "minwm-async-denoiser-h100-8x"
+    }
     assert denoiser["resources"]["requests"]["nvidia.com/gpu"] == "2"
     assert "--num-gpus 2" in command
     assert "--sp-degree 2" in command
@@ -211,6 +220,10 @@ def test_lingbot_denoiser_is_coordinator_managed_sp4_with_remote_vae():
     heartbeat = " ".join(_init_container(workload, "denoiser-heartbeat")["args"])
 
     assert workload["spec"]["replicas"] == 1
+    assert workload["spec"]["updateStrategy"]["type"] == "OnDelete"
+    assert workload["spec"]["template"]["spec"]["nodeSelector"] == {
+        "karpenter.sh/nodepool": "minwm-async-denoiser-h100-8x"
+    }
     assert denoiser["resources"]["requests"]["nvidia.com/gpu"] == 4
     assert denoiser["resources"]["limits"]["nvidia.com/gpu"] == 4
     assert "--num-gpus 4" in command

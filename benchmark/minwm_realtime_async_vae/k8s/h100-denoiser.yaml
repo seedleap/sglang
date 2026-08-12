@@ -30,7 +30,7 @@ spec:
       requirements:
         - key: karpenter.sh/capacity-type
           operator: In
-          values: [spot]
+          values: [spot, on-demand]
         - key: kubernetes.io/arch
           operator: In
           values: [amd64]
@@ -74,7 +74,7 @@ spec:
       requirements:
         - key: karpenter.sh/capacity-type
           operator: In
-          values: [spot]
+          values: [spot, on-demand]
         - key: kubernetes.io/arch
           operator: In
           values: [amd64]
@@ -137,7 +137,6 @@ spec:
       terminationGracePeriodSeconds: 90
       nodeSelector:
         karpenter.sh/nodepool: REPLACE_WITH_DENOISER_NODEPOOL
-        karpenter.sh/capacity-type: spot
       tolerations:
         - key: nvidia.com/gpu
           operator: Equal

@@ -3,15 +3,16 @@
 本目录是可重复部署的生产链路，不是直连 Denoiser 的验证拓扑：
 
 ```text
-NLB -> Gateway CPU Pool -> Coordinator CPU Pool -> H100 Spot Denoiser
+NLB -> Gateway CPU Pool -> Coordinator CPU Pool -> H100 Denoiser
                                              \-> L4 Spot TAEHV
 TAEHV -> owning Gateway -> Browser
 ```
 
 Gateway 和 Coordinator 各至少两个跨 AZ CPU Pod。Coordinator 使用 DynamoDB
 On-Demand 保存短期用户、Session 和 Worker slot Lease；GPU KV、latent history 和
-TAEHV context 只保存在绑定 Worker 本地。H100 与 L4 使用独立 Spot NodePool，并可独立
-缩容到 0。L4 不满足延迟门禁时，使用不在 base kustomization 中的 `l40s-vae.yaml`。
+TAEHV context 只保存在绑定 Worker 本地。H100 NodePool 优先使用 Spot，并允许
+On-Demand 作为容量兜底；L4 使用独立 Spot/On-Demand NodePool，并可独立缩容到 0。
+L4 不满足延迟门禁时，使用不在 base kustomization 中的 `l40s-vae.yaml`。
 
 当前模型的生产准入上限为 `4 Session/H100`，8 个 H100 Worker 共 32 个
 Denoiser slot。Coordinator 会按 Worker 的有效占用率、队列深度和服务耗时选择 slot，

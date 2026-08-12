@@ -58,8 +58,14 @@ def validate(documents: list[dict]) -> None:
     denoiser = find(documents, "NodePool", "minwm-async-denoiser-h100")
     denoiser_8x = find(documents, "NodePool", "minwm-async-denoiser-h100-8x")
     vae = find(documents, "NodePool", "minwm-async-vae-l4")
-    assert requirement_values(denoiser, "karpenter.sh/capacity-type") == ["spot"]
-    assert requirement_values(denoiser_8x, "karpenter.sh/capacity-type") == ["spot"]
+    assert requirement_values(denoiser, "karpenter.sh/capacity-type") == [
+        "spot",
+        "on-demand",
+    ]
+    assert requirement_values(denoiser_8x, "karpenter.sh/capacity-type") == [
+        "spot",
+        "on-demand",
+    ]
     assert requirement_values(vae, "karpenter.sh/capacity-type") == [
         "spot",
         "on-demand",
@@ -132,7 +138,7 @@ def validate(documents: list[dict]) -> None:
 
 def main() -> None:
     validate(load_documents())
-    print("MinWM async-VAE manifests satisfy Spot, quota, and cleanup policies.")
+    print("MinWM async-VAE manifests satisfy capacity, quota, and cleanup policies.")
 
 
 if __name__ == "__main__":

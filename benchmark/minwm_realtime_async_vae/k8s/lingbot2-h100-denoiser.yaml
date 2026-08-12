@@ -30,7 +30,7 @@ spec:
   serviceName: lingbot2-async-denoiser-headless
   podManagementPolicy: Parallel
   updateStrategy:
-    type: RollingUpdate
+    type: OnDelete
   selector:
     matchLabels:
       app.kubernetes.io/name: lingbot2-async-denoiser
@@ -46,7 +46,6 @@ spec:
       terminationGracePeriodSeconds: 90
       nodeSelector:
         karpenter.sh/nodepool: minwm-async-denoiser-h100-8x
-        karpenter.sh/capacity-type: spot
       tolerations:
         - key: nvidia.com/gpu
           operator: Equal
