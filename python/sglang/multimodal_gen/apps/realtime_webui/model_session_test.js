@@ -205,6 +205,53 @@ async function main() {
   });
   assert.equal(other.snapshot().queueFrames, 0, "model playback queues remain independent");
 
+  const stableCanvas = fakeCanvas();
+  const stableScheduled = [];
+  const stableStates = [];
+  const stable = new RealtimeModelSession({
+    key: "lingbot2-stable-start",
+    canvas: stableCanvas,
+    pack: (value) => value,
+    unpack: (value) => value,
+    WebSocketCtor: FakeSocket,
+    PlaybackController: FakePlaybackController,
+    startupMinChunk: 1,
+    decodeBatch: async (header) => [{
+      image: { width: 640, height: 360, close() {} },
+      chunk: header.chunk_index,
+      receivedAt: 100,
+      decodeMs: 2,
+    }],
+    requestFrame: (callback) => stableScheduled.push(callback),
+    now: () => 125,
+    onState: (state) => stableStates.push(state),
+  });
+  const stableConnecting = stable.connect({ type: "init", trace_id: "trace:stable" }, "/stable");
+  const stableSocket = FakeSocket.instances.at(-1);
+  stableSocket.open();
+  await stableConnecting;
+  assert.ok(!stableStates.includes("live"), "stable-start sessions wait for a post-warmup chunk");
+  stableSocket.message({
+    type: "frame_batch",
+    chunk_index: 0,
+    num_frames: 1,
+    payload: new Uint8Array([1]),
+  });
+  await flush();
+  stableScheduled.shift()(130);
+  assert.equal(stableCanvas.draws.length, 0, "warmup chunk zero should not flash on screen");
+  stableSocket.message({
+    type: "frame_batch",
+    chunk_index: 1,
+    num_frames: 1,
+    payload: new Uint8Array([2]),
+  });
+  await flush();
+  stableScheduled.shift()(140);
+  assert.equal(stableCanvas.draws.length, 1, "the first stable chunk should render");
+  assert.ok(stableStates.includes("live"), "the stable frame should mark the session live");
+  stable.close();
+
   session.setUnavailable("T2V unavailable");
   assert.equal(replacementSocket.readyState, FakeSocket.CLOSED);
   assert.ok(states.includes("unavailable"), "disabled model should expose an unavailable state");

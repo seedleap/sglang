@@ -108,8 +108,13 @@ assert.match(
 );
 assert.match(
   indexHtml,
-  /<option value="smooth_timeline" selected>Smooth timeline \(catch-up, no skip\)<\/option>/,
-  "webui should default to the no-skip catch-up timeline mode for smoother playback",
+  /<option value="live" selected>Low latency \(may skip\)<\/option>/,
+  "the interactive showcase should default to low-latency playback",
+);
+assert.match(
+  indexHtml,
+  /<option value="smooth_timeline">Smooth timeline \(catch-up, no skip\)<\/option>/,
+  "the no-skip timeline should remain available for non-interactive review",
 );
 assert.match(
   appJs,
@@ -188,8 +193,13 @@ assert.match(
 );
 assert.match(
   appJs,
-  /smoothTimelinePlaybackRateMax:\s*2\.5/,
-  "smooth timeline should catch up quickly without dropping old backlog",
+  /smoothTimelinePlaybackRateMax:\s*DEFAULT_SMOOTH_CATCHUP_RATE/,
+  "smooth timeline should use the production-configured bounded catch-up rate",
+);
+assert.match(
+  appJs,
+  /configuredNumber\("smoothCatchupRateMax",\s*1\.1\)/,
+  "production playback should default to the stable 1.1x catch-up limit",
 );
 assert.match(
   appJs,

@@ -35,6 +35,10 @@ metadata-only test cases are deliberately excluded from the visitor UI.
 For the isolated live dual-model preview, run `./run_live_dual.sh` and open
 `http://127.0.0.1:18083/`. Override `REALTIME_DUAL_GATEWAY_HTTP` and
 `REALTIME_DUAL_GATEWAY_WS` when the deployment owner rotates the gateway URL.
+The local page connects its video WebSockets directly to that gateway so frame
+traffic does not take an additional Python relay hop.
+The World Studio presentation defaults both players to low-latency playback,
+discarding stale backlog so camera and prompt updates remain responsive.
 
 ## I2V and T2V
 

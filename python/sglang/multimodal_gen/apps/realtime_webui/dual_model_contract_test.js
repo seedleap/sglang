@@ -100,9 +100,9 @@ assert.match(
   /\.stage:fullscreen \.model-parameters-grid,[\s\S]*?\.stage:fullscreen \.session-notice\s*\{[\s\S]*?display:\s*none/,
   "fullscreen must hide model parameters and notices while preserving both videos",
 );
-assert.match(html, /model_session\.js\?v=dual-model-v4/);
+assert.match(html, /model_session\.js\?v=dual-model-v5/);
 assert.match(html, /dual_model_controller\.js\?v=dual-model-v3/);
-assert.match(html, /app\.js\?v=world-studio-v2/);
+assert.match(html, /app\.js\?v=world-studio-v3/);
 assert.doesNotMatch(
   app,
   /window\.location\.hostname === "localhost"/,

@@ -50,6 +50,10 @@ const DEFAULT_PREVIEW_MAX_WIDTH = configuredNumber("previewMaxWidth", 832);
 const MAX_AUTO_PREVIEW_WIDTH = configuredNumber("maxAutoPreviewWidth", 1280);
 const DEFAULT_FRAME_INTERPOLATION_EXP = 1;
 const DEFAULT_FRAME_INTERPOLATION_SCALE = 1.0;
+const DEFAULT_SMOOTH_CATCHUP_RATE = Math.min(
+  2.5,
+  Math.max(1, configuredNumber("smoothCatchupRateMax", 1.1)),
+);
 const DEFAULT_UPSCALING_SCALE = 2;
 const DEFAULT_UPSCALING_MODEL =
   "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesr-general-x4v3.pth";
@@ -501,7 +505,7 @@ const playbackController = new RealtimePlaybackController({
   maxTargetLeadMs: 900,
   lowLatencyMaxLeadFrames: 12,
   smoothTimelinePlaybackRateMin: 0.85,
-  smoothTimelinePlaybackRateMax: 2.5,
+  smoothTimelinePlaybackRateMax: DEFAULT_SMOOTH_CATCHUP_RATE,
   startLeadChunkRatio: 0.55,
   minStartLeadMs: 260,
   resumeLeadChunkRatio: 0.55,
@@ -518,6 +522,7 @@ const lingbot2Session = new RealtimeModelSession({
   pack,
   unpack,
   workerUrl: DECODER_WORKER_URL,
+  startupMinChunk: 1,
   onState: (state, details) => {
     setModelConnectionState("lingbot2", state);
     if (state === "error") {
@@ -1287,6 +1292,23 @@ function syncPlaybackTargetFps() {
   playbackController.setTargetFps(previewPlaybackTargetFps("minwm"));
   lingbot2Session.configure({ targetFps: previewPlaybackTargetFps("lingbot2") });
   updateStats();
+}
+
+function syncSmoothCatchupRate() {
+  const rate = Math.min(2.5, Math.max(1, Number($("smoothCatchupRate").value) || 1.1));
+  $("smoothCatchupRate").value = String(rate);
+  $("smoothCatchupRateText").textContent = `${rate.toFixed(2)}x`;
+  playbackController.setSmoothTimelinePlaybackRateMax(rate);
+  lingbot2Session.configure({ smoothTimelinePlaybackRateMax: rate });
+}
+
+function syncZingFrameInterpolation({ fromTopbar = true } = {}) {
+  const topbar = $("zingFrameInterpolation");
+  const requestControl = modelControl("minwm", "frameInterpolation");
+  if (fromTopbar) requestControl.checked = topbar.checked;
+  else topbar.checked = requestControl.checked;
+  tunePreviewQualityForPostprocess("minwm");
+  syncPlaybackTargetFps();
 }
 
 function selectedPlaybackMode(key = "minwm") {
@@ -4473,6 +4495,7 @@ async function applyQueryParams() {
   const playbackParam = params.get("playback");
   const srParam = params.get("sr");
   const smoothParam = params.get("smooth");
+  const catchupParam = Number(params.get("catchup"));
   for (const key of ["minwm", "lingbot2"]) {
     modelControl(key, "transportFormat").value = params.get("transport") || DEFAULT_PREVIEW_OUTPUT_FORMAT;
     modelControl(key, "transportQuality").value = params.get("quality") || String(DEFAULT_PREVIEW_OUTPUT_QUALITY);
@@ -4491,6 +4514,13 @@ async function applyQueryParams() {
     tunePreviewQualityForPostprocess(key);
     updateSuperResolutionControls(key);
   }
+  $("smoothCatchupRate").value = String(
+    Number.isFinite(catchupParam) && catchupParam > 0
+      ? catchupParam
+      : DEFAULT_SMOOTH_CATCHUP_RATE,
+  );
+  syncSmoothCatchupRate();
+  syncZingFrameInterpolation({ fromTopbar: false });
   setPreviewScale(params.get("preview_scale") || params.get("zoom"));
   syncPlaybackTargetFps();
   syncPlaybackMode({ addToHistory: false });
@@ -4766,11 +4796,16 @@ for (const key of ["minwm", "lingbot2"]) {
     if (key === "minwm") updateOutputSizeText();
   });
   modelControl(key, "frameInterpolation").addEventListener("change", () => {
+    if (key === "minwm") syncZingFrameInterpolation({ fromTopbar: false });
     tunePreviewQualityForPostprocess(key);
     syncPlaybackTargetFps();
   });
 }
 $("previewScale").addEventListener("input", () => setPreviewScale($("previewScale").value));
+$("smoothCatchupRate").addEventListener("input", syncSmoothCatchupRate);
+$("zingFrameInterpolation").addEventListener("change", () => {
+  syncZingFrameInterpolation({ fromTopbar: true });
+});
 canvas.addEventListener("pointerdown", () => canvas.focus({ preventScroll: true }));
 lingbot2Canvas.addEventListener("pointerdown", () => canvas.focus({ preventScroll: true }));
 $("serverUrl").addEventListener("change", () => {

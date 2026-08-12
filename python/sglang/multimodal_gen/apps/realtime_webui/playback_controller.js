@@ -31,7 +31,7 @@
     playbackRateMin: 0.92,
     playbackRateMax: 1.12,
     smoothTimelinePlaybackRateMin: 0.85,
-    smoothTimelinePlaybackRateMax: 2.5,
+    smoothTimelinePlaybackRateMax: 1.1,
     emergencyPlaybackRateMin: 0.86,
     emergencyPlaybackRateMax: 1.3,
     playbackRateSlewPerSecond: 0.35,
@@ -115,6 +115,16 @@
         this.renderFps = this.sourceFps * this.playbackRate;
       }
       this.latestChunkDurationMs = Math.max(this.latestChunkDurationMs, 1000 / this.targetFps);
+    }
+
+    setSmoothTimelinePlaybackRateMax(rate) {
+      const nextRate = clamp(Number(rate) || 1.1, 1, 2.5);
+      this.config.smoothTimelinePlaybackRateMax = nextRate;
+      if (this.mode === "smooth_timeline") {
+        this.playbackRate = Math.min(this.playbackRate, nextRate);
+        this.#updatePlaybackRate(this.lastRateUpdateAt || 0);
+      }
+      return this.snapshot();
     }
 
     clear() {
@@ -320,6 +330,7 @@
         targetFps: this.targetFps,
         renderFps: this.renderFps,
         playbackRate: this.playbackRate,
+        smoothTimelinePlaybackRateMax: this.config.smoothTimelinePlaybackRateMax,
         droppedFrames: this.droppedFrames,
         lastDropAt: this.lastDropAt,
         lastDropCount: this.lastDropCount,
