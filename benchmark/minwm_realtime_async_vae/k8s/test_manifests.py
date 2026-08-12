@@ -218,7 +218,7 @@ def test_lingbot_denoiser_is_coordinator_managed_sp4_with_remote_vae():
     assert "--ulysses-degree 4" in command
     assert "--ring-degree 1" in command
     assert "--realtime-remote-vae-enabled" in command
-    assert "--realtime-session-max-lifetime-s 45" in command
+    assert "--realtime-session-max-lifetime-s 90" in command
     lingbot_env = {
         item["name"]: item.get("value") for item in denoiser.get("env", [])
     }
@@ -332,7 +332,7 @@ def test_denoiser_enables_dynamic_remote_vae_handoff_without_a_static_worker_url
     assert "--realtime-vae-worker-url" not in command
 
 
-def test_realtime_sessions_have_a_45_second_hard_lifetime():
+def test_realtime_sessions_have_a_90_second_hard_lifetime():
     workload = find(
         load_documents(("h100-denoiser.yaml",)),
         "StatefulSet",
@@ -340,7 +340,7 @@ def test_realtime_sessions_have_a_45_second_hard_lifetime():
     )
     command = " ".join(_container(workload, "denoiser")["args"])
 
-    assert "--realtime-session-max-lifetime-s 45" in command
+    assert "--realtime-session-max-lifetime-s 90" in command
 
 
 def test_public_gateway_uses_the_new_zing_lingbot_domain_service():
@@ -384,6 +384,7 @@ def test_webui_enables_i2v_and_t2v_in_production_manifest():
 
     assert '"generationModes":["i2v","t2v"]' in env["REALTIME_UI_CONFIG_JSON"]
     assert '"t2vDefaultNumFrames":121' in env["REALTIME_UI_CONFIG_JSON"]
+    assert '"sessionMaxLifetimeSeconds":90' in env["REALTIME_UI_CONFIG_JSON"]
     assert env["AWS_REGION"] == "REPLACE_WITH_AWS_REGION"
     assert env["AWS_DEFAULT_REGION"] == "REPLACE_WITH_AWS_REGION"
 

@@ -180,7 +180,7 @@ spec:
             - {name: MODEL_REVISION, value: wan22-5b-stage3-dmd-30-gs1800}
             - {name: VAE_FINGERPRINT, value: taew2_2-d053e216}
             - name: REALTIME_UI_CONFIG_JSON
-              value: '{"generationModes":["i2v","t2v"],"defaultGenerationMode":"i2v","t2vFrameStep":4,"t2vDefaultNumFrames":121}'
+              value: '{"generationModes":["i2v","t2v"],"defaultGenerationMode":"i2v","t2vFrameStep":4,"t2vDefaultNumFrames":121,"sessionMaxLifetimeSeconds":90}'
           ports:
             - name: http
               containerPort: 18080
@@ -264,7 +264,7 @@ spec:
             - {name: MODEL_REVISION, value: wan22-5b-stage3-dmd-30-gs1800}
             - {name: REALTIME_MAX_SESSIONS, value: "4"}
             - name: REALTIME_UI_CONFIG_JSON
-              value: '{"generationModes":["i2v","t2v"],"defaultGenerationMode":"i2v","t2vFrameStep":4,"t2vDefaultNumFrames":121}'
+              value: '{"generationModes":["i2v","t2v"],"defaultGenerationMode":"i2v","t2vFrameStep":4,"t2vDefaultNumFrames":121,"sessionMaxLifetimeSeconds":90}'
             - {name: MINWM_MODEL, value: /work/model}
             - {name: TAEHV_CHECKPOINT_PATH, value: /opt/taehv/taew2_2.pth}
             - {name: MINWM_ATTENTION_IMPL, value: packed}
@@ -293,7 +293,7 @@ spec:
                 --realtime-max-sessions-per-worker "${REALTIME_MAX_SESSIONS}" \
                 --realtime-remote-vae-enabled \
                 --realtime-session-idle-timeout-s 60 \
-                --realtime-session-max-lifetime-s 45 \
+                --realtime-session-max-lifetime-s 90 \
                 --realtime-admission-wait-s 10 \
                 --realtime-causal-sink-size 8 \
                 --realtime-causal-kv-cache-num-frames 32 \

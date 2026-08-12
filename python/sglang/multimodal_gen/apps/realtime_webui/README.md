@@ -39,6 +39,9 @@ The local page connects its video WebSockets directly to that gateway so frame
 traffic does not take an additional Python relay hop.
 The World Studio presentation defaults both players to low-latency playback,
 discarding stale backlog so camera and prompt updates remain responsive.
+The showcase session lifetime is provided by the hidden
+`sessionMaxLifetimeSeconds` runtime setting; the live dual-model launcher uses
+90 seconds, and both model workloads must use the same hard lifetime.
 
 ## I2V and T2V
 

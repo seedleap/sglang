@@ -22,8 +22,8 @@ assert.match(
 );
 assert.match(
   appJs,
-  /当前正有人体验，请等待45s/,
-  "a second showcase visitor should receive the product-facing busy message",
+  /当前正有人体验，请等待\$\{SESSION_MAX_LIFETIME_SECONDS\}s/,
+  "the product-facing busy message should follow the configured session lifetime",
 );
 assert.match(
   appJs,
@@ -47,9 +47,15 @@ assert.match(
 );
 assert.match(
   appJs,
-  /const SESSION_MAX_LIFETIME_MS = 45_000;/,
-  "browser safety guard should match the 45 second server lifetime",
+  /configuredNumber\("sessionMaxLifetimeSeconds", 45\)/,
+  "browser safety guard should retain a backwards-compatible 45 second fallback",
 );
+assert.match(
+  appJs,
+  /const SESSION_MAX_LIFETIME_MS = SESSION_MAX_LIFETIME_SECONDS \* 1000;/,
+  "browser safety guard should use the configured session lifetime",
+);
+assert.match(indexHtml, /id="sessionCountdownText">01:30<\/b>/);
 assert.match(
   appJs,
   /连接已断开，请重新连接/,

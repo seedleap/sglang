@@ -78,7 +78,7 @@ spec:
             - name: LINGBOT2_VAE_FINGERPRINT
               value: taew2_1-d26151e7
             - name: REALTIME_UI_CONFIG_JSON
-              value: '{"generationModes":["i2v","t2v"],"defaultGenerationMode":"i2v","t2vFrameStep":4,"t2vDefaultNumFrames":121,"singleExperience":true,"singleExperienceUserIds":{"minwm":"showcase:zing","lingbot2":"showcase:lingbot2"},"dualModels":{"minwm":{"label":"Zing"},"lingbot2":{"label":"LingBot2","targetFps":16,"sinkSize":9,"windowFrames":18}}}'
+              value: '{"generationModes":["i2v","t2v"],"defaultGenerationMode":"i2v","t2vFrameStep":4,"t2vDefaultNumFrames":121,"sessionMaxLifetimeSeconds":90,"singleExperience":true,"singleExperienceUserIds":{"minwm":"showcase:zing","lingbot2":"showcase:lingbot2"},"dualModels":{"minwm":{"label":"Zing"},"lingbot2":{"label":"LingBot2","targetFps":16,"sinkSize":9,"windowFrames":18}}}'
             - name: TRACE_LOG_GROUP
               value: REPLACE_WITH_TRACE_LOG_GROUP
             - name: AWS_REGION
