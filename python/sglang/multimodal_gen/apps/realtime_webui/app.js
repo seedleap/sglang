@@ -3677,7 +3677,10 @@ function updateWorldDraftState() {
   document.querySelector(".reference-upload").classList.toggle("has-image", hasImage);
   $("referenceUploadTitle").textContent = hasImage ? "更换首帧" : "上传首帧";
   const complete = hasImage && hasDescription;
-  $("connectBtn").disabled = !complete || worldCompletionPending;
+  $("connectBtn").disabled = worldCompletionPending;
+  $("connectBtn").title = complete
+    ? "进入当前世界"
+    : "需要首帧图片和世界描述；点击后会提示缺少项";
   if (!worldCompletionPending && !complete) {
     const missing = [
       !hasImage ? "首帧图片" : "",
@@ -3912,7 +3915,12 @@ async function connect() {
     if (!hasWorldDescription() || !hasFirstFrame()) {
       setStatus("Complete world first", "error");
       setWorldDraftStatus("请先补齐首帧图片和世界描述", "error");
-      $("connectBtn").disabled = true;
+      setModelConnectionState("minwm", "idle");
+      setModelConnectionState("lingbot2", "idle");
+      setPreviewState("idle");
+      addHistory("world draft incomplete");
+      $("connectBtn").disabled = false;
+      (hasWorldDescription() ? $("firstFrame") : $("prompt")).focus?.({ preventScroll: true });
       return;
     }
     const continuousT2V = generationMode === "t2v" && $("continuous").checked;

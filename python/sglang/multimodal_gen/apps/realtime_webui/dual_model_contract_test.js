@@ -126,10 +126,14 @@ assert.match(app, /function setWorldCompletionBusy\(pending, completingFromImage
 assert.match(app, /classList\.toggle\("is-loading", pending\)/);
 assert.doesNotMatch(app, /function enhancePrompt\(\)/, "legacy local prompt suffix must not bypass world completion");
 assert.doesNotMatch(app, /\$\("enhanceBtn"\)\.onclick = enhancePrompt/);
-assert.match(app, /\$\("connectBtn"\)\.disabled = !complete \|\| worldCompletionPending/);
 assert.match(
   app,
-  /if \(!hasWorldDescription\(\) \|\| !hasFirstFrame\(\)\) \{[\s\S]*?Complete world first/,
+  /\$\("connectBtn"\)\.disabled = worldCompletionPending/,
+  "incomplete world drafts should keep the button clickable so users get an explicit reason",
+);
+assert.match(
+  app,
+  /if \(!hasWorldDescription\(\) \|\| !hasFirstFrame\(\)\) \{[\s\S]*?Complete world first[\s\S]*?world draft incomplete/,
   "entering a world must require both a first frame and a world description",
 );
 assert.match(html, /id="voicePromptBtn"/, "runtime prompt composer should expose voice input");
