@@ -4743,6 +4743,8 @@ async function sendRuntimePromptUpdate() {
   }
   if (runtimePromptRewritePending) return;
   runtimePromptRewritePending = true;
+  input.blur();
+  canvas.focus({ preventScroll: true });
   $("sendPromptBtn").disabled = true;
   setPromptRewriteStatus("正在理解并改写指令…", "working");
   try {
@@ -4757,10 +4759,10 @@ async function sendRuntimePromptUpdate() {
   } catch (error) {
     setPromptRewriteStatus(error.message || "指令改写失败，请重试", "error");
     addHistory(`prompt rewrite failed · ${error.message || error}`);
+    input.focus({ preventScroll: true });
   } finally {
     runtimePromptRewritePending = false;
     $("sendPromptBtn").disabled = false;
-    input.focus();
   }
 }
 

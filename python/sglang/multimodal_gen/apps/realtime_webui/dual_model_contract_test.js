@@ -102,7 +102,7 @@ assert.match(
 );
 assert.match(html, /model_session\.js\?v=dual-model-v5/);
 assert.match(html, /dual_model_controller\.js\?v=dual-model-v3/);
-assert.match(html, /app\.js\?v=world-studio-v5/);
+assert.match(html, /app\.js\?v=world-studio-v6/);
 assert.doesNotMatch(
   app,
   /window\.location\.hostname === "localhost"/,
@@ -119,6 +119,21 @@ assert.match(html, /id="voicePromptBtn"/, "runtime prompt composer should expose
 assert.match(html, /data-action="w"[^>]*>W<\/button>/, "movement controls should use compact keycaps");
 assert.match(html, /data-action="i"[^>]*>I<\/button>/, "look controls should use compact keycaps");
 assert.match(app, /function sendRuntimePromptUpdate\(\)/);
+assert.match(
+  app,
+  /runtimePromptRewritePending = true;\s*input\.blur\(\);\s*canvas\.focus\(\{ preventScroll: true \}\);/,
+  "sending a runtime prompt should immediately return keyboard control to the world",
+);
+assert.match(
+  app,
+  /catch \(error\) \{[\s\S]*?input\.focus\(\{ preventScroll: true \}\);[\s\S]*?\} finally \{[\s\S]*?sendPromptBtn[\s\S]*?\}/,
+  "only a failed rewrite should return focus to the prompt input",
+);
+assert.doesNotMatch(
+  app,
+  /finally \{[\s\S]{0,180}?input\.focus/,
+  "a successful rewrite must not focus the prompt input",
+);
 assert.match(app, /window\.SpeechRecognition \|\| window\.webkitSpeechRecognition/);
 assert.match(app, /recognition\.lang = "zh-CN"/);
 
