@@ -108,8 +108,8 @@ assert.match(
 );
 assert.match(
   indexHtml,
-  /<option value="smooth_timeline" selected>Smooth realtime \(&lt;=500ms buffer\)<\/option>/,
-  "webui should default to bounded realtime playback for lower display lag",
+  /<option value="smooth_timeline" selected>Smooth realtime \(~1s buffer\)<\/option>/,
+  "webui should default to soft realtime playback for smoother display",
 );
 assert.match(
   appJs,
@@ -123,8 +123,13 @@ assert.match(
 );
 assert.match(
   appJs,
-  /const ONLINE_MAX_BUFFER_MS\s*=\s*configuredNumber\("onlineMaxBufferMs", 500\);/,
-  "webui should cap smooth realtime playback near the current tail by default",
+  /const ONLINE_MAX_BUFFER_MS\s*=\s*configuredNumber\("onlineMaxBufferMs", 1100\);/,
+  "webui should keep a short soft realtime playback tail by default",
+);
+assert.match(
+  appJs,
+  /const ONLINE_MAX_BUFFER_CHUNKS\s*=\s*Math\.max\([\s\S]*configuredNumber\("onlineMaxBufferChunks", 2\)/,
+  "webui should allow roughly two chunks of realtime jitter before trimming",
 );
 assert.match(
   appJs,
@@ -173,18 +178,18 @@ assert.match(
 );
 assert.match(
   appJs,
-  /targetLeadChunkRatio:\s*0\.45/,
-  "24 fps playback should keep a small realtime jitter lead",
+  /targetLeadChunkRatio:\s*0\.7/,
+  "24 fps playback should keep enough jitter lead for smoother display",
 );
 assert.match(
   appJs,
-  /minTargetLeadMs:\s*80/,
-  "24 fps playback should start quickly instead of waiting for a large buffer",
+  /minTargetLeadMs:\s*260/,
+  "24 fps playback should avoid underrunning on ordinary chunk jitter",
 );
 assert.match(
   appJs,
-  /maxTargetLeadMs:\s*500/,
-  "24 fps playback should keep smooth realtime lag under a short tail buffer",
+  /maxTargetLeadMs:\s*900/,
+  "24 fps playback should keep smooth realtime lag around one second instead of growing unbounded",
 );
 assert.match(
   appJs,

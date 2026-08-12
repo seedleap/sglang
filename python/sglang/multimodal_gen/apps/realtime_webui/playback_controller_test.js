@@ -683,6 +683,39 @@ function smoothTimelineModeKeepsRealtimeTailBounded() {
   assert.equal(snapshot.lastDropReason, "bounded realtime chunk");
 }
 
+function smoothTimelineModeAllowsSoftRealtimeJitterWindow() {
+  const controller = new RealtimePlaybackController({
+    mode: "smooth_timeline",
+    targetFps: 24,
+    realtimeMaxBufferMs: 1100,
+    realtimeMaxBufferChunks: 2,
+    realtimeMaxFrameAgeMs: 1800,
+    holdForTargetLead: true,
+    minTargetLeadMs: 260,
+    maxTargetLeadMs: 900,
+  });
+  enqueueChunk(controller, {
+    chunk: 0,
+    frameCount: 9,
+    durationMs: 450,
+    now: 1000,
+    receivedAt: 1000,
+  });
+  enqueueChunk(controller, {
+    chunk: 1,
+    frameCount: 9,
+    durationMs: 450,
+    now: 1100,
+    receivedAt: 1100,
+  });
+
+  const snapshot = controller.snapshot();
+
+  assert.equal(snapshot.queueFrames, 18);
+  assert.equal(snapshot.droppedFrames, 0);
+  assert.ok(snapshot.bufferMs <= 1100, `buffer ms ${snapshot.bufferMs}`);
+}
+
 function deliveryCadenceExpandsAdaptiveLeadWindow() {
   const controller = new RealtimePlaybackController({
     mode: "adaptive",
@@ -822,6 +855,7 @@ adaptiveModeRendersCutoverFrameWithoutWaitingForBufferLead();
 deliveryFpsCapsOptimisticServerFps();
 smoothTimelineDoesNotTurnDeliveryJitterIntoPlaybackSlowdown();
 smoothTimelineModeKeepsRealtimeTailBounded();
+smoothTimelineModeAllowsSoftRealtimeJitterWindow();
 deliveryCadenceExpandsAdaptiveLeadWindow();
 switchingBackToLiveTrimsTimelineBacklog();
 lowLatencyModeFollowsMeasuredSourceInsteadOfDrainingAtTargetFps();

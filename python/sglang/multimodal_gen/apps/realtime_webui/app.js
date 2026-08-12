@@ -75,8 +75,13 @@ const DEFAULT_T2V_NUM_FRAMES = 9;
 const RECONNECT_CLOSE_TIMEOUT_MS = 15000;
 const DECODE_QUEUE_SECONDS = configuredNumber("decodeQueueSeconds", 5);
 const STARTUP_DECODE_QUEUE_SECONDS = configuredNumber("startupDecodeQueueSeconds", 5);
-const ONLINE_MAX_BUFFER_MS = configuredNumber("onlineMaxBufferMs", 500);
-const ONLINE_DECODE_QUEUE_SLACK_FRAMES = configuredNumber("onlineDecodeQueueSlackFrames", 2);
+const ONLINE_MAX_BUFFER_MS = configuredNumber("onlineMaxBufferMs", 1100);
+const ONLINE_MAX_BUFFER_CHUNKS = Math.max(
+  1,
+  Math.trunc(configuredNumber("onlineMaxBufferChunks", 2)),
+);
+const ONLINE_MAX_FRAME_AGE_MS = configuredNumber("onlineMaxFrameAgeMs", 1800);
+const ONLINE_DECODE_QUEUE_SLACK_FRAMES = configuredNumber("onlineDecodeQueueSlackFrames", 8);
 const MAX_DECODE_QUEUE_BYTES = configuredNumber(
   "maxDecodeQueueBytes",
   192 * 1024 * 1024,
@@ -506,20 +511,20 @@ const playbackController = new RealtimePlaybackController({
   targetFps: DEFAULT_TARGET_FPS,
   lowLatencyPlayback: true,
   holdForTargetLead: true,
-  targetLeadChunkRatio: 0.45,
-  minTargetLeadMs: 80,
-  maxTargetLeadMs: 500,
+  targetLeadChunkRatio: 0.7,
+  minTargetLeadMs: 260,
+  maxTargetLeadMs: 900,
   lowLatencyMaxLeadFrames: 12,
   smoothTimelinePlaybackRateMin: 0.85,
   smoothTimelinePlaybackRateMax: DEFAULT_SMOOTH_CATCHUP_RATE,
   realtimeMaxBufferMs: ONLINE_MAX_BUFFER_MS,
-  realtimeMaxBufferChunks: 1,
-  realtimeMaxFrameAgeMs: ONLINE_MAX_BUFFER_MS,
-  startLeadChunkRatio: 0.2,
-  minStartLeadMs: 80,
-  resumeLeadChunkRatio: 0.2,
-  minResumeLeadMs: 80,
-  maxResumeLeadMs: 220,
+  realtimeMaxBufferChunks: ONLINE_MAX_BUFFER_CHUNKS,
+  realtimeMaxFrameAgeMs: ONLINE_MAX_FRAME_AGE_MS,
+  startLeadChunkRatio: 0.45,
+  minStartLeadMs: 220,
+  resumeLeadChunkRatio: 0.45,
+  minResumeLeadMs: 180,
+  maxResumeLeadMs: 650,
   maxDeliveryLeadBoostMs: 0,
   deliveryStallExpectedMultiplier: 1.8,
 });
