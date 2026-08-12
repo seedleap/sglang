@@ -345,8 +345,10 @@ function smoothTimelineModePreservesBacklogAndCatchesUp() {
   const catchUp = controller.snapshot();
   assert.equal(decision.action, "draw");
   assert.equal(catchUp.droppedFrames, 0);
-  assert.equal(catchUp.playbackRate, 1.1, `playback rate ${catchUp.playbackRate}`);
-  assert.ok(catchUp.renderFps > 27 && catchUp.renderFps < 28, `render fps ${catchUp.renderFps}`);
+  assert.equal(catchUp.smoothTimelineEmergencyCatchup, true);
+  assert.ok(catchUp.playbackRate > 1.1, `playback rate ${catchUp.playbackRate}`);
+  assert.ok(catchUp.playbackRate <= 2.5, `playback rate ${catchUp.playbackRate}`);
+  assert.ok(catchUp.renderFps > 27.5 && catchUp.renderFps <= 62.5, `render fps ${catchUp.renderFps}`);
 }
 
 function smoothTimelineModePreservesFramesAcrossEventCutover() {

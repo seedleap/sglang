@@ -84,6 +84,16 @@ async function main() {
   assert.equal(minwm.events[0].event_id, 1);
   assert.equal(minwm.events[0].client_sent_perf_ms, 1234);
 
+  await controller.reconnect("lingbot2");
+  assert.equal(lingbot2.connectCalls.length, 2, "only the failed peer should reconnect");
+  assert.equal(minwm.connectCalls.length, 1, "recovery must not restart the healthy peer");
+  assert.match(lingbot2.connectCalls[1].init.trace_id, /:lingbot2:retry1$/);
+  assert.deepEqual(
+    lingbot2.events.slice(-2).map((event) => event.event_id),
+    [1, 2],
+    "recovery should replay the latest action and prompt state in event order",
+  );
+
   const failingMinwm = new FakeSession("minwm");
   const failingLingbot = new FakeSession("lingbot2", { failConnect: true });
   const failingController = new DualModelController({

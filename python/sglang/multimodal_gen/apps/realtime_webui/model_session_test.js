@@ -205,6 +205,37 @@ async function main() {
   });
   assert.equal(other.snapshot().queueFrames, 0, "model playback queues remain independent");
 
+  let watchdogCallback = null;
+  const watchdogErrors = [];
+  const watchdogSession = new RealtimeModelSession({
+    key: "lingbot2-watchdog",
+    canvas: fakeCanvas(),
+    pack: (value) => value,
+    unpack: (value) => value,
+    WebSocketCtor: FakeSocket,
+    PlaybackController: FakePlaybackController,
+    decodeBatch: async () => [],
+    requestFrame: () => {},
+    setTimer: (callback) => {
+      watchdogCallback = callback;
+      return 1;
+    },
+    clearTimer: () => {},
+    onError: (error) => watchdogErrors.push(error),
+  });
+  const watchdogConnecting = watchdogSession.connect(
+    { type: "init", trace_id: "trace:watchdog" },
+    "/lingbot2",
+  );
+  const watchdogSocket = FakeSocket.instances.at(-1);
+  watchdogSocket.open();
+  await watchdogConnecting;
+  assert.equal(typeof watchdogCallback, "function");
+  watchdogCallback();
+  assert.equal(watchdogErrors.length, 1, "a silent media stream should fail exactly once");
+  assert.equal(watchdogErrors[0].code, "MEDIA_START_TIMEOUT");
+  assert.equal(watchdogSocket.readyState, FakeSocket.CLOSED);
+
   const stableCanvas = fakeCanvas();
   const stableStates = [];
   const stableSession = new RealtimeModelSession({

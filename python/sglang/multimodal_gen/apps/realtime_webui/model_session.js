@@ -27,7 +27,11 @@
       workerUrl = DEFAULT_WORKER_URL,
       requestFrame = (callback) => global.requestAnimationFrame(callback),
       now = () => performance.now(),
+      setTimer = (callback, delayMs) => global.setTimeout(callback, delayMs),
+      clearTimer = (timer) => global.clearTimeout(timer),
       startupMinChunk = 0,
+      startupTimeoutMs = 12000,
+      stallTimeoutMs = 7000,
       onState = () => {},
       onStats = () => {},
       onFrame = () => {},
@@ -44,8 +48,14 @@
       this.workerUrl = workerUrl;
       this.requestFrame = requestFrame;
       this.now = now;
+      this.setTimer = setTimer;
+      this.clearTimer = clearTimer;
       this.startupMinChunk = Math.max(0, Number(startupMinChunk) || 0);
+      this.startupTimeoutMs = Math.max(0, Number(startupTimeoutMs) || 0);
+      this.stallTimeoutMs = Math.max(0, Number(stallTimeoutMs) || 0);
       this.awaitingStableFrame = false;
+      this.mediaWatchdogTimer = null;
+      this.hasVisibleFrame = false;
       this.onState = onState;
       this.onStats = onStats;
       this.onFrame = onFrame;
@@ -129,6 +139,7 @@
           if (epoch !== this.epoch) return;
           opened = true;
           socket.send(this.pack(init));
+          this.armMediaWatchdog(epoch, "startup");
           if (!this.awaitingStableFrame) this.setState("live");
           this.scheduleRender();
           resolve();
@@ -149,6 +160,7 @@
         };
         socket.onclose = (event) => {
           if (epoch !== this.epoch) return;
+          this.clearMediaWatchdog();
           if (this.socket === socket) this.socket = null;
           this.setState(event.code === 1000 ? "closed" : "error", {
             code: event.code,
@@ -156,11 +168,13 @@
           });
           if (!opened) {
             reject(new Error(`${this.key} closed before startup (${event.code})`));
-          } else if (event.code !== 1000 && event.code !== 1001) {
-            this.onError(
-              new Error(`${this.key} websocket closed (${event.code}): ${event.reason || "unknown"}`),
-              this.key,
+          } else {
+            const normalClose = event.code === 1000 || event.code === 1001;
+            const error = new Error(
+              `${this.key} websocket closed (${event.code}): ${event.reason || "unknown"}`,
             );
+            error.code = normalClose ? "UNEXPECTED_MEDIA_CLOSE" : "MEDIA_SOCKET_CLOSED";
+            this.onError(error, this.key);
           }
         };
       });
@@ -181,6 +195,7 @@
     }
 
     close(reason = "session closed", { notify = true } = {}) {
+      this.clearMediaWatchdog();
       this.epoch += 1;
       const socket = this.socket;
       this.socket = null;
@@ -191,7 +206,7 @@
       if (socket && socket.readyState !== this.WebSocketCtor.CLOSED) {
         socket.close(1000, reason.slice(0, 120));
       }
-      if (notify) this.setState("closed");
+      if (notify) this.setState("closed", { reason });
     }
 
     setUnavailable(reason = "Unavailable for this mode") {
@@ -205,6 +220,7 @@
       const height = this.canvas.height || 720;
       this.ctx.fillStyle = "#11140f";
       this.ctx.fillRect(0, 0, width, height);
+      this.hasVisibleFrame = false;
     }
 
     receive(data, epoch) {
@@ -273,6 +289,7 @@
           item.header.event_id || this.stats.lastAppliedEventId,
         );
         this.stats.lastDecodeMs = decodeMs;
+        if (prepared.length) this.armMediaWatchdog(item.epoch, "stall");
         this.emitStats();
         this.scheduleRender();
       } catch (error) {
@@ -397,13 +414,17 @@
       if (isImageData && source === image) this.ctx.putImageData(image, 0, 0);
       else this.ctx.drawImage(source, 0, 0, image.width, image.height);
       if (!isImageData) image.close?.();
+      this.hasVisibleFrame = true;
       this.setState("live");
     }
 
     setState(state, details = {}) {
       if (this.root) this.root.dataset.sessionState = state;
       if (this.overlay?.style) {
-        this.overlay.style.display = state === "connecting" || state === "unavailable" ? "grid" : "none";
+        this.overlay.style.display =
+          (state === "connecting" && !this.hasVisibleFrame) || state === "unavailable"
+            ? "grid"
+            : "none";
       }
       const message = this.overlay?.querySelector?.(".preview-unavailable-text");
       if (message && state === "unavailable") message.textContent = details.reason || "Unavailable";
@@ -412,6 +433,7 @@
     }
 
     fail(error) {
+      this.clearMediaWatchdog();
       this.setState("error", { message: error.message || String(error) });
       this.onError(error, this.key);
       const socket = this.socket;
@@ -420,6 +442,29 @@
       if (socket && socket.readyState !== this.WebSocketCtor.CLOSED) {
         socket.close(4000, String(error.message || "session failed").slice(0, 120));
       }
+    }
+
+    clearMediaWatchdog() {
+      if (this.mediaWatchdogTimer === null) return;
+      this.clearTimer(this.mediaWatchdogTimer);
+      this.mediaWatchdogTimer = null;
+    }
+
+    armMediaWatchdog(epoch, phase) {
+      this.clearMediaWatchdog();
+      const timeoutMs = phase === "startup" ? this.startupTimeoutMs : this.stallTimeoutMs;
+      if (!timeoutMs) return;
+      this.mediaWatchdogTimer = this.setTimer(() => {
+        this.mediaWatchdogTimer = null;
+        if (epoch !== this.epoch || !this.socket) return;
+        const error = new Error(
+          phase === "startup"
+            ? `${this.key} produced no frames within ${timeoutMs}ms`
+            : `${this.key} media stream stalled for ${timeoutMs}ms`,
+        );
+        error.code = phase === "startup" ? "MEDIA_START_TIMEOUT" : "MEDIA_STALL_TIMEOUT";
+        this.fail(error);
+      }, timeoutMs);
     }
 
     snapshot() {
