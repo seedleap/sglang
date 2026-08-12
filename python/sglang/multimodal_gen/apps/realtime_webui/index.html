@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>World Studio · 实时模型对比</title>
-    <link rel="stylesheet" href="./styles.css?v=world-studio-v3" />
+    <link rel="stylesheet" href="./styles.css?v=world-studio-v4" />
   </head>
   <body class="world-studio">
     <header class="app-header">
@@ -24,9 +24,12 @@
     <main class="shell">
       <section class="panel controls" aria-label="世界设置">
         <div class="sidebar-heading">
-          <span>WORLD SETUP</span>
-          <h1>选择世界</h1>
-          <p>选择一个预设世界，或上传自己的首帧。</p>
+          <div class="sidebar-heading-row">
+            <span>WORLD SETUP</span>
+            <button id="clearWorldBtn" class="clear-world-draft" type="button">一键清空</button>
+          </div>
+          <h1>生成世界</h1>
+          <p>选择预设快速填充，或用图片、简单描述生成完整世界。</p>
         </div>
 
         <div class="runtime-defaults" hidden aria-hidden="true">
@@ -44,27 +47,31 @@
 
         <div id="referenceSection" class="reference-section">
           <div class="field-heading">
-            <strong>上传首帧</strong>
-            <span>可选</span>
+            <strong>首帧图片</strong>
+            <span id="firstFrameState">未填写</span>
           </div>
           <label class="reference-upload">
             <input id="firstFrame" type="file" accept="image/png,image/jpeg,image/webp" />
             <canvas id="referencePreview" width="320" height="180"></canvas>
             <span class="reference-upload-copy">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 16.5V19a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-2.5M8 9l4-4 4 4M12 5v11" /></svg>
-              <b>上传首帧</b>
+              <b id="referenceUploadTitle">上传首帧</b>
               <small>PNG、JPG、WebP，建议 16:9</small>
             </span>
-            <span id="referenceName" class="reference-name">Preset reference</span>
+            <span id="referenceName" class="reference-name">尚未选择图片</span>
           </label>
         </div>
 
         <label class="world-description">
-          <span class="field-heading"><strong>世界描述</strong><span>首次指令</span></span>
-          <textarea id="prompt" rows="6">A cinematic first-person journey through a misty mountain valley, moving steadily toward a distant castle with stable scenery and natural motion.</textarea>
+          <span class="field-heading"><strong>世界描述</strong><span id="worldDescriptionState">未填写</span></span>
+          <textarea id="prompt" rows="6" placeholder="一句话也可以，例如：第一人称骑龙飞过雪山……"></textarea>
         </label>
 
-        <button id="enhanceBtn" type="button" hidden>Enhance</button>
+        <button id="enhanceBtn" class="complete-world" type="button">
+          <span>Prompt 补全</span>
+          <small>补齐首帧与完整世界描述</small>
+        </button>
+        <p id="worldDraftStatus" class="world-draft-status" role="status" aria-live="polite">需要首帧图片和世界描述才能进入世界</p>
         <div class="entry-actions">
           <button id="connectBtn" class="primary enter-world" type="button">
             <span>进入世界</span>
@@ -268,6 +275,6 @@
     <script src="./fullscreen_controller.js?v=dual-fullscreen-v1"></script>
     <script src="./trace_topology.js?v=realtime-trace-topology-v6"></script>
     <script src="./trace_transport.js?v=realtime-trace-http-v2"></script>
-    <script src="./app.js?v=world-studio-v6"></script>
+    <script src="./app.js?v=world-studio-v8"></script>
   </body>
 </html>

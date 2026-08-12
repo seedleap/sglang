@@ -102,7 +102,7 @@ assert.match(
 );
 assert.match(html, /model_session\.js\?v=dual-model-v5/);
 assert.match(html, /dual_model_controller\.js\?v=dual-model-v3/);
-assert.match(html, /app\.js\?v=world-studio-v6/);
+assert.match(html, /app\.js\?v=world-studio-v8/);
 assert.doesNotMatch(
   app,
   /window\.location\.hostname === "localhost"/,
@@ -115,6 +115,18 @@ assert.doesNotMatch(
   "metadata-only presets without first-frame images should stay out of the visitor UI",
 );
 assert.match(html, /id="runtimePrompt"/, "runtime prompt updates should use a dedicated composer");
+assert.match(html, /id="clearWorldBtn"/, "world drafts should support one-click clearing");
+assert.match(html, /id="enhanceBtn"[^>]*class="complete-world"/, "world drafts should expose AI completion");
+assert.match(html, /id="firstFrameState"/, "first-frame completeness should be visible");
+assert.match(html, /id="worldDescriptionState"/, "description completeness should be visible");
+assert.match(app, /function clearWorldDraft\(\)/);
+assert.match(app, /async function completeWorldDraft\(\)/);
+assert.match(app, /\$\("connectBtn"\)\.disabled = !complete \|\| worldCompletionPending/);
+assert.match(
+  app,
+  /if \(!hasWorldDescription\(\) \|\| !hasFirstFrame\(\)\) \{[\s\S]*?Complete world first/,
+  "entering a world must require both a first frame and a world description",
+);
 assert.match(html, /id="voicePromptBtn"/, "runtime prompt composer should expose voice input");
 assert.match(html, /data-action="w"[^>]*>W<\/button>/, "movement controls should use compact keycaps");
 assert.match(html, /data-action="i"[^>]*>I<\/button>/, "look controls should use compact keycaps");

@@ -1283,6 +1283,17 @@ body.world-studio {
   background: linear-gradient(180deg, rgba(19, 25, 25, 0.98), rgba(13, 18, 18, 0.98));
 }
 .world-studio .sidebar-heading { margin-bottom: 18px; }
+.world-studio .sidebar-heading-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.world-studio .clear-world-draft {
+  min-height: 26px;
+  border: 1px solid var(--ws-line);
+  border-radius: 8px;
+  padding: 4px 9px;
+  background: rgba(255,255,255,0.025);
+  color: var(--ws-muted);
+  font-size: 9px;
+}
+.world-studio .clear-world-draft:hover:not(:disabled) { border-color: rgba(228, 134, 116, 0.45); background: rgba(228, 134, 116, 0.08); color: #f0b0a3; transform: none; }
 .world-studio .sidebar-heading > span,
 .world-studio .comparison-heading > div > span,
 .world-studio .prompt-update-heading > div > span {
@@ -1338,10 +1349,12 @@ body.world-studio {
 }
 .world-studio .preset b { align-self: end; overflow: hidden; font-size: 13px; font-weight: 620; text-overflow: ellipsis; white-space: nowrap; }
 .world-studio .preset span:not(.preset-thumb) { align-self: start; overflow: hidden; color: var(--ws-muted); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.world-studio .preset.is-selected span:not(.preset-thumb) { color: var(--ws-accent); }
 
 .world-studio .field-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .world-studio .field-heading strong { color: var(--ws-text); font-size: 13px; font-weight: 600; }
 .world-studio .field-heading > span { color: var(--ws-muted); font-size: 10px; }
+.world-studio .field-heading > span.is-complete { color: var(--ws-accent); }
 .world-studio .reference-section { margin-bottom: 18px; }
 .world-studio .reference-upload {
   position: relative;
@@ -1365,9 +1378,14 @@ body.world-studio {
   border: 0;
   border-radius: 0;
   background: #101515;
-  opacity: 0.26;
+  opacity: 0.18;
   object-fit: cover;
 }
+.world-studio .reference-upload.has-image #referencePreview { opacity: 0.86; }
+.world-studio .reference-upload.has-image::after { background: linear-gradient(180deg, rgba(9, 13, 13, 0.02), rgba(9, 13, 13, 0.48)); }
+.world-studio .reference-upload.has-image .reference-upload-copy { align-self: end; margin-bottom: 9px; padding: 4px 9px; border-radius: 999px; background: rgba(5, 10, 10, 0.68); }
+.world-studio .reference-upload.has-image .reference-upload-copy svg,
+.world-studio .reference-upload.has-image .reference-upload-copy small { display: none; }
 .world-studio .reference-upload::after { content: ""; position: absolute; inset: 0; background: linear-gradient(180deg, rgba(9, 13, 13, 0.2), rgba(9, 13, 13, 0.82)); }
 .world-studio .reference-upload-copy { position: relative; z-index: 2; display: grid; place-items: center; gap: 3px; color: var(--ws-text); text-align: center; }
 .world-studio .reference-upload-copy svg { width: 24px; height: 24px; margin-bottom: 3px; fill: none; stroke: var(--ws-accent); stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.5; }
@@ -1389,6 +1407,28 @@ body.world-studio {
 .world-studio input:focus,
 .world-studio select:focus { border-color: rgba(121, 223, 189, 0.58); box-shadow: 0 0 0 3px rgba(121, 223, 189, 0.07); }
 .world-studio .world-description textarea { min-height: 114px; resize: vertical; padding: 12px; color: #d8dedb; font-size: 12px; line-height: 1.55; }
+.world-studio .complete-world {
+  display: flex;
+  width: 100%;
+  min-height: 46px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0 0 7px;
+  border: 1px solid rgba(121, 223, 189, 0.32);
+  border-radius: 10px;
+  padding: 9px 12px;
+  background: var(--ws-accent-soft);
+  color: var(--ws-accent);
+  font-weight: 650;
+}
+.world-studio .complete-world small { color: #93aca4; font-size: 9px; font-weight: 450; }
+.world-studio .complete-world:hover:not(:disabled) { border-color: var(--ws-accent); background: rgba(121, 223, 189, 0.14); transform: none; }
+.world-studio .world-draft-status { min-height: 15px; margin: 0 0 10px; color: var(--ws-muted); font-size: 9px; line-height: 1.4; }
+.world-studio .world-draft-status[data-state="ready"] { color: var(--ws-accent); }
+.world-studio .world-draft-status[data-state="working"] { color: #e7c58f; }
+.world-studio .world-draft-status[data-state="error"] { color: #f1aa9c; }
+.world-studio .enter-world:disabled { background: #293533; color: #687572; cursor: not-allowed; opacity: 0.72; }
 .world-studio .entry-actions { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; margin-top: auto; }
 .world-studio .enter-world,
 .world-studio .close-world {

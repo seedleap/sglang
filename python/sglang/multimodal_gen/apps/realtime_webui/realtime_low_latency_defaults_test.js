@@ -88,8 +88,8 @@ assert.match(
 );
 assert.match(
   appJs,
-  /applyPreset\(presets\[0\], \{ sendRuntimeEvents: false, preserveSize: true \}\)/,
-  "initial preset hydration should preserve the user-facing 1280x704 default size",
+  /if \(!query\.preset\) clearWorldDraft\(\);/,
+  "the world builder should start empty until the visitor selects or completes a world",
 );
 assert.match(
   appJs,

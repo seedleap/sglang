@@ -126,6 +126,7 @@ celerybeat.pid
 .env
 python/sglang/multimodal_gen/apps/realtime_webui_secrets/*.json
 !python/sglang/multimodal_gen/apps/realtime_webui_secrets/README.md
+python/sglang/multimodal_gen/apps/realtime_webui_generated/
 .venv
 env/
 venv/

@@ -401,7 +401,9 @@ let selectedPreset = null;
 let selectedReferenceBytes = null;
 let selectedReferenceUrl = "";
 let selectedReferenceLabel = "";
+let selectedReferenceMimeType = "";
 let selectedReferencePreviewReady = false;
+let worldCompletionPending = false;
 let lastGenerationMode = null;
 let savedI2VNumFrames = "9";
 let savedT2VNumFrames = String(DEFAULT_T2V_NUM_FRAMES);
@@ -1579,7 +1581,7 @@ function recordPromptHistory(prompt, kind = "prompt_update", eventId = null, art
 async function createReferenceImageMeta(firstFrame) {
   if (!firstFrame) return null;
   const file = $("firstFrame").files[0];
-  const mime = file?.type || selectedPreset?.mime || mimeFromReferenceUrl(selectedReferenceUrl);
+  const mime = file?.type || selectedReferenceMimeType || selectedPreset?.mime || mimeFromReferenceUrl(selectedReferenceUrl);
   const bytes = firstFrame.byteLength || firstFrame.length || 0;
   const meta = {
     source: file ? "upload" : selectedReferenceUrl ? "preset_url" : "bytes",
@@ -3521,43 +3523,204 @@ function drawReferencePreviewFromImageSource(src, label) {
   previewCtx.fillRect(0, 0, preview.width, preview.height);
   $("referenceName").textContent = label;
   const img = new Image();
-  img.onload = () => {
-    const scale = Math.min(preview.width / img.width, preview.height / img.height);
-    const w = img.width * scale, h = img.height * scale;
-    previewCtx.fillRect(0, 0, preview.width, preview.height);
-    previewCtx.drawImage(img, (preview.width - w) / 2, (preview.height - h) / 2, w, h);
-    selectedReferencePreviewReady = true;
-    drawVisibleReferencePlaceholders();
-    if (src.startsWith("blob:")) URL.revokeObjectURL(src);
-  };
-  img.onerror = () => {
-    selectedReferencePreviewReady = false;
-    previewCtx.fillStyle = "#11140f";
-    previewCtx.fillRect(0, 0, preview.width, preview.height);
-    previewCtx.fillStyle = "#8c9288";
-    previewCtx.font = "14px ui-sans-serif, Avenir Next, Helvetica Neue, sans-serif";
-    previewCtx.textAlign = "center";
-    previewCtx.textBaseline = "middle";
-    previewCtx.fillText("reference image unavailable", preview.width / 2, preview.height / 2);
-    if (src.startsWith("blob:")) URL.revokeObjectURL(src);
-  };
-  img.src = src;
+  return new Promise((resolve) => {
+    img.onload = () => {
+      const scale = Math.min(preview.width / img.width, preview.height / img.height);
+      const w = img.width * scale, h = img.height * scale;
+      previewCtx.fillRect(0, 0, preview.width, preview.height);
+      previewCtx.drawImage(img, (preview.width - w) / 2, (preview.height - h) / 2, w, h);
+      selectedReferencePreviewReady = true;
+      updateWorldDraftState();
+      drawVisibleReferencePlaceholders();
+      if (src.startsWith("blob:")) URL.revokeObjectURL(src);
+      resolve(true);
+    };
+    img.onerror = () => {
+      selectedReferencePreviewReady = false;
+      updateWorldDraftState();
+      previewCtx.fillStyle = "#11140f";
+      previewCtx.fillRect(0, 0, preview.width, preview.height);
+      previewCtx.fillStyle = "#8c9288";
+      previewCtx.font = "14px ui-sans-serif, Avenir Next, Helvetica Neue, sans-serif";
+      previewCtx.textAlign = "center";
+      previewCtx.textBaseline = "middle";
+      previewCtx.fillText("reference image unavailable", preview.width / 2, preview.height / 2);
+      if (src.startsWith("blob:")) URL.revokeObjectURL(src);
+      resolve(false);
+    };
+    img.src = src;
+  });
+}
+
+function clearReferencePreview() {
+  const preview = $("referencePreview");
+  const previewCtx = preview.getContext("2d", { alpha: false });
+  selectedReferencePreviewReady = false;
+  previewCtx.fillStyle = "#101515";
+  previewCtx.fillRect(0, 0, preview.width, preview.height);
+  $("referenceName").textContent = "尚未选择图片";
+}
+
+function hasFirstFrame() {
+  return Boolean(
+    $("firstFrame").files[0]
+    || selectedReferenceBytes?.byteLength
+    || (selectedReferenceUrl && selectedReferencePreviewReady)
+  );
+}
+
+function hasWorldDescription() {
+  return Boolean($("prompt").value.trim());
+}
+
+function setWorldDraftStatus(message, state = "") {
+  const status = $("worldDraftStatus");
+  status.textContent = message;
+  if (state) status.dataset.state = state;
+  else delete status.dataset.state;
+}
+
+function updateWorldDraftState() {
+  const hasImage = hasFirstFrame();
+  const hasDescription = hasWorldDescription();
+  $("firstFrameState").textContent = hasImage ? "✓ 已填写" : "未填写";
+  $("worldDescriptionState").textContent = hasDescription ? "✓ 已填写" : "未填写";
+  $("firstFrameState").classList.toggle("is-complete", hasImage);
+  $("worldDescriptionState").classList.toggle("is-complete", hasDescription);
+  document.querySelector(".reference-upload").classList.toggle("has-image", hasImage);
+  $("referenceUploadTitle").textContent = hasImage ? "更换首帧" : "上传首帧";
+  const complete = hasImage && hasDescription;
+  $("connectBtn").disabled = !complete || worldCompletionPending;
+  if (!worldCompletionPending && !complete) {
+    const missing = [
+      !hasImage ? "首帧图片" : "",
+      !hasDescription ? "世界描述" : "",
+    ].filter(Boolean).join("和");
+    setWorldDraftStatus(`还需要${missing}，可点击 Prompt 补全`, "incomplete");
+  } else if (!worldCompletionPending && complete) {
+    setWorldDraftStatus("世界已完整，可以进入", "ready");
+  }
+}
+
+function clearWorldDraft() {
+  if (ws && ws.readyState === WebSocket.OPEN) closeSession("world draft cleared");
+  selectedPreset = null;
+  selectedReferenceBytes = null;
+  selectedReferenceUrl = "";
+  selectedReferenceLabel = "";
+  selectedReferenceMimeType = "";
+  $("firstFrame").value = "";
+  $("prompt").value = "";
+  document.querySelectorAll(".preset").forEach((button) => {
+    button.classList.remove("is-selected");
+    button.setAttribute("aria-pressed", "false");
+  });
+  clearReferencePreview();
+  updateWorldDraftState();
+  $("prompt").focus({ preventScroll: true });
+  addHistory("world draft cleared");
+}
+
+async function worldCompletionImage() {
+  const file = $("firstFrame").files[0];
+  if (file) return file;
+  if (!hasFirstFrame()) return null;
+  const bytes = await readFirstFrame();
+  if (!bytes?.byteLength) return null;
+  const mime = selectedReferenceMimeType
+    || selectedPreset?.mime
+    || mimeFromReferenceUrl(selectedReferenceUrl)
+    || "image/png";
+  return new File([bytes], selectedReferenceLabel || "first-frame", { type: mime });
+}
+
+async function completeWorldDraft() {
+  if (worldCompletionPending) return;
+  const seedText = $("prompt").value.trim();
+  if (!seedText && !hasFirstFrame()) {
+    setWorldDraftStatus("请先写一句世界描述或上传一张图片", "error");
+    $("prompt").focus({ preventScroll: true });
+    return;
+  }
+  worldCompletionPending = true;
+  let finalStatus = null;
+  $("enhanceBtn").disabled = true;
+  $("connectBtn").disabled = true;
+  setWorldDraftStatus(
+    hasFirstFrame() ? "正在理解首帧并补全世界描述…" : "正在生成世界描述和首帧，请稍候…",
+    "working",
+  );
+  try {
+    const form = new FormData();
+    if (seedText) form.append("world_description", seedText);
+    const image = await worldCompletionImage();
+    if (image) form.append("first_frame", image, image.name);
+    const response = await fetch("./api/world/complete", { method: "POST", body: form });
+    let result = null;
+    try {
+      result = await response.json();
+    } catch {
+      result = null;
+    }
+    if (!response.ok) {
+      throw new Error(result?.error || `world completion failed (${response.status})`);
+    }
+    $("prompt").value = String(result.world_description || "").trim();
+    if (result.image_url) {
+      selectedPreset = null;
+      selectedReferenceBytes = null;
+      selectedReferenceUrl = result.image_url;
+      selectedReferenceLabel = "AI 生成首帧";
+      selectedReferenceMimeType = "image/png";
+      $("firstFrame").value = "";
+      await drawReferencePreviewFromImageSource(result.image_url, selectedReferenceLabel);
+    }
+    if (!hasFirstFrame() || !hasWorldDescription()) {
+      throw new Error("world completion did not produce both required fields");
+    }
+    finalStatus = {
+      message: result.image_generated
+        ? "已生成首帧并补全世界描述"
+        : "已根据首帧补全世界描述",
+      state: "ready",
+    };
+    addHistory("world draft completed");
+  } catch (error) {
+    finalStatus = {
+      message: error.message || "世界补全失败，请重试",
+      state: "error",
+    };
+    addHistory(`world completion failed · ${error.message || error}`);
+  } finally {
+    worldCompletionPending = false;
+    $("enhanceBtn").disabled = false;
+    updateWorldDraftState();
+    if (finalStatus) setWorldDraftStatus(finalStatus.message, finalStatus.state);
+  }
 }
 
 function drawReferencePreview(file) {
   selectedReferenceBytes = null;
   selectedReferenceUrl = "";
   selectedReferenceLabel = file ? file.name : "";
-  if (!file) return;
+  selectedReferenceMimeType = file?.type || "";
+  if (!file) {
+    clearReferencePreview();
+    updateWorldDraftState();
+    return;
+  }
   drawReferencePreviewFromImageSource(URL.createObjectURL(file), file.name);
+  updateWorldDraftState();
 }
 
 async function setPresetReference(preset) {
   selectedReferenceBytes = null;
   selectedReferenceUrl = preset.referenceUrl;
   selectedReferenceLabel = preset.source;
+  selectedReferenceMimeType = preset.mime || mimeFromReferenceUrl(preset.referenceUrl);
   $("firstFrame").value = "";
-  drawReferencePreviewFromImageSource(preset.referenceUrl, selectedReferenceLabel);
+  await drawReferencePreviewFromImageSource(preset.referenceUrl, selectedReferenceLabel);
+  updateWorldDraftState();
 }
 
 function showError(error) {
@@ -3659,13 +3822,16 @@ async function connect() {
       fps: Number($("fps").value || DEFAULT_TARGET_FPS),
     });
     const generationMode = selectedGenerationMode();
+    if (!hasWorldDescription() || !hasFirstFrame()) {
+      setStatus("Complete world first", "error");
+      setWorldDraftStatus("请先补齐首帧图片和世界描述", "error");
+      $("connectBtn").disabled = true;
+      return;
+    }
     const continuousT2V = generationMode === "t2v" && $("continuous").checked;
     let firstFrame;
     let numFrames = Number($("numFrames").value);
     if (generationMode === "i2v") {
-      if (!$("firstFrame").files[0] && !selectedReferenceBytes && !selectedReferenceUrl) {
-        await setPresetReference(presets[0]);
-      }
       drawVisibleReferencePlaceholders();
       firstFrame = await readFirstFrame();
       if (!firstFrame) {
@@ -4132,6 +4298,8 @@ async function applyPreset(preset, options = {}) {
   updateOutputSizeText();
   syncPlaybackTargetFps();
   await setPresetReference(preset);
+  updateWorldDraftState();
+  setWorldDraftStatus(`已填充「${preset.name}」的首帧和世界描述`, "ready");
   if (sendRuntimeEvents) {
     promptRewriteController.beginSession(preset.prompt);
     sendEvent("prompt", preset.prompt, `prompt update · ${preset.name}`);
@@ -4488,7 +4656,7 @@ function renderPresets() {
       "Asylum Corridor": "废墟走廊",
     })[preset.name] || preset.name;
     const meta = document.createElement("span");
-    meta.textContent = "点击选择这个世界";
+    meta.textContent = "填充首帧 + 世界描述";
     btn.append(thumb, title, meta);
     btn.onclick = () => applyPreset(preset).catch(showError);
     $("presetList").appendChild(btn);
@@ -4686,13 +4854,11 @@ updateSuperResolutionControls("minwm");
 updateSuperResolutionControls("lingbot2");
 applyQueryParams()
   .then(async (query) => {
-    if (!query.preset) {
-      await applyPreset(presets[0], { sendRuntimeEvents: false, preserveSize: true });
-    }
+    if (!query.preset) clearWorldDraft();
     return query;
   })
   .then((query) => queryServerModelInfo({
-    applyPresetForModel: !query.model && !query.preset,
+    applyPresetForModel: false,
     preserveSize: true,
   }))
   .catch(showError);
@@ -4701,6 +4867,9 @@ renderTraceTopology();
 updateRecordButton();
 updateRecordFolderButton();
 $("connectBtn").onclick = connect;
+$("clearWorldBtn").onclick = clearWorldDraft;
+$("enhanceBtn").onclick = completeWorldDraft;
+$("prompt").addEventListener("input", updateWorldDraftState);
 $("stopBtn").onclick = () => {
   closeSession();
   setModelConnectionState("minwm", "closed");
@@ -4849,7 +5018,14 @@ $("recordFolderBtn").onclick = () => {
     addHistory(error.message || "record folder selection failed");
   });
 };
-$("firstFrame").onchange = () => drawReferencePreview($("firstFrame").files[0]);
+$("firstFrame").onchange = () => {
+  selectedPreset = null;
+  document.querySelectorAll(".preset").forEach((button) => {
+    button.classList.remove("is-selected");
+    button.setAttribute("aria-pressed", "false");
+  });
+  drawReferencePreview($("firstFrame").files[0]);
+};
 $("generationMode").addEventListener("change", updateGenerationModeUi);
 $("continuous").addEventListener("change", updateGenerationModeUi);
 $("numFrames").addEventListener("input", updateT2VFrameHint);
