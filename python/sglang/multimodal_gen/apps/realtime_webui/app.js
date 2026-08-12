@@ -75,6 +75,8 @@ const DEFAULT_T2V_NUM_FRAMES = 9;
 const RECONNECT_CLOSE_TIMEOUT_MS = 15000;
 const DECODE_QUEUE_SECONDS = configuredNumber("decodeQueueSeconds", 5);
 const STARTUP_DECODE_QUEUE_SECONDS = configuredNumber("startupDecodeQueueSeconds", 5);
+const ONLINE_MAX_BUFFER_MS = configuredNumber("onlineMaxBufferMs", 500);
+const ONLINE_DECODE_QUEUE_SLACK_FRAMES = configuredNumber("onlineDecodeQueueSlackFrames", 2);
 const MAX_DECODE_QUEUE_BYTES = configuredNumber(
   "maxDecodeQueueBytes",
   192 * 1024 * 1024,
@@ -504,18 +506,21 @@ const playbackController = new RealtimePlaybackController({
   targetFps: DEFAULT_TARGET_FPS,
   lowLatencyPlayback: true,
   holdForTargetLead: true,
-  targetLeadChunkRatio: 0.75,
-  minTargetLeadMs: 360,
-  maxTargetLeadMs: 900,
+  targetLeadChunkRatio: 0.45,
+  minTargetLeadMs: 80,
+  maxTargetLeadMs: 500,
   lowLatencyMaxLeadFrames: 12,
   smoothTimelinePlaybackRateMin: 0.85,
   smoothTimelinePlaybackRateMax: DEFAULT_SMOOTH_CATCHUP_RATE,
-  startLeadChunkRatio: 0.55,
-  minStartLeadMs: 260,
-  resumeLeadChunkRatio: 0.55,
-  minResumeLeadMs: 260,
-  maxResumeLeadMs: 900,
-  maxDeliveryLeadBoostMs: 360,
+  realtimeMaxBufferMs: ONLINE_MAX_BUFFER_MS,
+  realtimeMaxBufferChunks: 1,
+  realtimeMaxFrameAgeMs: ONLINE_MAX_BUFFER_MS,
+  startLeadChunkRatio: 0.2,
+  minStartLeadMs: 80,
+  resumeLeadChunkRatio: 0.2,
+  minResumeLeadMs: 80,
+  maxResumeLeadMs: 220,
+  maxDeliveryLeadBoostMs: 0,
   deliveryStallExpectedMultiplier: 1.8,
 });
 let lingbot2ReconnectTimer = 0;
@@ -3108,19 +3113,32 @@ function payloadByteLength(data) {
 function trimDecodeQueue() {
   if (recordingActive) return;
   if (!decodeQueue.length) return;
-  const preservesTimeline =
-    selectedPlaybackMode() === "timeline" ||
-    selectedPlaybackMode() === "smooth_timeline";
+  const playbackMode = selectedPlaybackMode();
+  const preservesTimeline = playbackMode === "timeline";
+  const boundedRealtime = playbackMode === "smooth_timeline";
   const playback = playbackController.snapshot();
-  const decodeWindowSeconds = renderedPreviewFrames
-    ? Math.max(DECODE_QUEUE_SECONDS, (playback.maxLeadMs || 0) / 1000)
-    : STARTUP_DECODE_QUEUE_SECONDS;
-  const maxQueuedFrames = preservesTimeline
-    ? Number.POSITIVE_INFINITY
-    : Math.max(
-        2,
-        Math.round(previewPlaybackTargetFps() * decodeWindowSeconds),
-      );
+  let maxQueuedFrames;
+  if (preservesTimeline) {
+    maxQueuedFrames = Number.POSITIVE_INFINITY;
+  } else if (boundedRealtime && renderedPreviewFrames) {
+    const fallbackFrames = Math.max(
+      1,
+      Math.floor(previewPlaybackTargetFps() * ONLINE_MAX_BUFFER_MS / 1000),
+    );
+    maxQueuedFrames = Math.max(
+      2,
+      Number(playback.maxRealtimeBufferFrames || fallbackFrames) +
+        ONLINE_DECODE_QUEUE_SLACK_FRAMES,
+    );
+  } else {
+    const decodeWindowSeconds = renderedPreviewFrames
+      ? Math.max(DECODE_QUEUE_SECONDS, (playback.maxLeadMs || 0) / 1000)
+      : STARTUP_DECODE_QUEUE_SECONDS;
+    maxQueuedFrames = Math.max(
+      2,
+      Math.round(previewPlaybackTargetFps() * decodeWindowSeconds),
+    );
+  }
   while (
     (queuedDecodeFrames > maxQueuedFrames || queuedDecodeBytes > MAX_DECODE_QUEUE_BYTES) &&
     decodeQueue.length > 1

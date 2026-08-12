@@ -108,8 +108,8 @@ assert.match(
 );
 assert.match(
   indexHtml,
-  /<option value="smooth_timeline" selected>Smooth timeline \(catch-up, no skip\)<\/option>/,
-  "webui should default to the no-skip catch-up timeline mode for smoother playback",
+  /<option value="smooth_timeline" selected>Smooth realtime \(&lt;=500ms buffer\)<\/option>/,
+  "webui should default to bounded realtime playback for lower display lag",
 );
 assert.match(
   appJs,
@@ -118,8 +118,13 @@ assert.match(
 );
 assert.match(
   appJs,
-  /const preservesTimeline[\s\S]*selectedPlaybackMode\(\) === "timeline"[\s\S]*selectedPlaybackMode\(\) === "smooth_timeline"/,
-  "webui should avoid browser decode drops in smooth timeline except at the byte cap",
+  /const boundedRealtime\s*=\s*playbackMode === "smooth_timeline"/,
+  "webui should bound smooth realtime browser decode backlog",
+);
+assert.match(
+  appJs,
+  /const ONLINE_MAX_BUFFER_MS\s*=\s*configuredNumber\("onlineMaxBufferMs", 500\);/,
+  "webui should cap smooth realtime playback near the current tail by default",
 );
 assert.match(
   appJs,
@@ -168,23 +173,23 @@ assert.match(
 );
 assert.match(
   appJs,
-  /targetLeadChunkRatio:\s*0\.75/,
-  "24 fps playback should keep enough jitter lead for sub-24fps backend delivery",
+  /targetLeadChunkRatio:\s*0\.45/,
+  "24 fps playback should keep a small realtime jitter lead",
 );
 assert.match(
   appJs,
-  /minTargetLeadMs:\s*360/,
-  "24 fps playback should avoid chasing a too-small buffer when backend delivery is bursty",
+  /minTargetLeadMs:\s*80/,
+  "24 fps playback should start quickly instead of waiting for a large buffer",
 );
 assert.match(
   appJs,
-  /maxTargetLeadMs:\s*900/,
-  "24 fps playback should trade a bounded sub-second lead for smoother display",
+  /maxTargetLeadMs:\s*500/,
+  "24 fps playback should keep smooth realtime lag under a short tail buffer",
 );
 assert.match(
   appJs,
-  /maxDeliveryLeadBoostMs:\s*360/,
-  "webui should bound adaptive jitter buffering",
+  /maxDeliveryLeadBoostMs:\s*0/,
+  "webui should not inflate the realtime tail when delivery is jittery",
 );
 assert.match(
   appJs,

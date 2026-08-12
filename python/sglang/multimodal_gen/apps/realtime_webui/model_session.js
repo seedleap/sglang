@@ -32,6 +32,7 @@
       startupMinChunk = 0,
       startupTimeoutMs = 12000,
       stallTimeoutMs = 7000,
+      maxDecodeQueueBatches = 2,
       onState = () => {},
       onStats = () => {},
       onFrame = () => {},
@@ -53,6 +54,7 @@
       this.startupMinChunk = Math.max(0, Number(startupMinChunk) || 0);
       this.startupTimeoutMs = Math.max(0, Number(startupTimeoutMs) || 0);
       this.stallTimeoutMs = Math.max(0, Number(stallTimeoutMs) || 0);
+      this.maxDecodeQueueBatches = Math.max(1, Number(maxDecodeQueueBatches) || 2);
       this.awaitingStableFrame = false;
       this.mediaWatchdogTimer = null;
       this.hasVisibleFrame = false;
@@ -68,8 +70,17 @@
         targetFps: 24,
         lowLatencyPlayback: true,
         holdForTargetLead: true,
-        minTargetLeadMs: 360,
-        maxTargetLeadMs: 900,
+        minTargetLeadMs: 80,
+        maxTargetLeadMs: 500,
+        startLeadChunkRatio: 0.2,
+        minStartLeadMs: 80,
+        resumeLeadChunkRatio: 0.2,
+        minResumeLeadMs: 80,
+        maxResumeLeadMs: 220,
+        maxDeliveryLeadBoostMs: 0,
+        realtimeMaxBufferMs: 500,
+        realtimeMaxBufferChunks: 1,
+        realtimeMaxFrameAgeMs: 500,
       });
       this.socket = null;
       this.pendingHeader = null;
@@ -262,7 +273,14 @@
     enqueueDecode(header, payload, epoch) {
       this.observeFrameBatch(header);
       this.decodeQueue.push({ header, payload, epoch });
+      this.trimDecodeQueue();
       this.pumpDecode();
+    }
+
+    trimDecodeQueue() {
+      while (this.decodeQueue.length > this.maxDecodeQueueBatches) {
+        this.decodeQueue.shift();
+      }
     }
 
     observeFrameBatch(header) {
