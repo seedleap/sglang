@@ -22,6 +22,7 @@ WARMUP_CHUNKS="${MINWM_THROUGHPUT_WARMUP_CHUNKS:-20}"
 MEASURED_CHUNKS="${MINWM_THROUGHPUT_MEASURED_CHUNKS:-200}"
 CASES_PATH="${MINWM_THROUGHPUT_CASES_PATH:-${SCRIPT_DIR}/cases_720p_compile_smoke.json}"
 THROUGHPUT_CASE="${MINWM_THROUGHPUT_CASE:-00_forward_080_pottery_720p}"
+CONTRACT_SIZES="${MINWM_CONTRACT_SIZES:-832x480}"
 SHM_ROOT="${MINWM_REALTIME_VAE_SHM_DIR:-/dev/shm/sglang-realtime-vae}"
 RESULT_ROOT="${MINWM_RESULTS_ROOT%/}/${MINWM_MATRIX_ID}"
 ARCHIVE_ROOT="${MINWM_ARCHIVE_ROOT:-}"
@@ -263,16 +264,13 @@ run_lane() {
   echo "MINWM_UNIFIED_EXACT_MATRIX_LANE_START lane=${profile} timestamp=$(date -Iseconds)"
   start_denoiser "${mode}" "${degree}" "${lane_dir}"
   set +e
-  PYTHONPATH="${SCRIPT_DIR}" python3 "${SCRIPT_DIR}/benchmark_realtime_throughput.py" \
-    --cases "${CASES_PATH}" \
+  PYTHONPATH="${SCRIPT_DIR}" python3 "${SCRIPT_DIR}/benchmark_rtx6000_contract.py" \
     --output "${lane_dir}/throughput.json" \
+    --server-log "${lane_dir}/server.log" \
     --ws-url ws://127.0.0.1:30000/v1/realtime_video/generate \
-    --case "${THROUGHPUT_CASE}" \
     --profile-name "${profile}" \
-    --warmup-chunks "${WARMUP_CHUNKS}" \
-    --measured-chunks "${MEASURED_CHUNKS}" \
-    --kv-cache-num-frames 45 \
-    --save-first-measured-frame \
+    --sglang-git-ref "${SGLANG_GIT_REF:-unknown}" \
+    --sizes ${CONTRACT_SIZES} \
     | tee "${lane_dir}/client.log"
   local status=${PIPESTATUS[0]}
   set -e
@@ -355,18 +353,12 @@ for degree in "${requested_degrees[@]}"; do
   curl --fail --silent http://127.0.0.1:31000/metrics \
     > "${RESULT_ROOT}/${profile}-vae-metrics-after.prom"
   if [[ "${degree}" == "1" ]]; then
-    python3 "${SCRIPT_DIR}/compare_realtime_vae_outputs.py" \
-      "${RESULT_ROOT}/local-sp1-r1/throughput.json" \
-      "${RESULT_ROOT}/${profile}-r1/throughput.json" \
-      "${RESULT_ROOT}/local-vs-remote-sp1-parity.json" \
-      --max-absolute-error "${PARITY_MAX_ABSOLUTE_ERROR}" \
-      --min-psnr-db "${PARITY_MIN_PSNR_DB}"
-    parity_met="$(python3 - "${RESULT_ROOT}/local-vs-remote-sp1-parity.json" <<'PY'
+    parity_met="$(python3 - "${RESULT_ROOT}/local-sp1-r1/throughput.json" "${RESULT_ROOT}/${profile}-r1/throughput.json" <<'PY'
 import json
 import sys
-
-summary = json.load(open(sys.argv[1]))
-print("true" if summary["numerical_parity"] else "false")
+a = json.load(open(sys.argv[1]))
+b = json.load(open(sys.argv[2]))
+print("true" if [x["payload_sha256"] for x in a["results"]] == [x["payload_sha256"] for x in b["results"]] else "false")
 PY
 )"
   fi
@@ -379,7 +371,7 @@ from pathlib import Path
 root = Path(sys.argv[1])
 values = [
     json.loads((root / f"{sys.argv[2]}-r{i}" / "throughput.json").read_text())
-    ["client"]["steady_received_fps_ratio_of_sums"]
+    ["results"][0]["steady_client_fps"]
     for i in range(1, int(sys.argv[3]) + 1)
 ]
 print(statistics.median(values))
@@ -408,27 +400,17 @@ import sys
 from pathlib import Path
 
 root = Path(sys.argv[1])
-parity_path = root / "local-vs-remote-sp1-parity.json"
-parity_summary = json.loads(parity_path.read_text()) if parity_path.exists() else {}
 lanes = {}
 for result_path in sorted(root.glob("*/throughput.json")):
     result = json.loads(result_path.read_text())
-    lanes[result["profile_name"]] = {
-        "client_fps": result["client"]["steady_received_fps_ratio_of_sums"],
-        "client_interarrival_ms": result["client"]["steady_payload_interarrival_ms"],
-        "first_payload_ms": result["client"][
-            "init_send_complete_to_first_payload_complete_ms"
-        ],
-        "payload_sha256": result["measured_payload_sha256"],
-        "server": result["server"],
-    }
+    lanes[result["profile_name"]] = result["results"]
 summary = {
     "schema_version": "minwm-unified-exact-spot-matrix/v1",
     "matrix_id": sys.argv[6],
     "target_fps": float(sys.argv[2]),
     "target_met": sys.argv[3] == "true",
-    "exact_sp1_bitwise_equal": parity_summary.get("bitwise_equal"),
-    "exact_sp1_numerical_parity": parity_summary.get("numerical_parity"),
+    "exact_sp1_bitwise_equal": sys.argv[4] == "true",
+    "exact_sp1_numerical_parity": sys.argv[4] == "true",
     "selected_sp_degree": int(sys.argv[5]) if sys.argv[5] else None,
     "lanes": lanes,
 }

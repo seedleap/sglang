@@ -148,8 +148,9 @@ spec:
             - {name: MINWM_ENABLE_CUDA_MPS, value: "true"}
             - {name: MINWM_MATRIX_REPETITIONS, value: "3"}
             - {name: MINWM_TARGET_FPS, value: "0.1"}
-            - {name: MINWM_THROUGHPUT_WARMUP_CHUNKS, value: "1"}
-            - {name: MINWM_THROUGHPUT_MEASURED_CHUNKS, value: "68"}
+            - {name: MINWM_THROUGHPUT_WARMUP_CHUNKS, value: "5"}
+            - {name: MINWM_THROUGHPUT_MEASURED_CHUNKS, value: "69"}
+            - {name: MINWM_CONTRACT_SIZES, value: 832x480}
             - {name: MINWM_THROUGHPUT_CASES_PATH, value: /workspace/sglang/benchmark/minwm_realtime_parity/cases_480p_compile_smoke.json}
             - {name: MINWM_THROUGHPUT_CASE, value: 00_forward_080_pottery_480p}
             - {name: MINWM_STAGE_FROM_MOUNT, value: "1"}

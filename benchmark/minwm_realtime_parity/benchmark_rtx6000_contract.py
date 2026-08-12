@@ -36,6 +36,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--warmup-chunks", type=int, default=5)
     parser.add_argument("--measured-chunks", type=int, default=69)
     parser.add_argument("--steady-start-chunk", type=int, default=10)
+    parser.add_argument(
+        "--sizes", nargs="+", default=["832x480", "1248x704"],
+        choices=["832x480", "1248x704"],
+    )
     parser.add_argument("--timeout", type=float, default=1800.0)
     return parser.parse_args()
 
@@ -231,7 +235,7 @@ async def main() -> None:
     base_request = contract["request"]
     summaries = []
     warmups = []
-    for size in ("832x480", "1248x704"):
+    for size in args.sizes:
         warm = await stream_request(
             args, request_for_size(base_request, size, args.warmup_chunks)
         )
