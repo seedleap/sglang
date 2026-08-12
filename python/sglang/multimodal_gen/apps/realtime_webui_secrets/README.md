@@ -27,3 +27,4 @@ Deployments may instead set these server-only environment variables:
 - `CREATE_WORLD_IMAGE_CONFIG`
 - `CREATE_WORLD_CREDENTIALS`
 - `CREATE_WORLD_DESCRIPTION_MODEL`
+- `CREATE_WORLD_IMAGE_ATTEMPTS` (default: `2`; failed gameplay framing is regenerated)
