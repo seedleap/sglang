@@ -34,8 +34,8 @@
     smoothTimelinePlaybackRateMax: 1.1,
     smoothTimelineEmergencyLeadMs: 1800,
     smoothTimelineEmergencyReleaseMs: 900,
-    smoothTimelineEmergencyPlaybackRateMax: 2.5,
-    smoothTimelineEmergencyPlaybackRateSlewPerSecond: 3,
+    smoothTimelineEmergencyPlaybackRateMax: 1.35,
+    smoothTimelineEmergencyPlaybackRateSlewPerSecond: 0.7,
     emergencyPlaybackRateMin: 0.86,
     emergencyPlaybackRateMax: 1.3,
     playbackRateSlewPerSecond: 0.35,
@@ -610,8 +610,7 @@
     }
 
     #dropsOldEventFramesForCutover() {
-      return this.pendingEventCutoverMode === "prompt"
-        || (this.mode !== "timeline" && this.mode !== "smooth_timeline");
+      return this.pendingEventCutoverMode === "prompt";
     }
 
     #trimStaleBacklog(now) {

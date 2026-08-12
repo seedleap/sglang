@@ -200,7 +200,7 @@ function backlogDropsContiguousOldFrames() {
   assert.equal(snapshot.lastDropReason, "backlog");
 }
 
-function eventCutoverKeepsOnlySmallOldFrameGrace() {
+function actionCutoverUsesBacklogPolicyInsteadOfEventDrop() {
   const controller = new RealtimePlaybackController({ targetFps: 25 });
   enqueueChunk(controller, { chunk: 1, frameCount: 24, durationMs: 960, now: 1000 });
   controller.noteInputEvent(5, 1050);
@@ -212,10 +212,10 @@ function eventCutoverKeepsOnlySmallOldFrameGrace() {
     now: 1150,
   });
   assert.ok(result.cutover);
-  assert.equal(result.droppedFrames.length, 21);
-  assert.equal(controller.queue[0].chunk, 1);
+  assert.equal(result.droppedFrames.length, 24);
+  assert.equal(controller.snapshot().lastDropReason, "backlog");
+  assert.equal(controller.queue[0].chunk, 2);
   assert.equal(controller.queue[0].index, 0);
-  assert.equal(controller.queue[3].chunk, 2);
 }
 
 function settleEventCutoverKeepsOnlySmallOldFrameGrace() {
@@ -347,8 +347,8 @@ function smoothTimelineModePreservesBacklogAndCatchesUp() {
   assert.equal(catchUp.droppedFrames, 0);
   assert.equal(catchUp.smoothTimelineEmergencyCatchup, true);
   assert.ok(catchUp.playbackRate > 1.1, `playback rate ${catchUp.playbackRate}`);
-  assert.ok(catchUp.playbackRate <= 2.5, `playback rate ${catchUp.playbackRate}`);
-  assert.ok(catchUp.renderFps > 27.5 && catchUp.renderFps <= 62.5, `render fps ${catchUp.renderFps}`);
+  assert.ok(catchUp.playbackRate <= 1.35, `playback rate ${catchUp.playbackRate}`);
+  assert.ok(catchUp.renderFps > 27.5 && catchUp.renderFps <= 33.75, `render fps ${catchUp.renderFps}`);
 }
 
 function smoothTimelineModePreservesFramesAcrossEventCutover() {
@@ -443,7 +443,7 @@ function smoothTimelineModeSpeedsUpToCatchBacklogWithoutDropping() {
   assert.equal(decision.action, "draw");
   assert.equal(snapshot.droppedFrames, 0);
   assert.ok(snapshot.playbackRate > 1, `playback rate ${snapshot.playbackRate}`);
-  assert.ok(snapshot.playbackRate <= 2.5, `playback rate ${snapshot.playbackRate}`);
+  assert.ok(snapshot.playbackRate <= 1.35, `playback rate ${snapshot.playbackRate}`);
 }
 
 function adaptiveModeKeepsBoundedBacklogWithoutLowLatencyJump() {
@@ -730,7 +730,7 @@ smallBufferContinuesWhenMoreFramesArrive();
 smallBufferPacesSlowChunksAtSourceFps();
 burstySubTargetSourceKeepsWarmBuffer();
 backlogDropsContiguousOldFrames();
-eventCutoverKeepsOnlySmallOldFrameGrace();
+actionCutoverUsesBacklogPolicyInsteadOfEventDrop();
 settleEventCutoverKeepsOnlySmallOldFrameGrace();
 staleFramesAfterWallClockPauseResumeAtFreshestChunk();
 timelineModeNeverDropsBacklog();
