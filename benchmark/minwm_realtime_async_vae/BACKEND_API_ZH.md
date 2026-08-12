@@ -500,6 +500,11 @@ ws.onmessage = async ({ data }) => {
 5. 页面失焦时发送空按键状态；Stop 时先清空按键，再关闭 WebSocket。
 6. Trace 页单独调用 REST 查询；Preview/媒体播放热路径不要轮询 CloudWatch。
 
+Gateway 在浏览器发送前使用 64 帧有界媒体环形队列。媒体帧入队不会等待慢浏览器；
+队列满时只淘汰最老媒体帧并保留最新帧，`media_chunk_complete` 等控制标记不会被淘汰。
+因此客户端不应依赖每一帧都到达，而应使用 `chunk_index`、`frame_batch_index` 和
+`event_id` 检测跳帧、事件切换及当前画面所对应的模型输入。
+
 ## 10. 当前部署能力边界
 
 - 每个 Denoiser Pod 使用 1 张 H100 并声明 4 个 reservation slot；8 个 Pod（8 张 H100）的 Denoiser 侧硬上限为 32。

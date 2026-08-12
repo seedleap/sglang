@@ -29,7 +29,13 @@ def test_gateway_admission_waiter_gate_rejects_overflow_without_blocking():
     asyncio.run(run())
 
 
-def _frame(chunk: int, batch: int = 0, *, generation: str = "g") -> bytes:
+def _frame(
+    chunk: int,
+    batch: int = 0,
+    *,
+    generation: str = "g",
+    num_frames: int = 1,
+) -> bytes:
     return encode_message(
         "frame_batch",
         session_id="s",
@@ -37,12 +43,12 @@ def _frame(chunk: int, batch: int = 0, *, generation: str = "g") -> bytes:
         request_id=f"r{chunk}",
         chunk_index=chunk,
         frame_batch_index=batch,
-        payload_lengths=[1],
-        payload=b"x",
+        payload_lengths=[1] * num_frames,
+        payload=b"x" * num_frames,
         content_type="image/webp",
         width=8,
         height=8,
-        num_frames=1,
+        num_frames=num_frames,
     )
 
 
@@ -91,19 +97,15 @@ def test_gateway_output_route_is_fenced_ordered_and_bounded():
     asyncio.run(run())
 
 
-def test_gateway_output_route_waits_for_bounded_capacity():
+def test_gateway_output_route_never_waits_for_browser_capacity():
     async def run():
         registry = GatewayOutputRegistry(queue_depth=1, enqueue_timeout_s=0.1)
         route = await registry.register("s", "g", token="secret")
 
         await route.put(_frame(0, 0))
-        blocked_put = asyncio.create_task(route.put(_frame(0, 1)))
-        await asyncio.sleep(0.01)
-        assert not blocked_put.done()
-
-        assert await route.get() == _frame(0, 0)
-        route.task_done()
-        await blocked_put
+        await asyncio.wait_for(route.put(_frame(0, 1)), timeout=0.01)
+        assert route.dropped_messages == 1
+        assert route.dropped_frames == 1
         assert await route.get() == _frame(0, 1)
         route.task_done()
 
@@ -146,10 +148,57 @@ def test_gateway_output_route_prioritizes_media_completion_under_backpressure():
         completion = _media_complete(0)
         await asyncio.wait_for(route.put(completion), timeout=0.05)
 
-        assert route.dropped_messages == 1
+        assert route.dropped_messages == 0
+        assert await route.get() == _frame(0, 0)
+        route.task_done()
         assert await route.get() == completion
         route.task_done()
         await route.wait_until_chunk_completed(0)
+
+    asyncio.run(run())
+
+
+def test_gateway_output_route_keeps_controls_when_shedding_old_media():
+    async def run():
+        registry = GatewayOutputRegistry(queue_depth=1)
+        route = await registry.register("s", "g", token="secret")
+
+        await route.put(_frame(0, 0))
+        completion = _media_complete(0)
+        await route.put(completion)
+        await route.put(_frame(1, 0))
+
+        assert route.dropped_messages == 1
+        assert route.dropped_frames == 1
+        assert await route.get() == completion
+        route.task_done()
+        assert await route.get() == _frame(1, 0)
+        route.task_done()
+
+    asyncio.run(run())
+
+
+def test_gateway_output_route_bounds_actual_frames_and_reports_queue_metrics():
+    async def run():
+        registry = GatewayOutputRegistry(queue_depth=4)
+        route = await registry.register(
+            "s", "g", token="secret", trace_id="trace-a"
+        )
+
+        await route.put(_frame(0, 0, num_frames=3))
+        await route.put(_frame(0, 1, num_frames=3))
+
+        metrics = route.queue_metrics()
+        assert route.trace_id == "trace-a"
+        assert metrics["gateway_queue_depth"] == 3
+        assert metrics["gateway_queue_capacity_frames"] == 4
+        assert metrics["gateway_dropped_frames"] == 3
+        assert metrics["gateway_queue_bytes"] > 0
+        assert metrics["gateway_oldest_frame_age_ms"] >= 0
+
+        assert await route.get() == _frame(0, 1, num_frames=3)
+        route.task_done()
+        await route.join()
 
     asyncio.run(run())
 
