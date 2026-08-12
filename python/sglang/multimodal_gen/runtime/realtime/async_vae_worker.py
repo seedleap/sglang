@@ -8,6 +8,7 @@ import asyncio
 import inspect
 import io
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
@@ -116,15 +117,24 @@ class AsyncVAEWorker:
         max_sessions: int,
         queue_depth_per_session: int = 1,
         encoded_frames_per_batch: int = 1,
+        encode_workers: int = 4,
     ) -> None:
         if max_sessions < 1:
             raise ValueError("max_sessions must be positive")
         if queue_depth_per_session < 1:
             raise ValueError("queue_depth_per_session must be positive")
+        if encode_workers < 1:
+            raise ValueError("encode_workers must be positive")
         self.engine = engine
         self.max_sessions = max_sessions
         self.queue_depth_per_session = queue_depth_per_session
         self.encoded_frames_per_batch = max(1, encoded_frames_per_batch)
+        self.encode_workers = encode_workers
+        self._encode_executor = ThreadPoolExecutor(
+            max_workers=encode_workers,
+            thread_name_prefix="realtime-webp",
+        )
+        self._encode_executor_shutdown = False
         self._sessions: dict[tuple[str, str], _WorkerSession] = {}
         self._session_lock = asyncio.Lock()
         self._actor_lock = asyncio.Lock()
@@ -412,7 +422,13 @@ class AsyncVAEWorker:
         previous_callback: asyncio.Task | None,
         on_frame_batch: FrameBatchCallback | None,
     ) -> tuple[EncodedFrameBatch, ...]:
-        encoded = await asyncio.to_thread(self._encode_frames, frames, opened)
+        loop = asyncio.get_running_loop()
+        encoded = await loop.run_in_executor(
+            self._encode_executor,
+            self._encode_frames,
+            frames,
+            opened,
+        )
         indexed = tuple(
             EncodedFrameBatch(
                 payloads=batch.payloads,
@@ -564,6 +580,13 @@ class AsyncVAEWorker:
     async def close_all(self) -> None:
         for session_id, generation_id in list(self._sessions):
             await self.close(session_id, generation_id)
+        if not self._encode_executor_shutdown:
+            self._encode_executor_shutdown = True
+            await asyncio.to_thread(
+                self._encode_executor.shutdown,
+                wait=True,
+                cancel_futures=True,
+            )
 
     @property
     def active_sessions(self) -> int:
@@ -582,6 +605,7 @@ class AsyncVAEWorker:
                 state.queue.qsize() for state in self._sessions.values()
             ),
             "service_time_ms": self._service_time_ms,
+            "encode_workers": self.encode_workers,
         }
 
     def _update_capacity_metrics(self) -> None:

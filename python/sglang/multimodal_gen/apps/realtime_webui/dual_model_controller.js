@@ -6,11 +6,19 @@
       this.now = now;
       this.nextEventId = 1;
       this.activeKeys = new Set();
+      this.connectionGeneration = 0;
+      this.connectionTemplates = new Map();
+      this.latestEvents = new Map();
+      this.reconnectCounts = new Map();
     }
 
     async connect(baseInit) {
+      this.connectionGeneration += 1;
       this.nextEventId = 1;
       this.activeKeys.clear();
+      this.connectionTemplates.clear();
+      this.latestEvents.clear();
+      this.reconnectCounts.clear();
       const entries = [];
       for (const [key, session] of Object.entries(this.sessions)) {
         const backend = this.backends[key];
@@ -28,25 +36,11 @@
           session.close("disabled for request");
         }
       }
-      const results = await Promise.allSettled(entries.map(([key, session]) => {
-        const backend = this.backends[key];
-        const traceBase = baseInit.trace_id || `trace-${Date.now()}`;
-        const model = typeof backend.model === "function"
-          ? backend.model(baseInit, key)
-          : backend.model;
-        let init = {
-          ...baseInit,
-          model,
-          trace_id: key === "minwm" ? traceBase : `${traceBase}:${key}`,
-        };
-        if (typeof backend.transformInit === "function") {
-          init = backend.transformInit(init, key);
-        }
-        const wsUrl = typeof backend.wsUrl === "function"
-          ? backend.wsUrl(init, key)
-          : backend.wsUrl;
-        return session.connect(init, wsUrl);
-      }));
+      const results = await Promise.allSettled(entries.map(([key]) => this.connectKey(
+        key,
+        baseInit,
+        { reconnect: false },
+      )));
       const report = { connected: [], failed: [] };
       results.forEach((result, index) => {
         const [key] = entries[index];
@@ -78,6 +72,7 @@
         client_sent_perf_ms: sentAt,
         client_sent_epoch_ms: Date.now(),
       };
+      this.latestEvents.set(kind, envelope);
       const sent = {};
       for (const key of this.activeKeys) {
         sent[key] = Boolean(this.sessions[key]?.sendEvent(envelope));
@@ -86,8 +81,59 @@
     }
 
     close(reason = "dual model session closed") {
+      this.connectionGeneration += 1;
       for (const session of Object.values(this.sessions)) session.close(reason);
       this.activeKeys.clear();
+      this.connectionTemplates.clear();
+      this.latestEvents.clear();
+      this.reconnectCounts.clear();
+    }
+
+    async reconnect(key) {
+      const template = this.connectionTemplates.get(key);
+      if (!template) throw new Error(`missing reconnect template for ${key}`);
+      const generation = this.connectionGeneration;
+      this.activeKeys.delete(key);
+      await this.connectKey(key, template.baseInit, { reconnect: true });
+      if (generation !== this.connectionGeneration) {
+        this.sessions[key]?.close("stale reconnect");
+        return false;
+      }
+      this.activeKeys.add(key);
+      const replayEvents = [...this.latestEvents.values()].sort(
+        (left, right) => Number(left.event_id || 0) - Number(right.event_id || 0),
+      );
+      for (const envelope of replayEvents) this.sessions[key]?.sendEvent(envelope);
+      return true;
+    }
+
+    async connectKey(key, baseInit, { reconnect }) {
+      const backend = this.backends[key];
+      const session = this.sessions[key];
+      if (!backend || !session) throw new Error(`missing backend session for ${key}`);
+      const traceBase = baseInit.trace_id || `trace-${Date.now()}`;
+      const model = typeof backend.model === "function"
+        ? backend.model(baseInit, key)
+        : backend.model;
+      const reconnectCount = reconnect
+        ? Number(this.reconnectCounts.get(key) || 0) + 1
+        : 0;
+      this.reconnectCounts.set(key, reconnectCount);
+      let init = {
+        ...baseInit,
+        model,
+        trace_id: key === "minwm"
+          ? traceBase
+          : `${traceBase}:${key}${reconnectCount ? `:retry${reconnectCount}` : ""}`,
+      };
+      if (typeof backend.transformInit === "function") {
+        init = backend.transformInit(init, key);
+      }
+      const wsUrl = typeof backend.wsUrl === "function"
+        ? backend.wsUrl(init, key)
+        : backend.wsUrl;
+      this.connectionTemplates.set(key, { baseInit: { ...baseInit } });
+      return session.connect(init, wsUrl);
     }
   }
 

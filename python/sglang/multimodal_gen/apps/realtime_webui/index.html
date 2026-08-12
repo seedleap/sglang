@@ -90,7 +90,7 @@
           <button id="tracePaneButton" class="workspace-switch" type="button" data-workspace-view="trace">Trace</button>
         </div>
 
-        <div id="previewPane" class="workspace-pane is-active">
+        <div id="previewPane" class="workspace-pane is-active" role="tabpanel" aria-labelledby="previewPaneButton">
           <section class="stage" aria-label="Zing 与 LingBot2 实时对比">
             <div class="comparison-heading">
               <div>
@@ -268,16 +268,15 @@
         </section>
       </section>
     </main>
-
     <script src="./runtime-config.js"></script>
-    <script src="./playback_controller.js?v=realtime-playback-v30"></script>
-    <script src="./model_session.js?v=dual-model-v5"></script>
-    <script src="./dual_model_controller.js?v=dual-model-v3"></script>
+    <script src="./playback_controller.js?v=realtime-playback-v31"></script>
+    <script src="./model_session.js?v=dual-model-v6"></script>
+    <script src="./dual_model_controller.js?v=dual-model-v4"></script>
     <script src="./session_lifetime.js?v=session-lifetime-v1"></script>
     <script src="./prompt_rewrite_controller.js?v=prompt-rewrite-v1"></script>
     <script src="./fullscreen_controller.js?v=dual-fullscreen-v1"></script>
     <script src="./trace_topology.js?v=realtime-trace-topology-v6"></script>
     <script src="./trace_transport.js?v=realtime-trace-http-v2"></script>
-    <script src="./app.js?v=world-studio-v10"></script>
+    <script src="./app.js?v=world-studio-v11"></script>
   </body>
 </html>

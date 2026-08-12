@@ -241,6 +241,33 @@ def test_gateway_readiness_depends_on_coordinator():
     assert response.json()["detail"] == "coordinator unavailable"
 
 
+def test_gateway_readiness_tolerates_a_bounded_coordinator_probe_blip():
+    coordinator = _Coordinator()
+    clock = [100.0]
+    client = TestClient(
+        create_app(
+            coordinator,
+            model_revision="minwm-r1",
+            vae_fingerprint="taew2_2",
+            internal_output_url="ws://gateway/v1/internal/realtime_output",
+            readiness_coordinator_grace_s=30.0,
+            readiness_clock=lambda: clock[0],
+        )
+    )
+
+    assert client.get("/readyz").json()["coordinator"] == "ready"
+    coordinator.ready = False
+    clock[0] = 125.0
+    response = client.get("/readyz")
+    assert response.status_code == 200
+    assert response.json()["coordinator"] == "degraded"
+
+    clock[0] = 131.0
+    response = client.get("/readyz")
+    assert response.status_code == 503
+    assert response.json()["detail"] == "coordinator unavailable"
+
+
 def test_gateway_cli_defaults_to_a_bounded_64_waiter_queue(monkeypatch):
     monkeypatch.setattr(
         sys,

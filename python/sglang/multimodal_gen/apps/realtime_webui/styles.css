@@ -478,6 +478,32 @@ button:focus-visible {
 }
 
 .topbar-spacer { flex: 1; }
+.catchup-rate-control,
+.topbar-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  color: #c9cdbf;
+  font-size: 11px;
+}
+
+.catchup-rate-control input[type="range"] {
+  width: 74px;
+}
+
+.catchup-rate-control b {
+  min-width: 34px;
+  color: #fffdf7;
+  font-variant-numeric: tabular-nums;
+}
+
+.topbar-toggle input {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  accent-color: #70b985;
+}
 .session-countdown {
   display: inline-flex;
   align-items: center;

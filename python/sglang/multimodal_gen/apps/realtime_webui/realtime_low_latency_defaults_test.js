@@ -202,6 +202,16 @@ assert.match(
   "production playback should default to the stable 1.1x catch-up limit",
 );
 assert.match(
+  indexHtml,
+  /id="smoothCatchupRate"[^>]*min="1"[^>]*max="2\.5"[^>]*value="1\.1"/,
+  "webui should expose the smooth timeline catch-up ceiling above the videos",
+);
+assert.match(
+  indexHtml,
+  /id="zingFrameInterpolation"[^>]*type="checkbox"/,
+  "webui should expose an opt-in Zing frame interpolation control",
+);
+assert.match(
   appJs,
   /lowLatencyMaxLeadFrames:\s*12/,
   "live playback should retain a small 24 fps frame cushion before dropping stale frames",

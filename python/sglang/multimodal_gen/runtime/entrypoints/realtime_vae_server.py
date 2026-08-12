@@ -408,6 +408,7 @@ def main() -> None:
     parser.add_argument("--max-sessions", type=int, default=8)
     parser.add_argument("--queue-depth-per-session", type=int, default=1)
     parser.add_argument("--encoded-frames-per-batch", type=int, default=1)
+    parser.add_argument("--encode-workers", type=int, default=4)
     parser.add_argument("--max-message-mb", type=int, default=64)
     parser.add_argument("--worker-epoch")
     args = parser.parse_args()
@@ -425,6 +426,7 @@ def main() -> None:
         max_sessions=args.max_sessions,
         queue_depth_per_session=args.queue_depth_per_session,
         encoded_frames_per_batch=args.encoded_frames_per_batch,
+        encode_workers=args.encode_workers,
     )
     reservations = WorkerReservationRegistry(
         worker_epoch=resolve_worker_epoch(args.worker_epoch),

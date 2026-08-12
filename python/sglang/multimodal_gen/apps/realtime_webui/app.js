@@ -531,6 +531,51 @@ const playbackController = new RealtimePlaybackController({
   maxDeliveryLeadBoostMs: 360,
   deliveryStallExpectedMultiplier: 1.8,
 });
+let lingbot2ReconnectTimer = 0;
+let lingbot2ReconnectAttempt = 0;
+let lingbot2ReconnectInFlight = false;
+
+function cancelLingbot2Reconnect() {
+  if (lingbot2ReconnectTimer) window.clearTimeout(lingbot2ReconnectTimer);
+  lingbot2ReconnectTimer = 0;
+  lingbot2ReconnectAttempt = 0;
+  lingbot2ReconnectInFlight = false;
+}
+
+function canReconnectLingbot2() {
+  return (
+    !sessionLifetimeExpired &&
+    selectedGenerationMode() === "i2v" &&
+    ws?.readyState === WebSocket.OPEN
+  );
+}
+
+function scheduleLingbot2Reconnect(reason = "media stream unavailable") {
+  if (!canReconnectLingbot2() || lingbot2ReconnectTimer || lingbot2ReconnectInFlight) return;
+  const delaysMs = [250, 1000, 2500, 4000];
+  const delayMs = delaysMs[Math.min(lingbot2ReconnectAttempt, delaysMs.length - 1)];
+  lingbot2ReconnectAttempt += 1;
+  addHistory(`LingBot2 recovering in ${delayMs}ms · ${reason}`);
+  lingbot2ReconnectTimer = window.setTimeout(async () => {
+    lingbot2ReconnectTimer = 0;
+    if (!canReconnectLingbot2()) return;
+    lingbot2ReconnectInFlight = true;
+    try {
+      const restored = await dualModelController.reconnect("lingbot2");
+      if (!restored || !canReconnectLingbot2()) return;
+      lingbot2ReconnectAttempt = 0;
+      addHistory("LingBot2 connection restored");
+    } catch (error) {
+      addHistory(`LingBot2 recovery failed · ${error.message || error}`);
+      lingbot2ReconnectInFlight = false;
+      scheduleLingbot2Reconnect(error.message || "retry failed");
+      return;
+    } finally {
+      lingbot2ReconnectInFlight = false;
+    }
+  }, delayMs);
+}
+
 const lingbot2Session = new RealtimeModelSession({
   key: "lingbot2",
   canvas: lingbot2Canvas,
@@ -563,6 +608,7 @@ const lingbot2Session = new RealtimeModelSession({
       return;
     }
     addHistory(`LingBot2 session failed · ${error.message || "unknown"}`);
+    scheduleLingbot2Reconnect(error.message || "stream failed");
   },
 });
 const primarySessionAdapter = {
@@ -1288,6 +1334,8 @@ function renderModelTelemetry(key, stats = {}) {
   const prefix = key === "lingbot2" ? "lingbot2" : "minwm";
   const renderFps = Number(stats.renderFps || 0);
   const sourceFps = Number(stats.sourceFps || 0);
+  const serverFps = Number(stats.serverFps || sourceFps);
+  const deliveryFps = Number(stats.deliveryFps || sourceFps);
   const bufferMs = Number(stats.bufferMs || 0);
   const queueFrames = Number(stats.queueFrames ?? stats.queueLength ?? 0);
   const droppedFrames = Number(stats.droppedFrames || 0);
@@ -1298,7 +1346,7 @@ function renderModelTelemetry(key, stats = {}) {
   if (droppedFrames) bufferParts.push(`drop ${droppedFrames}`);
   $(`${prefix}ChunkText`).textContent = stats.lastChunk == null ? "-" : `#${stats.lastChunk}`;
   $(`${prefix}RateText`).textContent = totalFrames > 0
-    ? `${sourceFps.toFixed(1)} source · ${renderFps} render`
+    ? `${serverFps.toFixed(1)} source · ${deliveryFps.toFixed(1)} recv · ${renderFps} render`
     : "-";
   $(`${prefix}BufferText`).textContent = bufferParts.join(" · ");
   $(`${prefix}FramesText`).textContent = `${totalFrames} · ${(Number(stats.bytes || 0) / 1048576).toFixed(1)} MB`;
@@ -3798,6 +3846,7 @@ function abortCurrentSession(reason = "session closed by client", {
 
 function closeSession(reason = "session closed by client", clearFrames = true) {
   promptRewriteController.endSession();
+  cancelLingbot2Reconnect();
   sessionLifetimeGuard.cancel();
   stopSessionCountdown();
   clearQueueOnClose = clearFrames;
@@ -3824,6 +3873,7 @@ function waitForSocketClose(socket, timeoutMs = RECONNECT_CLOSE_TIMEOUT_MS) {
 async function connect() {
   promptRewriteController.endSession();
   setPromptRewriteStatus("进入世界后可发送新指令", "");
+  cancelLingbot2Reconnect();
   resetSessionLifetimeUi();
   $("connectBtn").disabled = true;
   setModelConnectionState("minwm", "connecting");
@@ -3901,6 +3951,9 @@ async function connect() {
           .map(({ key, error }) => `${modelLabel(key)} unavailable: ${error?.message || error}`)
           .join(" · ")}`,
       );
+      if (connectionReport.failed.some(({ key }) => key === "lingbot2")) {
+        scheduleLingbot2Reconnect("initial connection failed");
+      }
     }
     promptRewriteController.beginSession(init.prompt);
     sessionLifetimeGuard.start();

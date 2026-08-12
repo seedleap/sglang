@@ -205,52 +205,95 @@ async function main() {
   });
   assert.equal(other.snapshot().queueFrames, 0, "model playback queues remain independent");
 
-  const stableCanvas = fakeCanvas();
-  const stableScheduled = [];
-  const stableStates = [];
-  const stable = new RealtimeModelSession({
-    key: "lingbot2-stable-start",
-    canvas: stableCanvas,
+  let watchdogCallback = null;
+  const watchdogErrors = [];
+  const watchdogSession = new RealtimeModelSession({
+    key: "lingbot2-watchdog",
+    canvas: fakeCanvas(),
     pack: (value) => value,
     unpack: (value) => value,
     WebSocketCtor: FakeSocket,
     PlaybackController: FakePlaybackController,
+    decodeBatch: async () => [],
+    requestFrame: () => {},
+    setTimer: (callback) => {
+      watchdogCallback = callback;
+      return 1;
+    },
+    clearTimer: () => {},
+    onError: (error) => watchdogErrors.push(error),
+  });
+  const watchdogConnecting = watchdogSession.connect(
+    { type: "init", trace_id: "trace:watchdog" },
+    "/lingbot2",
+  );
+  const watchdogSocket = FakeSocket.instances.at(-1);
+  watchdogSocket.open();
+  await watchdogConnecting;
+  assert.equal(typeof watchdogCallback, "function");
+  watchdogCallback();
+  assert.equal(watchdogErrors.length, 1, "a silent media stream should fail exactly once");
+  assert.equal(watchdogErrors[0].code, "MEDIA_START_TIMEOUT");
+  assert.equal(watchdogSocket.readyState, FakeSocket.CLOSED);
+
+  const stableCanvas = fakeCanvas();
+  const stableStates = [];
+  const stableSession = new RealtimeModelSession({
+    key: "lingbot2-stable-start",
+    canvas: stableCanvas,
     startupMinChunk: 1,
+    pack: (value) => value,
+    unpack: (value) => value,
+    WebSocketCtor: FakeSocket,
+    PlaybackController: FakePlaybackController,
     decodeBatch: async (header) => [{
       image: { width: 640, height: 360, close() {} },
       chunk: header.chunk_index,
       receivedAt: 100,
       decodeMs: 2,
     }],
-    requestFrame: (callback) => stableScheduled.push(callback),
-    now: () => 125,
+    requestFrame: () => {},
+    now: () => 150,
     onState: (state) => stableStates.push(state),
   });
-  const stableConnecting = stable.connect({ type: "init", trace_id: "trace:stable" }, "/stable");
+  const stableConnecting = stableSession.connect(
+    { type: "init", trace_id: "trace:stable" },
+    "/lingbot2",
+  );
   const stableSocket = FakeSocket.instances.at(-1);
   stableSocket.open();
   await stableConnecting;
-  assert.ok(!stableStates.includes("live"), "stable-start sessions wait for a post-warmup chunk");
+  assert.equal(
+    stableStates.includes("live"),
+    false,
+    "a gated LingBot2 session must retain the prior canvas until a stable chunk arrives",
+  );
   stableSocket.message({
     type: "frame_batch",
     chunk_index: 0,
+    event_id: 0,
     num_frames: 1,
+    content_type: "image/webp",
     payload: new Uint8Array([1]),
   });
   await flush();
-  stableScheduled.shift()(130);
-  assert.equal(stableCanvas.draws.length, 0, "warmup chunk zero should not flash on screen");
+  stableSession.render(160);
+  assert.equal(stableCanvas.draws.length, 0, "the unstable startup chunk must not flash");
+  assert.equal(stableStates.includes("live"), false);
+
   stableSocket.message({
     type: "frame_batch",
     chunk_index: 1,
+    event_id: 0,
     num_frames: 1,
+    content_type: "image/webp",
     payload: new Uint8Array([2]),
   });
   await flush();
-  stableScheduled.shift()(140);
-  assert.equal(stableCanvas.draws.length, 1, "the first stable chunk should render");
-  assert.ok(stableStates.includes("live"), "the stable frame should mark the session live");
-  stable.close();
+  stableSession.render(170);
+  assert.equal(stableCanvas.draws.length, 1);
+  assert.equal(stableStates.includes("live"), true);
+  stableSession.close("test complete", { notify: false });
 
   session.setUnavailable("T2V unavailable");
   assert.equal(replacementSocket.readyState, FakeSocket.CLOSED);
