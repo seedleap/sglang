@@ -50,13 +50,13 @@
             <strong>首帧图片</strong>
             <span id="firstFrameState">未填写</span>
           </div>
-          <label class="reference-upload">
+          <label id="referenceDropZone" class="reference-upload">
             <input id="firstFrame" type="file" accept="image/png,image/jpeg,image/webp" />
             <canvas id="referencePreview" width="320" height="180"></canvas>
             <span class="reference-upload-copy">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 16.5V19a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-2.5M8 9l4-4 4 4M12 5v11" /></svg>
               <b id="referenceUploadTitle">上传首帧</b>
-              <small>PNG、JPG、WebP，建议 16:9</small>
+              <small>点击或拖入 PNG、JPG、WebP，建议 16:9</small>
             </span>
             <span id="referenceName" class="reference-name">尚未选择图片</span>
           </label>
@@ -224,6 +224,14 @@
                 </button>
               </div>
               <p id="promptRewriteStatus" class="prompt-helper" role="status" aria-live="polite">支持文字或语音输入，AI 将判断为持久或一次性指令。</p>
+              <details id="promptLogPanel" class="prompt-log-panel">
+                <summary>
+                  <span>Prompt 发送记录</span>
+                  <small id="promptLogCount">0 条</small>
+                </summary>
+                <div id="promptLogEmpty" class="prompt-log-empty">进入世界后将在这里记录每次实际发送的完整 Prompt</div>
+                <ol id="promptLogList" class="prompt-log-list"></ol>
+              </details>
             </div>
 
             <div class="model-parameters-grid" aria-label="Model parameters" hidden>

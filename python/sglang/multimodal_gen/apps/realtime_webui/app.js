@@ -783,6 +783,104 @@ const dualModelController = new DualModelController({
     }
   },
 });
+const PROMPT_LOG_LIMIT = 100;
+let promptLogEntries = [];
+let promptLogNextId = 1;
+
+function promptLogTypeLabel(changeType) {
+  return changeType === "one_time" ? "一次性" : "持久";
+}
+
+function promptLogSourceLabel(trigger) {
+  return trigger === "user" ? "用户输入" : "规则触发";
+}
+
+function promptLogRuleLabel(rule, afterMs) {
+  if (rule === "session_start") return "进入世界，建立初始持久状态";
+  if (rule === "preset_runtime_update") return "切换世界预设，重建持久状态";
+  if (rule === "rewrite_failure_restore") return "新指令改写失败，恢复持久状态";
+  if (rule === "one_time_timeout_restore") {
+    return `一次性指令持续 ${Math.round(Number(afterMs || 10000) / 1000)} 秒后恢复`;
+  }
+  return "系统规则发送";
+}
+
+function clearPromptLog() {
+  promptLogEntries = [];
+  promptLogNextId = 1;
+  renderPromptLog();
+}
+
+function appendPromptLog(prompt, metadata = {}) {
+  const normalizedPrompt = String(prompt || "").trim();
+  if (!normalizedPrompt) return;
+  const trigger = metadata.trigger === "user" ? "user" : "rule";
+  const changeType = metadata.changeType === "one_time" ? "one_time" : "persistent";
+  promptLogEntries.push({
+    id: promptLogNextId++,
+    timestamp: new Date(),
+    prompt: normalizedPrompt,
+    trigger,
+    changeType,
+    instruction: trigger === "user" ? String(metadata.instruction || "").trim() : "",
+    rule: trigger === "rule" ? String(metadata.rule || "") : "",
+    afterMs: Number(metadata.afterMs || 0),
+  });
+  if (promptLogEntries.length > PROMPT_LOG_LIMIT) {
+    promptLogEntries.splice(0, promptLogEntries.length - PROMPT_LOG_LIMIT);
+  }
+  renderPromptLog();
+}
+
+function renderPromptLog() {
+  const list = $("promptLogList");
+  const empty = $("promptLogEmpty");
+  const count = $("promptLogCount");
+  if (!list || !empty || !count) return;
+  count.textContent = `${promptLogEntries.length} 条`;
+  empty.hidden = promptLogEntries.length > 0;
+  list.innerHTML = "";
+  for (const entry of [...promptLogEntries].reverse()) {
+    const item = document.createElement("li");
+    item.className = "prompt-log-entry";
+    item.dataset.trigger = entry.trigger;
+    item.dataset.changeType = entry.changeType;
+    const header = document.createElement("div");
+    header.className = "prompt-log-entry-header";
+    const sequence = document.createElement("b");
+    sequence.textContent = `#${entry.id}`;
+    const source = document.createElement("span");
+    source.className = "prompt-log-badge prompt-log-source";
+    source.textContent = promptLogSourceLabel(entry.trigger);
+    const type = document.createElement("span");
+    type.className = "prompt-log-badge prompt-log-type";
+    type.textContent = promptLogTypeLabel(entry.changeType);
+    const time = document.createElement("time");
+    time.dateTime = entry.timestamp.toISOString();
+    time.textContent = entry.timestamp.toLocaleTimeString("zh-CN", { hour12: false });
+    header.append(sequence, source, type, time);
+    const context = document.createElement("p");
+    context.className = "prompt-log-context";
+    context.textContent = entry.trigger === "user"
+      ? `用户输入：${entry.instruction || "（未记录）"}`
+      : `触发规则：${promptLogRuleLabel(entry.rule, entry.afterMs)}`;
+    const fullPrompt = document.createElement("pre");
+    fullPrompt.className = "prompt-log-full";
+    fullPrompt.textContent = entry.prompt;
+    item.append(header, context, fullPrompt);
+    list.appendChild(item);
+  }
+}
+
+function beginPromptLogSession(prompt, rule = "session_start") {
+  clearPromptLog();
+  appendPromptLog(prompt, {
+    trigger: "rule",
+    changeType: "persistent",
+    rule,
+  });
+}
+
 const promptRewriteController = new PromptRewriteController({
   rewrite: rewriteRuntimePrompt,
   sendPrompt: (prompt, metadata) => {
@@ -796,6 +894,7 @@ const promptRewriteController = new PromptRewriteController({
     if (metadata.phase === "restore" && eventId) {
       setPromptRewriteStatus("已恢复上一条持久指令", "persistent");
     }
+    if (eventId) appendPromptLog(prompt, metadata);
     return eventId;
   },
   restoreDelayMs: 10000,
@@ -4148,6 +4247,95 @@ function drawReferencePreview(file) {
   updateWorldDraftState();
 }
 
+function clearSelectedWorldPreset() {
+  selectedPreset = null;
+  document.querySelectorAll(".preset").forEach((button) => {
+    button.classList.remove("is-selected");
+    button.setAttribute("aria-pressed", "false");
+  });
+}
+
+function isSupportedFirstFrameImage(file) {
+  if (!file) return false;
+  const supportedTypes = new Set(["image/png", "image/jpeg", "image/webp"]);
+  if (file.type) return supportedTypes.has(file.type.toLowerCase());
+  return /\.(?:png|jpe?g|webp)$/i.test(file.name || "");
+}
+
+async function useFirstFrameFile(file, { fromDrop = false } = {}) {
+  if (!file) return false;
+  if (!isSupportedFirstFrameImage(file)) {
+    setWorldDraftStatus("请拖入 PNG、JPG 或 WebP 图片", "error");
+    addHistory("unsupported first-frame file rejected");
+    return false;
+  }
+  clearSelectedWorldPreset();
+  selectedReferenceBytes = null;
+  selectedReferenceUrl = "";
+  selectedReferenceLabel = file.name || "拖入的首帧";
+  selectedReferenceMimeType = file.type || mimeFromReferenceUrl(file.name);
+  $("firstFrame").value = "";
+  const previewPromise = drawReferencePreviewFromImageSource(
+    URL.createObjectURL(file),
+    selectedReferenceLabel,
+  );
+  selectedReferenceBytes = new Uint8Array(await file.arrayBuffer());
+  await previewPromise;
+  updateWorldDraftState();
+  if (fromDrop) addHistory(`first frame dropped · ${selectedReferenceLabel}`);
+  return true;
+}
+
+function setupFirstFrameDropZone() {
+  const dropZone = $("referenceDropZone");
+  if (!dropZone) return;
+  let dragDepth = 0;
+  const hasFiles = (event) => {
+    const types = event.dataTransfer?.types;
+    if (!types) return Boolean(event.dataTransfer?.files?.length);
+    for (let index = 0; index < types.length; index += 1) {
+      if (types[index] === "Files") return true;
+    }
+    return Boolean(event.dataTransfer?.files?.length);
+  };
+  const clearDragging = () => {
+    dragDepth = 0;
+    dropZone.classList.remove("is-dragging");
+  };
+  dropZone.addEventListener("dragenter", (event) => {
+    if (!hasFiles(event) || worldCompletionPending) return;
+    event.preventDefault();
+    dragDepth += 1;
+    dropZone.classList.add("is-dragging");
+  });
+  dropZone.addEventListener("dragover", (event) => {
+    if (!hasFiles(event) || worldCompletionPending) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+  });
+  dropZone.addEventListener("dragleave", (event) => {
+    if (!hasFiles(event)) return;
+    event.preventDefault();
+    dragDepth = Math.max(0, dragDepth - 1);
+    if (!dragDepth) dropZone.classList.remove("is-dragging");
+  });
+  dropZone.addEventListener("drop", (event) => {
+    event.preventDefault();
+    if (worldCompletionPending) {
+      clearDragging();
+      return;
+    }
+    const files = Array.from(event.dataTransfer?.files || []);
+    clearDragging();
+    void useFirstFrameFile(files[0], { fromDrop: true }).catch((error) => {
+      setWorldDraftStatus("首帧图片读取失败，请重试", "error");
+      addHistory(`dropped first frame failed · ${error.message || error}`);
+    });
+  });
+  window.addEventListener("dragend", clearDragging);
+  window.addEventListener("drop", clearDragging);
+}
+
 async function setPresetReference(preset) {
   selectedReferenceBytes = preset.imageBlob
     ? new Uint8Array(await preset.imageBlob.arrayBuffer())
@@ -4346,6 +4534,7 @@ async function connect() {
       addHistory("快乐生蚝 World 正在独立构建 · Zing/LingBot2 已先行启动");
     }
     promptRewriteController.beginSession(init.prompt);
+    beginPromptLogSession(init.prompt);
     sessionLifetimeGuard.start();
     startSessionCountdown();
     setStatus("Live", "live");
@@ -4797,7 +4986,8 @@ async function applyPreset(preset, options = {}) {
   setWorldDraftStatus(`已填充「${preset.name}」的首帧和世界描述`, "ready");
   if (sendRuntimeEvents) {
     promptRewriteController.beginSession(preset.prompt);
-    sendEvent("prompt", preset.prompt, `prompt update · ${preset.name}`);
+    const eventId = sendEvent("prompt", preset.prompt, `prompt update · ${preset.name}`);
+    if (eventId) beginPromptLogSession(preset.prompt, "preset_runtime_update");
   }
   addHistory(`preset ${preset.name}`);
 }
@@ -5535,6 +5725,7 @@ function setupVoicePromptInput() {
 }
 
 setupVoicePromptInput();
+setupFirstFrameDropZone();
 $("recordBtn").onclick = () => {
   if (recordingActive) {
     stopRecording();
@@ -5548,11 +5739,7 @@ $("recordFolderBtn").onclick = () => {
   });
 };
 $("firstFrame").onchange = () => {
-  selectedPreset = null;
-  document.querySelectorAll(".preset").forEach((button) => {
-    button.classList.remove("is-selected");
-    button.setAttribute("aria-pressed", "false");
-  });
+  clearSelectedWorldPreset();
   drawReferencePreview($("firstFrame").files[0]);
 };
 $("generationMode").addEventListener("change", updateGenerationModeUi);

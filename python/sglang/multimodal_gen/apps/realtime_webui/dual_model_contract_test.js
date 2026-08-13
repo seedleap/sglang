@@ -116,13 +116,24 @@ assert.doesNotMatch(
   "metadata-only presets without first-frame images should stay out of the visitor UI",
 );
 assert.match(html, /id="runtimePrompt"/, "runtime prompt updates should use a dedicated composer");
+assert.match(html, /<details id="promptLogPanel" class="prompt-log-panel">/, "prompt log should be collapsed by default");
+assert.doesNotMatch(html, /<details id="promptLogPanel"[^>]*\sopen/, "prompt log must not start expanded");
+assert.match(html, /id="promptLogList"/, "prompt log should render every sent prompt");
 assert.match(html, /id="clearWorldBtn"/, "world drafts should support one-click clearing");
 assert.match(html, /id="enhanceBtn"[^>]*class="complete-world"/, "world drafts should expose AI completion");
 assert.match(html, /id="firstFrameState"/, "first-frame completeness should be visible");
+assert.match(html, /id="referenceDropZone"/, "first-frame picker should expose a drag-and-drop target");
+assert.match(html, /点击或拖入 PNG、JPG、WebP/, "first-frame picker should advertise drag and drop");
 assert.match(html, /id="worldDescriptionState"/, "description completeness should be visible");
 assert.match(app, /function clearWorldDraft\(\)/);
 assert.match(app, /async function completeWorldDraft\(\)/);
 assert.match(app, /function setWorldCompletionBusy\(pending, completingFromImage = false\)/);
+assert.match(app, /function setupFirstFrameDropZone\(\)/);
+assert.match(app, /function appendPromptLog\(prompt, metadata = \{\}\)/);
+assert.match(app, /rule === "one_time_timeout_restore"/);
+assert.match(app, /if \(eventId\) appendPromptLog\(prompt, metadata\)/);
+assert.match(app, /dropZone\.addEventListener\("drop"/);
+assert.match(app, /selectedReferenceBytes = new Uint8Array\(await file\.arrayBuffer\(\)\)/);
 assert.match(app, /classList\.toggle\("is-loading", pending\)/);
 assert.doesNotMatch(app, /function enhancePrompt\(\)/, "legacy local prompt suffix must not bypass world completion");
 assert.doesNotMatch(app, /\$\("enhanceBtn"\)\.onclick = enhancePrompt/);

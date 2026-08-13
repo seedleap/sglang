@@ -27,6 +27,7 @@
       this.endSession();
       this.persistentPrompt = prompt;
       this.sessionGeneration += 1;
+      return prompt;
     }
 
     endSession() {
@@ -61,6 +62,8 @@
           this.sendPrompt(previousPrompt, {
             changeType: PERSISTENT,
             phase: "restore",
+            trigger: "rule",
+            rule: "rewrite_failure_restore",
           });
         }
         throw error;
@@ -81,6 +84,8 @@
       const eventId = this.sendPrompt(prompt, {
         changeType,
         phase: "rewrite",
+        trigger: "user",
+        instruction: normalizedInstruction,
       });
       if (!eventId) throw new Error("no model session is connected");
       if (changeType === PERSISTENT) {
@@ -95,6 +100,9 @@
           this.sendPrompt(restorePrompt, {
             changeType: PERSISTENT,
             phase: "restore",
+            trigger: "rule",
+            rule: "one_time_timeout_restore",
+            afterMs: this.restoreDelayMs,
           });
         }, this.restoreDelayMs);
         this.restoreTimer = restoreTimer;
