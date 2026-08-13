@@ -34,6 +34,8 @@ async function main() {
     previous_prompt: "initial world description",
   });
   assert.equal(sends[0].prompt, "persistent snow world");
+  assert.equal(sends[0].metadata.trigger, "user");
+  assert.equal(sends[0].metadata.instruction, "下雪");
 
   const oneTime = await controller.submit("跳一下");
   assert.equal(oneTime.change_type, "one_time");
@@ -46,6 +48,9 @@ async function main() {
   timers[0].callback();
   assert.equal(sends[2].prompt, "persistent snow world");
   assert.equal(sends[2].metadata.phase, "restore");
+  assert.equal(sends[2].metadata.trigger, "rule");
+  assert.equal(sends[2].metadata.rule, "one_time_timeout_restore");
+  assert.equal(sends[2].metadata.afterMs, 10000);
 
   await controller.submit("再跳一下");
   const staleTimer = timers[1];
