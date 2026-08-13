@@ -251,7 +251,7 @@ spec:
               test -d "${MINWM_MODEL}/transformer"
               ordinal="${POD_NAME##*-}"
               slot=$((ordinal % DENOISER_STARTUP_PARALLELISM))
-              exec 9>"/var/run/minwm-startup-lock/denoiser-${slot}.lock"
+              exec 9>"/var/run/minwm-startup-lock/minwm-denoiser-${slot}.lock"
               flock -x 9
               python3 -m sglang.multimodal_gen.runtime.launch_server \
                 --model-path "${MINWM_MODEL}" \

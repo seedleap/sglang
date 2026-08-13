@@ -167,7 +167,7 @@ spec:
               except FileNotFoundError:
                   pass
               PYREADY
-              exec 9>/var/run/minwm-startup-lock/denoiser-0.lock
+              exec 9>/var/run/minwm-startup-lock/lingbot2-denoiser.lock
               flock -x 9
               python3 -m sglang.multimodal_gen.runtime.launch_server \
                 --model-path "${LINGBOT2_MODEL}" \

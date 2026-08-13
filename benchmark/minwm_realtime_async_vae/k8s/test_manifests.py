@@ -553,7 +553,7 @@ def test_denoiser_restarts_as_one_batch_with_two_bounded_cold_load_slots():
     command = " ".join(denoiser["args"])
 
     assert 'slot=$((ordinal % DENOISER_STARTUP_PARALLELISM))' in command
-    assert 'denoiser-${slot}.lock' in command
+    assert 'minwm-denoiser-${slot}.lock' in command
     assert "flock -x 9" in command
     assert "flock -u 9" in command
     assert "python3 -m sglang.multimodal_gen.runtime.launch_server" in command
@@ -578,30 +578,30 @@ def test_denoiser_restarts_as_one_batch_with_two_bounded_cold_load_slots():
     }
 
 
-def test_one_node_model_startup_is_serialized_across_all_three_denoisers():
-    workloads = (
-        find(
+def test_one_node_model_startup_uses_dedicated_model_lock_domains():
+    workloads = {
+        "minwm-denoiser-": find(
             load_documents(("h100-denoiser.yaml",)),
             "StatefulSet",
             "minwm-async-denoiser",
         ),
-        find(
+        "tianpeng-direct-denoiser.lock": find(
             load_documents(("tianpeng-direct.yaml",)),
             "StatefulSet",
             "tianpeng-direct-async-denoiser",
         ),
-        find(
+        "lingbot2-denoiser.lock": find(
             load_documents(("lingbot2-h100-denoiser.yaml",)),
             "StatefulSet",
             "lingbot2-async-denoiser",
         ),
-    )
+    }
 
-    for workload in workloads:
+    for lock_name, workload in workloads.items():
         pod_spec = workload["spec"]["template"]["spec"]
         denoiser = _container(workload, "denoiser")
         command = " ".join(denoiser["args"])
-        assert "denoiser-" in command
+        assert lock_name in command
         assert "flock -x 9" in command
         assert "flock -u 9" in command
         assert any(

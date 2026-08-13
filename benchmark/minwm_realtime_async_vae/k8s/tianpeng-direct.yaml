@@ -150,7 +150,7 @@ spec:
               test -f "${MINWM_MODEL}/_READY"
               test -f "${MINWM_MODEL}/model_index.json"
               test -d "${MINWM_MODEL}/transformer"
-              exec 9>/var/run/minwm-startup-lock/denoiser-0.lock
+              exec 9>/var/run/minwm-startup-lock/tianpeng-direct-denoiser.lock
               flock -x 9
               python3 -m sglang.multimodal_gen.runtime.launch_server \
                 --model-path "${MINWM_MODEL}" \

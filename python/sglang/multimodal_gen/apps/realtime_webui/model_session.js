@@ -79,9 +79,9 @@
         minResumeLeadMs: 180,
         maxResumeLeadMs: 650,
         maxDeliveryLeadBoostMs: 0,
-        realtimeMaxBufferMs: 1100,
-        realtimeMaxBufferChunks: 2,
-        realtimeMaxFrameAgeMs: 1800,
+        realtimeMaxBufferMs: 500,
+        realtimeMaxBufferChunks: 1,
+        realtimeMaxFrameAgeMs: 900,
       });
       this.socket = null;
       this.pendingHeader = null;
