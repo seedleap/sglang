@@ -47,8 +47,8 @@ assert.match(
 );
 assert.match(
   appJs,
-  /configuredNumber\("sessionMaxLifetimeSeconds", 45\)/,
-  "browser safety guard should retain a backwards-compatible 45 second fallback",
+  /configuredNumber\("sessionMaxLifetimeSeconds", 90\)/,
+  "browser safety guard should use a 90 second fallback",
 );
 assert.match(
   appJs,

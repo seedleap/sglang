@@ -75,6 +75,13 @@ const DEFAULT_T2V_NUM_FRAMES = 9;
 const RECONNECT_CLOSE_TIMEOUT_MS = 15000;
 const DECODE_QUEUE_SECONDS = configuredNumber("decodeQueueSeconds", 5);
 const STARTUP_DECODE_QUEUE_SECONDS = configuredNumber("startupDecodeQueueSeconds", 5);
+const ONLINE_MAX_BUFFER_MS = configuredNumber("onlineMaxBufferMs", 1100);
+const ONLINE_MAX_BUFFER_CHUNKS = Math.max(
+  1,
+  Math.trunc(configuredNumber("onlineMaxBufferChunks", 2)),
+);
+const ONLINE_MAX_FRAME_AGE_MS = configuredNumber("onlineMaxFrameAgeMs", 1800);
+const ONLINE_DECODE_QUEUE_SLACK_FRAMES = configuredNumber("onlineDecodeQueueSlackFrames", 8);
 const MAX_DECODE_QUEUE_BYTES = configuredNumber(
   "maxDecodeQueueBytes",
   192 * 1024 * 1024,
@@ -85,7 +92,7 @@ const CONTROL_HELD_STATE_HEARTBEAT_MS = 100;
 const SESSION_HEARTBEAT_MS = 15000;
 const SESSION_MAX_LIFETIME_SECONDS = Math.max(
   1,
-  Math.trunc(configuredNumber("sessionMaxLifetimeSeconds", 45)),
+  Math.trunc(configuredNumber("sessionMaxLifetimeSeconds", 90)),
 );
 const SESSION_MAX_LIFETIME_MS = SESSION_MAX_LIFETIME_SECONDS * 1000;
 const EXPERIENCE_BUSY_MESSAGE = `当前正有人体验，请等待${SESSION_MAX_LIFETIME_SECONDS}s`;
@@ -520,18 +527,21 @@ const playbackController = new RealtimePlaybackController({
   targetFps: DEFAULT_TARGET_FPS,
   lowLatencyPlayback: true,
   holdForTargetLead: true,
-  targetLeadChunkRatio: 0.75,
-  minTargetLeadMs: 360,
+  targetLeadChunkRatio: 0.7,
+  minTargetLeadMs: 260,
   maxTargetLeadMs: 900,
   lowLatencyMaxLeadFrames: 12,
   smoothTimelinePlaybackRateMin: 0.85,
   smoothTimelinePlaybackRateMax: DEFAULT_SMOOTH_CATCHUP_RATE,
-  startLeadChunkRatio: 0.55,
-  minStartLeadMs: 260,
-  resumeLeadChunkRatio: 0.55,
-  minResumeLeadMs: 260,
-  maxResumeLeadMs: 900,
-  maxDeliveryLeadBoostMs: 360,
+  realtimeMaxBufferMs: ONLINE_MAX_BUFFER_MS,
+  realtimeMaxBufferChunks: ONLINE_MAX_BUFFER_CHUNKS,
+  realtimeMaxFrameAgeMs: ONLINE_MAX_FRAME_AGE_MS,
+  startLeadChunkRatio: 0.45,
+  minStartLeadMs: 220,
+  resumeLeadChunkRatio: 0.45,
+  minResumeLeadMs: 180,
+  maxResumeLeadMs: 650,
+  maxDeliveryLeadBoostMs: 0,
   deliveryStallExpectedMultiplier: 1.8,
 });
 let lingbot2ReconnectTimer = 0;
@@ -3159,19 +3169,32 @@ function payloadByteLength(data) {
 function trimDecodeQueue() {
   if (recordingActive) return;
   if (!decodeQueue.length) return;
-  const preservesTimeline =
-    selectedPlaybackMode() === "timeline" ||
-    selectedPlaybackMode() === "smooth_timeline";
+  const playbackMode = selectedPlaybackMode();
+  const preservesTimeline = playbackMode === "timeline";
+  const boundedRealtime = playbackMode === "smooth_timeline";
   const playback = playbackController.snapshot();
-  const decodeWindowSeconds = renderedPreviewFrames
-    ? Math.max(DECODE_QUEUE_SECONDS, (playback.maxLeadMs || 0) / 1000)
-    : STARTUP_DECODE_QUEUE_SECONDS;
-  const maxQueuedFrames = preservesTimeline
-    ? Number.POSITIVE_INFINITY
-    : Math.max(
-        2,
-        Math.round(previewPlaybackTargetFps() * decodeWindowSeconds),
-      );
+  let maxQueuedFrames;
+  if (preservesTimeline) {
+    maxQueuedFrames = Number.POSITIVE_INFINITY;
+  } else if (boundedRealtime && renderedPreviewFrames) {
+    const fallbackFrames = Math.max(
+      1,
+      Math.floor(previewPlaybackTargetFps() * ONLINE_MAX_BUFFER_MS / 1000),
+    );
+    maxQueuedFrames = Math.max(
+      2,
+      Number(playback.maxRealtimeBufferFrames || fallbackFrames) +
+        ONLINE_DECODE_QUEUE_SLACK_FRAMES,
+    );
+  } else {
+    const decodeWindowSeconds = renderedPreviewFrames
+      ? Math.max(DECODE_QUEUE_SECONDS, (playback.maxLeadMs || 0) / 1000)
+      : STARTUP_DECODE_QUEUE_SECONDS;
+    maxQueuedFrames = Math.max(
+      2,
+      Math.round(previewPlaybackTargetFps() * decodeWindowSeconds),
+    );
+  }
   while (
     (queuedDecodeFrames > maxQueuedFrames || queuedDecodeBytes > MAX_DECODE_QUEUE_BYTES) &&
     decodeQueue.length > 1

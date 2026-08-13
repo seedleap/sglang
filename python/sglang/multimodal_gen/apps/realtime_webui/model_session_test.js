@@ -312,6 +312,64 @@ async function main() {
   assert.equal(stableStates.includes("live"), true);
   stableSession.close("test complete", { notify: false });
 
+  let releaseFirstDecode = null;
+  const boundedDecodedChunks = [];
+  const boundedSession = new RealtimeModelSession({
+    key: "lingbot2-bounded-decode",
+    canvas: fakeCanvas(),
+    pack: (value) => value,
+    unpack: (value) => value,
+    WebSocketCtor: FakeSocket,
+    PlaybackController: FakePlaybackController,
+    decodeBatch: async (header) => {
+      const chunkIndex = Number(header.chunk_index || 0);
+      boundedDecodedChunks.push(chunkIndex);
+      if (chunkIndex === 0) {
+        await new Promise((resolve) => {
+          releaseFirstDecode = resolve;
+        });
+      }
+      return [{
+        image: { width: 640, height: 360, close() {} },
+        chunk: chunkIndex,
+        receivedAt: 100,
+        decodeMs: 2,
+      }];
+    },
+    requestFrame: () => {},
+  });
+  const boundedConnecting = boundedSession.connect(
+    { type: "init", trace_id: "trace:bounded-decode" },
+    "/lingbot2",
+  );
+  const boundedSocket = FakeSocket.instances.at(-1);
+  boundedSocket.open();
+  await boundedConnecting;
+  for (let chunk = 0; chunk < 6; chunk += 1) {
+    boundedSocket.message({
+      type: "frame_batch",
+      chunk_index: chunk,
+      event_id: 0,
+      num_frames: 1,
+      content_type: "image/webp",
+      payload: new Uint8Array([chunk]),
+    });
+  }
+  assert.deepEqual(
+    boundedSession.decodeQueue.map((item) => item.header.chunk_index),
+    [2, 3, 4, 5],
+    "LingBot2 should keep only the newest pending decode batches while a decode is busy",
+  );
+  releaseFirstDecode();
+  await flush();
+  await flush();
+  assert.deepEqual(
+    boundedDecodedChunks,
+    [0, 2, 3, 4, 5],
+    "LingBot2 should skip stale decode batches instead of catching up old frames",
+  );
+  boundedSession.close("test complete", { notify: false });
+
   session.setUnavailable("T2V unavailable");
   assert.equal(replacementSocket.readyState, FakeSocket.CLOSED);
   assert.ok(states.includes("unavailable"), "disabled model should expose an unavailable state");

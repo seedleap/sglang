@@ -34,8 +34,16 @@
     smoothTimelinePlaybackRateMax: 1.1,
     smoothTimelineEmergencyLeadMs: 1800,
     smoothTimelineEmergencyReleaseMs: 900,
-    smoothTimelineEmergencyPlaybackRateMax: 2.5,
-    smoothTimelineEmergencyPlaybackRateSlewPerSecond: 3,
+    smoothTimelineEmergencyPlaybackRateMax: 1.35,
+    smoothTimelineEmergencyPlaybackRateSlewPerSecond: 0.7,
+    smoothTimelineCriticalLeadMs: 5000,
+    smoothTimelineCriticalReleaseMs: 1800,
+    smoothTimelineCriticalPlaybackRateMax: 2.5,
+    smoothTimelineCriticalPlaybackRateSlewPerSecond: 2.5,
+    realtimeMaxBufferMs: 500,
+    realtimeMaxBufferChunks: 1,
+    realtimeMinBufferFrames: 1,
+    realtimeMaxFrameAgeMs: 500,
     emergencyPlaybackRateMin: 0.86,
     emergencyPlaybackRateMax: 1.3,
     playbackRateSlewPerSecond: 0.35,
@@ -97,6 +105,7 @@
       this.lastFinalReceiveAt = 0;
       this.receiveStalled = false;
       this.smoothTimelineEmergencyCatchup = false;
+      this.smoothTimelineCriticalCatchup = false;
     }
 
     setMode(mode) {
@@ -309,17 +318,21 @@
     }
 
     get targetLeadMs() {
+      const leadCapMs = this.#boundedRealtimeLeadCapMs();
       const base = clamp(
         this.latestChunkDurationMs * this.config.targetLeadChunkRatio,
         this.config.minTargetLeadMs,
-        this.config.maxTargetLeadMs,
+        Math.min(this.config.maxTargetLeadMs, leadCapMs),
       );
       return clamp(
         base + this.rebufferLeadBoostMs + this.deliveryLeadBoostMs,
         this.config.minTargetLeadMs,
-        this.config.maxTargetLeadMs +
-          this.config.rebufferLeadBoostMs +
-          this.config.maxDeliveryLeadBoostMs,
+        Math.min(
+          leadCapMs,
+          this.config.maxTargetLeadMs +
+            this.config.rebufferLeadBoostMs +
+            this.config.maxDeliveryLeadBoostMs,
+        ),
       );
     }
 
@@ -344,8 +357,13 @@
         targetFps: this.targetFps,
         renderFps: this.renderFps,
         playbackRate: this.playbackRate,
+        latestChunkFrames: this.latestChunkFrames,
+        latestChunkDurationMs: this.latestChunkDurationMs,
+        maxRealtimeBufferMs: this.#realtimeMaxBufferMs(),
+        maxRealtimeBufferFrames: this.#realtimeMaxBufferFrames(),
         smoothTimelinePlaybackRateMax: this.config.smoothTimelinePlaybackRateMax,
         smoothTimelineEmergencyCatchup: this.smoothTimelineEmergencyCatchup,
+        smoothTimelineCriticalCatchup: this.smoothTimelineCriticalCatchup,
         droppedFrames: this.droppedFrames,
         lastDropAt: this.lastDropAt,
         lastDropCount: this.lastDropCount,
@@ -482,6 +500,18 @@
       const error = (bufferMs - targetLeadMs) / targetLeadMs;
       if (this.mode === "smooth_timeline") {
         if (
+          !this.smoothTimelineCriticalCatchup &&
+          bufferMs >= this.config.smoothTimelineCriticalLeadMs
+        ) {
+          this.smoothTimelineCriticalCatchup = true;
+          this.smoothTimelineEmergencyCatchup = true;
+        } else if (
+          this.smoothTimelineCriticalCatchup &&
+          bufferMs <= this.config.smoothTimelineCriticalReleaseMs
+        ) {
+          this.smoothTimelineCriticalCatchup = false;
+        }
+        if (
           !this.smoothTimelineEmergencyCatchup &&
           bufferMs >= this.config.smoothTimelineEmergencyLeadMs
         ) {
@@ -494,6 +524,7 @@
         }
       } else {
         this.smoothTimelineEmergencyCatchup = false;
+        this.smoothTimelineCriticalCatchup = false;
       }
       const emergency =
         bufferMs > this.maxLeadMs ||
@@ -509,7 +540,13 @@
           )
         : this.config.playbackRateMin;
       const maxRate = this.mode === "smooth_timeline"
-        ? this.smoothTimelineEmergencyCatchup
+        ? this.smoothTimelineCriticalCatchup
+          ? Math.max(
+              this.config.smoothTimelinePlaybackRateMax,
+              this.config.smoothTimelineEmergencyPlaybackRateMax,
+              this.config.smoothTimelineCriticalPlaybackRateMax,
+            )
+          : this.smoothTimelineEmergencyCatchup
           ? Math.max(
               this.config.smoothTimelinePlaybackRateMax,
               this.config.smoothTimelineEmergencyPlaybackRateMax,
@@ -536,7 +573,9 @@
         this.playbackRate = desiredRate;
       } else {
         const dtSeconds = Math.max(0.001, (now - this.lastRateUpdateAt) / 1000);
-        const slewPerSecond = this.mode === "smooth_timeline" && this.smoothTimelineEmergencyCatchup
+        const slewPerSecond = this.mode === "smooth_timeline" && this.smoothTimelineCriticalCatchup
+          ? this.config.smoothTimelineCriticalPlaybackRateSlewPerSecond
+          : this.mode === "smooth_timeline" && this.smoothTimelineEmergencyCatchup
           ? this.config.smoothTimelineEmergencyPlaybackRateSlewPerSecond
           : this.receiveStalled
           ? this.config.receiveStallPlaybackRateSlewPerSecond
@@ -559,6 +598,10 @@
 
     #trimBacklog(now) {
       const droppedFrames = [];
+      if (this.#isBoundedRealtimeMode()) {
+        droppedFrames.push(...this.#trimBoundedRealtimeBacklog(now));
+        return droppedFrames;
+      }
       if (this.#preservesTimelineFrames()) return droppedFrames;
       droppedFrames.push(...this.#trimStaleBacklog(now));
       if (this.#isLowLatencyMode()) {
@@ -609,9 +652,91 @@
       return this.mode === "timeline" || this.mode === "smooth_timeline";
     }
 
+    #isBoundedRealtimeMode() {
+      return this.mode === "smooth_timeline" &&
+        (this.#realtimeMaxBufferMs() > 0 || this.#realtimeMaxBufferChunks() > 0);
+    }
+
+    #realtimeMaxBufferMs() {
+      const value = Number(this.config.realtimeMaxBufferMs);
+      return Number.isFinite(value) && value > 0 ? value : 0;
+    }
+
+    #realtimeMaxBufferChunks() {
+      const value = Number(this.config.realtimeMaxBufferChunks);
+      return Number.isFinite(value) && value > 0 ? value : 0;
+    }
+
+    #realtimeMinBufferFrames() {
+      const value = Number(this.config.realtimeMinBufferFrames);
+      return Math.max(1, Number.isFinite(value) ? Math.round(value) : 1);
+    }
+
+    #realtimeMaxBufferFrames() {
+      const maxMs = this.#realtimeMaxBufferMs();
+      const byMs = maxMs > 0
+        ? Math.max(1, Math.floor(maxMs / 1000 * Math.max(1, this.playbackCadenceFps)))
+        : Number.POSITIVE_INFINITY;
+      if (!Number.isFinite(byMs)) return Number.POSITIVE_INFINITY;
+      return Math.max(this.#realtimeMinBufferFrames(), byMs);
+    }
+
+    #trimBoundedRealtimeBacklog(now) {
+      const droppedFrames = [];
+      const maxChunks = this.#realtimeMaxBufferChunks();
+      if (maxChunks > 0 && this.queue.length > 1) {
+        const newestChunks = new Set();
+        let keepStart = 0;
+        for (let index = this.queue.length - 1; index >= 0; index -= 1) {
+          newestChunks.add(this.queue[index].chunkIndex);
+          if (newestChunks.size > maxChunks) {
+            keepStart = index + 1;
+            break;
+          }
+        }
+        if (keepStart > 0) {
+          droppedFrames.push(...this.queue.splice(0, keepStart));
+          this.#recordDrop(keepStart, "bounded realtime chunk", now);
+        }
+      }
+
+      const maxFrames = this.#realtimeMaxBufferFrames();
+      if (Number.isFinite(maxFrames) && this.queue.length > maxFrames) {
+        const dropCount = this.queue.length - maxFrames;
+        droppedFrames.push(...this.queue.splice(0, dropCount));
+        this.#recordDrop(dropCount, "bounded realtime buffer", now);
+      }
+
+      const configuredAgeMs = Number(this.config.realtimeMaxFrameAgeMs);
+      const maxAgeMs = Number.isFinite(configuredAgeMs) && configuredAgeMs > 0
+        ? configuredAgeMs
+        : this.#realtimeMaxBufferMs();
+      const minFrames = this.#realtimeMinBufferFrames();
+      if (maxAgeMs > 0) {
+        let dropCount = 0;
+        while (this.queue.length - dropCount > minFrames) {
+          const receivedAt = Number(this.queue[dropCount]?.receivedAt || 0);
+          if (!receivedAt || now - receivedAt <= maxAgeMs) break;
+          dropCount += 1;
+        }
+        if (dropCount > 0) {
+          droppedFrames.push(...this.queue.splice(0, dropCount));
+          this.#recordDrop(dropCount, "bounded realtime age", now);
+        }
+      }
+
+      if (droppedFrames.length) {
+        this.deliveryLeadBoostMs = 0;
+        this.rebufferLeadBoostMs = 0;
+        this.receiveStalled = false;
+        this.smoothTimelineEmergencyCatchup = false;
+        this.smoothTimelineCriticalCatchup = false;
+      }
+      return droppedFrames;
+    }
+
     #dropsOldEventFramesForCutover() {
-      return this.pendingEventCutoverMode === "prompt"
-        || (this.mode !== "timeline" && this.mode !== "smooth_timeline");
+      return this.pendingEventCutoverMode === "prompt";
     }
 
     #trimStaleBacklog(now) {
@@ -692,19 +817,34 @@
     }
 
     #startLeadMs() {
-      return Math.max(
-        this.config.minStartLeadMs,
-        this.latestChunkDurationMs * this.config.startLeadChunkRatio,
-        this.targetLeadMs,
+      return Math.min(
+        this.#boundedRealtimeLeadCapMs(),
+        Math.max(
+          this.config.minStartLeadMs,
+          this.latestChunkDurationMs * this.config.startLeadChunkRatio,
+          this.targetLeadMs,
+        ),
       );
     }
 
     #resumeLeadMs() {
-      return clamp(
-        this.latestChunkDurationMs * this.config.resumeLeadChunkRatio,
-        this.config.minResumeLeadMs,
-        this.config.maxResumeLeadMs,
+      return Math.min(
+        this.#boundedRealtimeLeadCapMs(),
+        clamp(
+          this.latestChunkDurationMs * this.config.resumeLeadChunkRatio,
+          this.config.minResumeLeadMs,
+          this.config.maxResumeLeadMs,
+        ),
       );
+    }
+
+    #boundedRealtimeLeadCapMs() {
+      if (!this.#isBoundedRealtimeMode()) return Number.POSITIVE_INFINITY;
+      const maxMs = this.#realtimeMaxBufferMs();
+      const maxFrameMs = this.#realtimeMaxBufferFrames() /
+        Math.max(1, this.playbackCadenceFps) * 1000;
+      const capMs = maxMs > 0 ? Math.min(maxMs, maxFrameMs) : maxFrameMs;
+      return Math.max(1000 / Math.max(1, this.playbackCadenceFps), capMs);
     }
 
     #decayRebufferBoost(now) {

@@ -113,8 +113,8 @@ assert.match(
 );
 assert.match(
   indexHtml,
-  /<option value="smooth_timeline">Smooth timeline \(catch-up, no skip\)<\/option>/,
-  "the no-skip timeline should remain available for non-interactive review",
+  /<option value="smooth_timeline">Smooth realtime \(~1s buffer\)<\/option>/,
+  "smooth realtime should remain available as a soft jitter-buffered mode",
 );
 assert.match(
   appJs,
@@ -123,8 +123,18 @@ assert.match(
 );
 assert.match(
   appJs,
-  /const preservesTimeline[\s\S]*selectedPlaybackMode\(\) === "timeline"[\s\S]*selectedPlaybackMode\(\) === "smooth_timeline"/,
-  "webui should avoid browser decode drops in smooth timeline except at the byte cap",
+  /const boundedRealtime\s*=\s*playbackMode === "smooth_timeline"/,
+  "webui should bound smooth realtime browser decode backlog",
+);
+assert.match(
+  appJs,
+  /const ONLINE_MAX_BUFFER_MS\s*=\s*configuredNumber\("onlineMaxBufferMs", 1100\);/,
+  "webui should keep a short soft realtime playback tail by default",
+);
+assert.match(
+  appJs,
+  /const ONLINE_MAX_BUFFER_CHUNKS\s*=\s*Math\.max\([\s\S]*configuredNumber\("onlineMaxBufferChunks", 2\)/,
+  "webui should allow roughly two chunks of realtime jitter before trimming",
 );
 assert.match(
   appJs,
@@ -173,23 +183,23 @@ assert.match(
 );
 assert.match(
   appJs,
-  /targetLeadChunkRatio:\s*0\.75/,
-  "24 fps playback should keep enough jitter lead for sub-24fps backend delivery",
+  /targetLeadChunkRatio:\s*0\.7/,
+  "24 fps playback should keep enough jitter lead for smoother display",
 );
 assert.match(
   appJs,
-  /minTargetLeadMs:\s*360/,
-  "24 fps playback should avoid chasing a too-small buffer when backend delivery is bursty",
+  /minTargetLeadMs:\s*260/,
+  "24 fps playback should avoid underrunning on ordinary chunk jitter",
 );
 assert.match(
   appJs,
   /maxTargetLeadMs:\s*900/,
-  "24 fps playback should trade a bounded sub-second lead for smoother display",
+  "24 fps playback should keep realtime lag around one second instead of growing unbounded",
 );
 assert.match(
   appJs,
-  /maxDeliveryLeadBoostMs:\s*360/,
-  "webui should bound adaptive jitter buffering",
+  /maxDeliveryLeadBoostMs:\s*0/,
+  "webui should not add adaptive delivery lead in bounded realtime mode",
 );
 assert.match(
   appJs,

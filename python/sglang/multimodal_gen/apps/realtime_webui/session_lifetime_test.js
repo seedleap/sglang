@@ -6,7 +6,7 @@ let scheduled = null;
 let cleared = [];
 let expirations = 0;
 const guard = new SessionLifetimeGuard({
-  durationMs: 45_000,
+  durationMs: 90_000,
   setTimer: (callback, delay) => {
     scheduled = { callback, delay, id: 7 };
     return 7;
@@ -16,7 +16,7 @@ const guard = new SessionLifetimeGuard({
 });
 
 guard.start();
-assert.equal(scheduled.delay, 45_000);
+assert.equal(scheduled.delay, 90_000);
 scheduled.callback();
 assert.equal(expirations, 1, "guard should expire one active session");
 

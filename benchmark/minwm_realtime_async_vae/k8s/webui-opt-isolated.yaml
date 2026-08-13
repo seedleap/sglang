@@ -1,0 +1,149 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: minwm-dual-webui-opt-20260812
+  namespace: minwm-realtime
+  labels:
+    app.kubernetes.io/name: minwm-dual-webui-opt-20260812
+    app.kubernetes.io/part-of: minwm-realtime
+    seedleap.ai/environment: production
+spec:
+  replicas: 1
+  revisionHistoryLimit: 2
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: minwm-dual-webui-opt-20260812
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: minwm-dual-webui-opt-20260812
+        app.kubernetes.io/part-of: minwm-realtime
+        seedleap.ai/environment: production
+      annotations:
+        seedleap.ai/code-git-ref: e5b9a222e8-dirty-b28a915a0b49
+        seedleap.ai/webui-profile: smooth-timeline-v33
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 10
+      nodeSelector:
+        karpenter.sh/nodepool: minwm-realtime-cpu
+      tolerations:
+        - key: seedleap.ai/task
+          operator: Equal
+          value: minwm-realtime-cpu
+          effect: NoSchedule
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        fsGroupChangePolicy: OnRootMismatch
+      containers:
+        - name: webui
+          image: 829115578968.dkr.ecr.us-east-2.amazonaws.com/leap-world/minwm-realtime@sha256:29ba22e0f17ca688c4b65cb448ab7cb01d30ba4db15682389a99cd674b3300e8
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: REALTIME_UPSTREAM_HTTP
+              value: http://zing-lingbot-public
+            - name: REALTIME_UPSTREAM_WS
+              value: ws://zing-lingbot-public
+            - name: MINWM_UPSTREAM_HTTP
+              value: http://zing-lingbot-public/backends/minwm
+            - name: MINWM_UPSTREAM_WS
+              value: ws://zing-lingbot-public/backends/minwm
+            - name: LINGBOT2_UPSTREAM_HTTP
+              value: http://zing-lingbot-public/backends/lingbot2
+            - name: LINGBOT2_UPSTREAM_WS
+              value: ws://zing-lingbot-public/backends/lingbot2
+            - name: REALTIME_UI_CONFIG_JSON
+              value: '{"generationModes":["i2v","t2v"],"defaultGenerationMode":"i2v","t2vFrameStep":4,"t2vDefaultNumFrames":121,"sessionMaxLifetimeSeconds":90,"singleExperience":true,"singleExperienceUserIds":{"minwm":"showcase:webui-opt-20260812:zing","lingbot2":"showcase:webui-opt-20260812:lingbot2"},"smoothCatchupRateMax":1.1,"dualModels":{"minwm":{"label":"Zing"},"lingbot2":{"label":"LingBot2","targetFps":16,"sinkSize":9,"windowFrames":18}}}'
+            - name: VIDEO_PROMPT_REWRITE_CREDENTIALS
+              value: /run/secrets/realtime-webui/prompt-rewriter-vertex.json
+            - name: CREATE_WORLD_IMAGE_CONFIG
+              value: /run/secrets/realtime-webui/world-image-model-config.json
+          ports:
+            - name: http
+              containerPort: 18080
+          startupProbe:
+            httpGet:
+              path: /runtime-config.js
+              port: http
+            periodSeconds: 2
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /runtime-config.js
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            periodSeconds: 15
+            timeoutSeconds: 2
+          resources:
+            requests:
+              cpu: 250m
+              memory: 384Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: realtime-webui-secrets
+              mountPath: /run/secrets/realtime-webui
+              readOnly: true
+            - name: generated-images
+              mountPath: /opt/sglang/python/sglang/multimodal_gen/apps/realtime_webui_generated
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: realtime-webui-secrets
+          secret:
+            secretName: minwm-dual-webui-opt-secrets-20260812
+            items:
+              - key: prompt-rewriter-vertex.json
+                path: prompt-rewriter-vertex.json
+              - key: world-image-model-config.json
+                path: world-image-model-config.json
+        - name: generated-images
+          emptyDir:
+            sizeLimit: 1Gi
+        - name: tmp
+          emptyDir:
+            sizeLimit: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: minwm-dual-webui-opt-public
+  namespace: minwm-realtime
+  labels:
+    app.kubernetes.io/name: minwm-dual-webui-opt-20260812
+    app.kubernetes.io/part-of: minwm-realtime
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing
+    service.beta.kubernetes.io/aws-load-balancer-type: external
+    service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: ip
+    service.beta.kubernetes.io/aws-load-balancer-cross-zone-load-balancing-enabled: "true"
+    service.beta.kubernetes.io/aws-load-balancer-healthcheck-protocol: HTTP
+    service.beta.kubernetes.io/aws-load-balancer-healthcheck-port: "18080"
+    service.beta.kubernetes.io/aws-load-balancer-healthcheck-path: /
+spec:
+  type: LoadBalancer
+  loadBalancerClass: service.k8s.aws/nlb
+  allocateLoadBalancerNodePorts: false
+  selector:
+    app.kubernetes.io/name: minwm-dual-webui-opt-20260812
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
