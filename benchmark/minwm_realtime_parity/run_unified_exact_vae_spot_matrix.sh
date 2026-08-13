@@ -138,9 +138,18 @@ mps_started=false
 persist_results() {
   [[ -n "${ARCHIVE_ROOT}" ]] || return 0
   local archive_dir="${ARCHIVE_ROOT%/}/${MINWM_MATRIX_ID}"
-  mkdir -p "${archive_dir}"
-  cp -a "${RESULT_ROOT}/." "${archive_dir}/"
-  date -Iseconds > "${archive_dir}/last-flush.txt"
+  mkdir -p "${archive_dir}" || return 0
+  while IFS= read -r -d '' source; do
+    local relative="${source#${RESULT_ROOT}/}"
+    [[ "${relative}" == mps-pipe/* ]] && continue
+    local destination="${archive_dir}/${relative}"
+    [[ -e "${destination}" ]] && continue
+    mkdir -p "$(dirname "${destination}")" || continue
+    cp "${source}" "${destination}" || true
+  done < <(find "${RESULT_ROOT}" -type f -print0)
+  local flush_marker="${archive_dir}/flush-$(date +%s%N).txt"
+  date -Iseconds > "${flush_marker}" || true
+  return 0
 }
 
 stop_denoiser() {
