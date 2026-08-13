@@ -1,0 +1,22 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: minwm-rtx6000-bounded-device-plugin
+  namespace: kube-system
+  labels: {seedleap.ai/owner: chenshengdong, seedleap.ai/task: minwm-rtx6000-bounded-matrix}
+spec:
+  selector: {matchLabels: {app: minwm-rtx6000-bounded-device-plugin}}
+  template:
+    metadata: {labels: {app: minwm-rtx6000-bounded-device-plugin}}
+    spec:
+      priorityClassName: system-node-critical
+      nodeSelector: {seedleap.ai/capacity-pool: minwm-rtx6000-bounded-8gpu-spot}
+      tolerations:
+        - {key: seedleap.ai/capacity-pool, operator: Equal, value: minwm-rtx6000-bounded-8gpu-spot, effect: NoSchedule}
+      containers:
+        - name: plugin
+          image: nvcr.io/nvidia/k8s-device-plugin:v0.19.1
+          args: [--fail-on-init-error=false]
+          securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
+          volumeMounts: [{name: sockets, mountPath: /var/lib/kubelet/device-plugins}]
+      volumes: [{name: sockets, hostPath: {path: /var/lib/kubelet/device-plugins, type: Directory}}]
