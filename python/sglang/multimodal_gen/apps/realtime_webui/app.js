@@ -5683,6 +5683,12 @@ function setupVoicePromptInput() {
   let listening = false;
   let prefix = "";
 
+  function focusInputAtEnd() {
+    input.focus({ preventScroll: true });
+    const end = input.value.length;
+    input.setSelectionRange(end, end);
+  }
+
   function setListening(next) {
     listening = next;
     button.classList.toggle("is-listening", next);
@@ -5701,6 +5707,10 @@ function setupVoicePromptInput() {
     }
     const spacer = prefix && transcript ? " " : "";
     input.value = `${prefix}${spacer}${transcript}`.trimStart();
+    if (document.activeElement === input) {
+      const end = input.value.length;
+      input.setSelectionRange(end, end);
+    }
     input.dispatchEvent(new Event("input", { bubbles: true }));
   };
   recognition.onerror = (event) => {
@@ -5714,9 +5724,15 @@ function setupVoicePromptInput() {
   };
   recognition.onend = () => {
     setListening(false);
-    input.focus();
   };
+  button.addEventListener("pointerdown", (event) => {
+    // Keep the textarea focused while pressing the microphone. Native buttons
+    // otherwise take focus before the speech recognizer starts.
+    event.preventDefault();
+    focusInputAtEnd();
+  });
   button.onclick = () => {
+    focusInputAtEnd();
     try {
       if (listening) recognition.stop();
       else recognition.start();

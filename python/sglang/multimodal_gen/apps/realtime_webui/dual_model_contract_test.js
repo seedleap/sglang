@@ -183,6 +183,21 @@ assert.doesNotMatch(
 );
 assert.match(app, /window\.SpeechRecognition \|\| window\.webkitSpeechRecognition/);
 assert.match(app, /recognition\.lang = "zh-CN"/);
+assert.match(
+  app,
+  /button\.addEventListener\("pointerdown", \(event\) => \{[\s\S]*?event\.preventDefault\(\);[\s\S]*?focusInputAtEnd\(\);/,
+  "pressing the voice button should preserve textarea focus",
+);
+assert.match(
+  app,
+  /button\.onclick = \(\) => \{\s*focusInputAtEnd\(\);/,
+  "starting speech recognition should focus the prompt at the insertion point",
+);
+assert.doesNotMatch(
+  app,
+  /recognition\.onend = \(\) => \{[\s\S]{0,120}?input\.focus/,
+  "recognition ending must not steal focus back after the user moves to world controls",
+);
 
 const server = fs.readFileSync(path.join(root, "server.py"), "utf8");
 assert.match(app, /const connectionReport = await dualModelController\.connect\(init\)/);
