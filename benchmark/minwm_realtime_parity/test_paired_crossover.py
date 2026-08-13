@@ -1,7 +1,6 @@
 import json
 
 import pytest
-
 from run_paired_crossover import (
     assignment,
     concurrency_is_safe,
@@ -60,9 +59,13 @@ def test_plan_supports_single_gpu_sequential_abba(tmp_path):
     output = plan(read_config(path))
 
     assert output["topology"] == "single_gpu_sequential"
-    assert output["cases"][0]["assignments"] == [
-        {"control": 0, "candidate": 0},
-    ] * 4
+    assert (
+        output["cases"][0]["assignments"]
+        == [
+            {"control": 0, "candidate": 0},
+        ]
+        * 4
+    )
 
 
 def test_rejects_too_few_reps(tmp_path):

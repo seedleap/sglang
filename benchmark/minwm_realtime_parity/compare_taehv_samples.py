@@ -39,8 +39,7 @@ def ssim(exact: np.ndarray, candidate: np.ndarray) -> float:
     var_left = gaussian_filter(left * left, sigma=(sigma, sigma, 0)) - mu_left**2
     var_right = gaussian_filter(right * right, sigma=(sigma, sigma, 0)) - mu_right**2
     covariance = (
-        gaussian_filter(left * right, sigma=(sigma, sigma, 0))
-        - mu_left * mu_right
+        gaussian_filter(left * right, sigma=(sigma, sigma, 0)) - mu_left * mu_right
     )
     c1 = (0.01 * 255) ** 2
     c2 = (0.03 * 255) ** 2
@@ -72,7 +71,9 @@ def main() -> None:
         exact = read_ppm(exact_root / name)
         taehv = read_ppm(taehv_root / name)
         if exact.shape != taehv.shape:
-            raise RuntimeError(f"shape mismatch for {name}: {exact.shape} != {taehv.shape}")
+            raise RuntimeError(
+                f"shape mismatch for {name}: {exact.shape} != {taehv.shape}"
+            )
         difference = exact.astype(np.float64) - taehv.astype(np.float64)
         mse = float(np.mean(difference**2))
         rows.append(

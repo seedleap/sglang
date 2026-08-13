@@ -19,17 +19,31 @@ p.add_argument("--safety-mib", type=int, default=2048)
 p.add_argument("--output", required=True)
 a = p.parse_args()
 
-row = subprocess.check_output(
-    ["nvidia-smi", f"--id={a.gpu}", "--query-gpu=memory.total,memory.free",
-     "--format=csv,noheader,nounits"], text=True
-).strip().split(",")
+row = (
+    subprocess.check_output(
+        [
+            "nvidia-smi",
+            f"--id={a.gpu}",
+            "--query-gpu=memory.total,memory.free",
+            "--format=csv,noheader,nounits",
+        ],
+        text=True,
+    )
+    .strip()
+    .split(",")
+)
 total, free = map(mib, row)
 required = a.denoiser_peak_mib + a.vae_peak_mib + a.transient_mib + a.safety_mib
 result = {
-    "gpu": a.gpu, "total_mib": total, "free_mib_at_gate": free,
-    "denoiser_peak_mib": a.denoiser_peak_mib, "vae_peak_mib": a.vae_peak_mib,
-    "transient_mib": a.transient_mib, "safety_mib": a.safety_mib,
-    "required_mib": required, "admitted": required <= total,
+    "gpu": a.gpu,
+    "total_mib": total,
+    "free_mib_at_gate": free,
+    "denoiser_peak_mib": a.denoiser_peak_mib,
+    "vae_peak_mib": a.vae_peak_mib,
+    "transient_mib": a.transient_mib,
+    "safety_mib": a.safety_mib,
+    "required_mib": required,
+    "admitted": required <= total,
     "fallback": (
         "serial VAE on the same GPU, or exact-remote VAE on a second GPU; "
         "do not shorten/chunk the 1089-frame request"

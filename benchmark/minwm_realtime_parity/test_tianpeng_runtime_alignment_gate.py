@@ -2,7 +2,6 @@ import ast
 from pathlib import Path
 
 import pytest
-
 from tianpeng_runtime_alignment_gate import validate_alignment
 
 

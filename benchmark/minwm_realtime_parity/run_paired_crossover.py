@@ -18,7 +18,6 @@ import time
 import urllib.request
 from pathlib import Path
 
-
 TERMINATING = False
 
 
@@ -224,9 +223,12 @@ def start_telemetry(
         "--loop-ms=1000",
     ]
     try:
-        return subprocess.Popen(
-            command, stdout=output, stderr=subprocess.STDOUT, start_new_session=True
-        ), output
+        return (
+            subprocess.Popen(
+                command, stdout=output, stderr=subprocess.STDOUT, start_new_session=True
+            ),
+            output,
+        )
     except FileNotFoundError:
         output.write("nvidia-smi not found\n")
         output.close()

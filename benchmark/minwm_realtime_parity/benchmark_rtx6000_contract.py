@@ -20,7 +20,6 @@ from pathlib import Path
 
 import msgspec.msgpack
 import websockets
-
 from tianpeng_alignment import DEFAULT_ALIGNMENT_URL, load_contract
 
 
