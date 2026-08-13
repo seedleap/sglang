@@ -397,9 +397,7 @@ config = {
     "base_port": 32000,
     "paired_reps": (
         3
-        if experiment_mode == "memory_ab"
-        else 1
-        if experiment_mode == "memory_fit"
+        if memory_mode
         else (4 if gpu_count == 1 else 3)
     ),
     "warmup_chunks": 5,
