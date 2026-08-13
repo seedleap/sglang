@@ -44,6 +44,7 @@ if [[ "${PAIR}" == "C" || "${PAIR}" == "D" ]]; then
 fi
 
 setup_results="/work/minwm-realtime/${RUN_ID}/setup-results"
+did_full_setup=false
 exec 9>"/work/minwm-realtime/.${RUN_ID}.lock"
 flock -x 9
 if [[ ! -f "/work/minwm-realtime/${RUN_ID}/SETUP_COMPLETE" ]]; then
@@ -53,8 +54,19 @@ if [[ ! -f "/work/minwm-realtime/${RUN_ID}/SETUP_COMPLETE" ]]; then
     MINWM_RESULTS_ROOT="${setup_results}" \
     bash "${SCRIPT_DIR}/aws_b200_entrypoint.sh"
   date -Iseconds > "/work/minwm-realtime/${RUN_ID}/SETUP_COMPLETE"
+  did_full_setup=true
 fi
 flock -u 9
+if [[ "${did_full_setup}" != "true" ]]; then
+  runtime_run_id="rtx6000-pair-${PAIR,,}-${SGLANG_GIT_REF:0:10}-runtime"
+  env CUDA_VISIBLE_DEVICES=0 \
+    MINWM_RUN_ID="${runtime_run_id}" \
+    MINWM_REUSE_INPUT_RUN_ID="${RUN_ID}" \
+    MINWM_REUSE_MODEL_RUN_ID="${RUN_ID}" \
+    MINWM_BENCHMARK_MODE=setup_only \
+    MINWM_RESULTS_ROOT="/work/minwm-realtime/${runtime_run_id}/setup-results" \
+    bash "${SCRIPT_DIR}/aws_b200_entrypoint.sh"
+fi
 
 size=832x480
 [[ "${PAIR}" == "B" ]] && size=1248x704
@@ -105,12 +117,17 @@ config = {
     "artifact_root": artifacts,
     "upload_command": [
         "bash", "-lc",
+        "if [[ -f {source}/COMPLETE ]]; then "
         "aws s3 cp {source} " + archive + "/{relative} --recursive "
         "--exclude COMPLETE --exclude UPLOADED.json --no-progress --only-show-errors && "
         "aws s3 cp {source}/COMPLETE " + archive + "/{relative}/COMPLETE "
         "--no-progress --only-show-errors && "
         "aws s3 cp {source}/result.json " + archive + "/{relative}/UPLOADED.json "
-        "--no-progress --only-show-errors",
+        "--no-progress --only-show-errors; else "
+        "aws s3 cp {source} " + archive + "/{relative} --recursive "
+        "--exclude INTERRUPTED.json --no-progress --only-show-errors && "
+        "aws s3 cp {source}/INTERRUPTED.json " + archive + "/{relative}/INTERRUPTED.json "
+        "--no-progress --only-show-errors; fi",
     ],
     "upload_file_command": [
         "aws", "s3", "cp", "{source}", archive + "/{relative}",
