@@ -30,6 +30,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--server-log", required=True)
     parser.add_argument("--profile-name", required=True)
     parser.add_argument("--sglang-git-ref", required=True)
+    parser.add_argument("--checkpoint-sha256", required=True)
     parser.add_argument(
         "--ws-url", default="ws://127.0.0.1:30000/v1/realtime_video/generate"
     )
@@ -239,7 +240,9 @@ def stage_summary(events: list[dict], stage: str, steady_start: int) -> dict | N
     return value_summary([float(row["duration_ms"]) for row in rows])
 
 
-def event_summary(events: list[dict], event_name: str, steady_start: int) -> dict | None:
+def event_summary(
+    events: list[dict], event_name: str, steady_start: int
+) -> dict | None:
     return value_summary(
         [
             float(event["duration_ms"])
@@ -360,11 +363,16 @@ async def main() -> None:
         "schema_version": "minwm-rtx6000-20260801-contract/v2",
         "profile_name": args.profile_name,
         "contract": {
-            "checkpoint_sha256": contract["expected"]["checkpoint_sha256"],
+            "checkpoint_sha256": args.checkpoint_sha256,
+            "tianpeng_canonical_checkpoint_sha256": contract["expected"][
+                "checkpoint_sha256"
+            ],
             "local_attn_size": 32,
             "sink_size": 8,
+            "sliding_window_num_frames": 32,
             "rope_position_mode": "block_relative",
             "rope_max_frame_gap": 12,
+            "prompt_first_frame_pin_enabled": True,
             "dmd_steps": 4,
             "sglang_git_ref": args.sglang_git_ref,
         },

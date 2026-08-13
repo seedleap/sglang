@@ -27,7 +27,7 @@ spec:
             - {name: SGLANG_GIT_REF, value: __RUNNER_COMMIT__}
             - {name: MINWM_REQUESTED_GPUS, value: "__GPU_COUNT__"}
             - {name: MINWM_GIT_REF, value: 4220c8a2dc456b2d9c85ef6c0d9db7fb872d864c}
-            - {name: MINWM_ARCHIVE_S3_URI, value: s3://leap-world-us-east-2/world-model/evals/minwm/realtime-vae/20260813/taehv-local}
+            - {name: MINWM_ARCHIVE_S3_URI, value: s3://leap-world-us-east-2/world-model/evals/minwm/realtime-vae/20260813/taehv-local-tianpeng-gap12}
             - {name: MINWM_CHECKPOINT_S3_EAST, value: s3://leap-world-us-east-2/world-model/evals/minwm/checkpoint-staging/wan22-5B-stage3-dmd-8-0721-6a531f0e067/global_step_003200/ema_student/model.pt}
             - {name: MINWM_CHECKPOINT_VERSION_EAST, value: wduScksw2f3yPErnG9lBioOuE2AToyAP}
             - {name: MINWM_CHECKPOINT_SOURCE_URI, value: s3://leap-world-us-west-2/world-model/minwm/checkpoints/run-archive/rolling/Wan21/Action2V/dmd/wan22-5B-stage3-dmd-8-0721-6a531f0e067/global_step_003200/ema_student/model.pt}

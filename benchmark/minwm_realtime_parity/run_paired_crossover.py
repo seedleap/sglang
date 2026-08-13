@@ -187,6 +187,8 @@ def run_client(
         f"{case['name']}-{variant}",
         "--sglang-git-ref",
         str(config["sglang_git_ref"]),
+        "--checkpoint-sha256",
+        str(config.get("checkpoint_sha256", "not-recorded")),
         "--ws-url",
         f"ws://127.0.0.1:{port}/v1/realtime_video/generate",
         "--warmup-chunks",
@@ -199,9 +201,7 @@ def run_client(
         case["size"],
     ]
     if root.name == str(config.get("sample_label", "rep-00")):
-        command.extend(
-            ["--sample-output-dir", str(work_dir / "quality-samples")]
-        )
+        command.extend(["--sample-output-dir", str(work_dir / "quality-samples")])
     process = subprocess.Popen(
         command,
         cwd=work_dir,
@@ -266,8 +266,7 @@ def publish(config: dict, source: Path, destination: Path, metadata: dict) -> No
     if upload:
         relative = str(destination.relative_to(config["artifact_root"]))
         command = [
-            part.format(source=str(destination), relative=relative)
-            for part in upload
+            part.format(source=str(destination), relative=relative) for part in upload
         ]
         subprocess.run(command, check=True)
     atomic_json(
@@ -279,9 +278,7 @@ def upload_file(config: dict, source: Path, relative: str) -> None:
     upload = config.get("upload_file_command")
     if not upload:
         return
-    command = [
-        part.format(source=str(source), relative=relative) for part in upload
-    ]
+    command = [part.format(source=str(source), relative=relative) for part in upload]
     subprocess.run(command, check=True)
 
 
@@ -359,12 +356,7 @@ def run_pair(
     started = time.time()
     telemetry, telemetry_log = start_telemetry(
         scratch,
-        sorted(
-            {
-                str(config["gpu_slots"][slot_map[v]]["gpu"])
-                for v in variants
-            }
-        ),
+        sorted({str(config["gpu_slots"][slot_map[v]]["gpu"]) for v in variants}),
     )
     error: BaseException | None = None
     metadata = {}
@@ -584,11 +576,7 @@ def plan(config: dict) -> dict:
                 "size": case["size"],
                 "mode": case["mode"],
                 "assignments": [
-                    (
-                        {"control": 0, "candidate": 0}
-                        if single_gpu
-                        else assignment(rep)
-                    )
+                    ({"control": 0, "candidate": 0} if single_gpu else assignment(rep))
                     for rep in range(int(config.get("paired_reps", 3)))
                 ],
             }

@@ -6,9 +6,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 : "${MINWM_GIT_REF:?set MINWM_GIT_REF}"
 : "${MINWM_ARCHIVE_S3_URI:?set MINWM_ARCHIVE_S3_URI}"
 
-RUN_ID="rtx6000-taehv-shared-4220c8a"
+RUN_ID="rtx6000-taehv-tianpeng-gap12-4220c8a"
+INPUT_RUN_ID="rtx6000-taehv-shared-4220c8a"
 MODEL_DIR="/work/minwm-realtime/${RUN_ID}/sglang-model"
-PAIR_ROOT="/work/minwm-taehv-paired"
+PAIR_ROOT="/work/minwm-taehv-paired-tianpeng-gap12"
 CONFIG_PATH="${PAIR_ROOT}/paired.json"
 LOCAL_ARTIFACT_ROOT="${PAIR_ROOT}/artifacts"
 TAEHV_ROOT="/work/minwm-taehv"
@@ -26,20 +27,61 @@ did_full_setup=false
 exec 9>"/work/minwm-realtime/.${RUN_ID}.lock"
 flock -x 9
 if [[ ! -f "/work/minwm-realtime/${RUN_ID}/SETUP_COMPLETE" ]]; then
-  env CUDA_VISIBLE_DEVICES=0 \
+  reuse_input_env=()
+  if [[ -f "/work/minwm-realtime/${INPUT_RUN_ID}/checkpoint/model.pt" \
+    && -d "/work/minwm-realtime/${INPUT_RUN_ID}/pretrained/transformer" ]]; then
+    reuse_input_env+=(MINWM_REUSE_INPUT_RUN_ID="${INPUT_RUN_ID}")
+  fi
+  env "${reuse_input_env[@]}" CUDA_VISIBLE_DEVICES=0 \
     MINWM_RUN_ID="${RUN_ID}" \
     MINWM_BENCHMARK_MODE=setup_only \
     MINWM_RESULTS_ROOT="${setup_results}" \
+    MINWM_CONVERT_LOCAL_ATTN_SIZE=32 \
+    MINWM_CONVERT_SINK_SIZE=8 \
+    MINWM_CONVERT_WINDOW_SIZE=32 \
+    MINWM_CONVERT_ROPE_POSITION_MODE=block_relative \
+    MINWM_CONVERT_ROPE_MAX_FRAME_GAP=12 \
+    MINWM_CONVERT_PROMPT_FIRST_FRAME_PIN_ENABLED=1 \
     bash "${SCRIPT_DIR}/aws_b200_entrypoint.sh"
   date -Iseconds > "/work/minwm-realtime/${RUN_ID}/SETUP_COMPLETE"
   did_full_setup=true
 fi
+
+manifest_root="${LOCAL_ARTIFACT_ROOT}/environment"
+mkdir -p "${manifest_root}"
+if [[ -f "/work/minwm-realtime/${INPUT_RUN_ID}/checkpoint/model.pt" ]]; then
+  experiment_checkpoint="/work/minwm-realtime/${INPUT_RUN_ID}/checkpoint/model.pt"
+else
+  experiment_checkpoint="/work/minwm-realtime/${RUN_ID}/checkpoint/model.pt"
+fi
+experiment_checkpoint_sha256="$(sha256sum "${experiment_checkpoint}" | awk '{print $1}')"
+printf '%s  %s\n' "${experiment_checkpoint_sha256}" "${experiment_checkpoint}" \
+  > "${manifest_root}/experiment-checkpoint-sha256.txt"
+alignment_provenance="${manifest_root}/alignment-provenance.json"
+python3 "${SCRIPT_DIR}/tianpeng_runtime_alignment_gate.py" \
+  --model-dir "${MODEL_DIR}" \
+  --checkpoint-sha256 "${experiment_checkpoint_sha256}" \
+  --output "${alignment_provenance}"
+aws s3 cp "${alignment_provenance}" \
+  "${MINWM_ARCHIVE_S3_URI%/}/environment/alignment-provenance.json" \
+  --no-progress --only-show-errors
+alignment_complete="${manifest_root}/ALIGNMENT_COMPLETE"
+printf 'pass\n' > "${alignment_complete}.partial"
+mv "${alignment_complete}.partial" "${alignment_complete}"
+aws s3 cp "${alignment_complete}" \
+  "${MINWM_ARCHIVE_S3_URI%/}/environment/ALIGNMENT_COMPLETE" \
+  --no-progress --only-show-errors
 flock -u 9
 if [[ "${did_full_setup}" != "true" ]]; then
   runtime_run_id="rtx6000-taehv-${SGLANG_GIT_REF:0:10}-runtime"
+  runtime_input_run_id="${RUN_ID}"
+  if [[ -f "/work/minwm-realtime/${INPUT_RUN_ID}/checkpoint/model.pt" \
+    && -d "/work/minwm-realtime/${INPUT_RUN_ID}/pretrained/transformer" ]]; then
+    runtime_input_run_id="${INPUT_RUN_ID}"
+  fi
   env CUDA_VISIBLE_DEVICES=0 \
     MINWM_RUN_ID="${runtime_run_id}" \
-    MINWM_REUSE_INPUT_RUN_ID="${RUN_ID}" \
+    MINWM_REUSE_INPUT_RUN_ID="${runtime_input_run_id}" \
     MINWM_REUSE_MODEL_RUN_ID="${RUN_ID}" \
     MINWM_BENCHMARK_MODE=setup_only \
     MINWM_RESULTS_ROOT="/work/minwm-realtime/${runtime_run_id}/setup-results" \
@@ -66,14 +108,17 @@ flock -u 8
 echo "${TAEHV_SHA256}  ${TAEHV_CHECKPOINT}" | sha256sum --check -
 
 python3 - "${CONFIG_PATH}" "${SGLANG_GIT_REF}" "${MODEL_DIR}" \
-  "${LOCAL_ARTIFACT_ROOT}" "${MINWM_ARCHIVE_S3_URI}" "${TAEHV_CHECKPOINT}" <<'PY'
+  "${LOCAL_ARTIFACT_ROOT}" "${MINWM_ARCHIVE_S3_URI}" "${TAEHV_CHECKPOINT}" \
+  "${experiment_checkpoint_sha256}" <<'PY'
 import json
 import os
 import subprocess
 import sys
 from pathlib import Path
 
-path, commit, model, artifacts, archive, taehv_checkpoint = sys.argv[1:]
+path, commit, model, artifacts, archive, taehv_checkpoint, checkpoint_sha256 = (
+    sys.argv[1:]
+)
 gpu_count = int(os.environ["MINWM_REQUESTED_GPUS"])
 if gpu_count not in {1, 2}:
     raise RuntimeError(f"MINWM_REQUESTED_GPUS must be 1 or 2, got {gpu_count}")
@@ -134,19 +179,30 @@ env = {
     "CUBLAS_WORKSPACE_CONFIG": ":4096:8",
     "PYTHONHASHSEED": "0",
     "MINWM_ROOT": "/workspace/minWM",
+    "MINWM_RUNTIME_ALIGNMENT_LOG": "1",
 }
+
+alignment_pattern = (
+    "MINWM_RUNTIME_ALIGNMENT local_attn_size=32 sink_size=8 window_size=32 "
+    "rope_position_mode=block_relative rope_gap=12 "
+    "prompt_first_frame_pin_enabled=True request_sink_size=8 "
+    "request_window_size=32 allow_growth=False"
+)
 
 def variant(command, backend):
     return {
         "command": command,
         "env": env,
-        "required_log_patterns": [f'"decoder_backend": "{backend}"'],
+        "required_log_patterns": [
+            f'"decoder_backend": "{backend}"',
+            alignment_pattern,
+        ],
     }
 
 cases = []
 for size in ("832x480", "1248x704"):
     cases.append({
-        "name": f"taehv-local-{size}-w32s8-eager",
+        "name": f"taehv-local-tianpeng-gap12-{size}-eager",
         "size": size,
         "mode": "eager",
         "control": variant(common, "causal_vae"),
@@ -158,6 +214,7 @@ for size in ("832x480", "1248x704"):
 
 config = {
     "sglang_git_ref": commit,
+    "checkpoint_sha256": checkpoint_sha256,
     "minwm_git_ref": os.environ["MINWM_GIT_REF"],
     "taehv_checkpoint_path": taehv_checkpoint,
     "taehv_checkpoint_sha256": os.environ["TAEHV_SHA256"],
@@ -199,8 +256,6 @@ config = {
 Path(path).write_text(json.dumps(config, indent=2, sort_keys=True) + "\n")
 PY
 
-manifest_root="${LOCAL_ARTIFACT_ROOT}/environment"
-mkdir -p "${manifest_root}"
 git -C /workspace/sglang rev-parse HEAD > "${manifest_root}/sglang-git.txt"
 git -C /workspace/minWM rev-parse HEAD > "${manifest_root}/minwm-git.txt"
 sha256sum "${TAEHV_CHECKPOINT}" > "${manifest_root}/taehv-checkpoint-sha256.txt"
@@ -213,13 +268,13 @@ aws s3 cp "${PAIR_ROOT}/dry-run.json" \
   --no-progress --only-show-errors
 python3 "${SCRIPT_DIR}/run_paired_crossover.py" --config "${CONFIG_PATH}"
 for size in 832x480 1248x704; do
-  case_root="${LOCAL_ARTIFACT_ROOT}/taehv-local-${size}-w32s8-eager"
+  case_root="${LOCAL_ARTIFACT_ROOT}/taehv-local-tianpeng-gap12-${size}-eager"
   quality_output="${case_root}/quality-comparison.json"
   python3 "${SCRIPT_DIR}/compare_taehv_samples.py" \
     --exact "${case_root}/rep-00/control/quality-samples/${size}" \
     --taehv "${case_root}/rep-00/candidate/quality-samples/${size}" \
     --output "${quality_output}"
   aws s3 cp "${quality_output}" \
-    "${MINWM_ARCHIVE_S3_URI%/}/taehv-local-${size}-w32s8-eager/quality-comparison.json" \
+    "${MINWM_ARCHIVE_S3_URI%/}/taehv-local-tianpeng-gap12-${size}-eager/quality-comparison.json" \
     --no-progress --only-show-errors
 done

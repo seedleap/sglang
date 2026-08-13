@@ -14,6 +14,7 @@ from run_paired_crossover import (
 def config(tmp_path):
     payload = {
         "sglang_git_ref": "deadbeef",
+        "checkpoint_sha256": "a" * 64,
         "nvme_root": str(tmp_path / "nvme"),
         "artifact_root": str(tmp_path / "artifacts"),
         "base_port": 31000,
