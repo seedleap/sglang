@@ -334,6 +334,20 @@ for size in sizes:
                     "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
                 },
             }
+            bounded_cudnn_workspace = {
+                **expandable_allocator,
+                "env": {
+                    **expandable_allocator["env"],
+                    "CUDNN_CONV_WSCAP_DBG": "256",
+                },
+            }
+            bounded_cudnn_cache = {
+                **bounded_cudnn_workspace,
+                "env": {
+                    **bounded_cudnn_workspace["env"],
+                    "CUDNN_KERNEL_CACHE_SIZE_MB": "128",
+                },
+            }
             cases.extend(
                 [
                     {
@@ -351,6 +365,22 @@ for size in sizes:
                         "paired_reps": 1,
                         "control": lazy_modules,
                         "candidate": expandable_allocator,
+                    },
+                    {
+                        "name": f"taehv-memory-f-cudnn-workspace-tianpeng-gap12-{size}-eager",
+                        "size": size,
+                        "mode": "eager",
+                        "paired_reps": 1,
+                        "control": expandable_allocator,
+                        "candidate": bounded_cudnn_workspace,
+                    },
+                    {
+                        "name": f"taehv-memory-g-cudnn-cache-tianpeng-gap12-{size}-eager",
+                        "size": size,
+                        "mode": "eager",
+                        "paired_reps": 1,
+                        "control": bounded_cudnn_workspace,
+                        "candidate": bounded_cudnn_cache,
                     },
                 ]
             )
