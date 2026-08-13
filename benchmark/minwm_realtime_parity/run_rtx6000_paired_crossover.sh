@@ -12,7 +12,7 @@ PAIR="${2:-${MINWM_PAIR:-}}"
 : "${MINWM_ARCHIVE_ROOT:?set MINWM_ARCHIVE_ROOT}"
 : "${MINWM_ARCHIVE_S3_URI:?set MINWM_ARCHIVE_S3_URI}"
 
-RUN_ID="rtx6000-shared-${SGLANG_GIT_REF:0:10}-setup"
+RUN_ID="rtx6000-shared-a3d231ccdc-setup"
 MODEL_DIR="/work/minwm-realtime/${RUN_ID}/sglang-model"
 PAIR_ROOT="/work/minwm-paired/pair-${PAIR,,}"
 CONFIG_PATH="${PAIR_ROOT}/paired.json"
@@ -62,17 +62,21 @@ case_name="pair-${PAIR,,}-${size}-eager-vs-cuda-graph"
 
 python3 - "${CONFIG_PATH}" "${SGLANG_GIT_REF}" "${MODEL_DIR}" \
   "${LOCAL_ARTIFACT_ROOT}" "${MINWM_ARCHIVE_S3_URI}" "${case_name}" "${size}" "${PAIR}" <<'PY'
-import json, sys
+import json, os, sys
 from pathlib import Path
 
 path, commit, model, artifacts, archive, name, size, pair = sys.argv[1:]
-cpu_slots = {
-    "A": ("0-19", "20-39", 0),
-    "B": ("48-67", "68-87", 0),
-    "C": ("96-115", "116-135", 1),
-    "D": ("144-163", "164-183", 1),
-}
-cpu0, cpu1, numa = cpu_slots[pair]
+available = sorted(os.sched_getaffinity(0))
+offsets = {"A": 0, "B": 48, "C": 96, "D": 144}
+offset = offsets[pair] if len(available) >= offsets[pair] + 40 else 0
+lane0, lane1 = available[offset:offset + 20], available[offset + 20:offset + 40]
+if len(lane1) != 20:
+    raise RuntimeError(f"need 40 CPUs for a pair, found {len(available)}")
+
+def cpu_set(cpus):
+    return ",".join(str(cpu) for cpu in cpus)
+
+cpu0, cpu1, numa = cpu_set(lane0), cpu_set(lane1), 0
 common = [
     "sglang", "serve", "--model-path", model,
     "--pipeline-class-name", "MinWMCausalDMDPipeline",
