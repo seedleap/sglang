@@ -348,6 +348,14 @@ for size in sizes:
                     "CUDNN_KERNEL_CACHE_SIZE_MB": "128",
                 },
             }
+            dit_cpu_offload = {
+                **expandable_allocator,
+                "command": [
+                    *expandable_allocator["command"],
+                    "--dit-cpu-offload",
+                    "true",
+                ],
+            }
             cases.extend(
                 [
                     {
@@ -381,6 +389,14 @@ for size in sizes:
                         "paired_reps": 1,
                         "control": bounded_cudnn_workspace,
                         "candidate": bounded_cudnn_cache,
+                    },
+                    {
+                        "name": f"taehv-memory-h-dit-offload-tianpeng-gap12-{size}-eager",
+                        "size": size,
+                        "mode": "eager",
+                        "paired_reps": 1,
+                        "control": expandable_allocator,
+                        "candidate": dit_cpu_offload,
                     },
                 ]
             )
