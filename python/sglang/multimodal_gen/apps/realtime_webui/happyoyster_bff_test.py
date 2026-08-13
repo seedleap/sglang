@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 
 import asyncio
+import io
 import json
 import unittest
 from unittest import mock
 
 import server
+from PIL import Image
 
 
 class FakeResponse:
@@ -45,6 +47,17 @@ class FakeRequest:
 
 
 class HappyOysterBffTest(unittest.IsolatedAsyncioTestCase):
+    def test_first_frame_is_normalized_to_bounded_16_by_9_jpeg(self):
+        source = io.BytesIO()
+        Image.new("RGB", (1393, 1129), (20, 80, 140)).save(source, format="PNG")
+
+        normalized = server._normalize_happyoyster_first_frame(source.getvalue())
+
+        self.assertLess(len(normalized), len(source.getvalue()))
+        with Image.open(io.BytesIO(normalized)) as image:
+            self.assertEqual(image.format, "JPEG")
+            self.assertEqual(image.size, (1280, 720))
+
     async def test_prepare_uses_origin_for_temporary_token(self):
         session = FakeSession()
         app = {server.SESSION: session}

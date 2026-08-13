@@ -3,6 +3,7 @@
 """Serve the realtime UI and proxy its HTTP/WebSocket API on one port."""
 
 import asyncio
+import io
 import json
 import logging
 import os
@@ -51,6 +52,7 @@ HAPPYOYSTER_PUBLIC_IMAGE_BASE_URL = os.environ.get(
 HAPPYOYSTER_TIMEOUT_SECONDS = float(
     os.environ.get("HAPPYOYSTER_TIMEOUT_SECONDS", "130")
 )
+HAPPYOYSTER_FIRST_FRAME_SIZE = (1280, 720)
 
 
 def _forward_headers(headers):
@@ -244,6 +246,30 @@ def _happyoyster_configured():
     return bool(HAPPYOYSTER_API_KEY and HAPPYOYSTER_API_BASE_URL)
 
 
+def _normalize_happyoyster_first_frame(image_bytes):
+    """Return a bounded 16:9 JPEG accepted by the HappyOyster first-frame API."""
+
+    from PIL import Image, ImageOps
+
+    with Image.open(io.BytesIO(image_bytes)) as image:
+        rgb = ImageOps.exif_transpose(image).convert("RGB")
+        fitted = ImageOps.fit(
+            rgb,
+            HAPPYOYSTER_FIRST_FRAME_SIZE,
+            method=Image.Resampling.LANCZOS,
+            centering=(0.5, 0.5),
+        )
+        output = io.BytesIO()
+        fitted.save(
+            output,
+            format="JPEG",
+            quality=88,
+            optimize=True,
+            progressive=True,
+        )
+        return output.getvalue()
+
+
 def _happyoyster_origin():
     parsed = urlsplit(HAPPYOYSTER_API_BASE_URL)
     return f"{parsed.scheme}://{parsed.netloc}"
@@ -343,10 +369,23 @@ async def _happyoyster_share_image(request):
             text=json.dumps({"error": "first frame must be PNG, JPEG, or WebP"}),
             content_type="application/json",
         )
-    suffix = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp"}[mime_type]
-    image_name = request.app[WORLD_CREATOR].save_shared_image(image_bytes, suffix)
+    try:
+        normalized = await asyncio.to_thread(
+            _normalize_happyoyster_first_frame, image_bytes
+        )
+    except Exception as error:
+        raise web.HTTPBadRequest(
+            text=json.dumps({"error": "first frame is not a valid image"}),
+            content_type="application/json",
+        ) from error
+    image_name = request.app[WORLD_CREATOR].save_shared_image(normalized, ".jpg")
     return web.json_response(
-        {"url": f"{HAPPYOYSTER_PUBLIC_IMAGE_BASE_URL}/api/world/images/{image_name}"}
+        {
+            "url": f"{HAPPYOYSTER_PUBLIC_IMAGE_BASE_URL}/api/world/images/{image_name}",
+            "contentType": "image/jpeg",
+            "width": HAPPYOYSTER_FIRST_FRAME_SIZE[0],
+            "height": HAPPYOYSTER_FIRST_FRAME_SIZE[1],
+        }
     )
 
 
