@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>World Studio · 实时模型对比</title>
-    <link rel="stylesheet" href="./styles.css?v=world-studio-v6" />
+    <link rel="stylesheet" href="./styles.css?v=world-studio-v7" />
   </head>
   <body class="world-studio">
     <header class="app-header">
@@ -16,7 +16,7 @@
         <span id="statusDot" class="dot"></span>
         <span id="statusText">Ready</span>
         <span id="sessionCountdown" class="session-countdown" role="timer" hidden>
-          剩余 <b id="sessionCountdownText">01:30</b>
+          剩余 <b id="sessionCountdownText">01:00</b>
         </span>
       </div>
     </header>
@@ -169,10 +169,14 @@
                   </div>
                 </header>
                 <div class="preview-frame">
+                  <img id="happyoysterReferenceImage" class="happyoyster-reference-image" alt="快乐生蚝所选首帧" />
                   <video id="happyoysterViewport" autoplay playsinline muted tabindex="0"></video>
                   <div id="happyoysterPreviewOverlay" class="preview-overlay" aria-hidden="true">
                     <span class="preview-loader"></span>
                     <span id="happyoysterStageText" class="preview-status-text">等待进入世界</span>
+                    <div id="happyoysterProgress" class="happyoyster-progress" role="progressbar" aria-label="快乐生蚝构建进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+                      <span id="happyoysterProgressBar"></span>
+                    </div>
                     <span class="preview-unavailable-text">暂不可用</span>
                   </div>
                 </div>
@@ -303,16 +307,16 @@
       </section>
     </main>
     <script src="./runtime-config.js"></script>
-    <script src="./playback_controller.js?v=realtime-playback-v33"></script>
-    <script src="./model_session.js?v=dual-model-v8"></script>
+    <script src="./playback_controller.js?v=realtime-playback-v34"></script>
+    <script src="./model_session.js?v=dual-model-v9"></script>
     <script src="./dual_model_controller.js?v=dual-model-v6"></script>
     <script src="./happy_oyster_sdk.js?v=happyoyster-sdk-0.1.0-ticket-only"></script>
-    <script src="./happy_oyster_session.js?v=happyoyster-session-v4"></script>
+    <script src="./happy_oyster_session.js?v=happyoyster-session-v5"></script>
     <script src="./session_lifetime.js?v=session-lifetime-v1"></script>
     <script src="./prompt_rewrite_controller.js?v=prompt-rewrite-v2"></script>
     <script src="./fullscreen_controller.js?v=dual-fullscreen-v1"></script>
     <script src="./trace_topology.js?v=realtime-trace-topology-v6"></script>
     <script src="./trace_transport.js?v=realtime-trace-http-v2"></script>
-    <script src="./app.js?v=world-studio-v18"></script>
+    <script src="./app.js?v=world-studio-v19"></script>
   </body>
 </html>

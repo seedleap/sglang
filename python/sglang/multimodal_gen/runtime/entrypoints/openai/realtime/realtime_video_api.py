@@ -356,7 +356,8 @@ async def _session_watchdog(
             enforce_max_lifetime
             and not internal_startup_warmup
             and max_lifetime_s > 0
-            and now - session.created_at >= max_lifetime_s
+            and session.playable_at is not None
+            and now - session.playable_at >= max_lifetime_s
         ):
             return "maximum session lifetime reached"
         if (
@@ -1060,6 +1061,11 @@ async def _send_output_and_log(
             result,
             batch,
         )
+        # ACK-aware clients start their lifetime only after a frame is
+        # actually rendered. Legacy clients keep the historical first-send
+        # fallback so this protocol extension is backwards compatible.
+        if not session.playback_ack_enabled:
+            session.mark_playable()
         send_stats["pace_wait_ms"] = pace_wait_ms
         chunk_total_ms = (time.perf_counter() - chunk_started) * 1000
         _log_realtime_chunk_timing(
@@ -1247,6 +1253,20 @@ async def _listen_events(ws: WebSocket, session: GenerateSession):
             realtime_event = RealtimeEvent.model_validate(data)
             if realtime_event.kind == "heartbeat":
                 session.mark_client_activity()
+                continue
+            if realtime_event.kind == "playback_ack":
+                if session.playback_ack_enabled:
+                    session.apply_playback_ack(realtime_event.payload)
+                session.mark_client_activity()
+                log_realtime_trace(
+                    logger,
+                    session,
+                    "server.playback_ack_received",
+                    last_received_chunk=session.last_received_chunk,
+                    last_rendered_chunk=session.last_rendered_chunk,
+                    last_rendered_event_id=session.last_rendered_event_id,
+                    playable=session.playable_at is not None,
+                )
                 continue
             if session.adapter is None:
                 raise ValueError("realtime adapter is not initialized")

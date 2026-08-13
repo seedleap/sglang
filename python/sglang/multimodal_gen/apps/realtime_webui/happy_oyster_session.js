@@ -77,36 +77,66 @@
       return readJson(response);
     }
 
-    async prepare({ prompt, firstFrame, firstFrameMimeType = "image/png", perspective = "third_person" }) {
+    async prepare({
+      prompt,
+      firstFrame,
+      firstFrameMimeType = "image/png",
+      perspective = "third_person",
+      presetKey = "",
+    }) {
       await this.close("replace session", { notify: false });
       const epoch = ++this.epoch;
       this.preparationError = null;
-      this.setState("preparing");
+      this.setState("preparing", { message: "正在准备快乐生蚝 World…", progress: 5 });
       try {
-        this.setState("preparing", { message: "正在检查快乐生蚝 API…" });
+        this.setState("preparing", { message: "正在检查快乐生蚝 API…", progress: 8 });
         const config = await this.configured();
         if (!config.enabled) throw new Error("快乐生蚝 API 未配置");
-        let firstFrameUrl = "";
-        if (firstFrame?.byteLength) {
-          this.setState("preparing", { message: "正在上传首帧…" });
-          const response = await this.fetchImpl("./api/happyoyster/share-image", {
+        let worldId = "";
+        let worldStatus = "";
+        if (presetKey) {
+          this.setState("preparing", { message: "正在查找预构建 World…", progress: 15 });
+          const resolved = await readJson(await this.fetchImpl("./api/happyoyster/worlds/resolve", {
             method: "POST",
-            headers: { "Content-Type": firstFrameMimeType || "image/png" },
-            body: firstFrame,
-          });
-          firstFrameUrl = (await readJson(response)).url || "";
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ presetKey }),
+          }));
+          worldId = resolved?.encryptedWorldId || "";
+          worldStatus = String(resolved?.status || "").toLowerCase();
+          if (worldId) {
+            this.setState("preparing", {
+              message: worldStatus === "ready" ? "已命中预构建 World" : "预构建 World 即将就绪…",
+              progress: worldStatus === "ready" ? 72 : 40,
+              source: "prebuilt",
+            });
+          }
         }
-        this.setState("preparing", { message: "正在创建快乐生蚝 World…" });
-        const created = await readJson(await this.fetchImpl("./api/happyoyster/worlds", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ prompt, firstFrameUrl, perspective }),
-        }));
-        const worldId = created?.encryptedWorldId;
+        if (!worldId) {
+          let firstFrameUrl = "";
+          if (firstFrame?.byteLength) {
+            this.setState("preparing", { message: "正在上传首帧…", progress: 20 });
+            const response = await this.fetchImpl("./api/happyoyster/share-image", {
+              method: "POST",
+              headers: { "Content-Type": firstFrameMimeType || "image/png" },
+              body: firstFrame,
+            });
+            firstFrameUrl = (await readJson(response)).url || "";
+          }
+          this.setState("preparing", { message: "正在创建快乐生蚝 World…", progress: 32 });
+          const created = await readJson(await this.fetchImpl("./api/happyoyster/worlds", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ prompt, firstFrameUrl, perspective, presetKey }),
+          }));
+          worldId = created?.encryptedWorldId || "";
+          worldStatus = "building";
+        }
         if (!worldId) throw new Error("快乐生蚝创建 World 未返回 encryptedWorldId");
-        this.setState("preparing", { message: "快乐生蚝 World 构建中…" });
-        await this.waitUntilReady(worldId, epoch);
-        this.setState("preparing", { message: "正在获取 RTC 连接凭证…" });
+        if (worldStatus !== "ready") {
+          this.setState("preparing", { message: "快乐生蚝 World 构建中…", progress: 45 });
+          await this.waitUntilReady(worldId, epoch);
+        }
+        this.setState("preparing", { message: "正在获取 RTC 连接凭证…", progress: 82 });
         const prepared = await readJson(await this.fetchImpl("./api/happyoyster/prepare", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -114,7 +144,7 @@
         }));
         if (epoch !== this.epoch) throw new Error("快乐生蚝会话已被替换");
         this.prepared = { ...prepared, epoch };
-        this.setState("ready", { message: "World 已就绪，正在连接视频流…" });
+        this.setState("ready", { message: "World 已就绪，正在连接视频流…", progress: 90 });
         return true;
       } catch (error) {
         if (epoch === this.epoch) {
@@ -134,7 +164,7 @@
       this.prepared = null;
       const epoch = prepared.epoch;
       if (epoch !== this.epoch) throw new Error("快乐生蚝会话已被替换");
-      this.setState("connecting", { message: "正在连接快乐生蚝视频流…" });
+      this.setState("connecting", { message: "正在连接快乐生蚝视频流…", progress: 94 });
       try {
         const sdk = global.HappyOysterSDK;
         if (!sdk?.HappyOysterEngine) throw new Error("快乐生蚝 Web SDK 加载失败");
@@ -154,7 +184,7 @@
         this.unsubscribers = [
           travel.on("statusChanged", (status) => {
             if (epoch !== this.epoch) return;
-            if (status === "running") this.setState("live");
+            if (status === "running") this.setState("live", { progress: 100 });
             if (status === "completed") this.setState("closed");
           }),
           travel.onError((error) => {
@@ -168,7 +198,7 @@
           return false;
         }
         this.connected = true;
-        this.setState("live");
+        this.setState("live", { progress: 100 });
         return true;
       } catch (error) {
         if (epoch === this.epoch) this.fail(error);
@@ -178,12 +208,18 @@
 
     async waitUntilReady(worldId, epoch) {
       const deadline = Date.now() + WORLD_READY_TIMEOUT_MS;
+      let attempt = 0;
       while (Date.now() < deadline) {
         if (epoch !== this.epoch) throw new Error("快乐生蚝会话已取消");
         const url = `./api/happyoyster/worlds/build-status?encryptedWorldId=${encodeURIComponent(worldId)}`;
         const status = await readJson(await this.fetchImpl(url, { cache: "no-store" }));
         if (status?.status === "ready") return status;
         if (status?.status === "failed") throw new Error(status.message || "快乐生蚝 World 构建失败");
+        attempt += 1;
+        this.setState("preparing", {
+          message: `快乐生蚝 World 构建中… ${Math.min(78, 45 + attempt * 2)}%`,
+          progress: Math.min(78, 45 + attempt * 2),
+        });
         await new Promise((resolve) => global.setTimeout(resolve, POLL_INTERVAL_MS));
       }
       throw new Error("快乐生蚝 World 构建超时");

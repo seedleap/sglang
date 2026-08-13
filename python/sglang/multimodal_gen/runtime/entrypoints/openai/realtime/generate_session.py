@@ -22,6 +22,16 @@ if TYPE_CHECKING:
     )
 
 
+def _non_negative_int(value: Any, fallback: int) -> int:
+    if isinstance(value, bool):
+        return fallback
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return fallback
+    return parsed if parsed >= 0 else fallback
+
+
 @dataclass(frozen=True, slots=True)
 class RealtimeChunkContext:
     session_id: str
@@ -50,6 +60,11 @@ class GenerateSession:
         self.trace_started_at = time.perf_counter()
         self.trace_started_epoch_ms = int(time.time() * 1000)
         self.created_at = time.monotonic()
+        self.playable_at: float | None = None
+        self.playback_ack_enabled = False
+        self.last_received_chunk = -1
+        self.last_rendered_chunk = -1
+        self.last_rendered_event_id = 0
         self.last_client_activity_at = self.created_at
         self.client_activity_version = 0
         self.interactive_event_version = 0
@@ -90,6 +105,7 @@ class GenerateSession:
     def set_request(self, request: RealtimeVideoGenerationsRequest):
         self.bind_trace(request)
         self.request = request
+        self.playback_ack_enabled = bool(request.playback_ack_enabled)
 
     def dispose(self):
         if self.adapter is not None:
@@ -108,9 +124,36 @@ class GenerateSession:
         self.vae_client = None
         self.pending_control_refresh = None
         self.control_refresh_task = None
+        self.playable_at = None
+        self.playback_ack_enabled = False
+        self.last_received_chunk = -1
+        self.last_rendered_chunk = -1
+        self.last_rendered_event_id = 0
         self.denoise_intervals.clear()
         self.vae_intervals.clear()
         self.realtime_session.dispose()
+
+    def mark_playable(self) -> None:
+        if self.playable_at is None:
+            self.playable_at = time.monotonic()
+
+    def apply_playback_ack(self, payload: Any) -> None:
+        if not isinstance(payload, dict):
+            return
+        self.last_received_chunk = max(
+            self.last_received_chunk,
+            _non_negative_int(payload.get("last_received_chunk"), -1),
+        )
+        self.last_rendered_chunk = max(
+            self.last_rendered_chunk,
+            _non_negative_int(payload.get("last_rendered_chunk"), -1),
+        )
+        self.last_rendered_event_id = max(
+            self.last_rendered_event_id,
+            _non_negative_int(payload.get("last_rendered_event_id"), 0),
+        )
+        if payload.get("playable") is True:
+            self.mark_playable()
 
     def mark_client_activity(self) -> None:
         self.last_client_activity_at = time.monotonic()

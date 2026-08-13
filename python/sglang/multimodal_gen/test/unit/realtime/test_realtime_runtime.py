@@ -1389,6 +1389,65 @@ def test_session_watchdog_closes_idle_session():
     assert asyncio.run(run()) == "session idle timeout"
 
 
+def test_session_watchdog_starts_max_lifetime_after_media_is_playable():
+    async def run():
+        store = realtime_video_api.InMemorySessionLeaseStore(1, 0.5)
+        controller = realtime_video_api.RealtimeAdmissionController(store)
+        session = GenerateSession()
+        session.created_at -= 10
+        lease = await controller.admit("u1", session.id, session.generation_id)
+        task = asyncio.create_task(
+            realtime_video_api._session_watchdog(
+                session,
+                controller,
+                lease,
+                idle_timeout_s=1,
+                max_lifetime_s=0.01,
+                lease_ttl_s=0.5,
+            )
+        )
+        await asyncio.sleep(0.12)
+        assert not task.done(), "socket/build time must not consume playable lifetime"
+        session.mark_playable()
+        try:
+            return await asyncio.wait_for(task, timeout=0.3)
+        finally:
+            await controller.release(lease)
+
+    assert asyncio.run(run()) == "maximum session lifetime reached"
+
+
+def test_playback_ack_marks_ack_aware_session_playable_without_model_ingest():
+    class RejectingAdapter:
+        def ingest_event(self, *_args):
+            raise AssertionError("playback transport ACK must not reach model adapter")
+
+    class _Ws:
+        async def iter_bytes(self):
+            yield msgspec.msgpack.encode(
+                {
+                    "type": "event",
+                    "kind": "playback_ack",
+                    "payload": {
+                        "last_received_chunk": 3,
+                        "last_rendered_chunk": 2,
+                        "last_rendered_event_id": 9,
+                        "playable": True,
+                    },
+                }
+            )
+
+    session = GenerateSession()
+    session.adapter = RejectingAdapter()
+    session.playback_ack_enabled = True
+    asyncio.run(realtime_video_api._listen_events(_Ws(), session))
+
+    assert session.last_received_chunk == 3
+    assert session.last_rendered_chunk == 2
+    assert session.last_rendered_event_id == 9
+    assert session.playable_at is not None
+
+
 def test_session_watchdog_exempts_internal_startup_warmup_from_max_lifetime():
     async def run():
         store = realtime_video_api.InMemorySessionLeaseStore(1, 0.5)

@@ -90,9 +90,10 @@ const RECENT_DROP_DISPLAY_MS = 1800;
 const CONTROL_TRANSITION_FLUSH_DELAY_MS = 50;
 const CONTROL_HELD_STATE_HEARTBEAT_MS = 100;
 const SESSION_HEARTBEAT_MS = 15000;
+const PLAYBACK_ACK_INTERVAL_MS = 50;
 const SESSION_MAX_LIFETIME_SECONDS = Math.max(
   1,
-  Math.trunc(configuredNumber("sessionMaxLifetimeSeconds", 90)),
+  Math.trunc(configuredNumber("sessionMaxLifetimeSeconds", 60)),
 );
 const SESSION_MAX_LIFETIME_MS = SESSION_MAX_LIFETIME_SECONDS * 1000;
 const EXPERIENCE_BUSY_MESSAGE = `当前正有人体验，请等待${SESSION_MAX_LIFETIME_SECONDS}s`;
@@ -391,6 +392,19 @@ const examplePresets = [
   { name: "Dragon Dolly", tone: "green", size: "832x480", fps: DEFAULT_TARGET_FPS, prompt: "A stable first-person dolly from the same dragon-rider viewpoint, keeping the black dragon head, horns, wings, jungle canopy, and distant castle consistent; slow forward camera motion, natural parallax, no creature morphing, no scene replacement.", referenceUrl: `${PRESET_ASSET_BASE_URL}/lingbot-example-00-dragon-dolly.jpg`, source: "LingBot example 00" },
 ];
 
+function presetKey(preset) {
+  if (!preset) return "";
+  if (preset.isCustom && preset.fingerprint) {
+    return `custom-${String(preset.fingerprint).replace(/[^a-zA-Z0-9]/g, "").slice(0, 64).toLowerCase()}`;
+  }
+  if (!presets.includes(preset)) return "";
+  return String(preset.name || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
 const FEATURED_PRESET_NAMES = [
   "Misted Kingdom",
   "Penguin Colony",
@@ -668,6 +682,7 @@ const lingbot2Session = new RealtimeModelSession({
     renderModelTelemetry("lingbot2", stats);
     markModelEventApplied("lingbot2", stats.lastAppliedEventId);
   },
+  onFrame: () => markSessionPlayable("lingbot2"),
   onError: (error) => {
     if (isExperienceBusyError(error)) {
       handleExperienceBusy();
@@ -694,6 +709,8 @@ const happyOysterSession = new HappyOysterSession({
       idle: "等待进入世界",
     }[state];
     setHappyOysterStageText(details.message || fallback, state);
+    setHappyOysterProgress(details.progress, state);
+    if (state === "live") markSessionPlayable("happyoyster");
     if (state === "error") {
       addHistory(`快乐生蚝 error · ${details.message || details.reason || "unknown"}`);
     }
@@ -704,11 +721,16 @@ const happyOysterSession = new HappyOysterSession({
 });
 
 function buildHappyOysterInit(init) {
+  const unchangedPresetKey = selectedWorldIsUnchanged(init.prompt)
+    ? presetKey(selectedPreset)
+    : "";
+  const customKey = `custom-${fallbackBytesFingerprint(init.first_frame).split("-").at(-1)}-${fallbackBytesFingerprint(new TextEncoder().encode(init.prompt || "")).split("-").at(-1)}`;
   return {
     prompt: init.prompt,
     firstFrame: init.first_frame,
     firstFrameMimeType: selectedReferenceMimeType || selectedPreset?.mime || "image/png",
     perspective: /first[-_ ]person/i.test(init.prompt || "") ? "first_person" : "third_person",
+    presetKey: unchangedPresetKey || customKey,
   };
 }
 
@@ -902,6 +924,9 @@ const promptRewriteController = new PromptRewriteController({
   restoreDelayMs: 10000,
 });
 let sessionLifetimeExpired = false;
+let sessionPlayable = false;
+let playbackAckTimer = 0;
+let lastRenderedEventId = 0;
 let sessionCountdownTimer = 0;
 let sessionCountdownDeadlineMs = 0;
 const sessionLifetimeGuard = new SessionLifetimeGuard({
@@ -917,7 +942,38 @@ function resetSessionLifetimeUi() {
   sessionLifetimeGuard.cancel();
   stopSessionCountdown();
   sessionLifetimeExpired = false;
+  sessionPlayable = false;
   $("sessionNotice").hidden = true;
+}
+
+function markSessionPlayable(modelKey) {
+  if (sessionPlayable || sessionLifetimeExpired || !modelSelected(modelKey)) return false;
+  sessionPlayable = true;
+  sessionLifetimeGuard.start();
+  startSessionCountdown();
+  setStatus("Live", "live");
+  recordTrajectoryEvent("session_playable", { model: modelKey });
+  addHistory(`可玩计时开始 · ${modelLabel(modelKey)} 首帧已显示`);
+  return true;
+}
+
+function schedulePrimaryPlaybackAck() {
+  if (playbackAckTimer || !ws || ws.readyState !== WebSocket.OPEN) return;
+  playbackAckTimer = window.setTimeout(() => {
+    playbackAckTimer = 0;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    ws.send(pack({
+      type: "event",
+      kind: "playback_ack",
+      trace_id: currentTrace?.traceId,
+      payload: {
+        last_received_chunk: lastReceivedChunk,
+        last_rendered_chunk: lastRenderedChunk,
+        last_rendered_event_id: lastRenderedEventId,
+        playable: renderedPreviewFrames > 0,
+      },
+    }));
+  }, PLAYBACK_ACK_INTERVAL_MS);
 }
 
 function formatSessionCountdown(seconds) {
@@ -1023,6 +1079,23 @@ function setHappyOysterStageText(message, state = "") {
   text.textContent = message || "正在准备快乐生蚝…";
   if (state) text.dataset.state = state;
   else delete text.dataset.state;
+}
+
+function setHappyOysterProgress(progress, state = "") {
+  const root = $("happyoysterProgress");
+  const bar = $("happyoysterProgressBar");
+  if (!root || !bar) return;
+  const value = Math.max(0, Math.min(100, Number(progress) || 0));
+  root.setAttribute("aria-valuenow", String(Math.round(value)));
+  root.hidden = state === "live" || state === "idle" || state === "closed";
+  bar.style.setProperty("--progress", `${value}%`);
+}
+
+function setHappyOysterReferencePreview(dataUrl = "") {
+  const image = $("happyoysterReferenceImage");
+  if (!image) return;
+  image.src = dataUrl;
+  image.hidden = !dataUrl;
 }
 
 function setPreviewState(state) {
@@ -1396,6 +1469,9 @@ function resetStreamStats() {
   encodedDecodeErrors = 0;
   renderedPreviewFrames = 0;
   lastSentEventId = 0;
+  lastRenderedEventId = 0;
+  if (playbackAckTimer) window.clearTimeout(playbackAckTimer);
+  playbackAckTimer = 0;
   lastSampledEventId = 0;
   pendingModelEvents.clear();
   lastRenderedChunk = null;
@@ -3577,6 +3653,10 @@ function hasPendingPlaybackInput() {
 function enqueueDecodeBatch(header, data, epoch) {
   const frameCount = Number(header.num_frames || 1);
   const payloadBytes = payloadByteLength(data);
+  const eventId = Number(header.event_id || 0);
+  if (lastSentEventId > 0 && eventId >= lastSentEventId) {
+    dropQueuedDecodeBatchesBeforeEvent(eventId);
+  }
   decodeQueue.push({ header, data, epoch, frameCount, payloadBytes });
   queuedDecodeFrames += frameCount;
   queuedDecodeBytes += payloadBytes;
@@ -3584,6 +3664,23 @@ function enqueueDecodeBatch(header, data, epoch) {
   trimDecodeQueue();
   pumpDecodeQueue();
   updateStats();
+}
+
+function dropQueuedDecodeBatchesBeforeEvent(eventId) {
+  const kept = [];
+  for (const item of decodeQueue) {
+    if (Number(item.header?.event_id || 0) >= eventId) {
+      kept.push(item);
+      continue;
+    }
+    queuedDecodeFrames = Math.max(0, queuedDecodeFrames - item.frameCount);
+    queuedDecodeBytes = Math.max(0, queuedDecodeBytes - item.payloadBytes);
+    pendingDecodeBatches = Math.max(0, pendingDecodeBatches - 1);
+    droppedDecodeFrames += item.frameCount;
+    lastDecodeDropAt = performance.now();
+    lastDecodeDropCount = item.frameCount;
+  }
+  decodeQueue = kept;
 }
 
 function payloadByteLength(data) {
@@ -3902,6 +3999,7 @@ function drawFrame(image, { close = true, markRendered = true } = {}) {
   ctx.drawImage(drawSource, 0, 0, sourceWidth, sourceHeight);
   if (markRendered) renderedPreviewFrames += 1;
   setPreviewState("live");
+  markSessionPlayable("minwm");
   if (close && !(image instanceof ImageData)) image.close?.();
 }
 
@@ -3918,6 +4016,7 @@ function renderLoop(now) {
     fpsSamples.push(now);
     fpsSamples = fpsSamples.filter((t) => now - t < 1000);
     lastRenderedChunk = item.chunk;
+    lastRenderedEventId = Number(item.eventId || lastRenderedEventId || 0);
     lastDisplayLagMs = now - (item.receivedAt || now);
     recordChunkFirstRendered(item.chunk, {
       render_loop: true,
@@ -3925,6 +4024,7 @@ function renderLoop(now) {
       decode_ms: item.decodeMs || lastDecodeMs,
     });
     updateStats();
+    schedulePrimaryPlaybackAck();
   } else if (decision.action === "hold") {
     updateStats();
   }
@@ -4045,6 +4145,7 @@ function drawReferencePreviewFromImageSource(src, label) {
       const w = img.width * scale, h = img.height * scale;
       previewCtx.fillRect(0, 0, preview.width, preview.height);
       previewCtx.drawImage(img, (preview.width - w) / 2, (preview.height - h) / 2, w, h);
+      setHappyOysterReferencePreview(preview.toDataURL("image/jpeg", 0.86));
       selectedReferencePreviewReady = true;
       updateWorldDraftState();
       drawVisibleReferencePlaceholders();
@@ -4061,6 +4162,7 @@ function drawReferencePreviewFromImageSource(src, label) {
       previewCtx.textAlign = "center";
       previewCtx.textBaseline = "middle";
       previewCtx.fillText("reference image unavailable", preview.width / 2, preview.height / 2);
+      setHappyOysterReferencePreview("");
       if (src.startsWith("blob:")) URL.revokeObjectURL(src);
       resolve(false);
     };
@@ -4075,6 +4177,7 @@ function clearReferencePreview() {
   previewCtx.fillStyle = "#101515";
   previewCtx.fillRect(0, 0, preview.width, preview.height);
   $("referenceName").textContent = "尚未选择图片";
+  setHappyOysterReferencePreview("");
 }
 
 function hasFirstFrame() {
@@ -4498,6 +4601,7 @@ async function connect() {
       type: "init",
       model: $("model").value,
       trace_id: currentTrace.traceId,
+      playback_ack_enabled: true,
       ...readModelRequestParams("minwm", {
         generationMode,
         firstFrame,
@@ -4537,9 +4641,7 @@ async function connect() {
     }
     promptRewriteController.beginSession(init.prompt);
     beginPromptLogSession(init.prompt);
-    sessionLifetimeGuard.start();
-    startSessionCountdown();
-    setStatus("Live", "live");
+    setStatus("Starting", "live");
   } catch (error) {
     sessionLifetimeGuard.cancel();
     stopSessionCountdown();
@@ -4708,6 +4810,7 @@ function receive(data, epoch) {
       });
       recordFrameBatchReceived(message, payload?.byteLength || payload?.size || payload?.length || 0);
       enqueueDecodeBatch(message, payload, epoch);
+      schedulePrimaryPlaybackAck();
       if (!renderedPreviewFrames) setStatus("Receiving", "live");
       return;
     }
@@ -4736,6 +4839,7 @@ function receive(data, epoch) {
   });
   recordFrameBatchReceived(header, data?.byteLength || data?.size || data?.length || 0);
   enqueueDecodeBatch(header, data, epoch);
+  schedulePrimaryPlaybackAck();
 }
 
 async function decodeAndEnqueueFrameBatch(header, data, epoch) {

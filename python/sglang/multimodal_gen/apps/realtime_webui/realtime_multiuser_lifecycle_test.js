@@ -47,15 +47,15 @@ assert.match(
 );
 assert.match(
   appJs,
-  /configuredNumber\("sessionMaxLifetimeSeconds", 90\)/,
-  "browser safety guard should use a 90 second fallback",
+  /configuredNumber\("sessionMaxLifetimeSeconds", 60\)/,
+  "browser safety guard should use a 60 second fallback",
 );
 assert.match(
   appJs,
   /const SESSION_MAX_LIFETIME_MS = SESSION_MAX_LIFETIME_SECONDS \* 1000;/,
   "browser safety guard should use the configured session lifetime",
 );
-assert.match(indexHtml, /id="sessionCountdownText">01:30<\/b>/);
+assert.match(indexHtml, /id="sessionCountdownText">01:00<\/b>/);
 assert.match(
   appJs,
   /连接已断开，请重新连接/,
@@ -73,8 +73,13 @@ assert.match(
 );
 assert.match(
   appJs,
-  /sessionLifetimeGuard\.start\(\);\s*startSessionCountdown\(\);/,
-  "the countdown should start only after the dual-model connection succeeds",
+  /function markSessionPlayable[\s\S]*?sessionLifetimeGuard\.start\(\);\s*startSessionCountdown\(\);/,
+  "the countdown should start only when a selected model renders a playable frame",
+);
+assert.doesNotMatch(
+  appJs,
+  /const connectionReport = await dualModelController\.connect\(init\);[\s\S]{0,2200}sessionLifetimeGuard\.start\(\)/,
+  "opening model sockets must not consume playable session time",
 );
 assert.match(
   appJs,

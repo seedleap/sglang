@@ -9,6 +9,7 @@ from sglang.multimodal_gen.runtime.realtime.async_vae_protocol import encode_mes
 from sglang.multimodal_gen.runtime.realtime.gateway import (
     AdmissionQueueFull,
     BoundedAdmissionWaiterGate,
+    BrowserPlaybackAckWindow,
     GatewayOutputRegistry,
     OutputProtocolError,
     build_denoiser_url,
@@ -61,6 +62,39 @@ def _media_complete(chunk: int, *, generation: str = "g") -> bytes:
         chunk_index=chunk,
         num_frames=1,
     )
+
+
+def test_gateway_playback_ack_window_bounds_chunk_lead_and_sheds_stale_media():
+    async def run():
+        window = BrowserPlaybackAckWindow(
+            max_unacked_chunks=2,
+            wait_timeout_s=0.01,
+        )
+        assert await window.allow_output(_frame(8))
+
+        await window.observe_browser_message(
+            encode_message("init", playback_ack_enabled=True)
+        )
+        assert await window.allow_output(_frame(0))
+        assert await window.allow_output(_frame(0, 1))
+        assert await window.allow_output(_frame(1))
+        assert not await window.allow_output(_frame(2))
+        assert await window.allow_output(_media_complete(2))
+
+        await window.observe_browser_message(
+            encode_message(
+                "event",
+                kind="playback_ack",
+                payload={
+                    "last_received_chunk": 0,
+                    "last_rendered_chunk": 0,
+                },
+            )
+        )
+        assert not await window.allow_output(_frame(2))
+        assert await window.allow_output(_frame(3))
+
+    asyncio.run(run())
 
 
 def test_gateway_output_route_is_fenced_ordered_and_bounded():

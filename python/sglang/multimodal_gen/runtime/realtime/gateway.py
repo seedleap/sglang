@@ -39,6 +39,105 @@ class AdmissionQueueFull(RuntimeError):
         super().__init__(self.reason)
 
 
+class BrowserPlaybackAckWindow:
+    """Bound media lead for ACK-aware browsers without blocking the VAE.
+
+    The browser opts in via the init message. Once enabled, at most
+    ``max_unacked_chunks`` chunks are sent beyond the latest received ACK.
+    If the browser cannot catch up within the short wait window, the stale
+    frame batch is shed at the Gateway; control/completion messages bypass
+    the window.
+    """
+
+    def __init__(
+        self,
+        *,
+        max_unacked_chunks: int = 2,
+        wait_timeout_s: float = 0.25,
+    ) -> None:
+        if max_unacked_chunks < 1:
+            raise ValueError("max_unacked_chunks must be positive")
+        if wait_timeout_s < 0:
+            raise ValueError("wait_timeout_s must be non-negative")
+        self.max_unacked_chunks = max_unacked_chunks
+        self.wait_timeout_s = wait_timeout_s
+        self.enabled = False
+        self.last_received_chunk = -1
+        self.last_rendered_chunk = -1
+        self._sent_chunks: set[int] = set()
+        self._shed_chunks: set[int] = set()
+        self._changed = asyncio.Condition()
+
+    async def observe_browser_message(self, wire: bytes) -> None:
+        try:
+            message = decode_message(wire)
+        except ProtocolViolation:
+            return
+        if message.get("type") == "init":
+            self.enabled = message.get("playback_ack_enabled") is True
+            return
+        if message.get("type") != "event" or message.get("kind") != "playback_ack":
+            return
+        payload = message.get("payload")
+        if not isinstance(payload, dict):
+            return
+        received = self._non_negative_int(payload.get("last_received_chunk"))
+        rendered = self._non_negative_int(payload.get("last_rendered_chunk"))
+        async with self._changed:
+            if received is not None:
+                self.last_received_chunk = max(self.last_received_chunk, received)
+                self._sent_chunks = {
+                    chunk for chunk in self._sent_chunks if chunk > received
+                }
+                self._shed_chunks = {
+                    chunk for chunk in self._shed_chunks if chunk > received
+                }
+            if rendered is not None:
+                self.last_rendered_chunk = max(self.last_rendered_chunk, rendered)
+            self._changed.notify_all()
+
+    async def allow_output(self, wire: bytes) -> bool:
+        if not self.enabled:
+            return True
+        try:
+            message = decode_message(wire)
+        except ProtocolViolation:
+            return True
+        if message.get("type") != "frame_batch":
+            return True
+        chunk_index = self._non_negative_int(message.get("chunk_index"))
+        if chunk_index is None:
+            return True
+        if chunk_index in self._shed_chunks:
+            return False
+        if chunk_index in self._sent_chunks:
+            return True
+        deadline = time.monotonic() + self.wait_timeout_s
+        async with self._changed:
+            while len(self._sent_chunks) >= self.max_unacked_chunks:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    self._shed_chunks.add(chunk_index)
+                    return False
+                try:
+                    await asyncio.wait_for(self._changed.wait(), remaining)
+                except TimeoutError:
+                    self._shed_chunks.add(chunk_index)
+                    return False
+            self._sent_chunks.add(chunk_index)
+        return True
+
+    @staticmethod
+    def _non_negative_int(value) -> int | None:
+        if isinstance(value, bool):
+            return None
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return None
+        return parsed if parsed >= 0 else None
+
+
 class BoundedAdmissionWaiterGate:
     def __init__(self, *, max_waiters: int = 64) -> None:
         if max_waiters < 1:

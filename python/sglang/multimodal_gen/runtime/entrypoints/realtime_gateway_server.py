@@ -38,6 +38,7 @@ from sglang.multimodal_gen.runtime.realtime.coordinator import (
 from sglang.multimodal_gen.runtime.realtime.gateway import (
     AdmissionQueueFull,
     BoundedAdmissionWaiterGate,
+    BrowserPlaybackAckWindow,
     GatewayOutputRegistry,
     OutputBackpressureError,
     OutputProtocolError,
@@ -476,6 +477,7 @@ def create_app(
         upstream = None
         tasks: set[asyncio.Task] = set()
         expected_last_chunk: int | None = None
+        playback_ack_window = BrowserPlaybackAckWindow()
         try:
             admitted_at = time.perf_counter()
             _log_gateway_trace(trace_id, "gateway.ws_accepted", session_id=session_id)
@@ -546,6 +548,8 @@ def create_app(
                                 max_chunks = int(control.get("max_chunks") or 0)
                                 if max_chunks > 0:
                                     expected_last_chunk = max_chunks - 1
+                        if isinstance(payload, bytes):
+                            await playback_ack_window.observe_browser_message(payload)
                         await upstream.send(payload)
                 except ConnectionClosedOK:
                     return
@@ -588,6 +592,20 @@ def create_app(
                 send_started = time.perf_counter()
                 send_fields = _browser_send_trace_fields(wire)
                 queue_fields = queue_fields or {}
+                if not await playback_ack_window.allow_output(wire):
+                    _log_gateway_trace(
+                        trace_id,
+                        "gateway.browser_send_dropped",
+                        session_id=session_id,
+                        generation_id=generation_id,
+                        send_source=send_source,
+                        drop_reason="playback_ack_window",
+                        last_received_chunk=playback_ack_window.last_received_chunk,
+                        last_rendered_chunk=playback_ack_window.last_rendered_chunk,
+                        **queue_fields,
+                        **send_fields,
+                    )
+                    return
                 try:
                     await sender.send(wire)
                 except Exception as exc:
