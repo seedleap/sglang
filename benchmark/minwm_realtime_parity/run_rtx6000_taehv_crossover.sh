@@ -5,11 +5,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 : "${SGLANG_GIT_REF:?set SGLANG_GIT_REF}"
 : "${MINWM_GIT_REF:?set MINWM_GIT_REF}"
 : "${MINWM_ARCHIVE_S3_URI:?set MINWM_ARCHIVE_S3_URI}"
+TAEHV_EXPERIMENT_MODE="${TAEHV_EXPERIMENT_MODE:-exact_vs_taehv}"
+TAEHV_BASELINE_GIT_REF="${TAEHV_BASELINE_GIT_REF:-}"
+export TAEHV_EXPERIMENT_MODE TAEHV_BASELINE_GIT_REF
 
 RUN_ID="rtx6000-taehv-tianpeng-gap12-4220c8a"
 INPUT_RUN_ID="rtx6000-taehv-shared-4220c8a"
 MODEL_DIR="/work/minwm-realtime/${RUN_ID}/sglang-model"
-PAIR_ROOT="/work/minwm-taehv-paired-tianpeng-gap12"
+PAIR_ROOT="/work/minwm-taehv-paired-tianpeng-gap12-${TAEHV_EXPERIMENT_MODE}"
 CONFIG_PATH="${PAIR_ROOT}/paired.json"
 LOCAL_ARTIFACT_ROOT="${PAIR_ROOT}/artifacts"
 TAEHV_ROOT="/work/minwm-taehv"
@@ -181,6 +184,8 @@ env = {
     "MINWM_ROOT": "/workspace/minWM",
     "MINWM_RUNTIME_ALIGNMENT_LOG": "1",
 }
+if os.environ["TAEHV_EXPERIMENT_MODE"] == "memory_ab":
+    env["SGLANG_REALTIME_MEMORY_TRACE"] = "1"
 
 alignment_pattern = (
     "MINWM_RUNTIME_ALIGNMENT local_attn_size=32 sink_size=8 window_size=32 "
@@ -201,16 +206,67 @@ def variant(command, backend):
 
 cases = []
 for size in ("832x480", "1248x704"):
-    cases.append({
-        "name": f"taehv-local-tianpeng-gap12-{size}-eager",
-        "size": size,
-        "mode": "eager",
-        "control": variant(common, "causal_vae"),
-        "candidate": variant(
-            common + ["--vae-config.taehv-checkpoint-path", taehv_checkpoint],
-            "taehv",
-        ),
-    })
+    if os.environ["TAEHV_EXPERIMENT_MODE"] == "memory_ab":
+        baseline_ref = os.environ["TAEHV_BASELINE_GIT_REF"]
+        if not baseline_ref:
+            raise RuntimeError("TAEHV_BASELINE_GIT_REF is required for memory_ab")
+        taehv_common = common + [
+            "--vae-config.taehv-checkpoint-path", taehv_checkpoint
+        ]
+        baseline = variant(taehv_common, "taehv")
+        baseline["env"] = {
+            **env,
+            "PYTHONPATH": "/workspace/sglang-baseline/python",
+        }
+        baseline["sglang_git_ref"] = baseline_ref
+
+        fixed = variant(taehv_common, "taehv")
+        fixed["env"] = {**env, "PYTHONPATH": "/workspace/sglang/python"}
+        fixed["required_log_patterns"].extend(
+            [
+                "realtime_memory_checkpoint checkpoint=model_loaded",
+                '"checkpoint":"after_first_image_vae_encode"',
+                '"checkpoint":"after_dit_cache_init"',
+            ]
+        )
+        fixed_offload = variant(
+            taehv_common + ["--vae-cpu-offload", "true"], "taehv"
+        )
+        fixed_offload["env"] = fixed["env"]
+        fixed_offload["required_log_patterns"] = list(
+            fixed["required_log_patterns"]
+        )
+
+        cases.extend(
+            [
+                {
+                    "name": f"taehv-memory-a-tianpeng-gap12-{size}-eager",
+                    "size": size,
+                    "mode": "eager",
+                    "paired_reps": 1,
+                    "control": baseline,
+                    "candidate": fixed,
+                },
+                {
+                    "name": f"taehv-memory-b-tianpeng-gap12-{size}-eager",
+                    "size": size,
+                    "mode": "eager",
+                    "control": fixed,
+                    "candidate": fixed_offload,
+                },
+            ]
+        )
+    else:
+        cases.append({
+            "name": f"taehv-local-tianpeng-gap12-{size}-eager",
+            "size": size,
+            "mode": "eager",
+            "control": variant(common, "causal_vae"),
+            "candidate": variant(
+                common + ["--vae-config.taehv-checkpoint-path", taehv_checkpoint],
+                "taehv",
+            ),
+        })
 
 config = {
     "sglang_git_ref": commit,
@@ -240,13 +296,18 @@ config = {
         "--no-progress", "--only-show-errors",
     ],
     "base_port": 32000,
-    "paired_reps": 4 if gpu_count == 1 else 3,
+    "paired_reps": (
+        3
+        if os.environ["TAEHV_EXPERIMENT_MODE"] == "memory_ab"
+        else (4 if gpu_count == 1 else 3)
+    ),
     "warmup_chunks": 5,
     "measured_chunks": 69,
     "steady_start_chunk": 10,
     "calibration_chunks": 12,
     "concurrency_threshold": 0.02,
     "health_timeout": 1800,
+    "telemetry_loop_ms": 100 if os.environ["TAEHV_EXPERIMENT_MODE"] == "memory_ab" else 1000,
     "gpu_slots": [
         {"gpu": gpu, "cpu_set": cpu_set(cpus), "numa_node": numa}
         for gpu, cpus, numa in lanes
@@ -267,14 +328,16 @@ aws s3 cp "${PAIR_ROOT}/dry-run.json" \
   "${MINWM_ARCHIVE_S3_URI%/}/dry-run-${SGLANG_GIT_REF:0:10}.json" \
   --no-progress --only-show-errors
 python3 "${SCRIPT_DIR}/run_paired_crossover.py" --config "${CONFIG_PATH}"
-for size in 832x480 1248x704; do
-  case_root="${LOCAL_ARTIFACT_ROOT}/taehv-local-tianpeng-gap12-${size}-eager"
-  quality_output="${case_root}/quality-comparison.json"
-  python3 "${SCRIPT_DIR}/compare_taehv_samples.py" \
-    --exact "${case_root}/rep-00/control/quality-samples/${size}" \
-    --taehv "${case_root}/rep-00/candidate/quality-samples/${size}" \
-    --output "${quality_output}"
-  aws s3 cp "${quality_output}" \
-    "${MINWM_ARCHIVE_S3_URI%/}/taehv-local-tianpeng-gap12-${size}-eager/quality-comparison.json" \
-    --no-progress --only-show-errors
-done
+if [[ "${TAEHV_EXPERIMENT_MODE}" == "exact_vs_taehv" ]]; then
+  for size in 832x480 1248x704; do
+    case_root="${LOCAL_ARTIFACT_ROOT}/taehv-local-tianpeng-gap12-${size}-eager"
+    quality_output="${case_root}/quality-comparison.json"
+    python3 "${SCRIPT_DIR}/compare_taehv_samples.py" \
+      --exact "${case_root}/rep-00/control/quality-samples/${size}" \
+      --taehv "${case_root}/rep-00/candidate/quality-samples/${size}" \
+      --output "${quality_output}"
+    aws s3 cp "${quality_output}" \
+      "${MINWM_ARCHIVE_S3_URI%/}/taehv-local-tianpeng-gap12-${size}-eager/quality-comparison.json" \
+      --no-progress --only-show-errors
+  done
+fi

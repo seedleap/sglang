@@ -65,6 +65,7 @@ from sglang.multimodal_gen.runtime.realtime.states import (
 from sglang.multimodal_gen.runtime.server_args import ServerArgs
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 from sglang.multimodal_gen.runtime.utils.realtime_trace import (
+    log_realtime_memory_checkpoint,
     realtime_trace_span,
     tensor_trace_metadata,
 )
@@ -823,7 +824,21 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
         server_args: ServerArgs,
         ctx: CausalDMDForwardContext,
     ) -> CausalDMDRealtimeCacheContext:
+        if batch.block_idx == 0:
+            log_realtime_memory_checkpoint(
+                logger,
+                batch,
+                "before_dit_cache_init",
+                component="dit_cache",
+            )
         cache_ctx = super()._prepare_realtime_causal_caches(batch, server_args, ctx)
+        if batch.block_idx == 0:
+            log_realtime_memory_checkpoint(
+                logger,
+                batch,
+                "after_dit_cache_init",
+                component="dit_cache",
+            )
         if (
             batch.block_idx == 0
             and os.getenv("MINWM_RUNTIME_ALIGNMENT_LOG", "0") == "1"

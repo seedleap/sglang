@@ -64,6 +64,8 @@ def read_config(path: Path) -> dict:
     if not config.get("cases"):
         raise ValueError("at least one case is required")
     for case in config["cases"]:
+        if int(case.get("paired_reps", config.get("paired_reps", 3))) < 1:
+            raise ValueError(f"{case['name']} paired_reps must be at least 1")
         if case["size"] not in {"832x480", "1248x704"}:
             raise ValueError(f"unsupported size: {case['size']}")
         if case["mode"] not in {"eager", "cuda_graph"}:
@@ -185,7 +187,7 @@ def run_client(
         "--profile-name",
         f"{case['name']}-{variant}",
         "--sglang-git-ref",
-        str(config["sglang_git_ref"]),
+        str(case[variant].get("sglang_git_ref", config["sglang_git_ref"])),
         "--checkpoint-sha256",
         str(config.get("checkpoint_sha256", "not-recorded")),
         "--ws-url",
@@ -212,7 +214,7 @@ def run_client(
 
 
 def start_telemetry(
-    root: Path, gpus: list[str]
+    root: Path, gpus: list[str], *, loop_ms: int = 1000
 ) -> tuple[subprocess.Popen | None, object | None]:
     output = (root / "gpu-telemetry.csv").open("w")
     command = [
@@ -220,7 +222,7 @@ def start_telemetry(
         f"--id={','.join(gpus)}",
         "--query-gpu=timestamp,index,uuid,power.draw,clocks.current.sm,clocks.current.memory,utilization.gpu,memory.used,temperature.gpu",
         "--format=csv",
-        "--loop-ms=1000",
+        f"--loop-ms={loop_ms}",
     ]
     try:
         return (
@@ -359,6 +361,7 @@ def run_pair(
     telemetry, telemetry_log = start_telemetry(
         scratch,
         sorted({str(config["gpu_slots"][slot_map[v]]["gpu"]) for v in variants}),
+        loop_ms=int(config.get("telemetry_loop_ms", 1000)),
     )
     error: BaseException | None = None
     metadata = {}
@@ -577,9 +580,14 @@ def plan(config: dict) -> dict:
                 "name": case["name"],
                 "size": case["size"],
                 "mode": case["mode"],
+                "paired_reps": int(
+                    case.get("paired_reps", config.get("paired_reps", 3))
+                ),
                 "assignments": [
                     ({"control": 0, "candidate": 0} if single_gpu else assignment(rep))
-                    for rep in range(int(config.get("paired_reps", 3)))
+                    for rep in range(
+                        int(case.get("paired_reps", config.get("paired_reps", 3)))
+                    )
                 ],
             }
             for case in config["cases"]
@@ -614,7 +622,9 @@ def main() -> None:
     upload_file(config, artifact_root / "resolved-config.json", "resolved-config.json")
     for case in config["cases"]:
         concurrent = calibrate(config, case)
-        for rep in range(int(config.get("paired_reps", 3))):
+        for rep in range(
+            int(case.get("paired_reps", config.get("paired_reps", 3)))
+        ):
             if len(config["gpu_slots"]) == 1:
                 slot_map = {"control": 0, "candidate": 0}
                 variants = (

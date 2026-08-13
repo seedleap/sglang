@@ -73,6 +73,9 @@ from sglang.multimodal_gen.runtime.utils.realtime_video import (
     RAW_RGB_CONTENT_TYPE,
     build_raw_rgb_frame_batches,
 )
+from sglang.multimodal_gen.runtime.utils.realtime_trace import (
+    realtime_memory_trace_metadata,
+)
 from sglang.multimodal_gen.runtime.utils.trace_wrapper import (
     DiffStage,
     init_diffusion_tracing,
@@ -238,6 +241,12 @@ class GPUWorker(GPUWorkerPostTrainingMixin):
         else:
             setproctitle(f"sgl_diffusion::scheduler_{self.local_rank}")
 
+        startup_memory = realtime_memory_trace_metadata()
+        if startup_memory:
+            logger.info(
+                "realtime_memory_checkpoint checkpoint=startup %s", startup_memory
+            )
+
         self.pipeline = build_pipeline(self.server_args)
 
         # apply layerwise offload after lora is applied while building LoRAPipeline
@@ -258,6 +267,12 @@ class GPUWorker(GPUWorkerPostTrainingMixin):
         logger.info(
             f"Worker {self.rank}: Initialized device, model, and distributed environment."
         )
+        model_loaded_memory = realtime_memory_trace_metadata()
+        if model_loaded_memory:
+            logger.info(
+                "realtime_memory_checkpoint checkpoint=model_loaded %s",
+                model_loaded_memory,
+            )
 
     def do_mem_analysis(self, output_batch: OutputBatch):
         final_snapshot = capture_memory_snapshot()
