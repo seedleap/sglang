@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+from contextlib import contextmanager
 from types import SimpleNamespace
 
 import pytest
@@ -83,6 +84,34 @@ from sglang.multimodal_gen.tools.convert_minwm_checkpoint import (
     TRANSFORMER_CONFIG,
     build_transformer_config,
 )
+
+
+def test_minwm_denoising_declares_transformer_residency_use(monkeypatch):
+    transformer = object()
+    calls = []
+
+    @contextmanager
+    def use_component(use, module=None):
+        calls.append((use.component_name, use.phase, module))
+        yield module
+
+    stage = MinWMCausalDMDDenoisingStage.__new__(MinWMCausalDMDDenoisingStage)
+    stage.transformer = transformer
+    stage.transformer_2 = None
+    stage.vae = None
+    stage.pipeline = None
+    stage._component_residency_manager = SimpleNamespace(
+        server_args=SimpleNamespace(),
+        state=SimpleNamespace(stage_name="denoising"),
+        use_component=use_component,
+    )
+    expected = SimpleNamespace(latents=torch.zeros(1))
+    monkeypatch.setattr(stage, "_forward_impl", lambda _batch, _args: expected)
+
+    result = stage.forward(SimpleNamespace(realtime_trace_id=None), SimpleNamespace())
+
+    assert result is expected
+    assert calls == [("transformer", "transformer", transformer)]
 
 
 @pytest.mark.parametrize(
