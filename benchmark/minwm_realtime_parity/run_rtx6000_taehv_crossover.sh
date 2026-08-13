@@ -264,6 +264,22 @@ for size in ("832x480", "1248x704"):
         fixed_offload["required_log_patterns"] = list(
             fixed["required_log_patterns"]
         )
+        fixed_low_memory = variant(
+            taehv_common
+            + [
+                "--vae-cpu-offload",
+                "true",
+                "--text-encoder-cpu-offload",
+                "true",
+            ],
+            "taehv",
+        )
+        fixed_low_memory["env"] = fixed["env"]
+        fixed_low_memory["required_log_patterns"] = [
+            *fixed["required_log_patterns"],
+            '"checkpoint":"before_text_encode"',
+            '"checkpoint":"after_text_encode"',
+        ]
 
         cases.extend(
             [
@@ -279,8 +295,16 @@ for size in ("832x480", "1248x704"):
                     "name": f"taehv-memory-b-tianpeng-gap12-{size}-eager",
                     "size": size,
                     "mode": "eager",
+                    "paired_reps": 1,
                     "control": fixed,
                     "candidate": fixed_offload,
+                },
+                {
+                    "name": f"taehv-memory-c-tianpeng-gap12-{size}-eager",
+                    "size": size,
+                    "mode": "eager",
+                    "control": fixed_offload,
+                    "candidate": fixed_low_memory,
                 },
             ]
         )

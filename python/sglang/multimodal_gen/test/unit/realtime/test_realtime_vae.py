@@ -9,6 +9,9 @@ from sglang.multimodal_gen.runtime.pipelines_core.stages.realtime.vae import (
     RealtimeImageVAEEncodingStage,
     RealtimeVAEDecodeState,
 )
+from sglang.multimodal_gen.runtime.pipelines_core.stages.realtime.text_encoding import (
+    RealtimeTextEncodingStage,
+)
 
 
 def test_realtime_vae_decode_state_clears_model_cache_on_dispose():
@@ -341,6 +344,20 @@ def test_realtime_t2v_records_first_image_encode_as_not_required(monkeypatch):
             },
         )
     ]
+
+
+def test_realtime_text_offload_does_not_prefetch_cached_encoder():
+    stage = RealtimeTextEncodingStage.__new__(RealtimeTextEncodingStage)
+    stage.text_encoders = [object()]
+    server_args = SimpleNamespace(text_encoder_cpu_offload=True)
+
+    uses = stage.component_uses(server_args, "text")
+
+    assert len(uses) == 1
+    assert uses[0].component_name == "text_encoder"
+    assert uses[0].preferred_ready_after_request is False
+    assert uses[0].allow_prefetch is False
+    assert uses[0].memory_intensive is True
 
 
 def test_causal_vae_decoding_stage_preloads_taehv_model(monkeypatch):
