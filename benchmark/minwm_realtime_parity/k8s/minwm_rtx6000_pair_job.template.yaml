@@ -28,6 +28,14 @@ spec:
             - {name: MINWM_GIT_REF, value: 2efc6485f65e8fcab506665efde79bc41406385e}
             - {name: MINWM_PAIR, value: __PAIR__}
             - {name: MINWM_ARCHIVE_ROOT, value: /s3/world-model/evals/minwm/realtime-vae/20260813/bounded-8gpu/pair-__PAIR_LOWER__}
+            - {name: MINWM_CHECKPOINT_S3_EAST, value: s3://leap-world-us-east-2/world-model/evals/minwm/checkpoint-staging/wan22-5B-stage3-dmd-8-0721-6a531f0e067/global_step_003200/ema_student/model.pt}
+            - {name: MINWM_CHECKPOINT_VERSION_EAST, value: wduScksw2f3yPErnG9lBioOuE2AToyAP}
+            - {name: MINWM_CHECKPOINT_SOURCE_URI, value: s3://leap-world-us-west-2/world-model/minwm/checkpoints/run-archive/rolling/Wan21/Action2V/dmd/wan22-5B-stage3-dmd-8-0721-6a531f0e067/global_step_003200/ema_student/model.pt}
+            - {name: MINWM_CHECKPOINT_SOURCE_VERSION, value: x.2zYaRRNzyqngI7O_cYSrsK3NvgPKKt}
+            - {name: MINWM_CHECKPOINT_SOURCE_ETAG, value: 5c29d614972e06fd0df859abfd1d6f4d-191}
+            - {name: MINWM_CHECKPOINT_BYTES, value: "10007171771"}
+            - {name: MINWM_CHECKPOINT_CRC64, value: I0IQ+p0pREI=}
+            - {name: MINWM_PRETRAINED_S3, value: s3://leap-world-us-east-2/world-model/checkpoints/minWM/Wan2.2-TI2V-5B-from-diffusers}
           command: [/bin/bash, -lc]
           args:
             - git clone --no-checkout "https://x-access-token:${GITHUB_TOKEN}@github.com/seedleap/sglang.git" /workspace/sglang && git -C /workspace/sglang checkout --detach "${SGLANG_GIT_REF}" && exec bash /workspace/sglang/benchmark/minwm_realtime_parity/run_rtx6000_paired_crossover.sh --pair "${MINWM_PAIR}"
