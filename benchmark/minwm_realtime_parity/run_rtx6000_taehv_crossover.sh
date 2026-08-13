@@ -253,7 +253,7 @@ for size in ("832x480", "1248x704"):
         fixed["required_log_patterns"].extend(
             [
                 "realtime_memory_checkpoint checkpoint=model_loaded",
-                '"checkpoint":"after_first_image_vae_encode"',
+                '"checkpoint":"first_image_vae_encode_gate"',
                 '"checkpoint":"after_dit_cache_init"',
             ]
         )

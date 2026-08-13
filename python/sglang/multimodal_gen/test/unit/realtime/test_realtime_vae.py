@@ -314,6 +314,35 @@ def test_taehv_image_encode_offload_marks_native_vae_as_large_no_prefetch():
     assert uses[0].allow_prefetch is False
 
 
+def test_realtime_t2v_records_first_image_encode_as_not_required(monkeypatch):
+    from sglang.multimodal_gen.runtime.pipelines_core.stages.realtime import (
+        vae as realtime_vae,
+    )
+
+    checkpoints = []
+    monkeypatch.setattr(
+        realtime_vae,
+        "log_realtime_memory_checkpoint",
+        lambda _logger, _batch, checkpoint, **fields: checkpoints.append(
+            (checkpoint, fields)
+        ),
+    )
+    stage = RealtimeImageVAEEncodingStage.__new__(RealtimeImageVAEEncodingStage)
+    batch = SimpleNamespace(block_idx=0, session=None, condition_image=None)
+
+    assert stage.forward(batch, SimpleNamespace()) is batch
+    assert checkpoints == [
+        (
+            "first_image_vae_encode_gate",
+            {
+                "component": "vae_encoder",
+                "condition_image_present": False,
+                "skipped": True,
+            },
+        )
+    ]
+
+
 def test_causal_vae_decoding_stage_preloads_taehv_model(monkeypatch):
     from sglang.multimodal_gen.runtime.pipelines_core.stages.realtime import (
         vae as realtime_vae,

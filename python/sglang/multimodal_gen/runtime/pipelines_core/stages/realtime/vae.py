@@ -116,6 +116,15 @@ class RealtimeImageVAEEncodingStage(ImageVAEEncodingStage):
                 return batch
 
         if batch.condition_image is None:
+            if batch.block_idx == 0:
+                log_realtime_memory_checkpoint(
+                    logger,
+                    batch,
+                    "first_image_vae_encode_gate",
+                    component="vae_encoder",
+                    condition_image_present=False,
+                    skipped=True,
+                )
             if state is not None and state.image_latent is not None:
                 batch.image_latent = state.image_latent
                 log_realtime_trace_for_batch(
@@ -154,6 +163,14 @@ class RealtimeImageVAEEncodingStage(ImageVAEEncodingStage):
                     batch,
                     "after_first_image_vae_encode",
                     component="vae_encoder",
+                )
+                log_realtime_memory_checkpoint(
+                    logger,
+                    batch,
+                    "first_image_vae_encode_gate",
+                    component="vae_encoder",
+                    condition_image_present=True,
+                    skipped=False,
                 )
             trace_span.add_fields(
                 **tensor_trace_metadata(batch.image_latent, prefix="image_latent"),
