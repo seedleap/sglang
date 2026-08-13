@@ -44,17 +44,21 @@ def parse_cpu_set(value: str) -> set[int]:
 
 def read_config(path: Path) -> dict:
     config = json.loads(path.read_text())
-    if len(config["gpu_slots"]) != 2:
-        raise ValueError("paired crossover requires exactly two gpu_slots")
-    if len({str(slot["gpu"]) for slot in config["gpu_slots"]}) != 2:
-        raise ValueError("gpu_slots must select two distinct GPUs")
+    if len(config["gpu_slots"]) not in {1, 2}:
+        raise ValueError("crossover requires one or two gpu_slots")
+    if len({str(slot["gpu"]) for slot in config["gpu_slots"]}) != len(
+        config["gpu_slots"]
+    ):
+        raise ValueError("gpu_slots must select distinct GPUs")
     if any(not slot.get("cpu_set") for slot in config["gpu_slots"]):
         raise ValueError("every gpu_slot requires an explicit cpu_set")
-    if len({str(slot["cpu_set"]) for slot in config["gpu_slots"]}) != 2:
-        raise ValueError("gpu_slots must use distinct cpu_set values")
-    if parse_cpu_set(str(config["gpu_slots"][0]["cpu_set"])) & parse_cpu_set(
-        str(config["gpu_slots"][1]["cpu_set"])
+    if len({str(slot["cpu_set"]) for slot in config["gpu_slots"]}) != len(
+        config["gpu_slots"]
     ):
+        raise ValueError("gpu_slots must use distinct cpu_set values")
+    if len(config["gpu_slots"]) == 2 and parse_cpu_set(
+        str(config["gpu_slots"][0]["cpu_set"])
+    ) & parse_cpu_set(str(config["gpu_slots"][1]["cpu_set"])):
         raise ValueError("gpu_slots cpu_set values must not overlap")
     if int(config.get("paired_reps", 3)) < 3:
         raise ValueError("paired_reps must be at least 3")
@@ -354,32 +358,63 @@ def run_pair(
     }
     started = time.time()
     telemetry, telemetry_log = start_telemetry(
-        scratch, [str(config["gpu_slots"][slot_map[v]]["gpu"]) for v in variants]
+        scratch,
+        sorted(
+            {
+                str(config["gpu_slots"][slot_map[v]]["gpu"])
+                for v in variants
+            }
+        ),
     )
     error: BaseException | None = None
     metadata = {}
     try:
-        for variant in processes:
-            processes[variant], logs[variant] = start_server(
-                case,
-                variant,
-                config["gpu_slots"][slot_map[variant]],
-                scratch,
-                ports[variant],
-            )
-        for variant in processes:
-            wait_health(
-                ports[variant],
-                processes[variant],
-                float(config.get("health_timeout", 1200)),
-            )
-        if concurrent:
+        single_gpu = len(config["gpu_slots"]) == 1
+        if single_gpu:
+            statuses = {}
+            for variant in processes:
+                processes[variant], logs[variant] = start_server(
+                    case,
+                    variant,
+                    config["gpu_slots"][0],
+                    scratch,
+                    ports[variant],
+                )
+                wait_health(
+                    ports[variant],
+                    processes[variant],
+                    float(config.get("health_timeout", 1200)),
+                )
+                clients[variant], client_logs[variant] = run_client(
+                    config, case, variant, scratch, ports[variant], chunks
+                )
+                statuses[variant] = clients[variant].wait()
+                client_logs[variant].close()
+                stop_server(processes[variant])
+                processes[variant] = None
+                logs[variant].close()
+        else:
+            for variant in processes:
+                processes[variant], logs[variant] = start_server(
+                    case,
+                    variant,
+                    config["gpu_slots"][slot_map[variant]],
+                    scratch,
+                    ports[variant],
+                )
+            for variant in processes:
+                wait_health(
+                    ports[variant],
+                    processes[variant],
+                    float(config.get("health_timeout", 1200)),
+                )
+        if not single_gpu and concurrent:
             for variant in processes:
                 clients[variant], client_logs[variant] = run_client(
                     config, case, variant, scratch, ports[variant], chunks
                 )
             statuses = {variant: client.wait() for variant, client in clients.items()}
-        else:
+        elif not single_gpu:
             statuses = {}
             for variant in processes:
                 clients[variant], client_logs[variant] = run_client(
@@ -390,7 +425,8 @@ def run_pair(
         if any(statuses.values()):
             raise RuntimeError(f"client failure: {statuses}")
         for variant, log in logs.items():
-            log.flush()
+            if not log.closed:
+                log.flush()
             server_log = (scratch / variant / "server.log").read_text()
             missing = [
                 pattern
@@ -435,7 +471,8 @@ def run_pair(
         for process in processes.values():
             stop_server(process)
         for log in logs.values():
-            log.close()
+            if not log.closed:
+                log.close()
         for log in client_logs.values():
             if not log.closed:
                 log.close()
@@ -457,6 +494,34 @@ def run_pair(
 
 def calibrate(config: dict, case: dict) -> bool:
     chunks = int(config.get("calibration_chunks", 12))
+    if len(config["gpu_slots"]) == 1:
+        metadata = run_pair(
+            config,
+            case,
+            "calibration-sequential",
+            {"control": 0, "candidate": 0},
+            chunks,
+            False,
+        )
+        calibration_path = (
+            Path(config["artifact_root"]) / case["name"] / "calibration.json"
+        )
+        atomic_json(
+            calibration_path,
+            {
+                "concurrent_exploratory": False,
+                "mode": "single_gpu_sequential",
+                "result": metadata,
+                "slowdown": None,
+                "threshold": float(config.get("concurrency_threshold", 0.02)),
+            },
+        )
+        upload_file(
+            config,
+            calibration_path,
+            str(calibration_path.relative_to(config["artifact_root"])),
+        )
+        return False
     solo = {}
     for variant, slot_index in (("control", 0), ("candidate", 1)):
         solo[variant] = run_pair(
@@ -509,15 +574,22 @@ def calibrate(config: dict, case: dict) -> bool:
 
 
 def plan(config: dict) -> dict:
+    single_gpu = len(config["gpu_slots"]) == 1
     return {
         "paired_reps": int(config.get("paired_reps", 3)),
+        "topology": "single_gpu_sequential" if single_gpu else "two_gpu_paired",
         "cases": [
             {
                 "name": case["name"],
                 "size": case["size"],
                 "mode": case["mode"],
                 "assignments": [
-                    assignment(rep) for rep in range(int(config.get("paired_reps", 3)))
+                    (
+                        {"control": 0, "candidate": 0}
+                        if single_gpu
+                        else assignment(rep)
+                    )
+                    for rep in range(int(config.get("paired_reps", 3)))
                 ],
             }
             for case in config["cases"]
@@ -553,13 +625,24 @@ def main() -> None:
     for case in config["cases"]:
         concurrent = calibrate(config, case)
         for rep in range(int(config.get("paired_reps", 3))):
+            if len(config["gpu_slots"]) == 1:
+                slot_map = {"control": 0, "candidate": 0}
+                variants = (
+                    ("control", "candidate")
+                    if rep % 4 in {0, 3}
+                    else ("candidate", "control")
+                )
+            else:
+                slot_map = assignment(rep)
+                variants = ("control", "candidate")
             run_pair(
                 config,
                 case,
                 f"rep-{rep:02d}",
-                assignment(rep),
+                slot_map,
                 int(config.get("measured_chunks", 69)),
                 concurrent,
+                variants,
             )
 
 

@@ -74,6 +74,9 @@ import sys
 from pathlib import Path
 
 path, commit, model, artifacts, archive, taehv_checkpoint = sys.argv[1:]
+gpu_count = int(os.environ["MINWM_REQUESTED_GPUS"])
+if gpu_count not in {1, 2}:
+    raise RuntimeError(f"MINWM_REQUESTED_GPUS must be 1 or 2, got {gpu_count}")
 available = sorted(os.sched_getaffinity(0))
 topology = subprocess.check_output(["lscpu", "-p=CPU,NODE"], text=True)
 by_numa = {}
@@ -83,18 +86,29 @@ for line in topology.splitlines():
     cpu, node = (int(value) for value in line.split(",")[:2])
     if cpu in available:
         by_numa.setdefault(node, []).append(cpu)
-eligible = [(node, cpus) for node, cpus in sorted(by_numa.items()) if len(cpus) >= 20]
-if len(eligible) >= 2:
+lane_width = 12 if gpu_count == 1 else 20
+eligible = [
+    (node, cpus) for node, cpus in sorted(by_numa.items()) if len(cpus) >= lane_width
+]
+if gpu_count == 1 and eligible:
+    numa0, lane0 = eligible[0]
+    lanes = [(0, lane0[:lane_width], numa0)]
+elif gpu_count == 1 and len(available) >= lane_width:
+    lanes = [(0, available[:lane_width], None)]
+elif len(eligible) >= 2:
     (numa0, lane0), (numa1, lane1) = eligible[:2]
     lane0, lane1 = lane0[:20], lane1[:20]
+    lanes = [(0, lane0, numa0), (1, lane1, numa1)]
 elif eligible and len(eligible[0][1]) >= 40:
     numa0, cpus = eligible[0]
     numa1, lane0, lane1 = numa0, cpus[:20], cpus[20:40]
+    lanes = [(0, lane0, numa0), (1, lane1, numa1)]
 elif len(available) >= 40:
     numa0 = numa1 = None
     lane0, lane1 = available[:20], available[20:40]
+    lanes = [(0, lane0, numa0), (1, lane1, numa1)]
 else:
-    raise RuntimeError(f"need 40 CPUs for a pair, found {len(available)}")
+    raise RuntimeError(f"insufficient CPUs for {gpu_count} GPU topology: {len(available)}")
 
 def cpu_set(cpus):
     return ",".join(str(cpu) for cpu in cpus)
@@ -169,7 +183,7 @@ config = {
         "--no-progress", "--only-show-errors",
     ],
     "base_port": 32000,
-    "paired_reps": 3,
+    "paired_reps": 4 if gpu_count == 1 else 3,
     "warmup_chunks": 5,
     "measured_chunks": 69,
     "steady_start_chunk": 10,
@@ -177,8 +191,8 @@ config = {
     "concurrency_threshold": 0.02,
     "health_timeout": 1800,
     "gpu_slots": [
-        {"gpu": 0, "cpu_set": cpu_set(lane0), "numa_node": numa0},
-        {"gpu": 1, "cpu_set": cpu_set(lane1), "numa_node": numa1},
+        {"gpu": gpu, "cpu_set": cpu_set(cpus), "numa_node": numa}
+        for gpu, cpus, numa in lanes
     ],
     "cases": cases,
 }

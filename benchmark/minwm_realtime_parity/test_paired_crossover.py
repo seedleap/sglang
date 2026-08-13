@@ -46,6 +46,22 @@ def test_assignment_crosses_gpus():
 def test_plan_contains_three_paired_reps(tmp_path):
     output = plan(read_config(config(tmp_path)))
     assert len(output["cases"][0]["assignments"]) == 3
+    assert output["topology"] == "two_gpu_paired"
+
+
+def test_plan_supports_single_gpu_sequential_abba(tmp_path):
+    path = config(tmp_path)
+    payload = json.loads(path.read_text())
+    payload["paired_reps"] = 4
+    payload["gpu_slots"] = payload["gpu_slots"][:1]
+    path.write_text(json.dumps(payload))
+
+    output = plan(read_config(path))
+
+    assert output["topology"] == "single_gpu_sequential"
+    assert output["cases"][0]["assignments"] == [
+        {"control": 0, "candidate": 0},
+    ] * 4
 
 
 def test_rejects_too_few_reps(tmp_path):

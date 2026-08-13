@@ -14,7 +14,7 @@ spec:
     spec:
       restartPolicy: Never
       terminationGracePeriodSeconds: 120
-      nodeSelector: {seedleap.ai/capacity-pool: minwm-rtx6000-bounded-8gpu-spot, karpenter.sh/capacity-type: spot}
+      nodeSelector: {seedleap.ai/capacity-pool: minwm-rtx6000-bounded-8gpu-spot, karpenter.sh/capacity-type: spot, kubernetes.io/hostname: __NODE_NAME__}
       tolerations:
         - {key: seedleap.ai/capacity-pool, operator: Equal, value: minwm-rtx6000-bounded-8gpu-spot, effect: NoSchedule}
       containers:
@@ -25,6 +25,7 @@ spec:
             - name: GITHUB_TOKEN
               valueFrom: {secretKeyRef: {name: github-token, key: token}}
             - {name: SGLANG_GIT_REF, value: __RUNNER_COMMIT__}
+            - {name: MINWM_REQUESTED_GPUS, value: "__GPU_COUNT__"}
             - {name: MINWM_GIT_REF, value: 4220c8a2dc456b2d9c85ef6c0d9db7fb872d864c}
             - {name: MINWM_ARCHIVE_S3_URI, value: s3://leap-world-us-east-2/world-model/evals/minwm/realtime-vae/20260813/taehv-local}
             - {name: MINWM_CHECKPOINT_S3_EAST, value: s3://leap-world-us-east-2/world-model/evals/minwm/checkpoint-staging/wan22-5B-stage3-dmd-8-0721-6a531f0e067/global_step_003200/ema_student/model.pt}
@@ -44,8 +45,8 @@ spec:
               git -C /workspace/minWM checkout --detach "${MINWM_GIT_REF}" &&
               exec bash /workspace/sglang/benchmark/minwm_realtime_parity/run_rtx6000_taehv_crossover.sh
           resources:
-            requests: {cpu: "40", memory: 220Gi, nvidia.com/gpu: "2"}
-            limits: {cpu: "44", memory: 240Gi, nvidia.com/gpu: "2"}
+            requests: {cpu: "__CPU_REQUEST__", memory: __MEMORY_REQUEST__, nvidia.com/gpu: "__GPU_COUNT__"}
+            limits: {cpu: "__CPU_LIMIT__", memory: __MEMORY_LIMIT__, nvidia.com/gpu: "__GPU_COUNT__"}
           volumeMounts: [{name: work, mountPath: /work}, {name: shm, mountPath: /dev/shm}]
       volumes:
         - {name: work, hostPath: {path: /var/lib/minwm-rtx6000-work, type: DirectoryOrCreate}}
