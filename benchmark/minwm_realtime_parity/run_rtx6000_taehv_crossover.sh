@@ -194,7 +194,7 @@ def variant(command, backend):
         "command": command,
         "env": env,
         "required_log_patterns": [
-            f'"decoder_backend": "{backend}"',
+            f'"decoder_backend":"{backend}"',
             alignment_pattern,
         ],
     }

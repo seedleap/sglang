@@ -36,6 +36,7 @@ spec:
             - {name: MINWM_CHECKPOINT_BYTES, value: "10007171771"}
             - {name: MINWM_CHECKPOINT_CRC64, value: I0IQ+p0pREI=}
             - {name: MINWM_PRETRAINED_S3, value: s3://leap-world-us-east-2/world-model/checkpoints/minWM/Wan2.2-TI2V-5B-from-diffusers}
+            - {name: PIP_CACHE_DIR, value: /work/minwm-pip-cache}
           command: [/bin/bash, -lc]
           args:
             - >-

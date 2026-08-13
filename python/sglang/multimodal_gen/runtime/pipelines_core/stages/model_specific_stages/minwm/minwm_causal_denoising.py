@@ -534,42 +534,6 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
                 )
         return cache_kwargs
 
-    def _prepare_realtime_causal_caches(
-        self,
-        batch: Req,
-        server_args: ServerArgs,
-        ctx: CausalDMDForwardContext,
-    ) -> CausalDMDRealtimeCacheContext:
-        cache_ctx = super()._prepare_realtime_causal_caches(batch, server_args, ctx)
-        if (
-            batch.block_idx == 0
-            and os.getenv("MINWM_RUNTIME_ALIGNMENT_LOG", "0") == "1"
-        ):
-            arch_config = self.transformer.config.arch_config
-            cache = cache_ctx.kv_cache[0]
-            logger.info(
-                "MINWM_RUNTIME_ALIGNMENT local_attn_size=%d sink_size=%d "
-                "window_size=%d rope_position_mode=%s rope_gap=%d "
-                "prompt_first_frame_pin_enabled=%s request_sink_size=%s "
-                "request_window_size=%s allow_growth=%s cache_tokens=%d "
-                "sink_tokens=%d scene_cut_rope_offset=%d "
-                "scene_cut_sink_enabled=%s",
-                int(arch_config.local_attn_size),
-                int(self.sink_size),
-                int(self.sliding_window_num_frames),
-                cache.rope_position_mode,
-                int(cache.rope_max_frame_gap),
-                bool(cache.prompt_first_frame_pin_enabled),
-                getattr(batch, "realtime_causal_sink_size", None),
-                getattr(batch, "realtime_causal_kv_cache_num_frames", None),
-                bool(cache.allow_growth),
-                int(cache.cache_size),
-                int(cache.sink_tokens),
-                int(cache.scene_cut_rope_offset),
-                bool(cache.scene_cut_sink_enabled),
-            )
-        return cache_ctx
-
     def _initialize_kv_cache(
         self,
         batch_size,
@@ -860,6 +824,33 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
         ctx: CausalDMDForwardContext,
     ) -> CausalDMDRealtimeCacheContext:
         cache_ctx = super()._prepare_realtime_causal_caches(batch, server_args, ctx)
+        if (
+            batch.block_idx == 0
+            and os.getenv("MINWM_RUNTIME_ALIGNMENT_LOG", "0") == "1"
+        ):
+            arch_config = self.transformer.config.arch_config
+            cache = cache_ctx.kv_cache[0]
+            logger.info(
+                "MINWM_RUNTIME_ALIGNMENT local_attn_size=%d sink_size=%d "
+                "window_size=%d rope_position_mode=%s rope_gap=%d "
+                "prompt_first_frame_pin_enabled=%s request_sink_size=%s "
+                "request_window_size=%s allow_growth=%s cache_tokens=%d "
+                "sink_tokens=%d scene_cut_rope_offset=%d "
+                "scene_cut_sink_enabled=%s",
+                int(arch_config.local_attn_size),
+                int(self.sink_size),
+                int(self.sliding_window_num_frames),
+                cache.rope_position_mode,
+                int(cache.rope_max_frame_gap),
+                bool(cache.prompt_first_frame_pin_enabled),
+                getattr(batch, "realtime_causal_sink_size", None),
+                getattr(batch, "realtime_causal_kv_cache_num_frames", None),
+                bool(cache.allow_growth),
+                int(cache.cache_size),
+                int(cache.sink_tokens),
+                int(cache.scene_cut_rope_offset),
+                bool(cache.scene_cut_sink_enabled),
+            )
         if (batch.condition_inputs or {}).get(MINWM_PROMPT_UPDATED_CONDITION):
             self._reset_crossattn_cache(cache_ctx.crossattn_cache)
             condition_switch = (batch.condition_inputs or {}).get(

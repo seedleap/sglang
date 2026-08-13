@@ -9,7 +9,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TEMPLATE="${SCRIPT_DIR}/k8s/minwm_rtx6000_taehv_local_job.template.yaml"
 OUTPUT="${RENDER_OUTPUT:-/tmp/minwm-rtx6000-taehv-${RUNNER_COMMIT:0:10}.yaml}"
 case "${GPU_COUNT}" in
-  1) CPU_REQUEST=12; CPU_LIMIT=14; MEMORY_REQUEST=100Gi; MEMORY_LIMIT=112Gi ;;
+  1) CPU_REQUEST=12; CPU_LIMIT=14; MEMORY_REQUEST=108Gi; MEMORY_LIMIT=114Gi ;;
   2) CPU_REQUEST=40; CPU_LIMIT=44; MEMORY_REQUEST=220Gi; MEMORY_LIMIT=240Gi ;;
   *) echo "GPU_COUNT must be 1 or 2" >&2; exit 2 ;;
 esac
