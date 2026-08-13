@@ -17,7 +17,7 @@ MODEL_DIR="/work/minwm-realtime/${RUN_ID}/sglang-model"
 PAIR_ROOT="/work/minwm-paired/pair-${PAIR,,}"
 CONFIG_PATH="${PAIR_ROOT}/paired.json"
 LOCAL_ARTIFACT_ROOT="${PAIR_ROOT}/artifacts"
-mkdir -p "${PAIR_ROOT}" "${MINWM_ARCHIVE_ROOT}" "${LOCAL_ARTIFACT_ROOT}"
+mkdir -p "/work/minwm-realtime" "${PAIR_ROOT}" "${MINWM_ARCHIVE_ROOT}" "${LOCAL_ARTIFACT_ROOT}"
 aws s3 sync "${MINWM_ARCHIVE_S3_URI%/}/" "${LOCAL_ARTIFACT_ROOT}/" \
   --no-progress --only-show-errors || true
 
