@@ -103,6 +103,7 @@ assert.match(
 assert.match(html, /playback_controller\.js\?v=realtime-playback-v33/);
 assert.match(html, /model_session\.js\?v=dual-model-v8/);
 assert.match(html, /dual_model_controller\.js\?v=dual-model-v4/);
+assert.match(html, /prompt_rewrite_controller\.js\?v=prompt-rewrite-v2/);
 assert.match(html, /app\.js\?v=world-studio-v17/);
 assert.doesNotMatch(
   app,
@@ -130,6 +131,7 @@ assert.match(app, /async function completeWorldDraft\(\)/);
 assert.match(app, /function setWorldCompletionBusy\(pending, completingFromImage = false\)/);
 assert.match(app, /function setupFirstFrameDropZone\(\)/);
 assert.match(app, /function appendPromptLog\(prompt, metadata = \{\}\)/);
+assert.match(app, /metadata\.trigger === "rule" \|\| metadata\.phase === "restore"/);
 assert.match(app, /rule === "one_time_timeout_restore"/);
 assert.match(app, /if \(eventId\) appendPromptLog\(prompt, metadata\)/);
 assert.match(app, /dropZone\.addEventListener\("drop"/);

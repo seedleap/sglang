@@ -714,7 +714,9 @@ function clearPromptLog() {
 function appendPromptLog(prompt, metadata = {}) {
   const normalizedPrompt = String(prompt || "").trim();
   if (!normalizedPrompt) return;
-  const trigger = metadata.trigger === "user" ? "user" : "rule";
+  const trigger = metadata.trigger === "rule" || metadata.phase === "restore"
+    ? "rule"
+    : "user";
   const changeType = metadata.changeType === "one_time" ? "one_time" : "persistent";
   promptLogEntries.push({
     id: promptLogNextId++,
