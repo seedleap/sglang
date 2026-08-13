@@ -62,7 +62,10 @@ def _forward_headers(headers):
 
 
 async def _index(_request):
-    return web.FileResponse(ROOT / "index.html")
+    return web.FileResponse(
+        ROOT / "index.html",
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 async def _runtime_config(_request):

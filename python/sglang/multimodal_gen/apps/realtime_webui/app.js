@@ -683,6 +683,17 @@ const happyOysterSession = new HappyOysterSession({
   root: document.querySelector('[data-model-key="happyoyster"]'),
   onState: (state, details) => {
     setModelConnectionState("happyoyster", state);
+    const fallback = {
+      preparing: "正在准备快乐生蚝 World…",
+      ready: "World 已就绪，正在连接视频流…",
+      connecting: "正在连接快乐生蚝视频流…",
+      live: "快乐生蚝已连接",
+      unavailable: details.reason || "当前模式不可用",
+      error: details.message || details.reason || "快乐生蚝连接失败",
+      closed: "快乐生蚝连接已关闭",
+      idle: "等待进入世界",
+    }[state];
+    setHappyOysterStageText(details.message || fallback, state);
     if (state === "error") {
       addHistory(`快乐生蚝 error · ${details.message || details.reason || "unknown"}`);
     }
@@ -758,6 +769,18 @@ const dualModelController = new DualModelController({
       transformInit: buildHappyOysterInit,
       wsUrl: "",
     },
+  },
+  onBackgroundState: ({ key, state, error }) => {
+    if (key !== "happyoyster") return;
+    if (state === "connected") {
+      addHistory("快乐生蚝 RTC 已连接并加入同步控制");
+      return;
+    }
+    if (state === "failed") {
+      const message = error?.message || String(error || "连接失败");
+      setHappyOysterStageText(message, "error");
+      addHistory(`快乐生蚝后台接入失败 · ${message}`);
+    }
   },
 });
 const promptRewriteController = new PromptRewriteController({
@@ -882,6 +905,8 @@ function setModelConnectionState(key, state) {
   const label = document.getElementById(`${key}ConnectionText`);
   if (!label) return;
   label.textContent = {
+    preparing: "构建中",
+    ready: "准备完成",
     connecting: "连接中",
     live: "已连接",
     unavailable: "不可用",
@@ -889,6 +914,14 @@ function setModelConnectionState(key, state) {
     closed: "已断开",
     idle: "待连接",
   }[state] || "待连接";
+}
+
+function setHappyOysterStageText(message, state = "") {
+  const text = $("happyoysterStageText");
+  if (!text) return;
+  text.textContent = message || "正在准备快乐生蚝…";
+  if (state) text.dataset.state = state;
+  else delete text.dataset.state;
 }
 
 function setPreviewState(state) {
@@ -4309,7 +4342,8 @@ async function connect() {
       }
     }
     if (connectionReport.pending?.includes("happyoyster")) {
-      addHistory("快乐生蚝 World is preparing independently · Zing/LingBot2 are already live");
+      setHappyOysterStageText("正在创建快乐生蚝 World…", "preparing");
+      addHistory("快乐生蚝 World 正在独立构建 · Zing/LingBot2 已先行启动");
     }
     promptRewriteController.beginSession(init.prompt);
     sessionLifetimeGuard.start();
@@ -5340,9 +5374,22 @@ for (let slotIndex = 0; slotIndex < MODEL_SLOT_DEFAULTS.length; slotIndex += 1) 
   });
 }
 $("addModelSlotBtn").onclick = () => {
-  closeForModelSlotChange();
+  const sessionActive = Boolean(
+    ws
+    || dualModelController.activeKeys.size > 0
+    || happyOysterSession.connected
+  );
   activeModelSlotCount = 3;
   ensureUniqueModelSlot(2);
+  if (!sessionActive || !modelSelected("happyoyster")) return;
+  setModelConnectionState("happyoyster", "preparing");
+  setHappyOysterStageText("正在创建快乐生蚝 World…", "preparing");
+  addHistory("正在把快乐生蚝加入当前对比会话");
+  void dualModelController.activate("happyoyster").catch((error) => {
+    const message = error?.message || String(error || "连接失败");
+    setModelConnectionState("happyoyster", "error");
+    setHappyOysterStageText(message, "error");
+  });
 };
 $("removeModelSlotBtn").onclick = () => {
   closeForModelSlotChange();

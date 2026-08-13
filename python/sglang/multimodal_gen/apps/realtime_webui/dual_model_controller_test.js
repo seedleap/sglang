@@ -184,6 +184,32 @@ async function main() {
     "the API model joins the same input bus once its travel is live",
   );
 
+  let hotApiEnabled = false;
+  const hotFastModel = new FakeSession("hot-fast");
+  const hotApiModel = new FakeSession("hot-api");
+  const hotController = new DualModelController({
+    sessions: { fast: hotFastModel, hotApi: hotApiModel },
+    backends: {
+      fast: { model: "fast", wsUrl: "/fast" },
+      hotApi: {
+        model: "hot-api",
+        wsUrl: "",
+        enabled: () => hotApiEnabled,
+      },
+    },
+  });
+  await hotController.connect({ trace_id: "hot-add" });
+  hotController.sendEvent("camera_actions", { transitions: [{ actions: ["w"] }] });
+  hotApiEnabled = true;
+  assert.equal(await hotController.activate("hotApi"), true);
+  assert.equal(hotApiModel.connectCalls.length, 1, "hot-added API model should connect immediately");
+  assert.equal(hotApiModel.events.length, 1, "hot-added API model should receive latest input state");
+  assert.deepEqual(
+    hotController.sendEvent("camera_actions", {}).sent,
+    { fast: true, hotApi: true },
+    "hot-added API model should join without reconnecting the existing model",
+  );
+
   console.log("dual model controller ok");
 }
 

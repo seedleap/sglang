@@ -22,8 +22,8 @@ spec:
         app.kubernetes.io/part-of: minwm-realtime
         seedleap.ai/environment: production
       annotations:
-        seedleap.ai/code-git-ref: e5b9a222e8-dirty-b28a915a0b49
-        seedleap.ai/webui-profile: smooth-timeline-v33
+        seedleap.ai/code-git-ref: happyoyster-sbs-east2
+        seedleap.ai/webui-profile: happyoyster-sbs-smooth-timeline
     spec:
       automountServiceAccountToken: false
       terminationGracePeriodSeconds: 10
@@ -45,6 +45,17 @@ spec:
           image: 829115578968.dkr.ecr.us-east-2.amazonaws.com/leap-world/minwm-realtime@sha256:29ba22e0f17ca688c4b65cb448ab7cb01d30ba4db15682389a99cd674b3300e8
           imagePullPolicy: IfNotPresent
           env:
+            - name: HAPPYOYSTER_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: minwm-dual-webui-opt-secrets-20260812
+                  key: happyoyster-api-key
+            - name: HAPPYOYSTER_API_BASE_URL
+              value: https://llm-0jcmcer24vyvd7rr.cn-beijing.maas.aliyuncs.com/api/v2/apps/happyoyster-1.0/
+            - name: HAPPYOYSTER_TOKEN_BASE_URL
+              value: https://llm-0jcmcer24vyvd7rr.cn-beijing.maas.aliyuncs.com
+            - name: HAPPYOYSTER_PUBLIC_IMAGE_BASE_URL
+              value: http://k8s-minwmrea-minwmdua-1c43097005-79d190f73ef7cbed.elb.us-east-2.amazonaws.com
             - name: REALTIME_UPSTREAM_HTTP
               value: http://zing-lingbot-public
             - name: REALTIME_UPSTREAM_WS

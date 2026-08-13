@@ -1,6 +1,11 @@
 (function (global) {
   class DualModelController {
-    constructor({ sessions, backends, now = () => performance.now() }) {
+    constructor({
+      sessions,
+      backends,
+      now = () => performance.now(),
+      onBackgroundState = () => {},
+    }) {
       this.sessions = sessions;
       this.backends = backends;
       this.now = now;
@@ -10,6 +15,9 @@
       this.connectionTemplates = new Map();
       this.latestEvents = new Map();
       this.reconnectCounts = new Map();
+      this.onBackgroundState = onBackgroundState;
+      this.baseInit = null;
+      this.pendingKeys = new Set();
     }
 
     async connect(baseInit) {
@@ -20,6 +28,8 @@
       this.connectionTemplates.clear();
       this.latestEvents.clear();
       this.reconnectCounts.clear();
+      this.pendingKeys.clear();
+      this.baseInit = { ...baseInit };
       const entries = [];
       const backgroundEntries = [];
       for (const [key, session] of Object.entries(this.sessions)) {
@@ -68,9 +78,22 @@
         }
       });
       for (const [key] of backgroundEntries) {
-        void connectOne(key, { replayLatest: true }).catch(() => {
-          this.activeKeys.delete(key);
-        });
+        this.pendingKeys.add(key);
+        this.onBackgroundState({ key, state: "pending" });
+        void connectOne(key, { replayLatest: true })
+          .then((connected) => {
+            this.pendingKeys.delete(key);
+            if (connected && generation === this.connectionGeneration) {
+              this.onBackgroundState({ key, state: "connected" });
+            }
+          })
+          .catch((error) => {
+            this.pendingKeys.delete(key);
+            this.activeKeys.delete(key);
+            if (generation === this.connectionGeneration) {
+              this.onBackgroundState({ key, state: "failed", error });
+            }
+          });
       }
       if (!report.connected.length && entries.length) {
         throw new Error(
@@ -80,6 +103,43 @@
         );
       }
       return report;
+    }
+
+    async activate(key) {
+      if (!this.baseInit) throw new Error("no active model session");
+      const backend = this.backends[key];
+      const session = this.sessions[key];
+      if (!backend || !session) throw new Error(`missing backend session for ${key}`);
+      const enabled = typeof backend.enabled === "function"
+        ? backend.enabled(this.baseInit, key)
+        : backend.enabled !== false;
+      if (!enabled) throw new Error(backend.unavailableReason || "Unavailable for this mode");
+      if (this.activeKeys.has(key) || this.pendingKeys.has(key)) return false;
+      const generation = this.connectionGeneration;
+      this.pendingKeys.add(key);
+      this.onBackgroundState({ key, state: "pending" });
+      try {
+        await this.connectKey(key, this.baseInit, { reconnect: false });
+        if (generation !== this.connectionGeneration) {
+          this.sessions[key]?.close("stale connection");
+          return false;
+        }
+        this.activeKeys.add(key);
+        this.pendingKeys.delete(key);
+        const replayEvents = [...this.latestEvents.values()].sort(
+          (left, right) => Number(left.event_id || 0) - Number(right.event_id || 0),
+        );
+        for (const envelope of replayEvents) this.sessions[key]?.sendEvent(envelope);
+        this.onBackgroundState({ key, state: "connected" });
+        return true;
+      } catch (error) {
+        this.pendingKeys.delete(key);
+        this.activeKeys.delete(key);
+        if (generation === this.connectionGeneration) {
+          this.onBackgroundState({ key, state: "failed", error });
+        }
+        throw error;
+      }
     }
 
     sendEvent(kind, payload) {
@@ -108,6 +168,8 @@
       this.connectionTemplates.clear();
       this.latestEvents.clear();
       this.reconnectCounts.clear();
+      this.pendingKeys.clear();
+      this.baseInit = null;
     }
 
     async reconnect(key) {

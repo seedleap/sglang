@@ -83,10 +83,12 @@
       this.preparationError = null;
       this.setState("preparing");
       try {
+        this.setState("preparing", { message: "正在检查快乐生蚝 API…" });
         const config = await this.configured();
         if (!config.enabled) throw new Error("快乐生蚝 API 未配置");
         let firstFrameUrl = "";
         if (firstFrame?.byteLength) {
+          this.setState("preparing", { message: "正在上传首帧…" });
           const response = await this.fetchImpl("./api/happyoyster/share-image", {
             method: "POST",
             headers: { "Content-Type": firstFrameMimeType || "image/png" },
@@ -94,6 +96,7 @@
           });
           firstFrameUrl = (await readJson(response)).url || "";
         }
+        this.setState("preparing", { message: "正在创建快乐生蚝 World…" });
         const created = await readJson(await this.fetchImpl("./api/happyoyster/worlds", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -101,7 +104,9 @@
         }));
         const worldId = created?.encryptedWorldId;
         if (!worldId) throw new Error("快乐生蚝创建 World 未返回 encryptedWorldId");
+        this.setState("preparing", { message: "快乐生蚝 World 构建中…" });
         await this.waitUntilReady(worldId, epoch);
+        this.setState("preparing", { message: "正在获取 RTC 连接凭证…" });
         const prepared = await readJson(await this.fetchImpl("./api/happyoyster/prepare", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -109,7 +114,7 @@
         }));
         if (epoch !== this.epoch) throw new Error("快乐生蚝会话已被替换");
         this.prepared = { ...prepared, epoch };
-        this.setState("ready");
+        this.setState("ready", { message: "World 已就绪，正在连接视频流…" });
         return true;
       } catch (error) {
         if (epoch === this.epoch) {
@@ -129,7 +134,7 @@
       this.prepared = null;
       const epoch = prepared.epoch;
       if (epoch !== this.epoch) throw new Error("快乐生蚝会话已被替换");
-      this.setState("connecting");
+      this.setState("connecting", { message: "正在连接快乐生蚝视频流…" });
       try {
         const sdk = global.HappyOysterSDK;
         if (!sdk?.HappyOysterEngine) throw new Error("快乐生蚝 Web SDK 加载失败");
@@ -226,7 +231,10 @@
 
     setState(state, details = {}) {
       if (this.root) this.root.dataset.sessionState = state;
-      if (this.overlay) this.overlay.setAttribute("aria-hidden", state === "connecting" ? "false" : "true");
+      if (this.overlay) {
+        const visible = ["preparing", "ready", "connecting", "error", "unavailable"].includes(state);
+        this.overlay.setAttribute("aria-hidden", visible ? "false" : "true");
+      }
       this.onState(state, details);
     }
 
