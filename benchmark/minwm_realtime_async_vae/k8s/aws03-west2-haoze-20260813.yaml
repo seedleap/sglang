@@ -905,8 +905,8 @@ spec:
         app.kubernetes.io/name: webui
         app.kubernetes.io/part-of: minwm-west2-haoze-20260813
       annotations:
-        seedleap.ai/code-git-ref: b8f0243d333c8fd57d9f647bdd7b2e732bf593d5
-        seedleap.ai/webui-profile: smooth-timeline-bounded-buffer
+        seedleap.ai/code-git-ref: 524b57f537950da29ae1397f7538f68fb277ded2
+        seedleap.ai/webui-profile: happyoyster-sbs-smooth-timeline
     spec:
       automountServiceAccountToken: false
       nodeSelector:
@@ -918,7 +918,7 @@ spec:
         fsGroup: 65532
       containers:
         - name: webui
-          image: 107014413969.dkr.ecr.us-west-2.amazonaws.com/leap-world/minwm-realtime@sha256:0236fa1358b99bc365aca031554a100964d5bffdccc57cc10a80c6942c91911a
+          image: 107014413969.dkr.ecr.us-west-2.amazonaws.com/leap-world/minwm-realtime@sha256:bb3b5b67c2c613e984913fe52ad341bd77815b80644b9117d747cc69ab709d83
           env:
             - {name: REALTIME_UPSTREAM_HTTP, value: http://gateway}
             - {name: REALTIME_UPSTREAM_WS, value: ws://gateway}
