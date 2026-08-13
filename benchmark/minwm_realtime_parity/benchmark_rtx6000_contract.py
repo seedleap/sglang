@@ -96,8 +96,10 @@ async def stream_request(args: argparse.Namespace, request: dict) -> dict:
             frame_count += int(header["num_frames"])
             payload_bytes += len(payload)
             payload_sha256.update(payload)
-            if header.get("is_final_frame_batch", True):
-                completed[int(header["chunk_index"])] = now_ns
+            # Exact-remote may omit the terminal marker on its last batch before
+            # closing normally. Keep the latest payload timestamp per chunk;
+            # multi-batch chunks naturally overwrite it with their final batch.
+            completed[int(header["chunk_index"])] = now_ns
     ended_epoch_ms = time.time_ns() / 1e6
     ended_ns = time.perf_counter_ns()
     expected_indices = list(range(int(request["max_chunks"])))

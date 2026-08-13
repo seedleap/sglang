@@ -152,6 +152,19 @@ persist_results() {
   return 0
 }
 
+restore_results() {
+  [[ -n "${ARCHIVE_ROOT}" ]] || return 0
+  local archive_dir="${ARCHIVE_ROOT%/}/${MINWM_MATRIX_ID}"
+  [[ -d "${archive_dir}" ]] || return 0
+  while IFS= read -r -d '' source; do
+    local relative="${source#${archive_dir}/}"
+    local destination="${RESULT_ROOT}/${relative}"
+    [[ -e "${destination}" ]] && continue
+    mkdir -p "$(dirname "${destination}")"
+    cp "${source}" "${destination}" || true
+  done < <(find "${archive_dir}" -type f -print0)
+}
+
 stop_denoiser() {
   if [[ -n "${denoiser_pid}" ]]; then
     kill "${denoiser_pid}" 2>/dev/null || true
@@ -295,9 +308,14 @@ run_lane() {
   echo "MINWM_UNIFIED_EXACT_MATRIX_LANE_END lane=${profile} status=0 timestamp=$(date -Iseconds)"
 }
 
-run_lane local 1 local-sp1-warmup
+restore_results
+if [[ ! -f "${RESULT_ROOT}/local-sp1-warmup/COMPLETE" ]]; then
+  run_lane local 1 local-sp1-warmup
+fi
 for repetition in $(seq 1 "${REPETITIONS}"); do
-  run_lane local 1 "local-sp1-r${repetition}"
+  if [[ ! -f "${RESULT_ROOT}/local-sp1-r${repetition}/COMPLETE" ]]; then
+    run_lane local 1 "local-sp1-r${repetition}"
+  fi
 done
 
 vae_log="${RESULT_ROOT}/${MINWM_MATRIX_ID}-exact-vae-worker.log"
@@ -357,7 +375,9 @@ for degree in "${requested_degrees[@]}"; do
   curl --fail --silent http://127.0.0.1:31000/metrics \
     > "${RESULT_ROOT}/${profile}-vae-metrics-before.prom"
   for repetition in $(seq 1 "${REPETITIONS}"); do
-    run_lane remote "${degree}" "${profile}-r${repetition}"
+    if [[ ! -f "${RESULT_ROOT}/${profile}-r${repetition}/COMPLETE" ]]; then
+      run_lane remote "${degree}" "${profile}-r${repetition}"
+    fi
   done
   curl --fail --silent http://127.0.0.1:31000/metrics \
     > "${RESULT_ROOT}/${profile}-vae-metrics-after.prom"
