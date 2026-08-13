@@ -363,6 +363,16 @@ for size in sizes:
                     "true",
                 ],
             }
+            dit_layerwise_offload = {
+                **dit_cpu_offload,
+                "command": [
+                    *dit_cpu_offload["command"],
+                    "--dit-layerwise-offload",
+                    "true",
+                    "--dit-offload-prefetch-size",
+                    "0.0",
+                ],
+            }
             fit_cases = [
                     {
                         "name": f"taehv-memory-d-lazy-modules-tianpeng-gap12-{size}-eager",
@@ -406,9 +416,14 @@ for size in sizes:
                     },
             ]
             if experiment_mode == "memory_fit_physical":
-                physical_case = dict(fit_cases[-1])
+                physical_case = {
+                    "size": size,
+                    "mode": "eager",
+                    "control": dit_cpu_offload,
+                    "candidate": dit_layerwise_offload,
+                }
                 physical_case["name"] = (
-                    f"taehv-memory-h-physical32-tianpeng-gap12-{size}-eager"
+                    f"taehv-memory-i-layerwise-physical32-tianpeng-gap12-{size}-eager"
                 )
                 physical_case["paired_reps"] = 3
                 physical_case["variants"] = ["candidate"]
