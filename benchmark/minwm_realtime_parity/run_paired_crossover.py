@@ -104,7 +104,7 @@ def isolated_env(base: dict[str, str], slot: dict, work_dir: Path) -> dict[str, 
 
 def command_prefix(slot: dict) -> list[str]:
     prefix = []
-    if slot.get("numa_node") is not None:
+    if slot.get("numa_node") is not None and shutil.which("numactl"):
         prefix.extend(
             [
                 "numactl",
