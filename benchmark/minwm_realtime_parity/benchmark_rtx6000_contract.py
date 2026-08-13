@@ -44,6 +44,8 @@ def parse_args() -> argparse.Namespace:
         default=("832x480", "1248x704"),
     )
     parser.add_argument("--timeout", type=float, default=1800.0)
+    parser.add_argument("--sample-output-dir")
+    parser.add_argument("--sample-chunks", default="0,10,34,68")
     return parser.parse_args()
 
 
@@ -69,7 +71,11 @@ def request_for_size(base_request: dict, size: str, chunks: int) -> dict:
     return request
 
 
-async def stream_request(args: argparse.Namespace, request: dict) -> dict:
+async def stream_request(
+    args: argparse.Namespace,
+    request: dict,
+    sample_output_dir: Path | None = None,
+) -> dict:
     completed: dict[int, int] = {}
     frame_count = 0
     payload_bytes = 0
@@ -77,6 +83,8 @@ async def stream_request(args: argparse.Namespace, request: dict) -> dict:
     started_ns = time.perf_counter_ns()
     started_epoch_ms = time.time_ns() / 1e6
     first_payload_ns = None
+    sample_chunks = {int(value) for value in args.sample_chunks.split(",") if value}
+    samples: dict[int, tuple[dict, bytes]] = {}
     async with websockets.connect(
         args.ws_url, max_size=None, ping_interval=None, open_timeout=args.timeout
     ) as websocket:
@@ -101,10 +109,39 @@ async def stream_request(args: argparse.Namespace, request: dict) -> dict:
             frame_count += int(header["num_frames"])
             payload_bytes += len(payload)
             payload_sha256.update(payload)
+            chunk_index = int(header["chunk_index"])
+            if sample_output_dir is not None and chunk_index in sample_chunks:
+                width = int(header["width"])
+                height = int(header["height"])
+                frame_size = width * height * 3
+                if len(payload) != int(header["num_frames"]) * frame_size:
+                    raise AssertionError(
+                        f"raw RGB payload size mismatch for chunk {chunk_index}: "
+                        f"got {len(payload)}, expected "
+                        f"{int(header['num_frames']) * frame_size}"
+                    )
+                samples[chunk_index] = (header, payload[-frame_size:])
             if header.get("is_final_frame_batch", True):
                 completed[int(header["chunk_index"])] = now_ns
     ended_epoch_ms = time.time_ns() / 1e6
     ended_ns = time.perf_counter_ns()
+    sample_manifest = []
+    if sample_output_dir is not None:
+        sample_output_dir.mkdir(parents=True, exist_ok=True)
+        for chunk_index, (header, frame) in sorted(samples.items()):
+            width = int(header["width"])
+            height = int(header["height"])
+            output = sample_output_dir / f"chunk-{chunk_index:03d}-last.ppm"
+            output.write_bytes(f"P6\n{width} {height}\n255\n".encode() + frame)
+            sample_manifest.append(
+                {
+                    "chunk_index": chunk_index,
+                    "height": height,
+                    "path": output.name,
+                    "rgb_sha256": hashlib.sha256(frame).hexdigest(),
+                    "width": width,
+                }
+            )
     expected_indices = list(range(int(request["max_chunks"])))
     if sorted(completed) != expected_indices:
         raise AssertionError("frame payload indices are not contiguous")
@@ -118,6 +155,7 @@ async def stream_request(args: argparse.Namespace, request: dict) -> dict:
         "ended_epoch_ms": ended_epoch_ms,
         "first_payload_ns": first_payload_ns,
         "payload_complete_ns": completed,
+        "samples": sample_manifest,
     }
 
 
@@ -256,6 +294,7 @@ def summarize(args: argparse.Namespace, size: str, result: dict) -> dict:
         "ttff_ms": (result["first_payload_ns"] - result["started_ns"]) / 1e6,
         "payload_bytes": result["payload_bytes"],
         "payload_sha256": result["payload_sha256"],
+        "samples": result["samples"],
         "trace_id": trace_id,
         "steady_start_chunk": args.steady_start_chunk,
         "dit_wall": stage_summary(
@@ -306,8 +345,13 @@ async def main() -> None:
         # server session cleanup releases admission capacity.  Keep that drain
         # outside every measured timing window.
         await asyncio.sleep(args.inter_request_delay)
+        sample_output_dir = (
+            Path(args.sample_output_dir) / size if args.sample_output_dir else None
+        )
         measured = await stream_request(
-            args, request_for_size(base_request, size, args.measured_chunks)
+            args,
+            request_for_size(base_request, size, args.measured_chunks),
+            sample_output_dir,
         )
         summary = summarize(args, size, measured)
         summaries.append(summary)

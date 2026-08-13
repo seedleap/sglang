@@ -197,4 +197,15 @@ python3 "${SCRIPT_DIR}/run_paired_crossover.py" --config "${CONFIG_PATH}" --dry-
 aws s3 cp "${PAIR_ROOT}/dry-run.json" \
   "${MINWM_ARCHIVE_S3_URI%/}/dry-run-${SGLANG_GIT_REF:0:10}.json" \
   --no-progress --only-show-errors
-exec python3 "${SCRIPT_DIR}/run_paired_crossover.py" --config "${CONFIG_PATH}"
+python3 "${SCRIPT_DIR}/run_paired_crossover.py" --config "${CONFIG_PATH}"
+for size in 832x480 1248x704; do
+  case_root="${LOCAL_ARTIFACT_ROOT}/taehv-local-${size}-w32s8-eager"
+  quality_output="${case_root}/quality-comparison.json"
+  python3 "${SCRIPT_DIR}/compare_taehv_samples.py" \
+    --exact "${case_root}/rep-00/control/quality-samples/${size}" \
+    --taehv "${case_root}/rep-00/candidate/quality-samples/${size}" \
+    --output "${quality_output}"
+  aws s3 cp "${quality_output}" \
+    "${MINWM_ARCHIVE_S3_URI%/}/taehv-local-${size}-w32s8-eager/quality-comparison.json" \
+    --no-progress --only-show-errors
+done

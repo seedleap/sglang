@@ -194,6 +194,10 @@ def run_client(
         "--sizes",
         case["size"],
     ]
+    if root.name == str(config.get("sample_label", "rep-00")):
+        command.extend(
+            ["--sample-output-dir", str(work_dir / "quality-samples")]
+        )
     process = subprocess.Popen(
         command,
         cwd=work_dir,
