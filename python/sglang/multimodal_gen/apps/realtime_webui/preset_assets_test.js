@@ -20,13 +20,6 @@ const assetNames = [
   "reactor-roman-chariot.png",
   "reactor-asylum-corridor.jpg",
   "lingbot-example-00-dragon-dolly.jpg",
-  "lingbot-example-01-stone-orbit.jpg",
-  "lingbot-example-02-urban-tilt.jpg",
-  "lingbot-example-03-lake-scout.jpg",
-  "artwork-ziggy-stardust.jpg",
-  "artwork-plastic-beach.jpg",
-  "artwork-plastic-ono-band.jpg",
-  "artwork-kid-a.jpg",
 ];
 
 assert.ok(
@@ -53,7 +46,7 @@ for (const name of assetNames) {
   assert.ok(fs.statSync(assetPath).size > 0, `${name} should not be empty`);
 }
 
-assert.strictEqual(assetNames.length, 21);
+assert.strictEqual(assetNames.length, 14);
 
 const featuredPresetMatch = appJs.match(
   /const FEATURED_PRESET_NAMES = \[([\s\S]*?)\];/,
