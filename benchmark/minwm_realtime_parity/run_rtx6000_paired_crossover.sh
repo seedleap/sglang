@@ -15,7 +15,9 @@ RUN_ID="rtx6000-pair-${PAIR,,}-setup"
 MODEL_DIR="/work/minwm-realtime/${RUN_ID}/sglang-model"
 PAIR_ROOT="/work/minwm-paired/pair-${PAIR,,}"
 CONFIG_PATH="${PAIR_ROOT}/paired.json"
-mkdir -p "${PAIR_ROOT}" "${MINWM_ARCHIVE_ROOT}"
+LOCAL_ARTIFACT_ROOT="${PAIR_ROOT}/artifacts"
+mkdir -p "${PAIR_ROOT}" "${MINWM_ARCHIVE_ROOT}" "${LOCAL_ARTIFACT_ROOT}"
+cp -a "${MINWM_ARCHIVE_ROOT}/." "${LOCAL_ARTIFACT_ROOT}/" 2>/dev/null || true
 
 flush_setup() {
   local source="/s3/world-model/evals/minwm/realtime-vae/20260813/bounded-8gpu/setup/pair-${PAIR,,}"
@@ -58,11 +60,11 @@ size=832x480
 case_name="pair-${PAIR,,}-${size}-eager-vs-cuda-graph"
 
 python3 - "${CONFIG_PATH}" "${SGLANG_GIT_REF}" "${MODEL_DIR}" \
-  "${MINWM_ARCHIVE_ROOT}" "${case_name}" "${size}" <<'PY'
+  "${LOCAL_ARTIFACT_ROOT}" "${MINWM_ARCHIVE_ROOT}" "${case_name}" "${size}" <<'PY'
 import json, sys
 from pathlib import Path
 
-path, commit, model, artifacts, name, size = sys.argv[1:]
+path, commit, model, artifacts, archive, name, size = sys.argv[1:]
 common = [
     "sglang", "serve", "--model-path", model,
     "--pipeline-class-name", "MinWMCausalDMDPipeline",
@@ -89,6 +91,13 @@ config = {
     "sglang_git_ref": commit,
     "nvme_root": str(Path(path).parent / "nvme"),
     "artifact_root": artifacts,
+    "upload_command": [
+        "bash", "-lc",
+        "destination=" + archive + "/{relative}; "
+        "mkdir -p \"$destination\"; "
+        "cd {source}; find . -type f ! -name COMPLETE -exec cp --parents '{}' \"$destination\" ';'; "
+        "cp COMPLETE \"$destination/COMPLETE\"; cp result.json \"$destination/UPLOADED.json\"",
+    ],
     "base_port": 31000,
     "paired_reps": 3,
     "warmup_chunks": 5,
