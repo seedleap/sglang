@@ -103,7 +103,7 @@ assert.match(
 assert.match(html, /playback_controller\.js\?v=realtime-playback-v33/);
 assert.match(html, /model_session\.js\?v=dual-model-v8/);
 assert.match(html, /dual_model_controller\.js\?v=dual-model-v4/);
-assert.match(html, /app\.js\?v=world-studio-v14/);
+assert.match(html, /app\.js\?v=world-studio-v15/);
 assert.doesNotMatch(
   app,
   /window\.location\.hostname === "localhost"/,
@@ -138,7 +138,20 @@ assert.match(
 );
 assert.match(html, /id="voicePromptBtn"/, "runtime prompt composer should expose voice input");
 assert.match(html, /data-action="w"[^>]*>W<\/button>/, "movement controls should use compact keycaps");
-assert.match(html, /data-action="i"[^>]*>I<\/button>/, "look controls should use compact keycaps");
+assert.match(html, /data-action="i"[^>]*>↑<\/button>/, "look-up should use an arrow keycap");
+assert.match(html, /data-action="j"[^>]*>←<\/button>/, "look-left should use an arrow keycap");
+assert.match(html, /data-action="k"[^>]*>↓<\/button>/, "look-down should use an arrow keycap");
+assert.match(html, /data-action="l"[^>]*>→<\/button>/, "look-right should use an arrow keycap");
+assert.match(html, /id="enhanceBtnLabel">补全世界<\/b>/, "world completion should use the requested label");
+assert.match(app, /globalThis\.indexedDB\.open\(CUSTOM_WORLD_DB_NAME, CUSTOM_WORLD_DB_VERSION\)/);
+assert.match(app, /keyPath: "fingerprint"/, "custom worlds should deduplicate by image and description");
+assert.match(app, /return \[\.\.\.presets, \.\.\.customWorldPresets\]/, "custom worlds should follow built-ins");
+assert.match(app, /await writeStoredCustomWorld\(record\)/, "custom worlds should persist in browser storage");
+assert.match(
+  app,
+  /const connectionReport = await dualModelController\.connect\(init\);[\s\S]*?rememberEnteredWorld\(/,
+  "custom worlds should only be saved after a model connection succeeds",
+);
 assert.match(app, /function sendRuntimePromptUpdate\(\)/);
 assert.match(
   app,
@@ -205,7 +218,7 @@ assert.ok(
   "I2V should retain the selected reference while both models prepare their first generated frame",
 );
 const visiblePlaceholderIndex = app.indexOf("drawVisibleReferencePlaceholders();");
-const firstFrameReadIndex = app.indexOf("firstFrame = await readFirstFrame()", visiblePlaceholderIndex);
+const firstFrameReadIndex = app.indexOf("enteredFirstFrame = await readFirstFrame()", visiblePlaceholderIndex);
 assert.ok(
   visiblePlaceholderIndex >= 0 && firstFrameReadIndex > visiblePlaceholderIndex,
   "Generate should paint the already-visible reference before waiting for its request bytes",

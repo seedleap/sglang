@@ -406,6 +406,16 @@ const presets = [
   ...reactorPresets.filter((preset) => !featuredPresetNames.has(preset.name)),
   ...examplePresets,
 ];
+const CUSTOM_WORLD_DB_NAME = "world-studio-custom-worlds";
+const CUSTOM_WORLD_DB_VERSION = 1;
+const CUSTOM_WORLD_STORE_NAME = "worlds";
+let customWorldPresets = [];
+let customWorldDbPromise = null;
+let customWorldLoadPromise = null;
+
+function allWorldPresets() {
+  return [...presets, ...customWorldPresets];
+}
 
 let ws = null;
 let selectedPreset = null;
@@ -1684,6 +1694,210 @@ async function sha256Bytes(bytes) {
   return Array.from(new Uint8Array(digest))
     .map((byte) => byte.toString(16).padStart(2, "0"))
     .join("");
+}
+
+function normalizeWorldDescription(value) {
+  return String(value || "").trim().replace(/\s+/g, " ");
+}
+
+function fallbackBytesFingerprint(bytes) {
+  const source = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes || 0);
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < source.length; index += 1) {
+    hash ^= source[index];
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return `fnv1a-${source.length}-${(hash >>> 0).toString(16).padStart(8, "0")}`;
+}
+
+async function customWorldFingerprint(firstFrame, description, knownImageHash = "") {
+  const normalizedDescription = normalizeWorldDescription(description);
+  const descriptionBytes = new TextEncoder().encode(normalizedDescription);
+  const imageHash = knownImageHash
+    || await sha256Bytes(firstFrame)
+    || fallbackBytesFingerprint(firstFrame);
+  const descriptionHash = await sha256Bytes(descriptionBytes)
+    || fallbackBytesFingerprint(descriptionBytes);
+  return `${imageHash}:${descriptionHash}`;
+}
+
+function requestResult(request) {
+  return new Promise((resolve, reject) => {
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error || new Error("browser storage request failed"));
+  });
+}
+
+function openCustomWorldDatabase() {
+  if (customWorldDbPromise) return customWorldDbPromise;
+  if (!globalThis.indexedDB) {
+    return Promise.reject(new Error("this browser does not support persistent world storage"));
+  }
+  customWorldDbPromise = new Promise((resolve, reject) => {
+    const request = globalThis.indexedDB.open(CUSTOM_WORLD_DB_NAME, CUSTOM_WORLD_DB_VERSION);
+    request.onupgradeneeded = () => {
+      const database = request.result;
+      if (!database.objectStoreNames.contains(CUSTOM_WORLD_STORE_NAME)) {
+        const store = database.createObjectStore(CUSTOM_WORLD_STORE_NAME, {
+          keyPath: "fingerprint",
+        });
+        store.createIndex("createdAt", "createdAt", { unique: false });
+      }
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => {
+      customWorldDbPromise = null;
+      reject(request.error || new Error("could not open custom world storage"));
+    };
+    request.onblocked = () => {
+      customWorldDbPromise = null;
+      reject(new Error("custom world storage upgrade is blocked"));
+    };
+  });
+  return customWorldDbPromise;
+}
+
+async function readStoredCustomWorlds() {
+  const database = await openCustomWorldDatabase();
+  const transaction = database.transaction(CUSTOM_WORLD_STORE_NAME, "readonly");
+  const records = await requestResult(
+    transaction.objectStore(CUSTOM_WORLD_STORE_NAME).getAll(),
+  );
+  return records.sort((left, right) => Number(left.createdAt) - Number(right.createdAt));
+}
+
+async function writeStoredCustomWorld(record) {
+  const database = await openCustomWorldDatabase();
+  await new Promise((resolve, reject) => {
+    const transaction = database.transaction(CUSTOM_WORLD_STORE_NAME, "readwrite");
+    transaction.objectStore(CUSTOM_WORLD_STORE_NAME).put(record);
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () => reject(
+      transaction.error || new Error("could not save custom world"),
+    );
+    transaction.onabort = () => reject(
+      transaction.error || new Error("custom world save was aborted"),
+    );
+  });
+}
+
+function customWorldPresetFromRecord(record) {
+  const imageBlob = record.imageBlob instanceof Blob
+    ? record.imageBlob
+    : new Blob([record.imageBlob], { type: record.mime || "image/png" });
+  return {
+    name: record.name,
+    tone: "green",
+    size: record.size || "832x480",
+    fps: Number(record.fps || DEFAULT_TARGET_FPS),
+    prompt: record.prompt,
+    referenceUrl: URL.createObjectURL(imageBlob),
+    source: "自定义世界",
+    mime: record.mime || imageBlob.type || "image/png",
+    imageBlob,
+    fingerprint: record.fingerprint,
+    createdAt: Number(record.createdAt || Date.now()),
+    isCustom: true,
+  };
+}
+
+async function loadCustomWorldPresets() {
+  try {
+    const records = await readStoredCustomWorlds();
+    customWorldPresets = records.map(customWorldPresetFromRecord);
+    renderPresets();
+    if (records.length) addHistory(`loaded ${records.length} custom worlds`);
+  } catch (error) {
+    addHistory(`custom world library unavailable · ${error.message || error}`);
+  }
+}
+
+function ensureCustomWorldPresetsLoaded() {
+  if (!customWorldLoadPromise) {
+    customWorldLoadPromise = loadCustomWorldPresets();
+  }
+  return customWorldLoadPromise;
+}
+
+function selectedWorldIsUnchanged(description, preset = selectedPreset) {
+  return Boolean(
+    preset
+    && normalizeWorldDescription(preset.prompt) === normalizeWorldDescription(description)
+  );
+}
+
+async function matchesBuiltInWorld(firstFrame, description, imageHash) {
+  const candidates = presets.filter((preset) => (
+    normalizeWorldDescription(preset.prompt) === description
+  ));
+  for (const preset of candidates) {
+    try {
+      const presetBytes = await fetchReferenceBytes(preset.referenceUrl);
+      const presetHash = await sha256Bytes(presetBytes)
+        || fallbackBytesFingerprint(presetBytes);
+      if (presetHash === imageHash) return true;
+    } catch (error) {
+      addHistory(`preset duplicate check skipped · ${preset.name} · ${error.message || error}`);
+    }
+  }
+  return false;
+}
+
+async function rememberEnteredWorld(firstFrame, referenceImage, entrySnapshot = {}) {
+  const description = normalizeWorldDescription(
+    entrySnapshot.description ?? $("prompt").value,
+  );
+  const entryPreset = entrySnapshot.preset ?? selectedPreset;
+  const shouldKeepSelection = () => (
+    selectedPreset === entryPreset
+    && normalizeWorldDescription($("prompt").value) === description
+  );
+  if (!firstFrame?.byteLength || !description || selectedWorldIsUnchanged(description, entryPreset)) {
+    return false;
+  }
+  try {
+    await ensureCustomWorldPresetsLoaded();
+    const imageHash = referenceImage?.first_frame_sha256
+      || await sha256Bytes(firstFrame)
+      || fallbackBytesFingerprint(firstFrame);
+    if (await matchesBuiltInWorld(firstFrame, description, imageHash)) return false;
+    const fingerprint = await customWorldFingerprint(
+      firstFrame,
+      description,
+      imageHash,
+    );
+    const existing = customWorldPresets.find((preset) => preset.fingerprint === fingerprint);
+    if (existing) {
+      if (shouldKeepSelection()) selectedPreset = existing;
+      renderPresets();
+      return false;
+    }
+    const mime = referenceImage?.mime
+      || $("firstFrame").files[0]?.type
+      || selectedReferenceMimeType
+      || "image/png";
+    const createdAt = Date.now();
+    const record = {
+      fingerprint,
+      name: `自定义世界 ${customWorldPresets.length + 1}`,
+      prompt: description,
+      mime,
+      size: modelControl("minwm", "size").value || "832x480",
+      fps: Number(modelControl("minwm", "fps").value || DEFAULT_TARGET_FPS),
+      createdAt,
+      imageBlob: new Blob([firstFrame], { type: mime }),
+    };
+    await writeStoredCustomWorld(record);
+    const preset = customWorldPresetFromRecord(record);
+    customWorldPresets.push(preset);
+    if (shouldKeepSelection()) selectedPreset = preset;
+    renderPresets();
+    addHistory(`saved ${preset.name} to world library`);
+    return true;
+  } catch (error) {
+    addHistory(`custom world save failed · ${error.message || error}`);
+    return false;
+  }
 }
 
 function bytesToDataUrl(bytes, mime = "application/octet-stream") {
@@ -3670,7 +3884,7 @@ function setWorldCompletionBusy(pending, completingFromImage = false) {
   button.disabled = pending;
   button.classList.toggle("is-loading", pending);
   button.setAttribute("aria-busy", pending ? "true" : "false");
-  $("enhanceBtnLabel").textContent = pending ? "正在补全…" : "Prompt 补全";
+  $("enhanceBtnLabel").textContent = pending ? "正在补全…" : "补全世界";
   $("enhanceBtnHint").textContent = pending
     ? (completingFromImage ? "正在理解首帧并生成完整描述" : "正在生成世界描述和首帧")
     : "补齐首帧与完整世界描述";
@@ -3702,7 +3916,7 @@ function updateWorldDraftState() {
       !hasImage ? "首帧图片" : "",
       !hasDescription ? "世界描述" : "",
     ].filter(Boolean).join("和");
-    setWorldDraftStatus(`还需要${missing}，可点击 Prompt 补全`, "incomplete");
+    setWorldDraftStatus(`还需要${missing}，可点击补全世界`, "incomplete");
   } else if (!worldCompletionPending && complete) {
     setWorldDraftStatus("世界已完整，可以进入", "ready");
   }
@@ -3818,12 +4032,17 @@ function drawReferencePreview(file) {
 }
 
 async function setPresetReference(preset) {
-  selectedReferenceBytes = null;
+  selectedReferenceBytes = preset.imageBlob
+    ? new Uint8Array(await preset.imageBlob.arrayBuffer())
+    : null;
   selectedReferenceUrl = preset.referenceUrl;
   selectedReferenceLabel = preset.source;
   selectedReferenceMimeType = preset.mime || mimeFromReferenceUrl(preset.referenceUrl);
   $("firstFrame").value = "";
-  await drawReferencePreviewFromImageSource(preset.referenceUrl, selectedReferenceLabel);
+  const previewUrl = preset.imageBlob
+    ? URL.createObjectURL(preset.imageBlob)
+    : preset.referenceUrl;
+  await drawReferencePreviewFromImageSource(previewUrl, selectedReferenceLabel);
   updateWorldDraftState();
 }
 
@@ -3940,11 +4159,17 @@ async function connect() {
       return;
     }
     const continuousT2V = generationMode === "t2v" && $("continuous").checked;
+    const enteredWorldSnapshot = {
+      description: $("prompt").value,
+      preset: selectedPreset,
+    };
+    let enteredFirstFrame;
     let firstFrame;
     let numFrames = Number($("numFrames").value);
     if (generationMode === "i2v") {
       drawVisibleReferencePlaceholders();
-      firstFrame = await readFirstFrame();
+      enteredFirstFrame = await readFirstFrame();
+      firstFrame = enteredFirstFrame;
       if (!firstFrame) {
         setModelConnectionState("minwm", "idle");
         setModelConnectionState("lingbot2", "idle");
@@ -3955,6 +4180,7 @@ async function connect() {
         return;
       }
     } else {
+      enteredFirstFrame = await readFirstFrame();
       numFrames = continuousT2V ? undefined : readT2VNumFrames();
     }
     await drawInitialReferencePlaceholders(firstFrame);
@@ -3968,7 +4194,7 @@ async function connect() {
         numFrames: continuousT2V ? undefined : numFrames,
       }),
     });
-    const referenceImage = await createReferenceImageMeta(firstFrame);
+    const referenceImage = await createReferenceImageMeta(enteredFirstFrame);
     beginSessionArtifact(init, referenceImage);
     if (currentSessionArtifact && currentTrace) {
       currentSessionArtifact.trace_id = currentTrace.traceId;
@@ -3978,6 +4204,13 @@ async function connect() {
     canvas.focus();
     const connectionReport = await dualModelController.connect(init);
     if (epoch !== streamEpoch) return;
+    void rememberEnteredWorld(
+      enteredFirstFrame,
+      referenceImage,
+      enteredWorldSnapshot,
+    ).catch((error) => {
+      addHistory(`custom world save failed · ${error.message || error}`);
+    });
     if (connectionReport.failed.length) {
       addHistory(
         `partial session · ${connectionReport.failed
@@ -4755,12 +4988,15 @@ function formatMs(value) {
 
 function renderPresets() {
   $("presetList").innerHTML = "";
-  presets.forEach((preset) => {
+  allWorldPresets().forEach((preset) => {
     const btn = document.createElement("button");
     btn.className = "preset";
     btn.type = "button";
     btn.dataset.presetName = preset.name;
-    btn.setAttribute("aria-pressed", "false");
+    const selected = preset === selectedPreset
+      || Boolean(preset.fingerprint && preset.fingerprint === selectedPreset?.fingerprint);
+    btn.classList.toggle("is-selected", selected);
+    btn.setAttribute("aria-pressed", selected ? "true" : "false");
     btn.dataset.tone = preset.tone;
     const thumb = document.createElement("img");
     thumb.className = "preset-thumb";
@@ -4785,7 +5021,9 @@ function renderPresets() {
       "Asylum Corridor": "废墟走廊",
     })[preset.name] || preset.name;
     const meta = document.createElement("span");
-    meta.textContent = "填充首帧 + 世界描述";
+    meta.textContent = preset.isCustom
+      ? "已保存的自定义世界"
+      : "填充首帧 + 世界描述";
     btn.append(thumb, title, meta);
     btn.onclick = () => applyPreset(preset).catch(showError);
     $("presetList").appendChild(btn);
@@ -4977,6 +5215,7 @@ function unpack(buf) {
 
 applyRuntimeUiConfig();
 renderPresets();
+void ensureCustomWorldPresetsLoaded();
 drawIdle();
 setPreviewScale(DEFAULT_PREVIEW_SCALE);
 updateSuperResolutionControls("minwm");
