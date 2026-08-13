@@ -11,6 +11,8 @@ spec:
   disruption:
     consolidationPolicy: WhenEmpty
     consolidateAfter: 30s
+    budgets:
+      - nodes: "0"
   template:
     metadata:
       labels:
