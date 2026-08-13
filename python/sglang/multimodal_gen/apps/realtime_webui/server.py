@@ -7,6 +7,7 @@ import json
 import logging
 import os
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from aiohttp import ClientError, ClientSession, ClientTimeout, WSMsgType, web
 
@@ -36,6 +37,20 @@ HOP_BY_HOP_HEADERS = {
     "transfer-encoding",
     "upgrade",
 }
+HAPPYOYSTER_API_KEY = os.environ.get("HAPPYOYSTER_API_KEY", "").strip()
+HAPPYOYSTER_API_BASE_URL = os.environ.get(
+    "HAPPYOYSTER_API_BASE_URL",
+    "https://llm-0jcmcer24vyvd7rr.cn-beijing.maas.aliyuncs.com/api/v2/apps/happyoyster-1.0/",
+).rstrip("/")
+HAPPYOYSTER_TOKEN_BASE_URL = os.environ.get(
+    "HAPPYOYSTER_TOKEN_BASE_URL", ""
+).rstrip("/")
+HAPPYOYSTER_PUBLIC_IMAGE_BASE_URL = os.environ.get(
+    "HAPPYOYSTER_PUBLIC_IMAGE_BASE_URL", ""
+).rstrip("/")
+HAPPYOYSTER_TIMEOUT_SECONDS = float(
+    os.environ.get("HAPPYOYSTER_TIMEOUT_SECONDS", "130")
+)
 
 
 def _forward_headers(headers):
@@ -222,6 +237,217 @@ async def _generated_world_image(request):
     )
 
 
+def _happyoyster_configured():
+    return bool(HAPPYOYSTER_API_KEY and HAPPYOYSTER_API_BASE_URL)
+
+
+def _happyoyster_origin():
+    parsed = urlsplit(HAPPYOYSTER_API_BASE_URL)
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
+def _happyoyster_token_base_url():
+    return HAPPYOYSTER_TOKEN_BASE_URL or _happyoyster_origin()
+
+
+def _unwrap_happyoyster_payload(payload):
+    if isinstance(payload, dict) and isinstance(payload.get("output"), dict):
+        payload = payload["output"]
+    if isinstance(payload, dict) and payload.get("code") == 0:
+        return payload.get("data")
+    if isinstance(payload, dict) and payload.get("code") not in (None, 0):
+        raise RuntimeError(
+            str(payload.get("message") or f"HappyOyster error {payload['code']}")
+        )
+    return payload
+
+
+async def _happyoyster_request(
+    app,
+    method,
+    path,
+    *,
+    params=None,
+    json_body=None,
+    base_url=None,
+):
+    if not _happyoyster_configured():
+        raise web.HTTPServiceUnavailable(
+            text=json.dumps({"error": "HappyOyster is not configured"}),
+            content_type="application/json",
+        )
+    request_base_url = (base_url or HAPPYOYSTER_API_BASE_URL).rstrip("/")
+    url = f"{request_base_url}/{path.lstrip('/')}"
+    try:
+        async with app[SESSION].request(
+            method,
+            url,
+            params=params,
+            json=json_body,
+            headers={
+                "Authorization": f"Bearer {HAPPYOYSTER_API_KEY}",
+                "Accept": "application/json",
+                "User-Agent": "sglang-world-studio/1.0",
+            },
+            timeout=ClientTimeout(total=HAPPYOYSTER_TIMEOUT_SECONDS),
+        ) as response:
+            payload = await response.json(content_type=None)
+            if response.status >= 400:
+                raise RuntimeError(
+                    str(payload.get("message") if isinstance(payload, dict) else payload)
+                )
+            return _unwrap_happyoyster_payload(payload)
+    except web.HTTPException:
+        raise
+    except Exception as error:
+        logging.exception("HappyOyster request failed: %s %s", method, url)
+        raise web.HTTPBadGateway(
+            text=json.dumps({"error": str(error) or "HappyOyster request failed"}),
+            content_type="application/json",
+        ) from error
+
+
+async def _happyoyster_config(_request):
+    return web.json_response(
+        {
+            "enabled": _happyoyster_configured(),
+            "apiBaseUrl": HAPPYOYSTER_API_BASE_URL,
+            "sessionMaxLifetimeSeconds": 90,
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+async def _happyoyster_share_image(request):
+    if not HAPPYOYSTER_PUBLIC_IMAGE_BASE_URL:
+        raise web.HTTPServiceUnavailable(
+            text=json.dumps({"error": "HappyOyster public image URL is not configured"}),
+            content_type="application/json",
+        )
+    image_bytes = await request.read()
+    if not image_bytes:
+        raise web.HTTPBadRequest(
+            text=json.dumps({"error": "first frame is required"}),
+            content_type="application/json",
+        )
+    if len(image_bytes) > MAX_WORLD_IMAGE_BYTES:
+        raise web.HTTPRequestEntityTooLarge(
+            max_size=MAX_WORLD_IMAGE_BYTES, actual_size=len(image_bytes)
+        )
+    mime_type = request.content_type.lower()
+    if mime_type not in ALLOWED_WORLD_IMAGE_TYPES:
+        raise web.HTTPUnsupportedMediaType(
+            text=json.dumps({"error": "first frame must be PNG, JPEG, or WebP"}),
+            content_type="application/json",
+        )
+    suffix = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp"}[mime_type]
+    image_name = request.app[WORLD_CREATOR].save_shared_image(image_bytes, suffix)
+    return web.json_response(
+        {"url": f"{HAPPYOYSTER_PUBLIC_IMAGE_BASE_URL}/api/world/images/{image_name}"}
+    )
+
+
+async def _happyoyster_create_world(request):
+    try:
+        body = await request.json()
+    except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as error:
+        raise web.HTTPBadRequest(
+            text=json.dumps({"error": "request body must be valid JSON"}),
+            content_type="application/json",
+        ) from error
+    if not isinstance(body, dict):
+        raise web.HTTPBadRequest(text="request body must be a JSON object")
+    prompt = str(body.get("prompt", "")).strip()
+    if not prompt:
+        raise web.HTTPBadRequest(
+            text=json.dumps({"error": "prompt is required"}),
+            content_type="application/json",
+        )
+    upstream_body = {
+        "mode": 1,
+        "async": True,
+        "creationModel": "simple",
+        "prompt": prompt[:2000],
+        "perspective": body.get("perspective", "third_person"),
+        "uploadMode": "first_frame",
+        "resolution": "720p",
+        "eventStyle": "normal",
+    }
+    first_frame_url = str(body.get("firstFrameUrl", "")).strip()
+    if first_frame_url:
+        upstream_body["firstFrameImage"] = {
+            "url": first_frame_url,
+            "referenceType": "default",
+        }
+    data = await _happyoyster_request(
+        request.app, "POST", "/openapi/v1/worlds", json_body=upstream_body
+    )
+    return web.json_response(data)
+
+
+async def _happyoyster_world_status(request):
+    world_id = str(request.query.get("encryptedWorldId", "")).strip()
+    if not world_id:
+        raise web.HTTPBadRequest(text="encryptedWorldId is required")
+    data = await _happyoyster_request(
+        request.app,
+        "GET",
+        "/openapi/v1/worlds/build-status",
+        params={"encryptedWorldId": world_id},
+    )
+    return web.json_response(data)
+
+
+async def _happyoyster_prepare(request):
+    try:
+        body = await request.json()
+    except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as error:
+        raise web.HTTPBadRequest(
+            text=json.dumps({"error": "request body must be valid JSON"}),
+            content_type="application/json",
+        ) from error
+    if not isinstance(body, dict):
+        raise web.HTTPBadRequest(
+            text=json.dumps({"error": "request body must be a JSON object"}),
+            content_type="application/json",
+        )
+    world_id = str(body.get("encryptedWorldId", "")).strip()
+    if not world_id:
+        raise web.HTTPBadRequest(text="encryptedWorldId is required")
+    credential, token_payload = await asyncio.gather(
+        _happyoyster_request(
+            request.app,
+            "POST",
+            "/openapi/v1/worlds/get-travel-credential",
+            json_body={"encryptedWorldId": world_id},
+        ),
+        _happyoyster_request(
+            request.app,
+            "POST",
+            "/api/v1/tokens",
+            params={"expire_in_seconds": 1800},
+            base_url=_happyoyster_token_base_url(),
+        ),
+    )
+    token = token_payload.get("token") if isinstance(token_payload, dict) else None
+    ticket = credential.get("ticket") if isinstance(credential, dict) else None
+    if not token or not ticket:
+        raise web.HTTPBadGateway(
+            text=json.dumps({"error": "HappyOyster credentials are incomplete"}),
+            content_type="application/json",
+        )
+    return web.json_response(
+        {
+            "token": token,
+            "ticket": ticket,
+            "apiBaseUrl": HAPPYOYSTER_API_BASE_URL,
+            "apiHost": urlsplit(HAPPYOYSTER_API_BASE_URL).netloc,
+            "encryptedWorldId": world_id,
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
 async def _proxy_http(request):
     upstream_url = f"{UPSTREAM_HTTP}{request.rel_url}"
     try:
@@ -389,6 +615,11 @@ def create_app():
     app.router.add_get(
         "/api/world/images/{image_id}", _generated_world_image
     )
+    app.router.add_get("/api/happyoyster/config", _happyoyster_config)
+    app.router.add_post("/api/happyoyster/share-image", _happyoyster_share_image)
+    app.router.add_post("/api/happyoyster/worlds", _happyoyster_create_world)
+    app.router.add_get("/api/happyoyster/worlds/build-status", _happyoyster_world_status)
+    app.router.add_post("/api/happyoyster/prepare", _happyoyster_prepare)
     app.router.add_get(
         "/backends/{backend}/v1/realtime_video/generate",
         _proxy_backend_websocket,

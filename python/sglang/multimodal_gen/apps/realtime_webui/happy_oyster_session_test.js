@@ -1,0 +1,127 @@
+const assert = require("assert");
+const fs = require("fs");
+const path = require("path");
+
+const root = __dirname;
+const html = fs.readFileSync(path.join(root, "index.html"), "utf8");
+const app = fs.readFileSync(path.join(root, "app.js"), "utf8");
+const server = fs.readFileSync(path.join(root, "server.py"), "utf8");
+const {
+  HappyOysterSession,
+  translateHappyOysterCameraActions,
+} = require("./happy_oyster_session.js");
+
+for (const slot of ["modelSlot0", "modelSlot1", "modelSlot2"]) {
+  assert.match(html, new RegExp(`id="${slot}"`), `${slot} should expose a model picker`);
+}
+assert.match(html, /id="happyOysterPlayer"/);
+assert.match(html, /id="happyoysterViewport"[^>]*autoplay[^>]*playsinline/);
+assert.match(html, /happy_oyster_sdk\.js/);
+assert.match(html, /happy_oyster_session\.js/);
+assert.match(html, /happy_oyster_session\.js\?v=happyoyster-session-v2/);
+assert.match(app, /happyoyster:\s*happyOysterSession/);
+assert.match(app, /enabled:\s*\(init\) => modelSelected\("happyoyster"\)/);
+assert.match(server, /\/api\/happyoyster\/prepare/);
+assert.match(server, /HAPPYOYSTER_API_KEY/);
+assert.doesNotMatch(server, /SGLANG_REALTIME_UI_CONFIG.*HAPPYOYSTER_API_KEY/);
+assert.match(server, /base_url=_happyoyster_token_base_url\(\)/);
+assert.match(server, /async def _generated_world_image[\s\S]*?return web\.FileResponse/);
+
+assert.deepStrictEqual(
+  translateHappyOysterCameraActions({ transitions: [{ actions: ["w", "a", "j"] }] }),
+  { translation: "Front_Left", rotation: "Mouse_Left", interaction: "None" },
+);
+assert.deepStrictEqual(
+  translateHappyOysterCameraActions({ transitions: [{ actions: ["d", "k", "space"] }] }),
+  { translation: "Right", rotation: "Mouse_Down", interaction: "Jump" },
+);
+assert.deepStrictEqual(
+  translateHappyOysterCameraActions({ transitions: [{ actions: [] }] }),
+  { translation: "None", rotation: "None", interaction: "None" },
+);
+
+function jsonResponse(payload, ok = true, status = 200) {
+  return { ok, status, json: async () => payload };
+}
+
+async function testSessionLifecycle() {
+  const calls = [];
+  const states = [];
+  const commands = [];
+  let ended = false;
+  const fetchImpl = async (url, options = {}) => {
+    calls.push({ url, options });
+    if (url.endsWith("/config")) return jsonResponse({ enabled: true });
+    if (url.endsWith("/share-image")) return jsonResponse({ url: "https://example.test/frame.png" });
+    if (url.endsWith("/worlds")) return jsonResponse({ encryptedWorldId: "world-test" });
+    if (url.includes("/build-status")) return jsonResponse({ status: "ready" });
+    if (url.endsWith("/prepare")) {
+      return jsonResponse({
+        apiBaseUrl: "https://example.test/api/v2/apps/happyoyster-1.0",
+        token: "temporary-token",
+        ticket: "one-time-ticket",
+      });
+    }
+    throw new Error(`unexpected URL ${url}`);
+  };
+  const travel = {
+    on: () => () => {},
+    onError: () => () => {},
+    start: async () => {},
+    end: async () => { ended = true; },
+    sendCommand: async (command) => { commands.push(command); },
+  };
+  global.HappyOysterSDK = {
+    HappyOysterEngine: class {
+      createTravel({ ticket, videoElement }) {
+        assert.strictEqual(ticket, "one-time-ticket");
+        assert.ok(videoElement);
+        return travel;
+      }
+    },
+  };
+  const video = {
+    muted: false,
+    defaultMuted: false,
+    pause() {},
+    removeAttribute() {},
+    load() {},
+  };
+  const session = new HappyOysterSession({
+    video,
+    fetchImpl,
+    onState: (state) => states.push(state),
+  });
+  await session.prepare({
+    prompt: "A safe test world",
+    firstFrame: new Uint8Array([1, 2, 3]),
+    firstFrameMimeType: "image/png",
+  });
+  assert.strictEqual(calls.filter(({ url }) => url.endsWith("/worlds")).length, 1);
+  assert.strictEqual(session.connected, false, "prepare should not start RTC playback");
+  await session.connect();
+  assert.strictEqual(session.connected, true);
+  assert.strictEqual(video.muted, true);
+  assert.strictEqual(session.sendEvent({
+    kind: "camera_actions",
+    payload: { transitions: [{ actions: ["w", "j"] }] },
+  }), true);
+  await session.pendingCommand;
+  assert.deepStrictEqual(commands, [{
+    translation: "Front",
+    rotation: "Mouse_Left",
+    interaction: "None",
+  }]);
+  assert.strictEqual(session.sendEvent({ kind: "prompt", payload: "turn left" }), false);
+  await session.close();
+  assert.strictEqual(ended, true);
+  assert.ok(states.includes("ready"));
+  assert.ok(states.includes("live"));
+}
+
+testSessionLifecycle()
+  .then(() => console.log("HappyOyster SBS contract checks passed"))
+  .catch((error) => {
+    console.error(error);
+    process.exitCode = 1;
+  });

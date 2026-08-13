@@ -165,6 +165,14 @@ class WorldCreatorTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ValueError, "required"):
             await self.creator.complete("")
 
+    async def test_shared_image_preserves_safe_extension_and_is_resolvable(self):
+        name = self.creator.save_shared_image(b"webp-bytes", ".webp")
+        self.assertRegex(name, r"^[0-9a-f]{32}\.webp$")
+        path = self.creator.generated_image_path(name)
+        self.assertIsNotNone(path)
+        self.assertEqual(path.read_bytes(), b"webp-bytes")
+        self.assertIsNone(self.creator.generated_image_path("../unsafe.webp"))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -9,8 +9,8 @@ const app = fs.readFileSync(path.join(root, "app.js"), "utf8");
 
 assert.equal(
   (html.match(/class="model-player"/g) || []).length,
-  2,
-  "comparison UI should render exactly two model players",
+  3,
+  "comparison UI should render two default players plus one optional SBS player",
 );
 assert.match(html, /id="minwmViewport"/, "left player should expose a Zing canvas");
 assert.match(html, /id="lingbot2Viewport"/, "right player should expose a LingBot2 canvas");
@@ -25,7 +25,7 @@ assert.equal((html.match(/class="stage-controls"/g) || []).length, 1, "camera co
 assert.equal((html.match(/id="firstFrame"/g) || []).length, 1, "reference picker remains shared");
 assert.equal((html.match(/id="prompt"/g) || []).length, 1, "prompt remains shared");
 assert.equal((html.match(/id="fullscreenBtn"/g) || []).length, 1, "comparison fullscreen remains shared");
-assert.equal((html.match(/class="model-player-telemetry"/g) || []).length, 2, "each player needs its own telemetry");
+assert.equal((html.match(/class="model-player-telemetry"/g) || []).length, 3, "each player needs its own telemetry");
 assert.equal((html.match(/class="model-parameter-panel"/g) || []).length, 2, "each player needs independent parameters");
 assert.match(
   html,
@@ -102,8 +102,8 @@ assert.match(
 );
 assert.match(html, /playback_controller\.js\?v=realtime-playback-v33/);
 assert.match(html, /model_session\.js\?v=dual-model-v8/);
-assert.match(html, /dual_model_controller\.js\?v=dual-model-v4/);
-assert.match(html, /app\.js\?v=world-studio-v15/);
+assert.match(html, /dual_model_controller\.js\?v=dual-model-v5/);
+assert.match(html, /app\.js\?v=world-studio-v17/);
 assert.doesNotMatch(
   app,
   /window\.location\.hostname === "localhost"/,
@@ -208,7 +208,7 @@ assert.doesNotMatch(
   /if \(ws && ws\.bufferedAmount > CONTROL_BUFFERED_AMOUNT_LIMIT\)/,
   "one model's socket pressure must not alter the shared control stream",
 );
-assert.match(app, /enabled:\s*\(init\)\s*=>\s*init\.generation_mode\s*!==\s*"t2v"/);
+assert.match(app, /enabled:\s*\(init\) => modelSelected\("lingbot2"\) && init\.generation_mode !== "t2v"/);
 assert.match(app, /function drawRecordingComparisonPreview\(/);
 assert.match(app, /createFullscreenController/);
 const placeholderIndex = app.indexOf("await drawInitialReferencePlaceholders(firstFrame);");

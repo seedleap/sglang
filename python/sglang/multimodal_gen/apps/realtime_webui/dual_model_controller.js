@@ -14,12 +14,14 @@
 
     async connect(baseInit) {
       this.connectionGeneration += 1;
+      const generation = this.connectionGeneration;
       this.nextEventId = 1;
       this.activeKeys.clear();
       this.connectionTemplates.clear();
       this.latestEvents.clear();
       this.reconnectCounts.clear();
       const entries = [];
+      const backgroundEntries = [];
       for (const [key, session] of Object.entries(this.sessions)) {
         const backend = this.backends[key];
         if (!backend) throw new Error(`missing backend configuration for ${key}`);
@@ -27,7 +29,7 @@
           ? backend.enabled(baseInit, key)
           : backend.enabled !== false;
         if (enabled) {
-          entries.push([key, session]);
+          (backend.nonBlocking ? backgroundEntries : entries).push([key, session]);
           continue;
         }
         if (typeof session.setUnavailable === "function") {
@@ -36,21 +38,40 @@
           session.close("disabled for request");
         }
       }
-      const results = await Promise.allSettled(entries.map(([key]) => this.connectKey(
-        key,
-        baseInit,
-        { reconnect: false },
-      )));
-      const report = { connected: [], failed: [] };
+      const connectOne = async (key, { replayLatest = false } = {}) => {
+        await this.connectKey(key, baseInit, { reconnect: false });
+        if (generation !== this.connectionGeneration) {
+          this.sessions[key]?.close("stale connection");
+          return false;
+        }
+        this.activeKeys.add(key);
+        if (replayLatest) {
+          const replayEvents = [...this.latestEvents.values()].sort(
+            (left, right) => Number(left.event_id || 0) - Number(right.event_id || 0),
+          );
+          for (const envelope of replayEvents) this.sessions[key]?.sendEvent(envelope);
+        }
+        return true;
+      };
+      const results = await Promise.allSettled(entries.map(([key]) => connectOne(key)));
+      const report = {
+        connected: [],
+        failed: [],
+        pending: backgroundEntries.map(([key]) => key),
+      };
       results.forEach((result, index) => {
         const [key] = entries[index];
-        if (result.status === "fulfilled") {
-          this.activeKeys.add(key);
+        if (result.status === "fulfilled" && result.value) {
           report.connected.push(key);
         } else {
-          report.failed.push({ key, error: result.reason });
+          report.failed.push({ key, error: result.reason || new Error("stale connection") });
         }
       });
+      for (const [key] of backgroundEntries) {
+        void connectOne(key, { replayLatest: true }).catch(() => {
+          this.activeKeys.delete(key);
+        });
+      }
       if (!report.connected.length && entries.length) {
         throw new Error(
           `no realtime model connected: ${report.failed

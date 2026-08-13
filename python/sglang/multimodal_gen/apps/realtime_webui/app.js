@@ -412,6 +412,56 @@ const CUSTOM_WORLD_STORE_NAME = "worlds";
 let customWorldPresets = [];
 let customWorldDbPromise = null;
 let customWorldLoadPromise = null;
+const MODEL_SLOT_DEFAULTS = ["minwm", "lingbot2", "happyoyster"];
+let activeModelSlotCount = 2;
+
+function selectedModelKeys() {
+  const keys = [];
+  for (let index = 0; index < activeModelSlotCount; index += 1) {
+    const key = $(`modelSlot${index}`)?.value || MODEL_SLOT_DEFAULTS[index];
+    if (!keys.includes(key)) keys.push(key);
+  }
+  return keys;
+}
+
+function modelSelected(key) {
+  return selectedModelKeys().includes(key);
+}
+
+function syncModelSlotUi() {
+  const selected = selectedModelKeys();
+  const grid = document.querySelector(".model-player-grid");
+  for (const key of MODEL_SLOT_DEFAULTS) {
+    const player = document.querySelector(`[data-model-key="${key}"]`);
+    if (player) player.hidden = !selected.includes(key);
+  }
+  for (const key of selected) {
+    const player = document.querySelector(`[data-model-key="${key}"]`);
+    if (player && grid) grid.appendChild(player);
+  }
+  grid?.classList.toggle("is-three-up", selected.length === 3);
+  $("modelSlot2Wrap").hidden = activeModelSlotCount < 3;
+  $("addModelSlotBtn").hidden = activeModelSlotCount >= 3;
+  $("removeModelSlotBtn").hidden = activeModelSlotCount < 3;
+}
+
+function ensureUniqueModelSlot(changedIndex) {
+  const changed = $(`modelSlot${changedIndex}`);
+  if (!changed) return;
+  for (let index = 0; index < activeModelSlotCount; index += 1) {
+    if (index === changedIndex) continue;
+    const other = $(`modelSlot${index}`);
+    if (other?.value !== changed.value) continue;
+    const replacement = MODEL_SLOT_DEFAULTS.find((key) => (
+      key !== changed.value
+      && !Array.from({ length: activeModelSlotCount }, (_, slotIndex) => (
+        slotIndex === index ? null : $(`modelSlot${slotIndex}`)?.value
+      )).includes(key)
+    ));
+    if (replacement) other.value = replacement;
+  }
+  syncModelSlotUi();
+}
 
 function allWorldPresets() {
   return [...presets, ...customWorldPresets];
@@ -627,6 +677,30 @@ const lingbot2Session = new RealtimeModelSession({
     scheduleLingbot2Reconnect(error.message || "stream failed");
   },
 });
+const happyOysterSession = new HappyOysterSession({
+  video: $("happyoysterViewport"),
+  overlay: $("happyoysterPreviewOverlay"),
+  root: document.querySelector('[data-model-key="happyoyster"]'),
+  onState: (state, details) => {
+    setModelConnectionState("happyoyster", state);
+    if (state === "error") {
+      addHistory(`快乐生蚝 error · ${details.message || details.reason || "unknown"}`);
+    }
+  },
+  onError: (error) => {
+    addHistory(`快乐生蚝 session failed · ${error.message || "unknown"}`);
+  },
+});
+
+function buildHappyOysterInit(init) {
+  return {
+    prompt: init.prompt,
+    firstFrame: init.first_frame,
+    firstFrameMimeType: selectedReferenceMimeType || selectedPreset?.mime || "image/png",
+    perspective: /first[-_ ]person/i.test(init.prompt || "") ? "first_person" : "third_person",
+  };
+}
+
 const primarySessionAdapter = {
   connect: (init, url) => openPrimarySession(init, url),
   sendEvent: (envelope) => sendPrimaryEventEnvelope(envelope),
@@ -636,9 +710,11 @@ const dualModelController = new DualModelController({
   sessions: {
     minwm: primarySessionAdapter,
     lingbot2: lingbot2Session,
+    happyoyster: happyOysterSession,
   },
   backends: {
     minwm: {
+      enabled: () => modelSelected("minwm"),
       model: () => String(
         DUAL_MODEL_CONFIG.minwm?.model
         || UI_CONFIG.minwmModel
@@ -670,9 +746,17 @@ const dualModelController = new DualModelController({
           size: "1280x720",
         };
       },
-      enabled: (init) => init.generation_mode !== "t2v",
+      enabled: (init) => modelSelected("lingbot2") && init.generation_mode !== "t2v",
       unavailableReason: "T2V unavailable",
       wsUrl: (init) => backendWebSocketUrl("lingbot2", init.trace_id),
+    },
+    happyoyster: {
+      model: "happyoyster-adventure",
+      nonBlocking: true,
+      enabled: (init) => modelSelected("happyoyster") && init.generation_mode === "i2v",
+      unavailableReason: "仅支持 I2V Adventure",
+      transformInit: buildHappyOysterInit,
+      wsUrl: "",
     },
   },
 });
@@ -4125,6 +4209,7 @@ async function connect() {
   $("connectBtn").disabled = true;
   setModelConnectionState("minwm", "connecting");
   setModelConnectionState("lingbot2", "connecting");
+  setModelConnectionState("happyoyster", "connecting");
   setStatus("Preparing");
   setPreviewState("waiting");
   addHistory("preparing session");
@@ -4152,6 +4237,7 @@ async function connect() {
       setWorldDraftStatus("请先补齐首帧图片和世界描述", "error");
       setModelConnectionState("minwm", "idle");
       setModelConnectionState("lingbot2", "idle");
+      setModelConnectionState("happyoyster", "idle");
       setPreviewState("idle");
       addHistory("world draft incomplete");
       $("connectBtn").disabled = false;
@@ -4173,6 +4259,7 @@ async function connect() {
       if (!firstFrame) {
         setModelConnectionState("minwm", "idle");
         setModelConnectionState("lingbot2", "idle");
+        setModelConnectionState("happyoyster", "idle");
         setStatus("Pick a reference", "error");
         setPreviewState("idle");
         addHistory("reference image required for I2V");
@@ -4220,6 +4307,9 @@ async function connect() {
       if (connectionReport.failed.some(({ key }) => key === "lingbot2")) {
         scheduleLingbot2Reconnect("initial connection failed");
       }
+    }
+    if (connectionReport.pending?.includes("happyoyster")) {
+      addHistory("快乐生蚝 World is preparing independently · Zing/LingBot2 are already live");
     }
     promptRewriteController.beginSession(init.prompt);
     sessionLifetimeGuard.start();
@@ -4591,7 +4681,9 @@ function sendEvent(kind, payload, historyText = null) {
 }
 
 function modelLabel(key) {
-  return key === "lingbot2" ? "LingBot2" : "Zing";
+  if (key === "lingbot2") return "LingBot2";
+  if (key === "happyoyster") return "快乐生蚝";
+  return "Zing";
 }
 
 function formatModelDelivery(sent = {}) {
@@ -5214,6 +5306,7 @@ function unpack(buf) {
 }
 
 applyRuntimeUiConfig();
+syncModelSlotUi();
 renderPresets();
 void ensureCustomWorldPresetsLoaded();
 drawIdle();
@@ -5235,6 +5328,27 @@ renderTraceTopology();
 updateRecordButton();
 updateRecordFolderButton();
 $("connectBtn").onclick = connect;
+function closeForModelSlotChange() {
+  if (!ws && dualModelController.activeKeys.size === 0 && !happyOysterSession.connected) return;
+  closeSession("model comparison selection changed");
+  setStatus("Selection changed");
+}
+for (let slotIndex = 0; slotIndex < MODEL_SLOT_DEFAULTS.length; slotIndex += 1) {
+  $(`modelSlot${slotIndex}`).addEventListener("change", () => {
+    closeForModelSlotChange();
+    ensureUniqueModelSlot(slotIndex);
+  });
+}
+$("addModelSlotBtn").onclick = () => {
+  closeForModelSlotChange();
+  activeModelSlotCount = 3;
+  ensureUniqueModelSlot(2);
+};
+$("removeModelSlotBtn").onclick = () => {
+  closeForModelSlotChange();
+  activeModelSlotCount = 2;
+  syncModelSlotUi();
+};
 $("clearWorldBtn").onclick = clearWorldDraft;
 $("enhanceBtn").onclick = completeWorldDraft;
 $("prompt").addEventListener("input", updateWorldDraftState);
@@ -5242,6 +5356,7 @@ $("stopBtn").onclick = () => {
   closeSession();
   setModelConnectionState("minwm", "closed");
   setModelConnectionState("lingbot2", "closed");
+  setModelConnectionState("happyoyster", "closed");
 };
 
 function setPromptRewriteStatus(message, state = "") {

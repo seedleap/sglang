@@ -1526,6 +1526,7 @@ body.world-studio {
   min-width: 0;
   background: transparent;
 }
+.world-studio .model-player-grid.is-three-up { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
 .world-studio .model-player {
   display: grid;
   min-width: 0;
@@ -1540,6 +1541,12 @@ body.world-studio {
 .world-studio .model-player[data-session-state="live"] { border-color: rgba(121, 223, 189, 0.38); box-shadow: 0 18px 54px rgba(0, 0, 0, 0.25), 0 0 30px rgba(77, 111, 145, 0.08); }
 .world-studio .model-player-title { display: flex; height: 38px; align-items: center; justify-content: space-between; gap: 10px; padding: 0 12px; background: linear-gradient(180deg, #161c1c, #121717); color: var(--ws-text); }
 .world-studio .model-player-title > strong { font-size: 14px; font-weight: 640; }
+.world-studio .model-slot-config { display: flex; align-items: end; gap: 8px; margin-bottom: 9px; }
+.world-studio .model-slot-config label { display: grid; min-width: 128px; gap: 4px; color: var(--ws-muted); font-size: 8px; letter-spacing: 0.09em; text-transform: uppercase; }
+.world-studio .model-slot-config select { width: 100%; height: 31px; border: 1px solid var(--ws-line); border-radius: 8px; padding: 0 28px 0 9px; background: #0d1212; color: var(--ws-text); font: inherit; font-size: 11px; font-weight: 640; letter-spacing: 0; text-transform: none; }
+.world-studio .model-slot-config button { min-height: 31px; border: 1px solid var(--ws-line); border-radius: 8px; padding: 0 11px; background: rgba(255,255,255,0.025); color: var(--ws-text); font-size: 9px; }
+.world-studio .model-slot-config button:hover { border-color: rgba(121,223,189,0.48); background: var(--ws-accent-soft); transform: none; }
+.world-studio .model-slot-config [hidden] { display: none; }
 .world-studio .model-player-telemetry { display: flex; width: auto; align-items: center; gap: 6px; border: 0; background: transparent; }
 .world-studio .model-player-telemetry > span {
   display: inline-flex;
@@ -1561,7 +1568,8 @@ body.world-studio {
 .world-studio .preview-frame { position: relative; display: grid; width: 100%; aspect-ratio: 16 / 9; place-items: center; overflow: hidden; background: #090d0d; contain: paint; isolation: isolate; }
 .world-studio .preview-frame::before { content: ""; position: absolute; inset: 0; z-index: 2; pointer-events: none; background: linear-gradient(180deg, rgba(255,255,255,0.025), transparent 28%, rgba(0,0,0,0.08)); }
 .world-studio #minwmViewport,
-.world-studio #lingbot2Viewport { position: relative; z-index: 1; display: block; width: 100%; height: 100%; max-height: none; object-fit: contain; transform: translateZ(0); }
+.world-studio #lingbot2Viewport,
+.world-studio #happyoysterViewport { position: relative; z-index: 1; display: block; width: 100%; height: 100%; max-height: none; object-fit: contain; transform: translateZ(0); }
 
 .world-studio .stage-controls {
   display: grid;
@@ -1694,6 +1702,8 @@ body.world-studio {
   .world-studio .entry-actions { margin-top: 6px; }
   .world-studio .preset-list { grid-template-columns: repeat(2, minmax(0, 1fr)); max-height: none; }
   .world-studio .model-player-grid { grid-template-columns: 1fr; }
+  .world-studio .model-player-grid.is-three-up { grid-template-columns: 1fr; }
+  .world-studio .model-slot-config { flex-wrap: wrap; align-items: end; }
   .world-studio .stage-controls { gap: 44px; padding-inline: 4%; }
   .world-studio .prompt-composer { grid-template-columns: minmax(0, 1fr) 64px; }
   .world-studio .send-update { grid-column: 1 / -1; min-height: 44px; }

@@ -48,6 +48,18 @@ for (const name of assetNames) {
 
 assert.strictEqual(assetNames.length, 14);
 
+for (const removedPreset of [
+  "Stone Orbit",
+  "Urban Tilt",
+  "Lake Scout",
+  "Ziggy Stardust",
+  "Plastic Beach",
+  "Plastic Ono Band",
+  "Kid A",
+]) {
+  assert.ok(!appJs.includes(`name: "${removedPreset}"`), `${removedPreset} must stay removed`);
+}
+
 const featuredPresetMatch = appJs.match(
   /const FEATURED_PRESET_NAMES = \[([\s\S]*?)\];/,
 );

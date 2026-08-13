@@ -464,8 +464,24 @@ class WorldCreator:
         target.write_bytes(image_bytes)
         return image_id
 
+    def save_shared_image(self, image_bytes: bytes, suffix: str = ".png") -> str:
+        """Persist one browser-supplied frame so an external model can fetch it."""
+
+        normalized_suffix = suffix.lower()
+        if normalized_suffix not in {".png", ".jpg", ".jpeg", ".webp"}:
+            normalized_suffix = ".png"
+        self.generated_root.mkdir(parents=True, exist_ok=True)
+        image_id = uuid.uuid4().hex
+        target = self.generated_root / f"{image_id}{normalized_suffix}"
+        target.write_bytes(image_bytes)
+        return target.name
+
     def generated_image_path(self, image_id: str) -> Path | None:
-        if len(image_id) != 32 or any(c not in "0123456789abcdef" for c in image_id):
+        stem = Path(image_id).stem
+        suffix = Path(image_id).suffix.lower()
+        if suffix and suffix not in {".png", ".jpg", ".jpeg", ".webp"}:
             return None
-        path = self.generated_root / f"{image_id}.png"
+        if len(stem) != 32 or any(c not in "0123456789abcdef" for c in stem):
+            return None
+        path = self.generated_root / (image_id if suffix else f"{stem}.png")
         return path if path.is_file() else None

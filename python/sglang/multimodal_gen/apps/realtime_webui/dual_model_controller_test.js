@@ -148,6 +148,42 @@ async function main() {
   assert.equal(t2vMinwm.events.length, 1, "active T2V backend should receive shared input");
   assert.equal(t2vLingbot.events.length, 0, "disabled T2V backend should not receive input");
 
+  let releaseBackground;
+  const backgroundReady = new Promise((resolve) => { releaseBackground = resolve; });
+  const fastModel = new FakeSession("fast");
+  const slowApiModel = new FakeSession("slow-api");
+  slowApiModel.connect = async function connect(init, url) {
+    this.connectCalls.push({ init, url });
+    await backgroundReady;
+  };
+  const backgroundController = new DualModelController({
+    sessions: { fast: fastModel, slowApi: slowApiModel },
+    backends: {
+      fast: { model: "fast", wsUrl: "/fast" },
+      slowApi: { model: "slow-api", wsUrl: "", nonBlocking: true },
+    },
+  });
+  const backgroundReport = await backgroundController.connect({ trace_id: "background" });
+  assert.deepEqual(backgroundReport.connected, ["fast"]);
+  assert.deepEqual(backgroundReport.pending, ["slowApi"]);
+  assert.deepEqual(
+    backgroundController.sendEvent("camera_actions", {}).sent,
+    { fast: true },
+    "an API model still building its world must not delay or receive input before it is ready",
+  );
+  releaseBackground();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(
+    slowApiModel.events.length,
+    1,
+    "a newly live API model should immediately receive the latest shared control state",
+  );
+  assert.deepEqual(
+    backgroundController.sendEvent("camera_actions", {}).sent,
+    { fast: true, slowApi: true },
+    "the API model joins the same input bus once its travel is live",
+  );
+
   console.log("dual model controller ok");
 }
 
