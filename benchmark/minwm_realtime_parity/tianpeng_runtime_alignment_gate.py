@@ -32,6 +32,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", required=True)
     parser.add_argument("--checkpoint-sha256", required=True)
     parser.add_argument("--alignment-url", default=DEFAULT_ALIGNMENT_URL)
+    parser.add_argument(
+        "--canonical-source-url",
+        help=(
+            "Immutable public source URL to record when --alignment-url uses a "
+            "signed or local mirror of the same bytes."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -78,7 +85,10 @@ def validate_alignment(canonical: dict, model_config: dict) -> list[dict]:
 
 
 def build_provenance(
-    model_dir: Path, alignment_url: str, checkpoint_sha256: str
+    model_dir: Path,
+    alignment_url: str,
+    checkpoint_sha256: str,
+    canonical_source_url: str | None = None,
 ) -> dict:
     source_payloads = {
         name: _fetch_bytes(urllib.parse.urljoin(alignment_url, name))
@@ -101,14 +111,15 @@ def build_provenance(
         "prompt_first_frame_pin_enabled=True request_sink_size=8 "
         "request_window_size=32 allow_growth=False"
     )
+    recorded_source_url = canonical_source_url or alignment_url
     return {
         "schema_version": "minwm-tianpeng-runtime-alignment/v1",
         "status": "pass",
         "canonical_source": {
-            "url": alignment_url,
+            "url": recorded_source_url,
             "files": {
                 name: {
-                    "url": urllib.parse.urljoin(alignment_url, name),
+                    "url": urllib.parse.urljoin(recorded_source_url, name),
                     "bytes": len(payload),
                     "sha256": sha256_bytes(payload),
                 }
@@ -169,7 +180,10 @@ def atomic_json(path: Path, payload: dict) -> None:
 def main() -> None:
     args = parse_args()
     payload = build_provenance(
-        Path(args.model_dir), args.alignment_url, args.checkpoint_sha256
+        Path(args.model_dir),
+        args.alignment_url,
+        args.checkpoint_sha256,
+        args.canonical_source_url,
     )
     atomic_json(Path(args.output), payload)
     print(json.dumps(payload, sort_keys=True))

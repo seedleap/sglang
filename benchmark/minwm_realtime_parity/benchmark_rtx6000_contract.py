@@ -30,6 +30,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--profile-name", required=True)
     parser.add_argument("--sglang-git-ref", required=True)
     parser.add_argument("--checkpoint-sha256", required=True)
+    parser.add_argument("--alignment-url", default=DEFAULT_ALIGNMENT_URL)
     parser.add_argument(
         "--ws-url", default="ws://127.0.0.1:30000/v1/realtime_video/generate"
     )
@@ -328,7 +329,7 @@ def summarize(args: argparse.Namespace, size: str, result: dict) -> dict:
 
 async def main() -> None:
     args = parse_args()
-    contract = load_contract(DEFAULT_ALIGNMENT_URL)
+    contract = load_contract(args.alignment_url)
     base_request = contract["request"]
     summaries = []
     warmups = []

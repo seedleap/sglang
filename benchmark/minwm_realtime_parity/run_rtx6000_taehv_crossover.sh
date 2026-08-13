@@ -20,8 +20,22 @@ TAEHV_CHECKPOINT="${TAEHV_ROOT}/taew2_2.pth"
 TAEHV_SHA256="d053e216ca50e2bb837bbcd79b85f0366bea00e5938025572382a773b74c559a"
 TAEHV_REVISION="093b918971d59001a0bad6dfd6e0409b5e1752cf"
 TAEHV_URL="https://raw.githubusercontent.com/madebyollin/taehv/${TAEHV_REVISION}/taew2_2.pth"
+ALIGNMENT_SOURCE_URL="https://leap-world-us-east-2.s3.us-east-2.amazonaws.com/world-model/sft/prompt_compare/detailmix_director_gap12_20260729_094145/inference-alignment/"
+ALIGNMENT_S3_URI="s3://leap-world-us-east-2/world-model/sft/prompt_compare/detailmix_director_gap12_20260729_094145/inference-alignment"
+ALIGNMENT_CACHE="/work/minwm-tianpeng-alignment/detailmix-director-gap12-20260729"
 export TAEHV_SHA256 TAEHV_REVISION
-mkdir -p "/work/minwm-realtime" "${PAIR_ROOT}" "${LOCAL_ARTIFACT_ROOT}" "${TAEHV_ROOT}"
+mkdir -p "/work/minwm-realtime" "${PAIR_ROOT}" "${LOCAL_ARTIFACT_ROOT}" \
+  "${TAEHV_ROOT}" "${ALIGNMENT_CACHE}"
+aws s3 sync "${ALIGNMENT_S3_URI%/}/" "${ALIGNMENT_CACHE}/" \
+  --exclude '*' \
+  --include gap12.jsonl \
+  --include input_manifest.json \
+  --include run_manifest.json \
+  --no-progress --only-show-errors
+for alignment_file in gap12.jsonl input_manifest.json run_manifest.json; do
+  [[ -s "${ALIGNMENT_CACHE}/${alignment_file}" ]]
+done
+ALIGNMENT_READ_URL="file://${ALIGNMENT_CACHE}/"
 aws s3 sync "${MINWM_ARCHIVE_S3_URI%/}/" "${LOCAL_ARTIFACT_ROOT}/" \
   --no-progress --only-show-errors || true
 
@@ -64,6 +78,8 @@ alignment_provenance="${manifest_root}/alignment-provenance.json"
 python3 "${SCRIPT_DIR}/tianpeng_runtime_alignment_gate.py" \
   --model-dir "${MODEL_DIR}" \
   --checkpoint-sha256 "${experiment_checkpoint_sha256}" \
+  --alignment-url "${ALIGNMENT_READ_URL}" \
+  --canonical-source-url "${ALIGNMENT_SOURCE_URL}" \
   --output "${alignment_provenance}"
 aws s3 cp "${alignment_provenance}" \
   "${MINWM_ARCHIVE_S3_URI%/}/environment/alignment-provenance.json" \
@@ -124,14 +140,14 @@ echo "${TAEHV_SHA256}  ${TAEHV_CHECKPOINT}" | sha256sum --check -
 
 python3 - "${CONFIG_PATH}" "${SGLANG_GIT_REF}" "${MODEL_DIR}" \
   "${LOCAL_ARTIFACT_ROOT}" "${MINWM_ARCHIVE_S3_URI}" "${TAEHV_CHECKPOINT}" \
-  "${experiment_checkpoint_sha256}" <<'PY'
+  "${experiment_checkpoint_sha256}" "${ALIGNMENT_READ_URL}" <<'PY'
 import json
 import os
 import subprocess
 import sys
 from pathlib import Path
 
-path, commit, model, artifacts, archive, taehv_checkpoint, checkpoint_sha256 = (
+path, commit, model, artifacts, archive, taehv_checkpoint, checkpoint_sha256, alignment_url = (
     sys.argv[1:]
 )
 gpu_count = int(os.environ["MINWM_REQUESTED_GPUS"])
@@ -283,6 +299,7 @@ for size in ("832x480", "1248x704"):
 config = {
     "sglang_git_ref": commit,
     "checkpoint_sha256": checkpoint_sha256,
+    "alignment_url": alignment_url,
     "minwm_git_ref": os.environ["MINWM_GIT_REF"],
     "taehv_checkpoint_path": taehv_checkpoint,
     "taehv_checkpoint_sha256": os.environ["TAEHV_SHA256"],

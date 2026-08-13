@@ -201,6 +201,8 @@ def run_client(
         "--sizes",
         case["size"],
     ]
+    if config.get("alignment_url"):
+        command.extend(["--alignment-url", str(config["alignment_url"])])
     if root.name == str(config.get("sample_label", "rep-00")):
         command.extend(["--sample-output-dir", str(work_dir / "quality-samples")])
     process = subprocess.Popen(
