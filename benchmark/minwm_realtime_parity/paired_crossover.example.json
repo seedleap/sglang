@@ -1,0 +1,47 @@
+{
+  "sglang_git_ref": "REPLACE_WITH_IMMUTABLE_COMMIT",
+  "nvme_root": "/local-nvme/minwm-paired",
+  "artifact_root": "/results/minwm-paired",
+  "base_port": 31000,
+  "paired_reps": 3,
+  "warmup_chunks": 5,
+  "measured_chunks": 69,
+  "steady_start_chunk": 10,
+  "calibration_chunks": 12,
+  "concurrency_threshold": 0.02,
+  "health_timeout": 1200,
+  "gpu_slots": [
+    {"gpu": 0, "cpu_set": "0-15", "numa_node": 0},
+    {"gpu": 1, "cpu_set": "16-31", "numa_node": 1}
+  ],
+  "cases": [
+    {
+      "name": "480-eager",
+      "size": "832x480",
+      "mode": "eager",
+      "control": {"command": ["sglang", "serve", "--model-path", "/model", "--port", "{port}", "--enable-cuda-graph", "false"]},
+      "candidate": {"command": ["sglang", "serve", "--model-path", "/model", "--port", "{port}", "--enable-cuda-graph", "false"]}
+    },
+    {
+      "name": "480-cuda-graph",
+      "size": "832x480",
+      "mode": "cuda_graph",
+      "control": {"command": ["sglang", "serve", "--model-path", "/model", "--port", "{port}", "--enable-cuda-graph", "true"]},
+      "candidate": {"command": ["sglang", "serve", "--model-path", "/model", "--port", "{port}", "--enable-cuda-graph", "true"]}
+    },
+    {
+      "name": "720-eager",
+      "size": "1248x704",
+      "mode": "eager",
+      "control": {"command": ["sglang", "serve", "--model-path", "/model", "--port", "{port}", "--enable-cuda-graph", "false"]},
+      "candidate": {"command": ["sglang", "serve", "--model-path", "/model", "--port", "{port}", "--enable-cuda-graph", "false"]}
+    },
+    {
+      "name": "720-cuda-graph",
+      "size": "1248x704",
+      "mode": "cuda_graph",
+      "control": {"command": ["sglang", "serve", "--model-path", "/model", "--port", "{port}", "--enable-cuda-graph", "true"]},
+      "candidate": {"command": ["sglang", "serve", "--model-path", "/model", "--port", "{port}", "--enable-cuda-graph", "true"]}
+    }
+  ]
+}
