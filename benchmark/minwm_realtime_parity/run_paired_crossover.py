@@ -267,6 +267,16 @@ def publish(config: dict, source: Path, destination: Path, metadata: dict) -> No
     )
 
 
+def upload_file(config: dict, source: Path, relative: str) -> None:
+    upload = config.get("upload_file_command")
+    if not upload:
+        return
+    command = [
+        part.format(source=str(source), relative=relative) for part in upload
+    ]
+    subprocess.run(command, check=True)
+
+
 def flush_interrupted(
     config: dict, source: Path, case_name: str, label: str, metadata: dict
 ) -> None:
@@ -455,13 +465,19 @@ def calibrate(config: dict, case: dict) -> bool:
         }
     threshold = float(config.get("concurrency_threshold", 0.02))
     exploratory = not concurrency_is_safe(ratios, threshold)
+    calibration_path = root / "calibration.json"
     atomic_json(
-        root / "calibration.json",
+        calibration_path,
         {
             "slowdown": ratios,
             "threshold": threshold,
             "concurrent_exploratory": exploratory,
         },
+    )
+    upload_file(
+        config,
+        calibration_path,
+        str(calibration_path.relative_to(config["artifact_root"])),
     )
     return not exploratory
 

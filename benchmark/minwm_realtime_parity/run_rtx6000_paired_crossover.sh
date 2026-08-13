@@ -10,21 +10,16 @@ PAIR="${2:-${MINWM_PAIR:-}}"
 
 : "${SGLANG_GIT_REF:?set SGLANG_GIT_REF}"
 : "${MINWM_ARCHIVE_ROOT:?set MINWM_ARCHIVE_ROOT}"
+: "${MINWM_ARCHIVE_S3_URI:?set MINWM_ARCHIVE_S3_URI}"
 
-RUN_ID="rtx6000-pair-${PAIR,,}-setup"
+RUN_ID="rtx6000-shared-${SGLANG_GIT_REF:0:10}-setup"
 MODEL_DIR="/work/minwm-realtime/${RUN_ID}/sglang-model"
 PAIR_ROOT="/work/minwm-paired/pair-${PAIR,,}"
 CONFIG_PATH="${PAIR_ROOT}/paired.json"
 LOCAL_ARTIFACT_ROOT="${PAIR_ROOT}/artifacts"
 mkdir -p "${PAIR_ROOT}" "${MINWM_ARCHIVE_ROOT}" "${LOCAL_ARTIFACT_ROOT}"
-cp -a "${MINWM_ARCHIVE_ROOT}/." "${LOCAL_ARTIFACT_ROOT}/" 2>/dev/null || true
-
-flush_setup() {
-  local source="/s3/world-model/evals/minwm/realtime-vae/20260813/bounded-8gpu/setup/pair-${PAIR,,}"
-  mkdir -p "${source}"
-  cp -a "/s3/world-model/evals/minwm/realtime-vae/20260813/bounded-8gpu/setup-local/pair-${PAIR,,}/." "${source}/" 2>/dev/null || true
-}
-trap flush_setup EXIT INT TERM
+aws s3 sync "${MINWM_ARCHIVE_S3_URI%/}/" "${LOCAL_ARTIFACT_ROOT}/" \
+  --no-progress --only-show-errors || true
 
 # The measured 480p lower bound already exceeds a 96 GB card once the causal
 # cache reaches chunk 55.  720p cannot be admitted from that lower bound.  Do
@@ -48,23 +43,36 @@ if [[ "${PAIR}" == "C" || "${PAIR}" == "D" ]]; then
   fi
 fi
 
-setup_results="/s3/world-model/evals/minwm/realtime-vae/20260813/bounded-8gpu/setup-local/pair-${PAIR,,}"
-env CUDA_VISIBLE_DEVICES=0 \
-  MINWM_RUN_ID="${RUN_ID}" \
-  MINWM_BENCHMARK_MODE=setup_only \
-  MINWM_RESULTS_ROOT="${setup_results}" \
-  bash "${SCRIPT_DIR}/aws_b200_entrypoint.sh"
+setup_results="/work/minwm-realtime/${RUN_ID}/setup-results"
+exec 9>"/work/minwm-realtime/.${RUN_ID}.lock"
+flock -x 9
+if [[ ! -f "/work/minwm-realtime/${RUN_ID}/SETUP_COMPLETE" ]]; then
+  env CUDA_VISIBLE_DEVICES=0 \
+    MINWM_RUN_ID="${RUN_ID}" \
+    MINWM_BENCHMARK_MODE=setup_only \
+    MINWM_RESULTS_ROOT="${setup_results}" \
+    bash "${SCRIPT_DIR}/aws_b200_entrypoint.sh"
+  date -Iseconds > "/work/minwm-realtime/${RUN_ID}/SETUP_COMPLETE"
+fi
+flock -u 9
 
 size=832x480
 [[ "${PAIR}" == "B" ]] && size=1248x704
 case_name="pair-${PAIR,,}-${size}-eager-vs-cuda-graph"
 
 python3 - "${CONFIG_PATH}" "${SGLANG_GIT_REF}" "${MODEL_DIR}" \
-  "${LOCAL_ARTIFACT_ROOT}" "${MINWM_ARCHIVE_ROOT}" "${case_name}" "${size}" <<'PY'
+  "${LOCAL_ARTIFACT_ROOT}" "${MINWM_ARCHIVE_S3_URI}" "${case_name}" "${size}" "${PAIR}" <<'PY'
 import json, sys
 from pathlib import Path
 
-path, commit, model, artifacts, archive, name, size = sys.argv[1:]
+path, commit, model, artifacts, archive, name, size, pair = sys.argv[1:]
+cpu_slots = {
+    "A": ("0-19", "20-39", 0),
+    "B": ("48-67", "68-87", 0),
+    "C": ("96-115", "116-135", 1),
+    "D": ("144-163", "164-183", 1),
+}
+cpu0, cpu1, numa = cpu_slots[pair]
 common = [
     "sglang", "serve", "--model-path", model,
     "--pipeline-class-name", "MinWMCausalDMDPipeline",
@@ -93,10 +101,16 @@ config = {
     "artifact_root": artifacts,
     "upload_command": [
         "bash", "-lc",
-        "destination=" + archive + "/{relative}; "
-        "mkdir -p \"$destination\"; "
-        "cd {source}; find . -type f ! -name COMPLETE -exec cp --parents '{}' \"$destination\" ';'; "
-        "cp COMPLETE \"$destination/COMPLETE\"; cp result.json \"$destination/UPLOADED.json\"",
+        "aws s3 cp {source} " + archive + "/{relative} --recursive "
+        "--exclude COMPLETE --exclude UPLOADED.json --no-progress --only-show-errors && "
+        "aws s3 cp {source}/COMPLETE " + archive + "/{relative}/COMPLETE "
+        "--no-progress --only-show-errors && "
+        "aws s3 cp {source}/result.json " + archive + "/{relative}/UPLOADED.json "
+        "--no-progress --only-show-errors",
+    ],
+    "upload_file_command": [
+        "aws", "s3", "cp", "{source}", archive + "/{relative}",
+        "--no-progress", "--only-show-errors",
     ],
     "base_port": 31000,
     "paired_reps": 3,
@@ -107,8 +121,8 @@ config = {
     "concurrency_threshold": 0.02,
     "health_timeout": 1800,
     "gpu_slots": [
-        {"gpu": 0, "cpu_set": "0-19", "numa_node": 0},
-        {"gpu": 1, "cpu_set": "20-39", "numa_node": 0},
+        {"gpu": 0, "cpu_set": cpu0, "numa_node": numa},
+        {"gpu": 1, "cpu_set": cpu1, "numa_node": numa},
     ],
     "cases": [{
         "name": name, "size": size, "mode": "cuda_graph",
@@ -120,5 +134,8 @@ Path(path).write_text(json.dumps(config, indent=2, sort_keys=True) + "\n")
 PY
 
 python3 "${SCRIPT_DIR}/run_paired_crossover.py" --config "${CONFIG_PATH}" --dry-run \
-  | tee "${MINWM_ARCHIVE_ROOT}/dry-run.json"
+  | tee "${PAIR_ROOT}/dry-run.json"
+aws s3 cp "${PAIR_ROOT}/dry-run.json" \
+  "${MINWM_ARCHIVE_S3_URI%/}/dry-run-${SGLANG_GIT_REF:0:10}.json" \
+  --no-progress --only-show-errors
 exec python3 "${SCRIPT_DIR}/run_paired_crossover.py" --config "${CONFIG_PATH}"
