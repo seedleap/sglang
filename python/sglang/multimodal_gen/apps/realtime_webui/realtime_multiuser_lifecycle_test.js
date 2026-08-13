@@ -76,6 +76,11 @@ assert.match(
   /function markSessionPlayable[\s\S]*?sessionLifetimeGuard\.start\(\);\s*startSessionCountdown\(\);/,
   "the countdown should start only when a selected model renders a playable frame",
 );
+assert.match(
+  appJs,
+  /primaryHasVisibleFrame = true;[\s\S]*?markSessionPlayable\("minwm"\)/,
+  "Zing must mark the session playable only after an actual model frame is drawn",
+);
 assert.doesNotMatch(
   appJs,
   /const connectionReport = await dualModelController\.connect\(init\);[\s\S]{0,2200}sessionLifetimeGuard\.start\(\)/,

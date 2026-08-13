@@ -927,6 +927,7 @@ let sessionLifetimeExpired = false;
 let sessionPlayable = false;
 let playbackAckTimer = 0;
 let lastRenderedEventId = 0;
+let primaryHasVisibleFrame = false;
 let sessionCountdownTimer = 0;
 let sessionCountdownDeadlineMs = 0;
 const sessionLifetimeGuard = new SessionLifetimeGuard({
@@ -970,7 +971,7 @@ function schedulePrimaryPlaybackAck() {
         last_received_chunk: lastReceivedChunk,
         last_rendered_chunk: lastRenderedChunk,
         last_rendered_event_id: lastRenderedEventId,
-        playable: renderedPreviewFrames > 0,
+        playable: primaryHasVisibleFrame,
       },
     }));
   }, PLAYBACK_ACK_INTERVAL_MS);
@@ -1470,6 +1471,7 @@ function resetStreamStats() {
   renderedPreviewFrames = 0;
   lastSentEventId = 0;
   lastRenderedEventId = 0;
+  primaryHasVisibleFrame = false;
   if (playbackAckTimer) window.clearTimeout(playbackAckTimer);
   playbackAckTimer = 0;
   lastSampledEventId = 0;
@@ -3997,6 +3999,7 @@ function drawFrame(image, { close = true, markRendered = true } = {}) {
   ctx.imageSmoothingEnabled = true;
   ctx.imageSmoothingQuality = "medium";
   ctx.drawImage(drawSource, 0, 0, sourceWidth, sourceHeight);
+  primaryHasVisibleFrame = true;
   if (markRendered) renderedPreviewFrames += 1;
   setPreviewState("live");
   markSessionPlayable("minwm");
