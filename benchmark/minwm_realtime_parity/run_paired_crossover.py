@@ -256,8 +256,9 @@ def publish(config: dict, source: Path, destination: Path, metadata: dict) -> No
     os.replace(staging, destination)
     upload = config.get("upload_command")
     if upload:
+        relative = str(destination.relative_to(config["artifact_root"]))
         command = [
-            part.format(source=str(destination), relative=str(destination.name))
+            part.format(source=str(destination), relative=relative)
             for part in upload
         ]
         subprocess.run(command, check=True)
