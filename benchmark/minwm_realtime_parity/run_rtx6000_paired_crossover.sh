@@ -70,7 +70,7 @@ fi
 
 size=832x480
 [[ "${PAIR}" == "B" ]] && size=1248x704
-case_name="pair-${PAIR,,}-${size}-eager-vs-cuda-graph"
+case_name="pair-${PAIR,,}-${size}-w32s8-eager-vs-cuda-graph"
 
 python3 - "${CONFIG_PATH}" "${SGLANG_GIT_REF}" "${MODEL_DIR}" \
   "${LOCAL_ARTIFACT_ROOT}" "${MINWM_ARCHIVE_S3_URI}" "${case_name}" "${size}" "${PAIR}" <<'PY'

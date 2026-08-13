@@ -54,6 +54,8 @@ def request_for_size(base_request: dict, size: str, chunks: int) -> dict:
     request["max_chunks"] = chunks
     request["num_frames"] = 1 + 16 * (chunks - 1)
     request["realtime_output_format"] = "raw"
+    request["realtime_causal_kv_cache_num_frames"] = 32
+    request["realtime_causal_sink_size"] = 8
     conditions = request["condition_inputs"]
     conditions["action_weights"] = conditions["action_weights"][
         : request["num_frames"] - 1
