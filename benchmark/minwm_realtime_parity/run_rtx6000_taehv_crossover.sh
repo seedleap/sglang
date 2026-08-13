@@ -107,7 +107,8 @@ if [[ "${did_full_setup}" != "true" ]]; then
     bash "${SCRIPT_DIR}/aws_b200_entrypoint.sh"
 fi
 
-if [[ "${TAEHV_EXPERIMENT_MODE}" == "memory_ab" ]]; then
+if [[ "${TAEHV_EXPERIMENT_MODE}" == "memory_ab" \
+  || "${TAEHV_EXPERIMENT_MODE}" == "memory_fit" ]]; then
   unit_test_log="${PAIR_ROOT}/test-realtime-vae.log"
   (
     cd /workspace/sglang
@@ -212,7 +213,9 @@ env = {
     "MINWM_ROOT": "/workspace/minWM",
     "MINWM_RUNTIME_ALIGNMENT_LOG": "1",
 }
-if os.environ["TAEHV_EXPERIMENT_MODE"] == "memory_ab":
+experiment_mode = os.environ["TAEHV_EXPERIMENT_MODE"]
+memory_mode = experiment_mode in {"memory_ab", "memory_fit"}
+if memory_mode:
     env["SGLANG_REALTIME_MEMORY_TRACE"] = "1"
 
 alignment_pattern = (
@@ -233,11 +236,18 @@ def variant(command, backend):
     }
 
 cases = []
-for size in ("832x480", "1248x704"):
-    if os.environ["TAEHV_EXPERIMENT_MODE"] == "memory_ab":
+sizes = (
+    ("1248x704",)
+    if experiment_mode == "memory_fit"
+    else ("832x480", "1248x704")
+)
+for size in sizes:
+    if memory_mode:
         baseline_ref = os.environ["TAEHV_BASELINE_GIT_REF"]
         if not baseline_ref:
-            raise RuntimeError("TAEHV_BASELINE_GIT_REF is required for memory_ab")
+            raise RuntimeError(
+                "TAEHV_BASELINE_GIT_REF is required for memory experiments"
+            )
         taehv_common = common + [
             "--vae-config.taehv-checkpoint-path", taehv_checkpoint
         ]
@@ -281,33 +291,69 @@ for size in ("832x480", "1248x704"):
             '"checkpoint":"after_text_encode"',
         ]
 
-        cases.extend(
-            [
-                {
-                    "name": f"taehv-memory-a-tianpeng-gap12-{size}-eager",
-                    "size": size,
-                    "mode": "eager",
-                    "paired_reps": 1,
-                    "control": baseline,
-                    "candidate": fixed,
+        if experiment_mode == "memory_ab":
+            cases.extend(
+                [
+                    {
+                        "name": f"taehv-memory-a-tianpeng-gap12-{size}-eager",
+                        "size": size,
+                        "mode": "eager",
+                        "paired_reps": 1,
+                        "control": baseline,
+                        "candidate": fixed,
+                    },
+                    {
+                        "name": f"taehv-memory-b-tianpeng-gap12-{size}-eager",
+                        "size": size,
+                        "mode": "eager",
+                        "paired_reps": 1,
+                        "control": fixed,
+                        "candidate": fixed_offload,
+                    },
+                    {
+                        "name": f"taehv-memory-c-tianpeng-gap12-{size}-eager",
+                        "size": size,
+                        "mode": "eager",
+                        "control": fixed_offload,
+                        "candidate": fixed_low_memory,
+                    },
+                ]
+            )
+        else:
+            lazy_modules = {
+                **fixed_low_memory,
+                "env": {
+                    **fixed_low_memory["env"],
+                    "CUDA_MODULE_LOADING": "LAZY",
                 },
-                {
-                    "name": f"taehv-memory-b-tianpeng-gap12-{size}-eager",
-                    "size": size,
-                    "mode": "eager",
-                    "paired_reps": 1,
-                    "control": fixed,
-                    "candidate": fixed_offload,
+            }
+            expandable_allocator = {
+                **lazy_modules,
+                "env": {
+                    **lazy_modules["env"],
+                    "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
                 },
-                {
-                    "name": f"taehv-memory-c-tianpeng-gap12-{size}-eager",
-                    "size": size,
-                    "mode": "eager",
-                    "control": fixed_offload,
-                    "candidate": fixed_low_memory,
-                },
-            ]
-        )
+            }
+            cases.extend(
+                [
+                    {
+                        "name": f"taehv-memory-d-lazy-modules-tianpeng-gap12-{size}-eager",
+                        "size": size,
+                        "mode": "eager",
+                        "paired_reps": 1,
+                        "control": fixed_low_memory,
+                        "candidate": lazy_modules,
+                    },
+                    {
+                        "name": f"taehv-memory-e-expandable-tianpeng-gap12-{size}-eager",
+                        "size": size,
+                        "mode": "eager",
+                        "paired_reps": 1,
+                        "control": lazy_modules,
+                        "candidate": expandable_allocator,
+                    },
+                ]
+            )
     else:
         cases.append({
             "name": f"taehv-local-tianpeng-gap12-{size}-eager",
@@ -351,7 +397,9 @@ config = {
     "base_port": 32000,
     "paired_reps": (
         3
-        if os.environ["TAEHV_EXPERIMENT_MODE"] == "memory_ab"
+        if experiment_mode == "memory_ab"
+        else 1
+        if experiment_mode == "memory_fit"
         else (4 if gpu_count == 1 else 3)
     ),
     "warmup_chunks": 5,
@@ -360,7 +408,7 @@ config = {
     "calibration_chunks": 12,
     "concurrency_threshold": 0.02,
     "health_timeout": 1800,
-    "telemetry_loop_ms": 100 if os.environ["TAEHV_EXPERIMENT_MODE"] == "memory_ab" else 1000,
+    "telemetry_loop_ms": 100 if memory_mode else 1000,
     "gpu_slots": [
         {"gpu": gpu, "cpu_set": cpu_set(cpus), "numa_node": numa}
         for gpu, cpus, numa in lanes

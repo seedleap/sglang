@@ -509,6 +509,16 @@ class CausalVaeDecodingStage(DecodingStage):
             ),
             parallel_decode_mode=getattr(vae_config, "parallel_decode_mode", None),
         ) as trace_span:
+            log_realtime_memory_checkpoint(
+                logger,
+                batch,
+                "before_vae_decode",
+                component="vae_decoder",
+                decoder_backend="taehv"
+                if taehv_checkpoint_path is not None
+                else "causal_vae",
+                chunk_index=batch.block_idx,
+            )
             frames = self.decode_causal(
                 batch.latents,
                 server_args,
@@ -539,6 +549,16 @@ class CausalVaeDecodingStage(DecodingStage):
             frames = server_args.pipeline_config.post_decoding(frames, server_args)
             trace_span.add_fields(
                 **tensor_trace_metadata(frames, prefix="post_decoded_frames")
+            )
+            log_realtime_memory_checkpoint(
+                logger,
+                batch,
+                "after_post_decode",
+                component="post_decode",
+                decoder_backend="taehv"
+                if taehv_checkpoint_path is not None
+                else "causal_vae",
+                chunk_index=batch.block_idx,
             )
 
         return OutputBatch(
