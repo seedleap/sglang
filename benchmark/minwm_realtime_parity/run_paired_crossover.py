@@ -19,6 +19,7 @@ import urllib.request
 from pathlib import Path
 
 TERMINATING = False
+DEFAULT_VARIANTS = ("control", "candidate")
 
 
 def parse_args() -> argparse.Namespace:
@@ -39,6 +40,17 @@ def parse_cpu_set(value: str) -> set[int]:
         else:
             raise ValueError(f"invalid cpu_set: {value}")
     return cpus
+
+
+def case_variants(case: dict) -> tuple[str, ...]:
+    variants = tuple(case.get("variants", DEFAULT_VARIANTS))
+    if not variants or len(set(variants)) != len(variants):
+        raise ValueError(f"{case['name']} variants must be non-empty and unique")
+    if any(variant not in DEFAULT_VARIANTS for variant in variants):
+        raise ValueError(
+            f"{case['name']} variants must be selected from {DEFAULT_VARIANTS}"
+        )
+    return variants
 
 
 def read_config(path: Path) -> dict:
@@ -70,7 +82,7 @@ def read_config(path: Path) -> dict:
             raise ValueError(f"unsupported size: {case['size']}")
         if case["mode"] not in {"eager", "cuda_graph"}:
             raise ValueError(f"unsupported mode: {case['mode']}")
-        for variant in ("control", "candidate"):
+        for variant in case_variants(case):
             if not case[variant].get("command"):
                 raise ValueError(f"{case['name']} {variant} command is empty")
     return config
@@ -493,14 +505,17 @@ def run_pair(
 
 def calibrate(config: dict, case: dict) -> bool:
     chunks = int(config.get("calibration_chunks", 12))
-    if len(config["gpu_slots"]) == 1:
+    variants = case_variants(case)
+    if len(config["gpu_slots"]) == 1 or len(variants) == 1:
+        slot_map = {variant: 0 for variant in variants}
         metadata = run_pair(
             config,
             case,
             "calibration-sequential",
-            {"control": 0, "candidate": 0},
+            slot_map,
             chunks,
             False,
+            variants,
         )
         calibration_path = (
             Path(config["artifact_root"]) / case["name"] / "calibration.json"
@@ -586,7 +601,11 @@ def plan(config: dict) -> dict:
                     case.get("paired_reps", config.get("paired_reps", 3))
                 ),
                 "assignments": [
-                    ({"control": 0, "candidate": 0} if single_gpu else assignment(rep))
+                    (
+                        {variant: 0 for variant in case_variants(case)}
+                        if single_gpu or len(case_variants(case)) == 1
+                        else assignment(rep)
+                    )
                     for rep in range(
                         int(case.get("paired_reps", config.get("paired_reps", 3)))
                     )
@@ -627,12 +646,16 @@ def main() -> None:
         for rep in range(
             int(case.get("paired_reps", config.get("paired_reps", 3)))
         ):
-            if len(config["gpu_slots"]) == 1:
+            configured_variants = case_variants(case)
+            if len(configured_variants) == 1:
+                variants = configured_variants
+                slot_map = {variants[0]: 0}
+            elif len(config["gpu_slots"]) == 1:
                 slot_map = {"control": 0, "candidate": 0}
                 variants = (
-                    ("control", "candidate")
+                    DEFAULT_VARIANTS
                     if rep % 4 in {0, 3}
-                    else ("candidate", "control")
+                    else tuple(reversed(DEFAULT_VARIANTS))
                 )
             else:
                 slot_map = assignment(rep)

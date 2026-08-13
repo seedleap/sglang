@@ -68,6 +68,29 @@ def test_plan_supports_single_gpu_sequential_abba(tmp_path):
     )
 
 
+def test_plan_supports_single_candidate_memory_fit(tmp_path):
+    path = config(tmp_path)
+    payload = json.loads(path.read_text())
+    payload["gpu_slots"] = payload["gpu_slots"][:1]
+    payload["cases"][0]["variants"] = ["candidate"]
+    path.write_text(json.dumps(payload))
+
+    resolved = read_config(path)
+    output = plan(resolved)
+
+    assert output["cases"][0]["assignments"] == [{"candidate": 0}] * 3
+
+
+def test_rejects_unknown_single_variant(tmp_path):
+    path = config(tmp_path)
+    payload = json.loads(path.read_text())
+    payload["cases"][0]["variants"] = ["unknown"]
+    path.write_text(json.dumps(payload))
+
+    with pytest.raises(ValueError, match="selected from"):
+        read_config(path)
+
+
 def test_rejects_too_few_reps(tmp_path):
     path = config(tmp_path)
     payload = json.loads(path.read_text())

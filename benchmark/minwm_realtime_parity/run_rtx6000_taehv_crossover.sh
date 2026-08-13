@@ -109,7 +109,8 @@ fi
 
 if [[ "${TAEHV_EXPERIMENT_MODE}" == "memory_ab" \
   || "${TAEHV_EXPERIMENT_MODE}" == "memory_fit" \
-  || "${TAEHV_EXPERIMENT_MODE}" == "memory_fit_final" ]]; then
+  || "${TAEHV_EXPERIMENT_MODE}" == "memory_fit_final" \
+  || "${TAEHV_EXPERIMENT_MODE}" == "memory_fit_physical" ]]; then
   unit_test_log="${PAIR_ROOT}/test-realtime-vae.log"
   (
     cd /workspace/sglang
@@ -215,7 +216,12 @@ env = {
     "MINWM_RUNTIME_ALIGNMENT_LOG": "1",
 }
 experiment_mode = os.environ["TAEHV_EXPERIMENT_MODE"]
-memory_mode = experiment_mode in {"memory_ab", "memory_fit", "memory_fit_final"}
+memory_mode = experiment_mode in {
+    "memory_ab",
+    "memory_fit",
+    "memory_fit_final",
+    "memory_fit_physical",
+}
 if memory_mode:
     env["SGLANG_REALTIME_MEMORY_TRACE"] = "1"
 
@@ -399,7 +405,15 @@ for size in sizes:
                         "candidate": dit_cpu_offload,
                     },
             ]
-            if experiment_mode == "memory_fit_final":
+            if experiment_mode == "memory_fit_physical":
+                physical_case = dict(fit_cases[-1])
+                physical_case["name"] = (
+                    f"taehv-memory-h-physical32-tianpeng-gap12-{size}-eager"
+                )
+                physical_case["paired_reps"] = 3
+                physical_case["variants"] = ["candidate"]
+                cases.append(physical_case)
+            elif experiment_mode == "memory_fit_final":
                 cases.append(fit_cases[-1])
             else:
                 cases.extend(fit_cases)
