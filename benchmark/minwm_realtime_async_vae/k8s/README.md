@@ -62,6 +62,34 @@ Deployment 保持原地滚动恢复，Denoiser StatefulSet 则恢复原 spec 后
 Session 不迁移，受影响用户重试。Spot Worker 不复制状态，节点中断时仅终止绑定 Session，
 Coordinator TTL 自动回收 Lease。
 
+## B300 Capacity Block 经验
+
+`aws03-west2-haoze-20260813.yaml` 是一次隔离的 us-west-2 B300 Capacity Block 部署记录。
+该拓扑复用一台 8 卡 B300 节点：Zing denoiser 使用 2 卡 SP=2，LingBot2 denoiser
+使用 4 卡 SP=4，剩余 2 卡分别作为 Zing 与 LingBot2 的异步 TAEHV VAE worker。
+如果 L4 VAE 无法调度，这种切分可以保持异步 VAE 架构，但要显式检查节点
+`Allocated resources` 为 `nvidia.com/gpu 8/8`，避免 VAE 与 denoiser 抢卡或漏卡。
+
+- B300 节点需要独立 service label/taint，例如
+  `seedleap.ai/service=minwm-west2-haoze-20260813`，并让本次 namespace 的 GPU pod
+  都精确绑定到该节点；这样不会影响现有线上服务。
+- LingBot2 冷启动 warmup 在 B300 上可能超过 60s。实测 720p startup warmup 约
+  84.6s，其中 text encoding 约 47.2s、aux encoding 约 7.9s、VAE encode 约 9.4s、
+  denoise 约 18.7s。要把内部 `--realtime-session-idle-timeout-s` 放宽到 180s 或更高，
+  同时继续保留用户侧 `--realtime-session-max-lifetime-s 90`；这两个参数不要混在一起。
+- Zing 与 LingBot2 的 TAEHV checkpoint 不同：Zing 使用 `taew2_2.pth`，LingBot2 使用
+  `taew2_1.pth`。如果镜像没有内置 `taew2_1.pth`，需要通过 init container 下载或从
+  可信缓存挂载，并做 SHA-256 校验。
+- denoiser 与 VAE heartbeat 都需要 `WORKER_EPOCH_FILE` 和共享 `worker-epoch` volume；
+  否则 worker 可能主容器已健康但 heartbeat CrashLoop，Coordinator 看不到可用 worker。
+- B300 `compute_103` 上可能出现自定义 CUDA JIT 编译失败并 fallback 到 Triton，例如
+  `Unsupported gpu architecture 'compute_103'`。只要后续阶段继续完成，这是非致命启动噪声；
+  但首次 warmup 会因此更慢，watchdog 和 startup timeout 要留余量。
+- Denoiser StatefulSet 使用 `updateStrategy: OnDelete` 时，apply 新模板不会自动替换已有
+  pod。修改启动参数后要显式删除对应 pod，并等同名新 pod 全部 Ready。
+- 验收时至少做三类检查：WebUI 首页返回并显示 90s 倒计时；Coordinator 收到四路 heartbeat
+  真实 websocket smoke 对 Zing 与 LingBot2 I2V 各完成一个 chunk。
+
 ### GPU 分批重启与冷加载
 
 - 默认 `DENOISER_RESTART_BATCH_SIZE=2`，同批两个 Pod 并行重建，批次之间有严格
