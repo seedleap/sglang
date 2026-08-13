@@ -31,7 +31,7 @@ spec:
           values: [amd64]
         - key: topology.kubernetes.io/zone
           operator: In
-          values: [us-east-2a, us-east-2b]
+          values: [us-east-2b]
         - key: node.kubernetes.io/instance-type
           operator: In
           values: [g7e.12xlarge]
@@ -95,7 +95,7 @@ metadata:
   annotations:
     seedleap.ai/capacity-type: spot
     seedleap.ai/repo: seedleap/sglang
-    seedleap.ai/sglang-git-ref: &sglang_ref 87b6071e8012c9eddefa0fecf5bed3f194471c8c
+    seedleap.ai/sglang-git-ref: &sglang_ref bdc9cb7188896a9ffaf6303012e7ff664acd8bbf
     seedleap.ai/minwm-git-ref: &minwm_ref 2efc6485f65e8fcab506665efde79bc41406385e
     seedleap.ai/checkpoint-version-id: wduScksw2f3yPErnG9lBioOuE2AToyAP
 spec:
