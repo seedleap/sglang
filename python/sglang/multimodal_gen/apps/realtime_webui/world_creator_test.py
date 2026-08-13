@@ -16,28 +16,10 @@ from world_creator import WorldCreator
 class FakeGeminiModels:
     def __init__(self):
         self.calls = []
-        self.validation_results = []
         self.description_result = None
 
     async def generate_content(self, **kwargs):
         self.calls.append(kwargs)
-        schema = kwargs["config"].response_json_schema
-        if "passed" in schema.get("properties", {}):
-            passed = self.validation_results.pop(0) if self.validation_results else True
-            return SimpleNamespace(
-                parsed={
-                    "camera_mode_matches": passed,
-                    "avatar_orientation_valid": passed,
-                    "camera_distance_and_scale_valid": passed,
-                    "continuous_walkable_route": passed,
-                    "explorable_space": passed,
-                    "not_poster_or_portrait": passed,
-                    "passed": passed,
-                    "feedback": "Show the subject from behind on a walkable road."
-                    if not passed
-                    else "",
-                }
-            )
         return SimpleNamespace(
             parsed=self.description_result or {
                 "camera_mode": "third_person",
@@ -70,7 +52,7 @@ class WorldCreatorTest(unittest.IsolatedAsyncioTestCase):
         self.config.write_text(
             json.dumps(
                 {
-                    "model_name": "gpt-image-2",
+                    "model_name": "unused-config-model",
                     "api_key": "unused-test-key",
                     "api_version": "test",
                     "client_args": {"base_url": "https://example.invalid"},
@@ -96,8 +78,10 @@ class WorldCreatorTest(unittest.IsolatedAsyncioTestCase):
     async def test_text_creates_description_and_16_by_9_first_frame(self):
         result = await self.creator.complete("龙飞过山谷")
         self.assertTrue(result.image_generated)
-        self.assertEqual(len(self.models.calls), 2)
+        self.assertEqual(len(self.models.calls), 1)
         self.assertEqual(len(self.images.calls), 1)
+        self.assertEqual(self.images.calls[0]["model"], "gpt-image-1.5")
+        self.assertEqual(self.images.calls[0]["quality"], "medium")
         with Image.open(io.BytesIO(result.image_bytes)) as image:
             self.assertEqual(image.size, (1280, 720))
         image_prompt = self.images.calls[0]["prompt"]
@@ -123,20 +107,6 @@ class WorldCreatorTest(unittest.IsolatedAsyncioTestCase):
 
     async def _first_person_description(self, **kwargs):
         self.models.calls.append(kwargs)
-        schema = kwargs["config"].response_json_schema
-        if "passed" in schema.get("properties", {}):
-            return SimpleNamespace(
-                parsed={
-                    "camera_mode_matches": True,
-                    "avatar_orientation_valid": True,
-                    "camera_distance_and_scale_valid": True,
-                    "continuous_walkable_route": True,
-                    "explorable_space": True,
-                    "not_poster_or_portrait": True,
-                    "passed": True,
-                    "feedback": "",
-                }
-            )
         return SimpleNamespace(
             parsed={
                 "camera_mode": "first_person",
@@ -208,15 +178,11 @@ class WorldCreatorTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("subject centered in the frame", result.world_description)
         self.assertIn("seen from behind", result.world_description)
 
-    async def test_failed_visual_gate_regenerates_with_review_feedback(self):
-        self.models.validation_results = [False, True]
+    async def test_generated_image_is_returned_without_visual_gate_or_retry(self):
         result = await self.creator.complete("孙悟空在仙境")
         self.assertTrue(result.image_generated)
-        self.assertEqual(len(self.images.calls), 2)
-        self.assertIn(
-            "Show the subject from behind on a walkable road.",
-            self.images.calls[1]["prompt"],
-        )
+        self.assertEqual(len(self.models.calls), 1)
+        self.assertEqual(len(self.images.calls), 1)
 
     async def test_text_and_image_are_combined_without_redrawing(self):
         result = await self.creator.complete(
