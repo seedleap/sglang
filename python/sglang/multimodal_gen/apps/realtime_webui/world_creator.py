@@ -26,6 +26,7 @@ DEFAULT_IMAGE_CONFIG_PATH = SECRETS_ROOT / "world-image-model-config.json"
 DESCRIPTION_MODEL = "gemini-3.1-flash-lite"
 DEFAULT_VERTEX_LOCATION = "global"
 DEFAULT_IMAGE_SIZE = "1536x1024"
+DEFAULT_IMAGE_MODEL = "gpt-image-1.5"
 DEFAULT_IMAGE_QUALITY = "medium"
 FINAL_IMAGE_SIZE = (1280, 720)
 IMAGE_CONFIG_NAME = "azure/gpt-image-2"
@@ -73,33 +74,6 @@ class CompletedWorld(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
 
-class GameplayImageValidation(BaseModel):
-    camera_mode_matches: bool
-    avatar_orientation_valid: bool
-    camera_distance_and_scale_valid: bool
-    continuous_walkable_route: bool
-    explorable_space: bool
-    not_poster_or_portrait: bool
-    passed: bool
-    feedback: str
-
-    model_config = ConfigDict(
-        extra="forbid",
-        json_schema_extra={
-            "propertyOrdering": [
-                "camera_mode_matches",
-                "avatar_orientation_valid",
-                "camera_distance_and_scale_valid",
-                "continuous_walkable_route",
-                "explorable_space",
-                "not_poster_or_portrait",
-                "passed",
-                "feedback",
-            ]
-        },
-    )
-
-
 WORLD_DESCRIPTION_SYSTEM_PROMPT = """Create one detailed, standalone English description for the opening state of an explorable 3D game world. Return the schema only.
 
 When a source image is supplied, visually classify its gameplay perspective before writing. Do not default every uploaded image to third-person:
@@ -136,16 +110,6 @@ THIRD_PERSON_IMAGE_RULES = """MANDATORY THIRD-PERSON GAMEPLAY CAMERA: Render a t
 
 
 SHARED_GAMEPLAY_IMAGE_RULES = """This must look like a playable 3D game screenshot, not key art, concept art, a movie poster, a character portrait, or a scenic establishing shot. Prioritize spatial readability and traversal: show continuous ground, clear depth, a forward route wide enough to walk along, and at least one visible reachable area or branch to explore. Do not begin at a cliff edge, isolated platform, open flight, impassable barrier, water-only foreground, or dead end. Do not let any character dominate the frame. Use a wide landscape composition with no text, captions, UI, borders, or logos."""
-
-
-GAMEPLAY_IMAGE_VALIDATION_PROMPT = """Strictly review this generated opening frame for an explorable 3D game world. Do not reward visual beauty. It passes only if every requirement is visibly satisfied.
-
-For first_person: it must be an eye-level forward gameplay view with no external player avatar or visible face. Player-attached hands, forearms, knees, lower legs, or feet are allowed only when required by the world description and must match its explicit body-part visibility statement. If the description says no body parts are visible, any visible player anatomy fails.
-For third_person: the full playable subject must be precisely centered on the frame's vertical centerline with its body midpoint close to the visual center, seen from behind, facing directly away toward the route, approximately 18-28% of frame height, with a clear 4-7 meter follow-camera feeling. An off-center subject, visible face, front, three-quarter front, dominant close-up, portrait pose, or hero pose fails.
-
-For both modes: continuous walkable ground must begin at the player position/bottom of frame and lead through the midground toward a reachable background area. There must be a broad readable path, street, corridor, bridge, trail, or traversable terrain, plus enough free space and depth to explore. A cliff edge, isolated platform, open flight, water-only foreground, impassable barrier, scenic-only vista, poster, or portrait fails.
-
-Set passed=true only when all six boolean checks are true. feedback must be a concise English image-regeneration instruction that names every visible failure; use an empty string when passed."""
 
 
 def _parse_world_description(response: Any) -> WorldDescriptionOutput:
@@ -266,9 +230,6 @@ class WorldCreator:
             request_timeout_seconds
             or os.environ.get("CREATE_WORLD_TIMEOUT_SECONDS", "180")
         )
-        self.image_generation_attempts = max(
-            1, int(os.environ.get("CREATE_WORLD_IMAGE_ATTEMPTS", "2"))
-        )
         self._gemini_client_provider = gemini_client_provider
         self._gemini_client = None
         self._gemini_lock = asyncio.Lock()
@@ -377,43 +338,6 @@ class WorldCreator:
             result = _enforce_uploaded_image_perspective(result)
         return result
 
-    async def validate_gameplay_image(
-        self, image_bytes: bytes, camera_mode: str
-    ) -> GameplayImageValidation:
-        from google.genai import types
-
-        client = await self._get_gemini_client()
-        response = await asyncio.wait_for(
-            client.aio.models.generate_content(
-                model=self.description_model,
-                contents=[
-                    f"Required camera mode: {camera_mode}\n\n"
-                    + GAMEPLAY_IMAGE_VALIDATION_PROMPT,
-                    types.Part.from_bytes(data=image_bytes, mime_type="image/png"),
-                ],
-                config=types.GenerateContentConfig(
-                    temperature=0,
-                    max_output_tokens=512,
-                    response_mime_type="application/json",
-                    response_json_schema=GameplayImageValidation.model_json_schema(),
-                    thinking_config=types.ThinkingConfig(
-                        thinking_budget=0,
-                        include_thoughts=False,
-                    ),
-                ),
-            ),
-            timeout=min(self.request_timeout_seconds, 30),
-        )
-        parsed = getattr(response, "parsed", None)
-        if isinstance(parsed, BaseModel):
-            parsed = parsed.model_dump()
-        if isinstance(parsed, dict):
-            return GameplayImageValidation.model_validate(parsed)
-        text = getattr(response, "text", None)
-        if isinstance(text, str) and text.strip():
-            return GameplayImageValidation.model_validate_json(text)
-        raise RuntimeError("Gemini returned no gameplay image validation")
-
     def _load_image_config(self) -> dict[str, Any]:
         if self._image_config is not None:
             return self._image_config
@@ -458,7 +382,6 @@ class WorldCreator:
         self,
         world_description: str,
         camera_mode: str,
-        retry_feedback: str = "",
     ) -> bytes:
         client, config = self._get_image_client()
         camera_rules = (
@@ -475,18 +398,11 @@ class WorldCreator:
             "front-facing, flying, or poster composition. Keep the route and player "
             "inside the central safe area so a 16:9 crop preserves both."
         )
-        if retry_feedback:
-            image_prompt += (
-                "\n\nTHE PREVIOUS IMAGE FAILED THE GAMEPLAY QUALITY GATE. Fix every "
-                f"issue in this review: {retry_feedback}"
-            )
         response = client.images.generate(
-            model=str(config.get("model_name") or "gpt-image-2"),
+            model=os.environ.get("CREATE_WORLD_IMAGE_MODEL", DEFAULT_IMAGE_MODEL),
             prompt=image_prompt,
             size=os.environ.get("CREATE_WORLD_IMAGE_SIZE", DEFAULT_IMAGE_SIZE),
-            quality=os.environ.get(
-                "CREATE_WORLD_IMAGE_QUALITY", DEFAULT_IMAGE_QUALITY
-            ),
+            quality=DEFAULT_IMAGE_QUALITY,
             n=1,
         )
         items = getattr(response, "data", None) or []
@@ -516,29 +432,15 @@ class WorldCreator:
                 image_bytes=None,
                 image_generated=False,
             )
-        retry_feedback = ""
-        for _attempt in range(self.image_generation_attempts):
-            generated = await asyncio.to_thread(
-                self._generate_image_sync,
-                description.world_description,
-                description.camera_mode,
-                retry_feedback,
-            )
-            validation = await self.validate_gameplay_image(
-                generated, description.camera_mode
-            )
-            if validation.passed:
-                return CompletedWorld(
-                    world_description=description.world_description,
-                    image_bytes=generated,
-                    image_generated=True,
-                )
-            retry_feedback = validation.feedback or (
-                "Use the required gameplay camera, show the subject correctly, "
-                "and add a continuous walkable route with explorable depth."
-            )
-        raise RuntimeError(
-            "Generated first frame failed the gameplay composition quality gate"
+        generated = await asyncio.to_thread(
+            self._generate_image_sync,
+            description.world_description,
+            description.camera_mode,
+        )
+        return CompletedWorld(
+            world_description=description.world_description,
+            image_bytes=generated,
+            image_generated=True,
         )
 
     def save_generated_image(self, image_bytes: bytes) -> str:
