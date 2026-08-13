@@ -101,9 +101,6 @@ spec:
               [[ "$(git -C /workspace/sglang-baseline rev-parse HEAD)" == "${TAEHV_BASELINE_GIT_REF}" ]]
               clone_at minWM /workspace/minWM "${MINWM_GIT_REF}"
 
-              PYTHONPATH=/workspace/sglang/python python3 -m pytest -q \
-                /workspace/sglang/python/sglang/multimodal_gen/test/unit/realtime/test_realtime_vae.py
-
               exec bash /workspace/sglang/benchmark/minwm_realtime_parity/run_rtx6000_taehv_crossover.sh
           resources:
             requests:

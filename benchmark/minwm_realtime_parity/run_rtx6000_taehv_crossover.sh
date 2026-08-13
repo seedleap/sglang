@@ -91,6 +91,18 @@ if [[ "${did_full_setup}" != "true" ]]; then
     bash "${SCRIPT_DIR}/aws_b200_entrypoint.sh"
 fi
 
+if [[ "${TAEHV_EXPERIMENT_MODE}" == "memory_ab" ]]; then
+  unit_test_log="${PAIR_ROOT}/test-realtime-vae.log"
+  (
+    cd /workspace/sglang
+    PYTHONPATH=/workspace/sglang/python python3 -m pytest -q \
+      python/sglang/multimodal_gen/test/unit/realtime/test_realtime_vae.py
+  ) 2>&1 | tee "${unit_test_log}"
+  aws s3 cp "${unit_test_log}" \
+    "${MINWM_ARCHIVE_S3_URI%/}/environment/test-realtime-vae.log" \
+    --no-progress --only-show-errors
+fi
+
 python3 -m pip install --no-deps \
   "taehv @ git+https://github.com/madebyollin/taehv.git@${TAEHV_REVISION}" \
   --root-user-action=ignore
