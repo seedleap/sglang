@@ -343,6 +343,30 @@ def test_realtime_sessions_have_a_60_second_hard_lifetime():
     assert "--realtime-session-max-lifetime-s 60" in command
 
 
+def test_optimized_webui_uses_an_isolated_ack_aware_gateway():
+    documents = load_documents(("webui-opt-gateway-isolated.yaml",))
+    service = find(documents, "Service", "minwm-webui-opt-gateway-20260813")
+    gateway = find(documents, "Deployment", "minwm-webui-opt-gateway-20260813")
+    command = " ".join(_container(gateway, "gateway")["args"])
+
+    assert service["spec"].get("type", "ClusterIP") == "ClusterIP"
+    assert gateway["spec"]["replicas"] == 2
+    assert "--output-queue-depth=64" in command
+    assert "--output-enqueue-timeout-s=0" in command
+
+    webui = find(
+        load_documents(("webui-opt-isolated.yaml",)),
+        "Deployment",
+        "minwm-dual-webui-opt-20260812",
+    )
+    env = {
+        item["name"]: item.get("value")
+        for item in _container(webui, "webui").get("env", [])
+    }
+    assert env["REALTIME_UPSTREAM_HTTP"] == "http://minwm-webui-opt-gateway-20260813"
+    assert env["REALTIME_UPSTREAM_WS"] == "ws://minwm-webui-opt-gateway-20260813"
+
+
 def test_public_gateway_uses_the_new_zing_lingbot_domain_service():
     service = find(
         load_documents(("gateway-service.yaml",)),
