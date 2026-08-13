@@ -167,6 +167,28 @@ def ratio_of_sums(rows: list[dict], field: str) -> float:
     return frames / (milliseconds / 1000.0)
 
 
+def percentile(values: list[float], quantile: float) -> float:
+    ordered = sorted(values)
+    position = (len(ordered) - 1) * quantile
+    lower = int(position)
+    upper = min(lower + 1, len(ordered) - 1)
+    fraction = position - lower
+    return ordered[lower] * (1 - fraction) + ordered[upper] * fraction
+
+
+def value_summary(values: list[float]) -> dict | None:
+    if not values:
+        return None
+    return {
+        "count": len(values),
+        "sum_ms": sum(values),
+        "mean_ms": statistics.fmean(values),
+        "p50_ms": statistics.median(values),
+        "p95_ms": percentile(values, 0.95),
+        "max_ms": max(values),
+    }
+
+
 def stage_summary(events: list[dict], stage: str, steady_start: int) -> dict | None:
     rows = [
         event
@@ -176,15 +198,25 @@ def stage_summary(events: list[dict], stage: str, steady_start: int) -> dict | N
         and "source" not in event
         and int(event.get("chunk_index", -1)) >= steady_start
     ]
-    if not rows:
-        return None
-    values = [float(row["duration_ms"]) for row in rows]
-    return {
-        "count": len(values),
-        "sum_ms": sum(values),
-        "mean_ms": statistics.fmean(values),
-        "p50_ms": statistics.median(values),
-    }
+    return value_summary([float(row["duration_ms"]) for row in rows])
+
+
+def event_summary(events: list[dict], event_name: str, steady_start: int) -> dict | None:
+    return value_summary(
+        [
+            float(event["duration_ms"])
+            for event in events
+            if event.get("event") == event_name
+            and int(event.get("chunk_index", -1)) >= steady_start
+            and "duration_ms" in event
+        ]
+    )
+
+
+def chunk_field_summary(chunks: list[dict], field: str) -> dict | None:
+    return value_summary(
+        [float(chunk[field]) for chunk in chunks if chunk.get(field) is not None]
+    )
 
 
 def summarize(args: argparse.Namespace, size: str, result: dict) -> dict:
@@ -218,6 +250,7 @@ def summarize(args: argparse.Namespace, size: str, result: dict) -> dict:
         "steady_source_fps": ratio_of_sums(steady, "chunk_total_ms"),
         "steady_scheduler_fps": ratio_of_sums(steady, "scheduler_forward_ms"),
         "steady_chunk_total_ms_p50": statistics.median(chunk_totals),
+        "steady_chunk_total_ms_p95": percentile(chunk_totals, 0.95),
         "steady_chunk_total_ms_min": min(chunk_totals),
         "steady_chunk_total_ms_max": max(chunk_totals),
         "ttff_ms": (result["first_payload_ns"] - result["started_ns"]) / 1e6,
@@ -231,6 +264,24 @@ def summarize(args: argparse.Namespace, size: str, result: dict) -> dict:
         "vae_wall": stage_summary(
             events, "MinWMCausalVaeDecodingStage", args.steady_start_chunk
         ),
+        "vae_decode_wall": event_summary(
+            events, "server.vae_decode_complete", args.steady_start_chunk
+        ),
+        "post_decode_wall": event_summary(
+            events, "server.post_decode_complete", args.steady_start_chunk
+        ),
+        "output_wall": {
+            field: chunk_field_summary(steady, field)
+            for field in (
+                "request_prepare_ms",
+                "output_pace_ms",
+                "header_pack_ms",
+                "header_write_ms",
+                "raw_payload_build_ms",
+                "raw_write_ms",
+                "ws_write_ms",
+            )
+        },
     }
 
 

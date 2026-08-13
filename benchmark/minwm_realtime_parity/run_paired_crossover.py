@@ -385,6 +385,24 @@ def run_pair(
                 client_logs[variant].close()
         if any(statuses.values()):
             raise RuntimeError(f"client failure: {statuses}")
+        for variant, log in logs.items():
+            log.flush()
+            server_log = (scratch / variant / "server.log").read_text()
+            missing = [
+                pattern
+                for pattern in case[variant].get("required_log_patterns", [])
+                if pattern not in server_log
+            ]
+            forbidden = [
+                pattern
+                for pattern in case[variant].get("forbidden_log_patterns", [])
+                if pattern in server_log
+            ]
+            if missing or forbidden:
+                raise RuntimeError(
+                    f"{variant} server log validation failed: "
+                    f"missing={missing} forbidden={forbidden}"
+                )
         metadata = {
             "case": case["name"],
             "size": case["size"],
@@ -393,6 +411,10 @@ def run_pair(
             "concurrent": concurrent,
             "sglang_git_ref": config["sglang_git_ref"],
             "commands": {variant: case[variant]["command"] for variant in variants},
+            "required_log_patterns": {
+                variant: case[variant].get("required_log_patterns", [])
+                for variant in variants
+            },
             "gpu_assignment": {
                 variant: config["gpu_slots"][index]["gpu"]
                 for variant, index in slot_map.items()

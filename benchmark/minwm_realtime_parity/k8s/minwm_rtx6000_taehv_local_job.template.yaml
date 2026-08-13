@@ -1,0 +1,52 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: minwm-rtx6000-taehv-local-20260813
+  namespace: ray
+  labels: {seedleap.ai/owner: chenshengdong, seedleap.ai/task: minwm-rtx6000-taehv-local}
+spec:
+  backoffLimit: 8
+  activeDeadlineSeconds: 16200
+  ttlSecondsAfterFinished: 300
+  template:
+    metadata:
+      labels: {seedleap.ai/owner: chenshengdong, seedleap.ai/task: minwm-rtx6000-taehv-local}
+    spec:
+      restartPolicy: Never
+      terminationGracePeriodSeconds: 120
+      nodeSelector: {seedleap.ai/capacity-pool: minwm-rtx6000-bounded-8gpu-spot, karpenter.sh/capacity-type: spot}
+      tolerations:
+        - {key: seedleap.ai/capacity-pool, operator: Equal, value: minwm-rtx6000-bounded-8gpu-spot, effect: NoSchedule}
+      containers:
+        - name: pair
+          image: 829115578968.dkr.ecr.us-east-2.amazonaws.com/leap-world/minwm-training@sha256:bedc07ea3ba55059a8c1c569c3b177c4d00d41f37d4fa9105375531534ef5f2a
+          workingDir: /workspace
+          env:
+            - name: GITHUB_TOKEN
+              valueFrom: {secretKeyRef: {name: github-token, key: token}}
+            - {name: SGLANG_GIT_REF, value: __RUNNER_COMMIT__}
+            - {name: MINWM_GIT_REF, value: 4220c8a2dc456b2d9c85ef6c0d9db7fb872d864c}
+            - {name: MINWM_ARCHIVE_S3_URI, value: s3://leap-world-us-east-2/world-model/evals/minwm/realtime-vae/20260813/taehv-local}
+            - {name: MINWM_CHECKPOINT_S3_EAST, value: s3://leap-world-us-east-2/world-model/evals/minwm/checkpoint-staging/wan22-5B-stage3-dmd-8-0721-6a531f0e067/global_step_003200/ema_student/model.pt}
+            - {name: MINWM_CHECKPOINT_VERSION_EAST, value: wduScksw2f3yPErnG9lBioOuE2AToyAP}
+            - {name: MINWM_CHECKPOINT_SOURCE_URI, value: s3://leap-world-us-west-2/world-model/minwm/checkpoints/run-archive/rolling/Wan21/Action2V/dmd/wan22-5B-stage3-dmd-8-0721-6a531f0e067/global_step_003200/ema_student/model.pt}
+            - {name: MINWM_CHECKPOINT_SOURCE_VERSION, value: x.2zYaRRNzyqngI7O_cYSrsK3NvgPKKt}
+            - {name: MINWM_CHECKPOINT_SOURCE_ETAG, value: 5c29d614972e06fd0df859abfd1d6f4d-191}
+            - {name: MINWM_CHECKPOINT_BYTES, value: "10007171771"}
+            - {name: MINWM_CHECKPOINT_CRC64, value: I0IQ+p0pREI=}
+            - {name: MINWM_PRETRAINED_S3, value: s3://leap-world-us-east-2/world-model/checkpoints/minWM/Wan2.2-TI2V-5B-from-diffusers}
+          command: [/bin/bash, -lc]
+          args:
+            - >-
+              git clone --no-checkout "https://x-access-token:${GITHUB_TOKEN}@github.com/seedleap/sglang.git" /workspace/sglang &&
+              git -C /workspace/sglang checkout --detach "${SGLANG_GIT_REF}" &&
+              git clone --no-checkout "https://x-access-token:${GITHUB_TOKEN}@github.com/seedleap/minWM.git" /workspace/minWM &&
+              git -C /workspace/minWM checkout --detach "${MINWM_GIT_REF}" &&
+              exec bash /workspace/sglang/benchmark/minwm_realtime_parity/run_rtx6000_taehv_crossover.sh
+          resources:
+            requests: {cpu: "40", memory: 220Gi, nvidia.com/gpu: "2"}
+            limits: {cpu: "44", memory: 240Gi, nvidia.com/gpu: "2"}
+          volumeMounts: [{name: work, mountPath: /work}, {name: shm, mountPath: /dev/shm}]
+      volumes:
+        - {name: work, hostPath: {path: /var/lib/minwm-rtx6000-work, type: DirectoryOrCreate}}
+        - {name: shm, emptyDir: {medium: Memory, sizeLimit: 96Gi}}
