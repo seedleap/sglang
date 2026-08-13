@@ -36,6 +36,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--warmup-chunks", type=int, default=5)
     parser.add_argument("--measured-chunks", type=int, default=69)
     parser.add_argument("--steady-start-chunk", type=int, default=10)
+    parser.add_argument("--inter-request-delay", type=float, default=1.0)
     parser.add_argument(
         "--sizes",
         nargs="+",
@@ -248,6 +249,10 @@ async def main() -> None:
                 "wall_seconds": (warm["ended_ns"] - warm["started_ns"]) / 1e9,
             }
         )
+        # The final payload can arrive a few milliseconds before asynchronous
+        # server session cleanup releases admission capacity.  Keep that drain
+        # outside every measured timing window.
+        await asyncio.sleep(args.inter_request_delay)
         measured = await stream_request(
             args, request_for_size(base_request, size, args.measured_chunks)
         )
