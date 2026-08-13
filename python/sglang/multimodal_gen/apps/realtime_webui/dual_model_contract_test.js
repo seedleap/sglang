@@ -102,8 +102,8 @@ assert.match(
 );
 assert.match(html, /playback_controller\.js\?v=realtime-playback-v33/);
 assert.match(html, /model_session\.js\?v=dual-model-v8/);
-assert.match(html, /dual_model_controller\.js\?v=dual-model-v5/);
-assert.match(html, /app\.js\?v=world-studio-v17/);
+assert.match(html, /dual_model_controller\.js\?v=dual-model-v6/);
+assert.match(html, /app\.js\?v=world-studio-v18/);
 assert.doesNotMatch(
   app,
   /window\.location\.hostname === "localhost"/,

@@ -54,11 +54,11 @@
   }
 
   class HappyOysterSession {
-    constructor({ video, root = null, overlay = null, fetchImpl = global.fetch, onState = () => {}, onError = () => {} }) {
+    constructor({ video, root = null, overlay = null, fetchImpl = null, onState = () => {}, onError = () => {} }) {
       this.video = video;
       this.root = root;
       this.overlay = overlay;
-      this.fetchImpl = fetchImpl;
+      this.fetchImpl = fetchImpl || global.fetch.bind(global);
       this.onState = onState;
       this.onError = onError;
       this.engine = null;

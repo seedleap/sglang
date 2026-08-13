@@ -18,7 +18,7 @@ assert.match(html, /id="happyOysterPlayer"/);
 assert.match(html, /id="happyoysterViewport"[^>]*autoplay[^>]*playsinline/);
 assert.match(html, /happy_oyster_sdk\.js/);
 assert.match(html, /happy_oyster_session\.js/);
-assert.match(html, /happy_oyster_session\.js\?v=happyoyster-session-v3/);
+assert.match(html, /happy_oyster_session\.js\?v=happyoyster-session-v4/);
 assert.match(html, /dual_model_controller\.js\?v=dual-model-v6/);
 assert.match(html, /app\.js\?v=world-studio-v18/);
 assert.match(html, /styles\.css\?v=world-studio-v6/);
@@ -122,7 +122,26 @@ async function testSessionLifecycle() {
   assert.ok(states.includes("live"));
 }
 
-testSessionLifecycle()
+async function testDefaultFetchKeepsGlobalReceiver() {
+  const originalFetch = global.fetch;
+  let calls = 0;
+  global.fetch = async function (url, options = {}) {
+    assert.strictEqual(this, global, "default fetch must retain its global receiver");
+    calls += 1;
+    assert.strictEqual(url, "./api/happyoyster/config");
+    assert.deepStrictEqual(options, { cache: "no-store" });
+    return jsonResponse({ enabled: true });
+  };
+  try {
+    const session = new HappyOysterSession({ video: null });
+    assert.deepStrictEqual(await session.configured(), { enabled: true });
+    assert.strictEqual(calls, 1);
+  } finally {
+    global.fetch = originalFetch;
+  }
+}
+
+Promise.all([testSessionLifecycle(), testDefaultFetchKeepsGlobalReceiver()])
   .then(() => console.log("HappyOyster SBS contract checks passed"))
   .catch((error) => {
     console.error(error);
