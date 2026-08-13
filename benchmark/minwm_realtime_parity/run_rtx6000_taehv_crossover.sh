@@ -108,7 +108,8 @@ if [[ "${did_full_setup}" != "true" ]]; then
 fi
 
 if [[ "${TAEHV_EXPERIMENT_MODE}" == "memory_ab" \
-  || "${TAEHV_EXPERIMENT_MODE}" == "memory_fit" ]]; then
+  || "${TAEHV_EXPERIMENT_MODE}" == "memory_fit" \
+  || "${TAEHV_EXPERIMENT_MODE}" == "memory_fit_final" ]]; then
   unit_test_log="${PAIR_ROOT}/test-realtime-vae.log"
   (
     cd /workspace/sglang
@@ -214,7 +215,7 @@ env = {
     "MINWM_RUNTIME_ALIGNMENT_LOG": "1",
 }
 experiment_mode = os.environ["TAEHV_EXPERIMENT_MODE"]
-memory_mode = experiment_mode in {"memory_ab", "memory_fit"}
+memory_mode = experiment_mode in {"memory_ab", "memory_fit", "memory_fit_final"}
 if memory_mode:
     env["SGLANG_REALTIME_MEMORY_TRACE"] = "1"
 
@@ -238,7 +239,7 @@ def variant(command, backend):
 cases = []
 sizes = (
     ("1248x704",)
-    if experiment_mode == "memory_fit"
+    if experiment_mode in {"memory_fit", "memory_fit_final"}
     else ("832x480", "1248x704")
 )
 for size in sizes:
@@ -356,8 +357,7 @@ for size in sizes:
                     "true",
                 ],
             }
-            cases.extend(
-                [
+            fit_cases = [
                     {
                         "name": f"taehv-memory-d-lazy-modules-tianpeng-gap12-{size}-eager",
                         "size": size,
@@ -398,8 +398,11 @@ for size in sizes:
                         "control": expandable_allocator,
                         "candidate": dit_cpu_offload,
                     },
-                ]
-            )
+            ]
+            if experiment_mode == "memory_fit_final":
+                cases.append(fit_cases[-1])
+            else:
+                cases.extend(fit_cases)
     else:
         cases.append({
             "name": f"taehv-local-tianpeng-gap12-{size}-eager",
