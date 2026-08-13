@@ -516,6 +516,14 @@ def main() -> None:
     artifact_root = Path(config["artifact_root"])
     capture_environment(artifact_root / "environment")
     atomic_json(artifact_root / "resolved-config.json", config)
+    for path in sorted((artifact_root / "environment").glob("*")):
+        if path.is_file():
+            upload_file(
+                config,
+                path,
+                str(path.relative_to(artifact_root)),
+            )
+    upload_file(config, artifact_root / "resolved-config.json", "resolved-config.json")
     for case in config["cases"]:
         concurrent = calibrate(config, case)
         for rep in range(int(config.get("paired_reps", 3))):
