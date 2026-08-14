@@ -212,6 +212,7 @@ const { PrimaryWebRTCSession } = require("./primary_webrtc_session.js");
     controlReconnectBaseMs: 1,
     mediaDisconnectGraceMs: 5,
     mediaReconnectBaseMs: 1,
+    mediaCutoverReconnectDelayMs: 0,
     playoutDelayMs: 500,
     onState: (state) => states.push(state),
     onPlayable: (details) => { playable = details; },
@@ -312,6 +313,49 @@ const { PrimaryWebRTCSession } = require("./primary_webrtc_session.js");
     url === "./api/webrtc/sessions/session-a" && options.method === "DELETE"
   )));
 
+  const cutoverVideo = new FakeVideo();
+  const peerCountBeforeCutover = peers.length;
+  const cutoverSession = new PrimaryWebRTCSession({
+    video: cutoverVideo,
+    canvas: { hidden: false },
+    fetchImpl: fakeFetch,
+    WebSocketImpl: FakeWebSocket,
+    RTCPeerConnectionImpl: FakePeerConnection,
+    mediaPollIntervalMs: 1,
+    startupTimeoutMs: 1000,
+    controlKeepaliveMs: 0,
+    mediaCutoverReconnectDelayMs: 1,
+  });
+  await cutoverSession.connect({ type: "init", fps: 24, first_frame: "data:image/png;base64,AA==" });
+  const cutoverControl = controlSockets.at(-1);
+  assert.equal(cutoverSession.sendEvent({
+    type: "event",
+    kind: "camera_actions",
+    event_id: 20,
+    client_sent_epoch_ms: Date.now(),
+  }), true);
+  cutoverControl.emit("message", { data: JSON.stringify({
+    type: "media_batch",
+    chunk_index: 10,
+    event_id: 20,
+    first_frame_index: 160,
+    num_frames: 16,
+    bridge_received_epoch_ms: Date.now(),
+  }) });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(
+    peers.length,
+    peerCountBeforeCutover + 2,
+    "new interactive media should negotiate a fresh live-edge WHEP reader",
+  );
+  assert.equal(cutoverSession.timestampFrameBase, 160);
+  assert.equal(cutoverSession.mediaCutoverReconnectCount, 1);
+  assert.ok(requests.some(({ url, options }) => (
+    url === "http://media.example.test/zing-session-a/whep/session-resource"
+    && options.method === "DELETE"
+  )));
+  await cutoverSession.close("cutover test complete");
+
   let pendingReadResolve = null;
   let delivered = false;
   let readerCanceled = false;
@@ -358,6 +402,7 @@ const { PrimaryWebRTCSession } = require("./primary_webrtc_session.js");
     mediaPollIntervalMs: 1,
     startupTimeoutMs: 1000,
     controlKeepaliveMs: 0,
+    mediaCutoverReconnectDelayMs: 0,
     playoutDelayMs: 750,
     onFrame: (frame) => managedFrames.push(frame),
     onPlayable: (details) => { managedPlayable = details; },

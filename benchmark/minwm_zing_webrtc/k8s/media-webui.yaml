@@ -150,12 +150,12 @@ spec:
             - {name: WEBRTC_MEDIA_HTTP_BASE, value: http://REPLACE_WITH_MEDIA_PUBLIC_HOST}
             - {name: WEBRTC_BRIDGE_MAX_SESSIONS, value: "8"}
             - {name: WEBRTC_BRIDGE_SESSION_TTL_S, value: "600"}
-            - {name: WEBRTC_H264_PRESET, value: superfast}
+            - {name: WEBRTC_H264_PRESET, value: veryfast}
             - {name: WEBRTC_H264_PROFILE, value: main}
             - {name: WEBRTC_H264_CRF, value: "20"}
             - {name: WEBRTC_H264_VBV_BUFFER_MS, value: "250"}
             - name: REALTIME_UI_CONFIG_JSON
-              value: '{"generationModes":["i2v","t2v"],"defaultGenerationMode":"i2v","availableModels":["minwm"],"modelSlotCount":1,"singleExperience":true,"sessionMaxLifetimeSeconds":600,"primaryTransport":"webrtc-h264","webrtcManagedPlayback":true,"playbackAckEnabled":true,"webrtcBitrateKbps":3500,"webrtcPlayoutDelayMs":250,"targetFps":24,"sinkSize":9,"windowFrames":18,"dualModels":{"minwm":{"label":"Zing"}}}'
+              value: '{"generationModes":["i2v","t2v"],"defaultGenerationMode":"i2v","availableModels":["minwm"],"modelSlotCount":1,"singleExperience":true,"sessionMaxLifetimeSeconds":600,"primaryTransport":"webrtc-h264","webrtcManagedPlayback":true,"playbackAckEnabled":true,"webrtcBitrateKbps":2200,"webrtcPlayoutDelayMs":250,"targetFps":24,"sinkSize":9,"windowFrames":18,"dualModels":{"minwm":{"label":"Zing"}}}'
           ports:
             - {name: http, containerPort: 18080}
           startupProbe:
