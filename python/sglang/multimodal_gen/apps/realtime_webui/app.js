@@ -428,7 +428,10 @@ let customWorldPresets = [];
 let customWorldDbPromise = null;
 let customWorldLoadPromise = null;
 const MODEL_SLOT_DEFAULTS = ["minwm", "lingbot2", "happyoyster"];
-let activeModelSlotCount = 2;
+let activeModelSlotCount = Math.min(
+  MODEL_SLOT_DEFAULTS.length,
+  Math.max(1, Math.trunc(configuredNumber("modelSlotCount", 2))),
+);
 
 function selectedModelKeys() {
   const keys = [];

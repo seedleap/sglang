@@ -1,0 +1,197 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: minwm-zing-webrtc-lab
+  labels:
+    app.kubernetes.io/name: minwm-zing-webrtc-lab
+    seedleap.ai/environment: development
+---
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: zing-webrtc-h100
+  labels:
+    app.kubernetes.io/part-of: minwm-zing-webrtc-lab
+spec:
+  limits:
+    cpu: "192"
+    nvidia.com/gpu: "8"
+  disruption:
+    consolidationPolicy: WhenEmpty
+    consolidateAfter: 2m
+  template:
+    metadata:
+      labels:
+        seedleap.ai/zing-webrtc-role: denoiser
+        seedleap.ai/environment: development
+    spec:
+      expireAfter: Never
+      nodeClassRef:
+        group: karpenter.k8s.aws
+        kind: EC2NodeClass
+        name: minwm-test-h100-ec2
+      requirements:
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: [spot, on-demand]
+        - key: kubernetes.io/arch
+          operator: In
+          values: [amd64]
+        - key: topology.kubernetes.io/zone
+          operator: In
+          values: [us-east-2a, us-east-2b, us-east-2c]
+        - key: node.kubernetes.io/instance-type
+          operator: In
+          values: [p5.48xlarge]
+      taints:
+        - key: nvidia.com/gpu
+          value: "true"
+          effect: NoSchedule
+---
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: zing-webrtc-l4
+  labels:
+    app.kubernetes.io/part-of: minwm-zing-webrtc-lab
+spec:
+  limits:
+    cpu: "8"
+    nvidia.com/gpu: "1"
+  disruption:
+    consolidationPolicy: WhenEmpty
+    consolidateAfter: 2m
+  template:
+    metadata:
+      labels:
+        seedleap.ai/zing-webrtc-role: vae
+        seedleap.ai/environment: development
+    spec:
+      expireAfter: Never
+      nodeClassRef:
+        group: karpenter.k8s.aws
+        kind: EC2NodeClass
+        name: ray-gpu-ec2-all
+      requirements:
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: [on-demand]
+        - key: kubernetes.io/arch
+          operator: In
+          values: [amd64]
+        - key: topology.kubernetes.io/zone
+          operator: In
+          values: [us-east-2a, us-east-2b, us-east-2c]
+        - key: node.kubernetes.io/instance-type
+          operator: In
+          values: [g6.2xlarge]
+      taints:
+        - key: nvidia.com/gpu
+          value: "true"
+          effect: NoSchedule
+---
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: zing-webrtc-cpu
+  labels:
+    app.kubernetes.io/part-of: minwm-zing-webrtc-lab
+spec:
+  limits:
+    cpu: "32"
+  disruption:
+    consolidationPolicy: WhenEmpty
+    consolidateAfter: 2m
+  template:
+    metadata:
+      labels:
+        seedleap.ai/zing-webrtc-role: control-media
+        seedleap.ai/environment: development
+    spec:
+      expireAfter: 168h
+      nodeClassRef:
+        group: karpenter.k8s.aws
+        kind: EC2NodeClass
+        name: platform-ec2-all
+      requirements:
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: [on-demand]
+        - key: kubernetes.io/arch
+          operator: In
+          values: [amd64]
+        - key: topology.kubernetes.io/zone
+          operator: In
+          values: [us-east-2a, us-east-2b, us-east-2c]
+        - key: node.kubernetes.io/instance-type
+          operator: In
+          values: [c7a.4xlarge, m7a.4xlarge, m6a.4xlarge]
+      taints:
+        - key: seedleap.ai/zing-webrtc-cpu
+          value: "true"
+          effect: NoSchedule
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: zing-webrtc-model-pv
+  labels:
+    app.kubernetes.io/part-of: minwm-zing-webrtc-lab
+spec:
+  capacity:
+    storage: 100Gi
+  accessModes: [ReadOnlyMany]
+  persistentVolumeReclaimPolicy: Retain
+  volumeMode: Filesystem
+  csi:
+    driver: s3.csi.aws.com
+    volumeHandle: zing-webrtc-model-us-east-2-20260814
+    volumeAttributes:
+      bucketName: leap-world-model-serving-829115578968-us-east-2
+      mount-timeout-seconds: "300"
+  mountOptions:
+    - region us-east-2
+    - --read-part-size 25165824
+    - --maximum-throughput-gbps 100
+    - --metadata-ttl 3600
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: zing-webrtc-model
+  namespace: minwm-zing-webrtc-lab
+spec:
+  accessModes: [ReadOnlyMany]
+  storageClassName: ""
+  volumeName: zing-webrtc-model-pv
+  resources:
+    requests:
+      storage: 100Gi
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: zing-webrtc-worker-discovery
+  namespace: minwm-zing-webrtc-lab
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: zing-webrtc-worker-discovery
+rules:
+  - apiGroups: [""]
+    resources: [nodes]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: zing-webrtc-worker-discovery
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: zing-webrtc-worker-discovery
+subjects:
+  - kind: ServiceAccount
+    name: zing-webrtc-worker-discovery
+    namespace: minwm-zing-webrtc-lab

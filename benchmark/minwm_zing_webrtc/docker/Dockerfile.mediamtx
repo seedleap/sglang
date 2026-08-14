@@ -1,0 +1,11 @@
+FROM public.ecr.aws/docker/library/alpine@sha256:7c8cb692ae09657cbc4a3f3cbd0e8d5a2690ba38386aaaf252dbb060bf5eb2e6 AS unpack
+
+ADD --checksum=sha256:73ed27c292e05ceb4990dcb34531f01872dfff5374b7515c45a202e0abf47706 \
+    https://github.com/bluenviron/mediamtx/releases/download/v1.18.2/mediamtx_v1.18.2_linux_amd64.tar.gz \
+    /tmp/mediamtx.tar.gz
+RUN tar -xzf /tmp/mediamtx.tar.gz -C /tmp mediamtx
+
+FROM scratch
+COPY --from=unpack /tmp/mediamtx /mediamtx
+USER 65532:65532
+ENTRYPOINT ["/mediamtx"]

@@ -1,0 +1,26 @@
+ARG WEBUI_RUNTIME_IMAGE
+
+FROM ${WEBUI_RUNTIME_IMAGE}
+
+USER 0
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && \
+    apt-get install -y --no-install-recommends ffmpeg && \
+    rm -rf /var/lib/apt/lists/*
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python -m pip install --no-cache-dir 'msgspec==0.21.1'
+
+COPY python/sglang/multimodal_gen/apps/realtime_webui \
+     /opt/sglang/python/sglang/multimodal_gen/apps/realtime_webui
+RUN python -m compileall -q \
+      /opt/sglang/python/sglang/multimodal_gen/apps/realtime_webui && \
+    ffmpeg -hide_banner -encoders 2>/dev/null | grep -q 'libx264'
+
+ARG SOURCE_REVISION
+LABEL org.opencontainers.image.title="zing-webrtc-lab-webui-bridge" \
+      org.opencontainers.image.revision=${SOURCE_REVISION}
+
+USER 65532:65532
+WORKDIR /opt/sglang/python/sglang/multimodal_gen/apps/realtime_webui
+ENTRYPOINT ["python", "server.py"]

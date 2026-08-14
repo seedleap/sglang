@@ -231,6 +231,15 @@ class MinWMCausalDMDConfig(Wan2_2_TI2V_5B_Config):
     realtime_causal_sink_size: int | None = None
     realtime_causal_kv_cache_num_frames: int | None = None
 
+    def supports_dynamic_batching(self) -> bool:
+        """Enable native batching for compatible, stateless MinWM requests.
+
+        The scheduler still rejects image-conditioned and realtime-session
+        requests.  This opt-in therefore enables the safe text-to-video path
+        without combining independent causal KV/session states.
+        """
+        return True
+
     @staticmethod
     def _native_vae_stats(latents: torch.Tensor, vae):
         mean = torch.tensor(

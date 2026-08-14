@@ -1,0 +1,184 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: zing-webrtc-mediamtx-config
+  namespace: minwm-zing-webrtc-lab
+data:
+  mediamtx.yml: |
+    logLevel: info
+    logDestinations: [stdout]
+    api: true
+    apiAddress: :9997
+    metrics: true
+    metricsAddress: :9998
+    rtsp: true
+    rtspTransports: [tcp]
+    rtspAddress: :8554
+    rtmp: false
+    hls: false
+    srt: false
+    webrtc: true
+    webrtcAddress: :8889
+    webrtcAllowOrigins: ['*']
+    webrtcLocalUDPAddress: :8189
+    webrtcLocalTCPAddress: ''
+    webrtcIPsFromInterfaces: false
+    webrtcAdditionalHosts: [REPLACE_WITH_MEDIA_PUBLIC_HOST]
+    paths:
+      all_others:
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: zing-webrtc-mediamtx
+  namespace: minwm-zing-webrtc-lab
+  labels:
+    app.kubernetes.io/name: zing-webrtc-mediamtx
+    app.kubernetes.io/part-of: minwm-zing-webrtc-lab
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: zing-webrtc-mediamtx
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: zing-webrtc-mediamtx
+        app.kubernetes.io/part-of: minwm-zing-webrtc-lab
+    spec:
+      nodeSelector:
+        karpenter.sh/nodepool: zing-webrtc-cpu
+      tolerations:
+        - {key: seedleap.ai/zing-webrtc-cpu, operator: Equal, value: "true", effect: NoSchedule}
+      containers:
+        - name: mediamtx
+          image: REPLACE_WITH_MEDIAMTX_IMAGE
+          args: [/etc/mediamtx/mediamtx.yml]
+          ports:
+            - {name: rtsp, containerPort: 8554, protocol: TCP}
+            - {name: whep, containerPort: 8889, protocol: TCP}
+            - {name: ice-udp, containerPort: 8189, protocol: UDP}
+            - {name: api, containerPort: 9997, protocol: TCP}
+            - {name: metrics, containerPort: 9998, protocol: TCP}
+          readinessProbe:
+            tcpSocket: {port: whep}
+            periodSeconds: 3
+            failureThreshold: 20
+          livenessProbe:
+            tcpSocket: {port: whep}
+            periodSeconds: 15
+          resources:
+            requests: {cpu: "2", memory: 1Gi}
+            limits: {cpu: "8", memory: 8Gi}
+          volumeMounts:
+            - {name: config, mountPath: /etc/mediamtx, readOnly: true}
+      volumes:
+        - name: config
+          configMap: {name: zing-webrtc-mediamtx-config}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: zing-webrtc-mediamtx
+  namespace: minwm-zing-webrtc-lab
+spec:
+  selector:
+    app.kubernetes.io/name: zing-webrtc-mediamtx
+  ports:
+    - {name: rtsp, port: 8554, targetPort: rtsp, protocol: TCP}
+    - {name: whep, port: 8889, targetPort: whep, protocol: TCP}
+    - {name: api, port: 9997, targetPort: api, protocol: TCP}
+    - {name: metrics, port: 9998, targetPort: metrics, protocol: TCP}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: zing-webrtc-media-public
+  namespace: minwm-zing-webrtc-lab
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-type: external
+    service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing
+    service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: ip
+    service.beta.kubernetes.io/aws-load-balancer-healthcheck-protocol: TCP
+    service.beta.kubernetes.io/aws-load-balancer-healthcheck-port: traffic-port
+spec:
+  type: LoadBalancer
+  externalTrafficPolicy: Cluster
+  selector:
+    app.kubernetes.io/name: zing-webrtc-mediamtx
+  ports:
+    - {name: whep, port: 80, targetPort: whep, protocol: TCP}
+    - {name: ice-udp, port: 8189, targetPort: ice-udp, protocol: UDP}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: zing-webrtc-webui
+  namespace: minwm-zing-webrtc-lab
+  labels:
+    app.kubernetes.io/name: zing-webrtc-webui
+    app.kubernetes.io/part-of: minwm-zing-webrtc-lab
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: zing-webrtc-webui
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: zing-webrtc-webui
+        app.kubernetes.io/part-of: minwm-zing-webrtc-lab
+    spec:
+      nodeSelector:
+        karpenter.sh/nodepool: zing-webrtc-cpu
+      tolerations:
+        - {key: seedleap.ai/zing-webrtc-cpu, operator: Equal, value: "true", effect: NoSchedule}
+      containers:
+        - name: webui
+          image: REPLACE_WITH_WEBUI_IMAGE
+          env:
+            - {name: WEBUI_HOST, value: 0.0.0.0}
+            - {name: WEBUI_PORT, value: "18080"}
+            - {name: REALTIME_UPSTREAM_HTTP, value: http://zing-webrtc-gateway:18080}
+            - {name: REALTIME_UPSTREAM_WS, value: ws://zing-webrtc-gateway:18080}
+            - {name: MINWM_UPSTREAM_HTTP, value: http://zing-webrtc-gateway:18080}
+            - {name: MINWM_UPSTREAM_WS, value: ws://zing-webrtc-gateway:18080}
+            - {name: ZING_WEBRTC_UPSTREAM_WS, value: ws://zing-webrtc-gateway:18080/v1/realtime_video/generate}
+            - {name: WEBRTC_MEDIA_RTSP_BASE, value: rtsp://zing-webrtc-mediamtx:8554}
+            - {name: WEBRTC_MEDIA_HTTP_BASE, value: http://REPLACE_WITH_MEDIA_PUBLIC_HOST}
+            - {name: WEBRTC_BRIDGE_MAX_SESSIONS, value: "8"}
+            - {name: WEBRTC_BRIDGE_SESSION_TTL_S, value: "600"}
+            - name: REALTIME_UI_CONFIG_JSON
+              value: '{"generationModes":["i2v","t2v"],"defaultGenerationMode":"i2v","modelSlotCount":1,"singleExperience":true,"sessionMaxLifetimeSeconds":600,"dualModels":{"minwm":{"label":"Zing","targetFps":16,"sinkSize":8}}}'
+          ports:
+            - {name: http, containerPort: 18080}
+          startupProbe:
+            httpGet: {path: /runtime-config.js, port: http}
+            periodSeconds: 2
+            failureThreshold: 60
+          readinessProbe:
+            httpGet: {path: /runtime-config.js, port: http}
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: {path: /runtime-config.js, port: http}
+            periodSeconds: 15
+          resources:
+            requests: {cpu: "2", memory: 2Gi}
+            limits: {cpu: "8", memory: 12Gi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: zing-webrtc-webui-public
+  namespace: minwm-zing-webrtc-lab
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-type: external
+    service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing
+    service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: ip
+spec:
+  type: LoadBalancer
+  selector:
+    app.kubernetes.io/name: zing-webrtc-webui
+  ports:
+    - {name: http, port: 80, targetPort: http, protocol: TCP}

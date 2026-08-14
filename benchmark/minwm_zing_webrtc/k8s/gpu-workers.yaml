@@ -1,0 +1,313 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: zing-webrtc-worker-headless
+  namespace: minwm-zing-webrtc-lab
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    app.kubernetes.io/name: zing-webrtc-worker
+  ports:
+    - {name: api, port: 30000, targetPort: api}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: zing-webrtc-worker
+  namespace: minwm-zing-webrtc-lab
+  labels:
+    app.kubernetes.io/name: zing-webrtc-worker
+    app.kubernetes.io/part-of: minwm-zing-webrtc-lab
+spec:
+  replicas: 1
+  serviceName: zing-webrtc-worker-headless
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: zing-webrtc-worker
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: zing-webrtc-worker
+        app.kubernetes.io/part-of: minwm-zing-webrtc-lab
+    spec:
+      serviceAccountName: zing-webrtc-worker-discovery
+      terminationGracePeriodSeconds: 90
+      nodeSelector:
+        karpenter.sh/nodepool: zing-webrtc-h100
+      tolerations:
+        - {key: nvidia.com/gpu, operator: Equal, value: "true", effect: NoSchedule}
+      securityContext:
+        seLinuxOptions: {type: spc_t}
+      initContainers:
+        - name: model-stager
+          image: REPLACE_WITH_GPU_IMAGE
+          command: [/bin/bash, -lc]
+          env:
+            - name: SOURCE_MODEL
+              value: /model-s3/models/minwm/wan22-5b-stage3-dmd-47-0808-2fb2cfec2a2/gs3200-ema-student-v1/releases/20260810T042157Z-c302d572/model
+            - name: CACHED_MODEL
+              value: /model-cache/zing-gs3200-20260810/model
+          args:
+            - |
+              set -euo pipefail
+              if [[ ! -f "${CACHED_MODEL}/_READY" ]]; then
+                staging="${CACHED_MODEL}.staging.$$"
+                rm -rf "${staging}"
+                mkdir -p "$(dirname "${CACHED_MODEL}")"
+                cp -a "${SOURCE_MODEL}" "${staging}"
+                test -f "${staging}/_READY"
+                test -f "${staging}/model_index.json"
+                test -d "${staging}/transformer"
+                rm -rf "${CACHED_MODEL}"
+                mv "${staging}" "${CACHED_MODEL}"
+              fi
+          resources:
+            requests: {cpu: "2", memory: 2Gi, ephemeral-storage: 1Gi}
+            limits: {cpu: "4", memory: 4Gi, ephemeral-storage: 2Gi}
+          volumeMounts:
+            - {name: model-s3, mountPath: /model-s3, readOnly: true}
+            - {name: model-cache, mountPath: /model-cache}
+        - name: denoiser-heartbeat
+          image: REPLACE_WITH_GPU_IMAGE
+          restartPolicy: Always
+          command: [/bin/sh, -ec]
+          args:
+            - >-
+              exec python3 -m sglang.multimodal_gen.runtime.entrypoints.realtime_worker_heartbeat
+              --coordinator-url=http://zing-webrtc-coordinator:18081
+              --health-url=http://127.0.0.1:30000/health
+              --state-url=http://127.0.0.1:30000/v1/realtime_worker/state
+              --worker-id=$(POD_UID)-denoiser
+              --worker-epoch-file=/var/run/zing-worker/denoiser-epoch
+              --role=denoiser
+              --endpoint=ws://$(POD_IP):30000/v1/realtime_video/generate
+              --reservation-endpoint=http://$(POD_IP):30000/v1/realtime_worker
+              --node-name=$(NODE_NAME)
+              --capacity=8
+              --model-revision=zing-gs3200-20260810
+              --vae-fingerprint=taew2_2-d053e216
+              --interval-s=5
+          env:
+            - {name: SGLANG_LIGHTWEIGHT_RUNTIME, value: "1"}
+            - name: POD_UID
+              valueFrom: {fieldRef: {fieldPath: metadata.uid}}
+            - name: POD_IP
+              valueFrom: {fieldRef: {fieldPath: status.podIP}}
+            - name: NODE_NAME
+              valueFrom: {fieldRef: {fieldPath: spec.nodeName}}
+          resources:
+            requests: {cpu: 25m, memory: 64Mi}
+            limits: {cpu: 200m, memory: 256Mi}
+          volumeMounts:
+            - {name: worker-epoch, mountPath: /var/run/zing-worker}
+      containers:
+        - name: zing
+          image: REPLACE_WITH_GPU_IMAGE
+          workingDir: /opt/sglang
+          env:
+            - {name: PYTHONUNBUFFERED, value: "1"}
+            - {name: MINWM_MODEL, value: /model-cache/zing-gs3200-20260810/model}
+            - {name: TAEHV_CHECKPOINT_PATH, value: /opt/taehv/taew2_2.pth}
+            - {name: MINWM_ATTENTION_IMPL, value: packed}
+            - {name: MINWM_PACKED_ATTENTION_DETERMINISTIC, value: "false"}
+            - {name: MINWM_NATIVE_COMPONENTS, value: "text_encoder,vae"}
+            - {name: SGLANG_DIFFUSION_VAE_CHANNELS_LAST_3D, value: "false"}
+            - {name: NCCL_DEBUG, value: WARN}
+            - {name: NCCL_PROTO, value: Simple}
+          command: [/bin/bash, -lc]
+          args:
+            - |
+              set -euo pipefail
+              test -f "${MINWM_MODEL}/_READY"
+              test -f "${MINWM_MODEL}/model_index.json"
+              test -d "${MINWM_MODEL}/transformer"
+
+              WORKER_EPOCH_FILE=/var/run/zing-worker/denoiser-epoch \
+              python3 -m sglang.multimodal_gen.runtime.launch_server \
+                --model-path "${MINWM_MODEL}" \
+                --pipeline-class-name MinWMCausalDMDPipeline \
+                --attention-backend fa \
+                --performance-mode speed \
+                --num-gpus 2 \
+                --tp-size 1 \
+                --sp-degree 2 \
+                --ulysses-degree 2 \
+                --ring-degree 1 \
+                --enable-cuda-graph \
+                --enable-cfg-parallel false \
+                --enable-torch-compile false \
+                --warmup-mode off \
+                --batching-max-size 8 \
+                --batching-delay-ms 12 \
+                --enable-batching-metrics \
+                --realtime-max-sessions 8 \
+                --realtime-max-sessions-per-worker 8 \
+                --realtime-remote-vae-enabled \
+                --realtime-session-idle-timeout-s 120 \
+                --realtime-session-max-lifetime-s 600 \
+                --realtime-admission-wait-s 20 \
+                --realtime-causal-sink-size 8 \
+                --realtime-causal-kv-cache-num-frames 32 \
+                --host 0.0.0.0 \
+                --port 30000 &
+              zing_pid=$!
+
+              terminate() {
+                kill -TERM "${zing_pid}" 2>/dev/null || true
+                wait "${zing_pid}" 2>/dev/null || true
+                exit 143
+              }
+              trap terminate TERM INT
+              until curl --fail --silent --max-time 2 http://127.0.0.1:30000/health >/dev/null; do
+                kill -0 "${zing_pid}" 2>/dev/null || { wait "${zing_pid}"; exit $?; }
+                sleep 2
+              done
+              wait "${zing_pid}"
+          ports:
+            - {name: api, containerPort: 30000}
+          startupProbe:
+            httpGet: {path: /health, port: api}
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 270
+          readinessProbe:
+            httpGet: {path: /health, port: api}
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          livenessProbe:
+            httpGet: {path: /health, port: api}
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: "24"
+              memory: 300Gi
+              ephemeral-storage: 80Gi
+              nvidia.com/gpu: "2"
+            limits:
+              cpu: "40"
+              memory: 400Gi
+              ephemeral-storage: 100Gi
+              nvidia.com/gpu: "2"
+          securityContext:
+            capabilities: {add: [SYS_ADMIN]}
+          volumeMounts:
+            - {name: model-cache, mountPath: /model-cache}
+            - {name: shm, mountPath: /dev/shm}
+            - {name: worker-epoch, mountPath: /var/run/zing-worker}
+      volumes:
+        - name: model-s3
+          persistentVolumeClaim: {claimName: zing-webrtc-model, readOnly: true}
+        - name: model-cache
+          emptyDir: {sizeLimit: 100Gi}
+        - name: shm
+          emptyDir: {medium: Memory, sizeLimit: 64Gi}
+        - name: worker-epoch
+          emptyDir: {}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: zing-webrtc-vae
+  namespace: minwm-zing-webrtc-lab
+  labels:
+    app.kubernetes.io/name: zing-webrtc-vae
+    app.kubernetes.io/part-of: minwm-zing-webrtc-lab
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: zing-webrtc-vae
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: zing-webrtc-vae
+        app.kubernetes.io/part-of: minwm-zing-webrtc-lab
+    spec:
+      serviceAccountName: zing-webrtc-worker-discovery
+      terminationGracePeriodSeconds: 60
+      nodeSelector:
+        karpenter.sh/nodepool: zing-webrtc-l4
+      tolerations:
+        - {key: nvidia.com/gpu, operator: Equal, value: "true", effect: NoSchedule}
+      initContainers:
+        - name: vae-heartbeat
+          image: 829115578968.dkr.ecr.us-east-2.amazonaws.com/leap-world/minwm-realtime@sha256:2c12bf86efebbc783d43e40f28d3e3b90e614f0e11eb6f50d2a1cf3aaab8a293
+          restartPolicy: Always
+          command: [/bin/sh, -ec]
+          args:
+            - >-
+              exec python3 -m sglang.multimodal_gen.runtime.entrypoints.realtime_worker_heartbeat
+              --coordinator-url=http://zing-webrtc-coordinator:18081
+              --health-url=http://127.0.0.1:18081/health
+              --state-url=http://127.0.0.1:18081/v1/realtime_worker/state
+              --worker-id=$(POD_UID)
+              --worker-epoch-file=/var/run/zing-worker/epoch
+              --role=vae
+              --endpoint=ws://$(POD_IP):18081/v1/realtime_vae/decode
+              --reservation-endpoint=http://$(POD_IP):18081/v1/realtime_worker
+              --node-name=$(NODE_NAME)
+              --capacity=16
+              --model-revision=all
+              --vae-fingerprint=taew2_2-d053e216
+              --interval-s=5
+          env:
+            - {name: SGLANG_LIGHTWEIGHT_RUNTIME, value: "1"}
+            - name: POD_UID
+              valueFrom: {fieldRef: {fieldPath: metadata.uid}}
+            - name: POD_IP
+              valueFrom: {fieldRef: {fieldPath: status.podIP}}
+            - name: NODE_NAME
+              valueFrom: {fieldRef: {fieldPath: spec.nodeName}}
+          resources:
+            requests: {cpu: 25m, memory: 64Mi}
+            limits: {cpu: 200m, memory: 256Mi}
+          volumeMounts:
+            - {name: worker-epoch, mountPath: /var/run/zing-worker}
+      containers:
+        - name: vae
+          image: 829115578968.dkr.ecr.us-east-2.amazonaws.com/leap-world/minwm-realtime@sha256:f584bdd2e71376dacb480d5455c6c9a045b14bb0ba30a97982f7c83967843978
+          args:
+            - --checkpoint-path=/opt/taehv/taew2_2.pth
+            - --device=cuda
+            - --dtype=bfloat16
+            - --max-sessions=16
+            - --queue-depth-per-session=1
+            - --encoded-frames-per-batch=1
+            - --encode-workers=4
+            - --max-message-mb=64
+            - --host=0.0.0.0
+            - --port=18081
+          env:
+            - {name: WORKER_EPOCH_FILE, value: /var/run/zing-worker/epoch}
+          ports:
+            - {name: vae, containerPort: 18081}
+          startupProbe:
+            httpGet: {path: /health, port: vae}
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 180
+          readinessProbe:
+            httpGet: {path: /health, port: vae}
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 6
+          livenessProbe:
+            httpGet: {path: /health, port: vae}
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 6
+          resources:
+            requests: {cpu: "6", memory: 24Gi, ephemeral-storage: 20Gi, nvidia.com/gpu: "1"}
+            limits: {cpu: "7", memory: 28Gi, ephemeral-storage: 40Gi, nvidia.com/gpu: "1"}
+          volumeMounts:
+            - {name: worker-epoch, mountPath: /var/run/zing-worker}
+      volumes:
+        - name: worker-epoch
+          emptyDir: {}
