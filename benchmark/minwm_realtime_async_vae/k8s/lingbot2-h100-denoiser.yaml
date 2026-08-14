@@ -194,7 +194,7 @@ spec:
                 --realtime-max-sessions-per-worker 4 \
                 --realtime-remote-vae-enabled \
                 --realtime-session-idle-timeout-s 60 \
-                --realtime-session-max-lifetime-s 60 \
+                --realtime-session-max-lifetime-s 70 \
                 --realtime-admission-wait-s 10 \
                 --enable-trace \
                 --otlp-traces-endpoint "${OTEL_EXPORTER_OTLP_ENDPOINT}" \
