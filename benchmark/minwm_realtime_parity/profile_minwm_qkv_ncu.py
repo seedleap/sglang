@@ -15,7 +15,7 @@ import torch.nn.functional as F
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=("baseline", "fused"), required=True)
-    parser.add_argument("--iterations", type=int, default=8)
+    parser.add_argument("--iterations", type=int, default=1)
     args = parser.parse_args()
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is required")
@@ -39,12 +39,15 @@ def main() -> None:
     sink.item()
     torch.cuda.synchronize()
 
+    torch.cuda.nvtx.range_push(f"minwm_qkv_{args.mode}")
     for _ in range(args.iterations):
         if args.mode == "baseline":
             outputs = [F.linear(x, weight) for weight in weights]
-            sink = outputs[0].float().sum()
+            sink = outputs[0]
         else:
-            sink = F.linear(x, packed).float().sum()
+            sink = F.linear(x, packed)
+    torch.cuda.nvtx.range_pop()
+    sink = sink.float().sum()
     sink.item()
     torch.cuda.synchronize()
 

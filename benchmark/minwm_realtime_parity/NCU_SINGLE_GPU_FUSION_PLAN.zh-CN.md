@@ -17,11 +17,16 @@
 H200、BF16、真实 720p SP1 layer-probe 形状 `[1,858,3072]`：baseline 为三次
 `3072→3072` linear，candidate 为一次 `3072→9216` packed linear。每张卡串行运行
 baseline/candidate，NCU 采集 kernel duration、Tensor/SM/DRAM throughput、active warps、
-registers 与 local-memory spill。必须保留 `.ncu-rep`、CSV、环境与 GPU clock；NCU 不与
+registers 与 local-memory spill。采集只包含 `minwm_qkv_baseline` / `minwm_qkv_fused`
+NVTX range 内的一次投影，避免 `--set full` 对 warmup/归约做无意义 replay。必须保留 `.ncu-rep`、CSV、环境与 GPU clock；NCU 不与
 torch.profiler/Nsight Systems 同跑。
 
 Spot 节点获得后，GPU0 与 GPU1 跑独立同构 A/B pair（交叉顺序），GPU2 可作为重试槽；其余卡
 不启动 workload。任务请求整机仅为获得同一 H200 Spot 节点，完成后 Job 自动退出。
+
+首个 Job `...-01` 在 Pod 被 TTL 回收前失败；其日志未保留在 Kubernetes。PVC 原位保留，
+`...-02` 启动时必须先列出旧 attempt 文件并记录大小，之后才允许采集。首版缺少 NVTX 过滤且
+对多次迭代做 full-set replay，不能把失败解释成 kernel 结论。
 
 ## 验收与决策
 
