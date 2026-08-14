@@ -175,6 +175,9 @@ def test_webui_keeps_external_secret_references_and_ephemeral_volumes():
         "name": "world-studio-runtime",
         "key": "happyoyster-api-key",
     }
+    assert env["HAPPYOYSTER_PUBLIC_IMAGE_BASE_URL"]["value"] == (
+        "https://open-world.loopit.me"
+    )
     assert volumes["runtime-secret"]["type"] == "secret"
     assert volumes["generated-images"]["type"] == "emptyDir"
     assert volumes["tmp"]["type"] == "emptyDir"

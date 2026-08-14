@@ -1003,7 +1003,7 @@ def _webui() -> dict[str, Any]:
                 ),
                 _env(
                     "HAPPYOYSTER_PUBLIC_IMAGE_BASE_URL",
-                    "https://seedleap-world.loopit.me",
+                    "https://open-world.loopit.me",
                 ),
                 _env("REALTIME_UPSTREAM_HTTP", "http://world-realtime-gateway:18080"),
                 _env("REALTIME_UPSTREAM_WS", "ws://world-realtime-gateway:18080"),
