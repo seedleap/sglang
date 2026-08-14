@@ -5,7 +5,9 @@ import io
 import json
 from datetime import datetime, timezone
 
-from build_model_release_spec import build_release_spec
+import pytest
+
+from build_model_release_spec import build_release_spec, parse_created_at
 
 
 class FakeClient:
@@ -99,3 +101,17 @@ def test_supports_legacy_manifest_key_and_resolved_revision():
 
     assert result["source"]["artifact_manifest"]["key"] == "legacy/manifest.json"
     assert result["source"]["manifest_revision"] == "revision-1"
+
+
+def test_created_at_can_reproduce_a_reviewed_release_id():
+    assert parse_created_at("2026-08-14T05:41:18Z") == datetime(
+        2026, 8, 14, 5, 41, 18, tzinfo=timezone.utc
+    )
+    assert parse_created_at("2026-08-14T13:41:18+08:00") == datetime(
+        2026, 8, 14, 5, 41, 18, tzinfo=timezone.utc
+    )
+
+    with pytest.raises(ValueError, match="include a timezone"):
+        parse_created_at("2026-08-14T05:41:18")
+    with pytest.raises(ValueError, match="RFC3339"):
+        parse_created_at("not-a-timestamp")

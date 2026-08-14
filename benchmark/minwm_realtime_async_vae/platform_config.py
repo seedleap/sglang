@@ -16,8 +16,10 @@ BUSINESS_LINE = "world-model"
 NAMESPACE = "world-model"
 APP_GROUP = "world-studio"
 REGISTRY = "829115578968.dkr.ecr.us-east-2.amazonaws.com/leap-world/minwm-realtime"
-FROZEN_GIT_SHA = "d8019542103c83047997cf6dc2e7014cba8565e3"
-FROZEN_BRANCH = "codex/minwm-lingbot2-dual-webui-opt-20260812"
+PRODUCTION_BASE_GIT_SHA = "d8019542103c83047997cf6dc2e7014cba8565e3"
+PRODUCTION_BASE_BRANCH = "codex/minwm-lingbot2-dual-webui-opt-20260812"
+FROZEN_GIT_SHA = "03afce6463bda488fbfc124fa0c8d8efd104a080"
+FROZEN_BRANCH = "codex/wm09-sglang-platform-config-20260814"
 GIT_REPO = "git@github.com:seedleap/sglang.git"
 IMAGE_RE = re.compile(r"^[^\s]+@sha256:[0-9a-f]{64}$")
 CALLBACK_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -212,7 +214,25 @@ def required_inputs_document() -> dict[str, Any]:
             "branch": FROZEN_BRANCH,
             "gitSha": FROZEN_GIT_SHA,
         },
+        "productionBaseline": {
+            "branch": PRODUCTION_BASE_BRANCH,
+            "gitSha": PRODUCTION_BASE_GIT_SHA,
+        },
         "requiredInputs": {
+            "wm08BuildContract": {
+                "state": "missing",
+                "currentFrozenBranch": PRODUCTION_BASE_BRANCH,
+                "currentFrozenGitSha": PRODUCTION_BASE_GIT_SHA,
+                "requiredBranch": FROZEN_BRANCH,
+                "requiredGitSha": FROZEN_GIT_SHA,
+                "requiredTagFormat": "<service-tag-prefix>-<full-40-character-git-sha>",
+                "requiredCallbackDigestField": "imageDigest",
+                "runtimeImageFormat": "<ecr-repository>@<callback.imageDigest>",
+                "reason": (
+                    "the production baseline does not contain the WM-09 release "
+                    "spec, CRT downloader compatibility, or publisher verifier"
+                ),
+            },
             "clusterRegistration": {
                 "state": "missing",
                 "clusterName": "world-model",

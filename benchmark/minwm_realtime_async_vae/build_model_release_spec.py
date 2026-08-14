@@ -17,6 +17,19 @@ MODEL_COMPONENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 REVISION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$")
 
 
+def parse_created_at(value: str | None) -> datetime:
+    """Return an explicit UTC release timestamp or the current UTC time."""
+    if value is None:
+        return datetime.now(timezone.utc)
+    try:
+        created_at = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise ValueError("created-at must be an RFC3339 timestamp") from error
+    if created_at.tzinfo is None:
+        raise ValueError("created-at must include a timezone")
+    return created_at.astimezone(timezone.utc)
+
+
 def _read_versioned_object(
     client: Any, bucket: str, key: str
 ) -> tuple[bytes, str]:
@@ -146,6 +159,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-id", required=True)
     parser.add_argument("--revision", required=True)
     parser.add_argument("--rollback-release")
+    parser.add_argument(
+        "--created-at",
+        help=(
+            "RFC3339 release timestamp; omit to generate a new review release ID "
+            "from the current UTC time"
+        ),
+    )
     return parser.parse_args()
 
 
@@ -171,7 +191,7 @@ def main() -> None:
         model_id=args.model_id,
         revision=args.revision,
         rollback_release=args.rollback_release,
-        created_at=datetime.now(timezone.utc),
+        created_at=parse_created_at(args.created_at),
     )
     print(json.dumps(result, ensure_ascii=True, indent=2, sort_keys=True))
 

@@ -12,6 +12,11 @@ service accounts, pools, and image digests.
 - Application group: `world-studio`.
 - Production code baseline:
   `origin/codex/minwm-lingbot2-dual-webui-opt-20260812@d8019542103c83047997cf6dc2e7014cba8565e3`.
+- Image build source: WM-09 implementation commit
+  `codex/wm09-sglang-platform-config-20260814@03afce6463bda488fbfc124fa0c8d8efd104a080`.
+  WM-08 must freeze this exact branch and commit before any of the eight images
+  is built; the production baseline remains the lineage base, not the image
+  source.
 - Selected canary source: `19692819b..e01efdb6e`. The branch was not used as a
   production base. WM-09 carried over only the CRT downloader and tests, the
   digest-bake files, and the root-EBS/containerd versus NVMe/kubelet split. The
@@ -95,9 +100,12 @@ full-Git-SHA audit tag, and ECR `imageDigest=sha256:<64 lowercase hex>`. The tag
 is checked and retained only as audit evidence; the renderer constructs every
 runtime image as `<repository>@<callback.imageDigest>`. It rejects `latest`, a
 branch tag, a short SHA, a missing service, a failed callback, or a digest/tag
-mismatch. The callbacks must come from a WM-08 contract updated to build the
-WM-09 integration commit: the older frozen `d8019542...` image cannot contain
-WM-09's CRT downloader, release spec, or copy verifier.
+mismatch. The callbacks must come from a WM-08 contract updated to build
+`03afce6463bda488fbfc124fa0c8d8efd104a080`: the older frozen `d8019542...`
+image cannot contain WM-09's CRT downloader compatibility, exact release spec,
+or copy verifier. `required-inputs.json` records this WM-08 contract update as a
+missing hard input, including both the lineage baseline and required image
+source SHA.
 
 Validate a collected callback document without writing payloads:
 
@@ -148,8 +156,13 @@ python3 benchmark/minwm_realtime_async_vae/build_model_release_spec.py \
   --model-family lingbot2 \
   --model-id robbyant-lingbot-world-v2-14b-causal-fast-diffusers \
   --revision 59cccf49f2d2dd27418ae7a04b82b10868d455c2 \
+  --created-at 2026-08-14T05:41:18Z \
   > /tmp/lingbot2-release-spec.review.json
 ```
+
+Omitting `--created-at` intentionally creates a new review release ID from the
+current UTC time. Supplying the reviewed timestamp above makes the read-only
+inventory output byte-for-byte reproducible against the checked-in spec.
 
 Review the source/destination, every VersionId, object count, total bytes,
 manifest SHA, release ID, and `rollback_release`. Then run the networked but

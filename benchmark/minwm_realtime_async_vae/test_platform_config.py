@@ -11,6 +11,8 @@ from platform_config import (
     FROZEN_GIT_SHA,
     IMAGE_INPUT_SPECS,
     IMAGE_PLACEHOLDERS,
+    PRODUCTION_BASE_BRANCH,
+    PRODUCTION_BASE_GIT_SHA,
     REGISTRY,
     all_platform_configs,
     applications,
@@ -193,6 +195,28 @@ def test_required_inputs_keep_unresolved_deployment_non_executable():
     document = required_inputs_document()
 
     assert document["executionReady"] is False
+    assert document["productionBaseline"] == {
+        "branch": PRODUCTION_BASE_BRANCH,
+        "gitSha": PRODUCTION_BASE_GIT_SHA,
+    }
+    assert document["frozenSource"] == {
+        "branch": FROZEN_BRANCH,
+        "gitSha": FROZEN_GIT_SHA,
+    }
+    assert document["requiredInputs"]["wm08BuildContract"] == {
+        "state": "missing",
+        "currentFrozenBranch": PRODUCTION_BASE_BRANCH,
+        "currentFrozenGitSha": PRODUCTION_BASE_GIT_SHA,
+        "requiredBranch": FROZEN_BRANCH,
+        "requiredGitSha": FROZEN_GIT_SHA,
+        "requiredTagFormat": "<service-tag-prefix>-<full-40-character-git-sha>",
+        "requiredCallbackDigestField": "imageDigest",
+        "runtimeImageFormat": "<ecr-repository>@<callback.imageDigest>",
+        "reason": (
+            "the production baseline does not contain the WM-09 release spec, "
+            "CRT downloader compatibility, or publisher verifier"
+        ),
+    }
     assert document["requiredInputs"]["clusterRegistration"]["state"] == "missing"
     assert len(document["requiredInputs"]["imageBuildCallbacks"]) == 8
     assert all(
