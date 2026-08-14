@@ -466,28 +466,19 @@ let socketServerError = "";
 let renderedPreviewFrames = 0;
 let previewScaleFrame = 0;
 let recordingActive = false;
-let recordingSamples = [];
-let recordingEncoder = null;
-let recordingEncoderReady = null;
-let recordingEncoderConfig = null;
+let recordingTracks = [];
 let recordingFrameIndex = 0;
 let recordingFps = DEFAULT_TARGET_FPS;
 let recordingTimer = 0;
 let recordingFrameTimer = 0;
 let recordingStartedPerfMs = 0;
 let recordingElapsedMs = 0;
-let recordingLastTimestampUs = -1;
 let recordingDroppedFrames = 0;
 let recordingSaving = false;
-let recordingEncodeChain = Promise.resolve();
 let recordingMode = "";
-let recordingMediaRecorder = null;
-let recordingMediaChunks = [];
-let recordingCaptureStream = null;
-let recordingMimeType = "video/mp4";
 let recordingDirectoryHandle = null;
 let recordingBaseFileName = "";
-let recordingDownload = null;
+let recordingDownloads = [];
 let recordingPromptDraft = "";
 let recordingPromptSubmitted = "";
 let recordingPromptStatus = "idle";
@@ -540,7 +531,9 @@ const lingbot2Canvas = $("lingbot2Viewport");
 const scratchCanvas = document.createElement("canvas");
 const scratchCtx = scratchCanvas.getContext("2d", { alpha: false });
 const recordingCanvas = document.createElement("canvas");
-const recordingCtx = recordingCanvas.getContext("2d", { alpha: false });
+let recordingCtx = recordingCanvas.getContext("2d", { alpha: false });
+const zingRecordingCanvas = document.createElement("canvas");
+const zingRecordingCtx = zingRecordingCanvas.getContext("2d", { alpha: false });
 const playbackController = new RealtimePlaybackController({
   mode: "adaptive",
   targetFps: DEFAULT_TARGET_FPS,
@@ -816,6 +809,8 @@ const promptRewriteController = new PromptRewriteController({
 let sessionLifetimeExpired = false;
 let sessionCountdownTimer = 0;
 let sessionCountdownDeadlineMs = 0;
+let worldExperiencePending = false;
+let worldExperienceReady = false;
 const sessionLifetimeGuard = new SessionLifetimeGuard({
   durationMs: SESSION_MAX_LIFETIME_MS,
   onExpire: () => expireSessionLifetime({ closeSessions: true }),
@@ -829,7 +824,32 @@ function resetSessionLifetimeUi() {
   sessionLifetimeGuard.cancel();
   stopSessionCountdown();
   sessionLifetimeExpired = false;
+  worldExperiencePending = false;
+  worldExperienceReady = false;
   $("sessionNotice").hidden = true;
+  updateRecordButton();
+}
+
+function markWorldExperienceReady() {
+  if (!worldExperiencePending || worldExperienceReady || sessionLifetimeExpired) return false;
+  worldExperiencePending = false;
+  worldExperienceReady = true;
+  sessionLifetimeGuard.start();
+  startSessionCountdown();
+  startRecording({ source: "first_visible_frame" });
+  setStatus("Live", "live");
+  $("sessionNotice").hidden = true;
+  addHistory("world ready · timer and dual recordings started");
+  return true;
+}
+
+function stopWorldExperienceTiming({ recordingReason = "session_closed" } = {}) {
+  worldExperiencePending = false;
+  worldExperienceReady = false;
+  sessionLifetimeGuard.cancel();
+  stopSessionCountdown();
+  if (recordingActive) void stopRecording({ reason: recordingReason });
+  updateRecordButton();
 }
 
 function formatSessionCountdown(seconds) {
@@ -884,8 +904,7 @@ function isExperienceBusyError(error) {
 
 function handleExperienceBusy() {
   promptRewriteController.endSession();
-  sessionLifetimeGuard.cancel();
-  stopSessionCountdown();
+  stopWorldExperienceTiming({ recordingReason: "admission_rejected" });
   dualModelController.close("showcase session is occupied");
   $("connectBtn").disabled = false;
   setStatus("Busy", "error");
@@ -898,12 +917,8 @@ function expireSessionLifetime({ closeSessions = false } = {}) {
   if (sessionLifetimeExpired) return;
   sessionLifetimeExpired = true;
   promptRewriteController.endSession();
-  sessionLifetimeGuard.cancel();
-  stopSessionCountdown();
   const finalizingRecording = recordingActive;
-  if (finalizingRecording) {
-    void stopRecording({ reason: "session_timeout" });
-  }
+  stopWorldExperienceTiming({ recordingReason: "session_timeout" });
   if (closeSessions) dualModelController.close("maximum session lifetime reached");
   showSessionNotice(finalizingRecording
     ? "本轮体验已结束，正在生成游玩录像…"
@@ -1582,11 +1597,37 @@ function recordingFileName(extension = "mp4") {
   return `world-studio-gameplay-${stamp}.${extension}`;
 }
 
+function createRecordingTrack({ key, label, variant, canvas: targetCanvas, ctx: targetCtx }) {
+  return {
+    key,
+    label,
+    variant,
+    canvas: targetCanvas,
+    ctx: targetCtx,
+    samples: [],
+    encoder: null,
+    encoderReady: null,
+    encoderConfig: null,
+    encodeChain: Promise.resolve(),
+    mediaRecorder: null,
+    mediaChunks: [],
+    captureStream: null,
+    mimeType: recordingMode === "mediarecorder-webm"
+      ? supportedWebmMimeType()
+      : "video/mp4",
+    frameIndex: 0,
+    lastTimestampUs: -1,
+    droppedFrames: 0,
+  };
+}
+
 function updateRecordButton() {
   const button = $("recordBtn");
   button.classList.toggle("is-recording", recordingActive);
   button.classList.toggle("is-saving", recordingSaving);
-  const sessionLive = sessionCountdownDeadlineMs > Date.now() && !sessionLifetimeExpired;
+  const sessionLive = worldExperienceReady
+    && sessionCountdownDeadlineMs > Date.now()
+    && !sessionLifetimeExpired;
   button.disabled = recordingSaving || (!recordingActive && !sessionLive);
   button.setAttribute("aria-pressed", recordingActive ? "true" : "false");
   $("recordLabel").textContent = recordingSaving
@@ -1603,34 +1644,45 @@ function updateRecordButton() {
 }
 
 function updateRecordingDownloadButton() {
-  const link = $("recordDownloadBtn");
-  if (!link) return;
-  link.hidden = !recordingDownload;
-  link.setAttribute("aria-disabled", !recordingDownload || recordingSaving ? "true" : "false");
-  if (recordingDownload) {
-    link.href = recordingDownload.url;
-    link.download = recordingDownload.fileName;
-    link.title = `下载 ${recordingDownload.fileName}`;
-  } else {
-    link.removeAttribute("download");
-    link.href = "#";
-  }
+  const button = $("recordDownloadBtn");
+  if (!button) return;
+  const ready = recordingDownloads.length === 2;
+  button.hidden = !ready;
+  button.disabled = !ready || recordingSaving;
+  button.setAttribute("aria-disabled", !ready || recordingSaving ? "true" : "false");
+  button.title = ready
+    ? `同步下载 ${recordingDownloads.map((item) => item.fileName).join("、")}`
+    : "两份录像生成后可下载";
 }
 
-function setRecordingDownload(videoBlob = null, fileName = "") {
-  if (recordingDownload?.url) URL.revokeObjectURL(recordingDownload.url);
-  recordingDownload = videoBlob && fileName
-    ? { videoBlob, fileName, url: URL.createObjectURL(videoBlob) }
-    : null;
+function setRecordingDownloads(outputs = []) {
+  for (const item of recordingDownloads) {
+    if (item.url) URL.revokeObjectURL(item.url);
+  }
+  recordingDownloads = outputs
+    .filter((item) => item?.videoBlob && item?.fileName)
+    .map((item) => ({
+      ...item,
+      url: URL.createObjectURL(item.videoBlob),
+    }));
   updateRecordingDownloadButton();
 }
 
-function downloadGameplayRecording(event) {
-  if (!recordingDownload || recordingSaving) {
+function downloadGameplayRecordings(event) {
+  if (recordingDownloads.length !== 2 || recordingSaving) {
     event?.preventDefault?.();
     return;
   }
-  addHistory(`downloaded gameplay recording · ${recordingDownload.fileName}`);
+  event?.preventDefault?.();
+  for (const item of recordingDownloads) {
+    const link = document.createElement("a");
+    link.href = item.url;
+    link.download = item.fileName;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+  }
+  addHistory(`downloaded both gameplay recordings · ${recordingDownloads.map((item) => item.fileName).join(" · ")}`);
 }
 
 function resetRecordingPromptOverlay() {
@@ -2192,24 +2244,28 @@ function startRecording({ source = "manual" } = {}) {
     return;
   }
   recordingActive = true;
-  recordingSamples = [];
-  recordingEncoder = null;
-  recordingEncoderReady = null;
-  recordingEncoderConfig = null;
-  recordingMediaRecorder = null;
-  recordingMediaChunks = [];
-  recordingCaptureStream = null;
-  setRecordingDownload(null);
-  recordingMimeType = recordingMode === "mediarecorder-webm"
-    ? supportedWebmMimeType()
-    : "video/mp4";
+  setRecordingDownloads([]);
+  recordingTracks = [
+    createRecordingTrack({
+      key: "comparison",
+      label: "Zing × LingBot2",
+      variant: "comparison",
+      canvas: recordingCanvas,
+      ctx: recordingCtx,
+    }),
+    createRecordingTrack({
+      key: "zing",
+      label: "Zing",
+      variant: "zing",
+      canvas: zingRecordingCanvas,
+      ctx: zingRecordingCtx,
+    }),
+  ];
   recordingFrameIndex = 0;
   recordingFps = Math.max(1, Math.min(GAMEPLAY_RECORDING_FPS, previewPlaybackTargetFps()));
   recordingStartedPerfMs = performance.now();
   recordingElapsedMs = 0;
-  recordingLastTimestampUs = -1;
   recordingDroppedFrames = 0;
-  recordingEncodeChain = Promise.resolve();
   recordingBaseFileName = recordingFileName().replace(/\.[^.]*$/, "");
   recordingActionPulseUntil.clear();
   resetRecordingPromptOverlay();
@@ -2219,21 +2275,24 @@ function startRecording({ source = "manual" } = {}) {
     started_at: new Date().toISOString(),
     started_client_ms: artifactClientMs(recordingArtifact),
     mode: recordingMode,
-    mime_type: recordingMimeType,
+    mime_type: recordingTracks[0].mimeType,
     capture_scope: "stage",
     capture_width: RECORDING_STAGE_WIDTH,
     capture_height: RECORDING_STAGE_HEIGHT,
     target_fps: recordingFps,
     timing: "wall_clock",
     source,
+    variants: recordingTracks.map((track) => track.key),
   };
-  if (recordingMode === "mediarecorder-webm") startWebmRecording();
+  if (recordingMode === "mediarecorder-webm") {
+    for (const track of recordingTracks) startWebmRecording(track);
+  }
   startRecordingFramePump();
   recordTrajectoryEvent("record_start", { target_fps: recordingFps, source });
   recordingTimer = window.setInterval(updateRecordButton, 250);
   updateRecordButton();
   updateRecordFolderButton();
-  addHistory("recording started");
+  addHistory("dual recording started · comparison + Zing");
 }
 
 async function stopRecording({ reason = "manual" } = {}) {
@@ -2250,23 +2309,33 @@ async function stopRecording({ reason = "manual" } = {}) {
   updateRecordFolderButton();
 
   const extension = recordingMode === "mediarecorder-webm" ? "webm" : "mp4";
-  const fileName = `${recordingBaseFileName || recordingFileName(extension).replace(/\.[^.]*$/, "")}.${extension}`;
   try {
     recordTrajectoryEvent("record_stop", {
-      encoded_frames: recordingSamples.length,
+      encoded_frames: Object.fromEntries(
+        recordingTracks.map((track) => [track.key, track.samples.length]),
+      ),
       captured_frames: recordingFrameIndex,
       mode: recordingMode,
       reason,
       elapsed_ms: Math.round(recordingElapsedMs),
-      dropped_frames: recordingDroppedFrames,
+      dropped_frames: Object.fromEntries(
+        recordingTracks.map((track) => [track.key, track.droppedFrames]),
+      ),
     });
-    const videoBlob = recordingMode === "mediarecorder-webm"
-      ? await stopWebmRecording()
-      : await buildMp4RecordingBlob();
-    await saveRecordingArtifactFiles(videoBlob, fileName, { deferDownload: true });
-    addHistory(`gameplay recording ready · ${recordingFrameIndex} frames · ${extension}`);
-    if (reason === "session_timeout" || reason === "session_closed") {
-      showSessionNotice("游玩录像已生成，可点击右上角下载录像");
+    const baseFileName = recordingBaseFileName
+      || recordingFileName(extension).replace(/\.[^.]*$/, "");
+    const outputs = await Promise.all(recordingTracks.map(async (track) => ({
+      key: track.key,
+      label: track.label,
+      fileName: `${baseFileName}-${track.key}.${extension}`,
+      videoBlob: recordingMode === "mediarecorder-webm"
+        ? await stopWebmRecording(track)
+        : await buildMp4RecordingBlob(track),
+    })));
+    await saveRecordingArtifactFiles(outputs, { deferDownload: true });
+    addHistory(`both gameplay recordings ready · ${recordingFrameIndex} synchronized frames · ${extension}`);
+    if (["session_timeout", "session_closed", "primary_disconnected"].includes(reason)) {
+      showSessionNotice("两份游玩录像已生成，可点击右上角同步下载");
     }
   } catch (error) {
     if (error?.name === "AbortError") {
@@ -2277,68 +2346,70 @@ async function stopRecording({ reason = "manual" } = {}) {
       showSessionNotice("游玩录像生成失败，请重新体验后再试");
     }
   } finally {
-    recordingEncoder?.close?.();
-    recordingEncoder = null;
-    recordingEncoderReady = null;
-    stopRecordingCaptureStream();
-    recordingMediaRecorder = null;
-    recordingMediaChunks = [];
-    recordingCaptureStream = null;
+    for (const track of recordingTracks) {
+      track.encoder?.close?.();
+      track.encoder = null;
+      track.encoderReady = null;
+      stopRecordingCaptureStream(track);
+      track.mediaRecorder = null;
+      track.mediaChunks = [];
+      track.captureStream = null;
+    }
     recordingMode = "";
     recordingSaving = false;
-    recordingSamples = [];
+    recordingTracks = [];
     updateRecordButton();
     updateRecordFolderButton();
   }
 }
 
-async function buildMp4RecordingBlob() {
-  await recordingEncodeChain;
-  if (!recordingEncoder) throw new Error("No frames were recorded");
-  await recordingEncoder.flush();
-  if (!recordingSamples.length) throw new Error("No frames were recorded");
-  return buildRecordingMp4();
+async function buildMp4RecordingBlob(track) {
+  await track.encodeChain;
+  if (!track.encoder) throw new Error(`No ${track.label} frames were recorded`);
+  await track.encoder.flush();
+  if (!track.samples.length) throw new Error(`No ${track.label} frames were recorded`);
+  return buildRecordingMp4(track);
 }
 
-function startWebmRecording() {
-  drawRecordingStageFrame(canvas);
-  recordingMediaChunks = [];
-  recordingCaptureStream = recordingCanvas.captureStream(recordingFps);
-  recordingMediaRecorder = new MediaRecorder(
-    recordingCaptureStream,
-    recordingMimeType ? { mimeType: recordingMimeType } : undefined,
+function startWebmRecording(track) {
+  drawRecordingStageFrame(canvas, track);
+  track.mediaChunks = [];
+  track.captureStream = track.canvas.captureStream(recordingFps);
+  track.mediaRecorder = new MediaRecorder(
+    track.captureStream,
+    track.mimeType ? { mimeType: track.mimeType } : undefined,
   );
-  recordingMimeType = recordingMediaRecorder.mimeType || recordingMimeType || "video/webm";
-  recordingMediaRecorder.ondataavailable = (event) => {
-    if (event.data?.size) recordingMediaChunks.push(event.data);
+  track.mimeType = track.mediaRecorder.mimeType || track.mimeType || "video/webm";
+  track.mediaRecorder.ondataavailable = (event) => {
+    if (event.data?.size) track.mediaChunks.push(event.data);
   };
-  recordingMediaRecorder.onerror = (event) => {
+  track.mediaRecorder.onerror = (event) => {
     recordingActive = false;
     stopRecordingFramePump();
-    addHistory(event.error?.message || "recording media recorder failed");
+    addHistory(event.error?.message || `${track.label} recorder failed`);
     updateRecordButton();
   };
-  recordingMediaRecorder.start(250);
+  track.mediaRecorder.start(250);
 }
 
-function stopWebmRecording() {
+function stopWebmRecording(track) {
   return new Promise((resolve, reject) => {
-    const recorder = recordingMediaRecorder;
+    const recorder = track.mediaRecorder;
     if (!recorder) {
-      reject(new Error("No WebM recorder was started"));
+      reject(new Error(`No ${track.label} WebM recorder was started`));
       return;
     }
     recorder.onstop = () => {
-      stopRecordingCaptureStream();
-      if (!recordingMediaChunks.length) {
-        reject(new Error("No frames were recorded"));
+      stopRecordingCaptureStream(track);
+      if (!track.mediaChunks.length) {
+        reject(new Error(`No ${track.label} frames were recorded`));
         return;
       }
-      resolve(new Blob(recordingMediaChunks, { type: recordingMimeType || "video/webm" }));
+      resolve(new Blob(track.mediaChunks, { type: track.mimeType || "video/webm" }));
     };
     recorder.onerror = (event) => {
-      stopRecordingCaptureStream();
-      reject(event.error || new Error("recording media recorder failed"));
+      stopRecordingCaptureStream(track);
+      reject(event.error || new Error(`${track.label} recorder failed`));
     };
     if (recorder.state === "inactive") {
       recorder.onstop();
@@ -2353,9 +2424,9 @@ function stopWebmRecording() {
   });
 }
 
-function stopRecordingCaptureStream() {
-  for (const track of recordingCaptureStream?.getTracks?.() || []) track.stop();
-  recordingCaptureStream = null;
+function stopRecordingCaptureStream(track) {
+  for (const streamTrack of track?.captureStream?.getTracks?.() || []) streamTrack.stop();
+  if (track) track.captureStream = null;
 }
 
 function startRecordingFramePump() {
@@ -2376,68 +2447,90 @@ function captureRecordingFrame() {
   if (!recordingActive || recordingSaving) return;
   const elapsedMs = Math.max(0, performance.now() - recordingStartedPerfMs);
   recordingElapsedMs = elapsedMs;
-  if (recordingMode === "webcodecs-mp4" && recordingEncoder?.encodeQueueSize > 4) {
-    recordingDroppedFrames += 1;
-    return;
-  }
-  drawRecordingStageFrame(canvas);
+  for (const track of recordingTracks) drawRecordingStageFrame(canvas, track);
+  recordingFrameIndex += 1;
   if (recordingMode === "mediarecorder-webm") {
-    recordingFrameIndex += 1;
+    for (const track of recordingTracks) track.frameIndex += 1;
     return;
   }
-  const frameIndex = recordingFrameIndex;
+  for (const track of recordingTracks) captureRecordingTrack(track, elapsedMs);
+  recordingDroppedFrames = recordingTracks.reduce(
+    (sum, track) => sum + track.droppedFrames,
+    0,
+  );
+}
+
+function captureRecordingTrack(track, elapsedMs) {
+  if (track.encoder?.encodeQueueSize > 4) {
+    track.droppedFrames += 1;
+    return;
+  }
+  const frameIndex = track.frameIndex;
   const duration = Math.round(1_000_000 / Math.max(1, recordingFps));
-  const timestamp = Math.max(recordingLastTimestampUs + 1, Math.round(elapsedMs * 1000));
-  recordingLastTimestampUs = timestamp;
+  const timestamp = Math.max(track.lastTimestampUs + 1, Math.round(elapsedMs * 1000));
+  track.lastTimestampUs = timestamp;
   let frame;
   try {
-    frame = new VideoFrame(recordingCanvas, { timestamp, duration });
+    frame = new VideoFrame(track.canvas, { timestamp, duration });
   } catch (error) {
     recordingActive = false;
     stopRecordingFramePump();
-    addHistory(error.message || "recording frame capture failed");
+    addHistory(error.message || `${track.label} frame capture failed`);
     updateRecordButton();
     return;
   }
-  recordingFrameIndex += 1;
-  recordingEncodeChain = recordingEncodeChain
+  track.frameIndex += 1;
+  track.encodeChain = track.encodeChain
     .then(async () => {
-      await ensureRecordingEncoder(frame.displayWidth, frame.displayHeight);
-      recordingEncoder.encode(frame, { keyFrame: frameIndex === 0 || frameIndex % 120 === 0 });
-      frame.close();
+      try {
+        await ensureRecordingEncoder(track, frame.displayWidth, frame.displayHeight);
+        track.encoder.encode(frame, { keyFrame: frameIndex === 0 || frameIndex % 120 === 0 });
+      } finally {
+        frame.close();
+      }
     })
     .catch((error) => {
-      frame.close();
       recordingActive = false;
       stopRecordingFramePump();
-      addHistory(error.message || "recording encode failed");
+      addHistory(error.message || `${track.label} encode failed`);
       updateRecordButton();
     });
 }
 
-function drawRecordingStageFrame(image) {
-  ensureRecordingStageCanvas();
+function drawRecordingStageFrame(image, track = recordingTracks[0] || {
+  variant: "comparison",
+  canvas: recordingCanvas,
+  ctx: recordingCtx,
+}) {
+  const previousCtx = recordingCtx;
+  recordingCtx = track.ctx;
+  ensureRecordingStageCanvas(track.canvas);
   const minwmSource = recordingDrawableSource(image || canvas);
   recordingCtx.save();
-  recordingCtx.imageSmoothingEnabled = true;
-  recordingCtx.imageSmoothingQuality = "medium";
-  recordingCtx.fillStyle = "#11140f";
-  recordingCtx.fillRect(0, 0, RECORDING_STAGE_WIDTH, RECORDING_STAGE_HEIGHT);
-  drawRecordingTopbar();
-  drawRecordingComparisonPreview(minwmSource, lingbot2Canvas);
-  drawRecordingBottomGradient();
-  drawRecordingControls();
-  drawRecordingPromptComposer();
-  recordingCtx.restore();
+  try {
+    recordingCtx.imageSmoothingEnabled = true;
+    recordingCtx.imageSmoothingQuality = "medium";
+    recordingCtx.fillStyle = "#11140f";
+    recordingCtx.fillRect(0, 0, RECORDING_STAGE_WIDTH, RECORDING_STAGE_HEIGHT);
+    drawRecordingTopbar(track.variant);
+    if (track.variant === "zing") drawRecordingZingPreview(minwmSource);
+    else drawRecordingComparisonPreview(minwmSource, lingbot2Canvas);
+    drawRecordingBottomGradient();
+    drawRecordingControls();
+    drawRecordingPromptComposer();
+  } finally {
+    recordingCtx.restore();
+    recordingCtx = previousCtx;
+  }
 }
 
-function ensureRecordingStageCanvas() {
+function ensureRecordingStageCanvas(targetCanvas = recordingCanvas) {
   if (
-    recordingCanvas.width !== RECORDING_STAGE_WIDTH ||
-    recordingCanvas.height !== RECORDING_STAGE_HEIGHT
+    targetCanvas.width !== RECORDING_STAGE_WIDTH ||
+    targetCanvas.height !== RECORDING_STAGE_HEIGHT
   ) {
-    recordingCanvas.width = RECORDING_STAGE_WIDTH;
-    recordingCanvas.height = RECORDING_STAGE_HEIGHT;
+    targetCanvas.width = RECORDING_STAGE_WIDTH;
+    targetCanvas.height = RECORDING_STAGE_HEIGHT;
   }
 }
 
@@ -2453,7 +2546,7 @@ function recordingDrawableSource(image) {
   return image || canvas;
 }
 
-function drawRecordingTopbar() {
+function drawRecordingTopbar(variant = "comparison") {
   const y = 0;
   fillRecordingRect(0, y, RECORDING_STAGE_WIDTH, RECORDING_STAGE_TOPBAR_HEIGHT, "#0b1110");
   recordingCtx.fillStyle = "rgba(232, 234, 223, 0.12)";
@@ -2491,11 +2584,22 @@ function drawRecordingTopbar() {
     maxWidth: 60,
   });
 
-  drawRecordingLabel("Zing  ×  LingBot2", RECORDING_STAGE_WIDTH - RECORDING_STAGE_PADDING, y + 30, {
+  drawRecordingLabel(variant === "zing" ? "Zing" : "Zing  ×  LingBot2", RECORDING_STAGE_WIDTH - RECORDING_STAGE_PADDING, y + 30, {
     align: "right",
     color: "rgba(247, 250, 248, 0.72)",
     font: "600 14px ui-sans-serif, system-ui, sans-serif",
     maxWidth: 180,
+  });
+}
+
+function drawRecordingZingPreview(minwmSource) {
+  const y = RECORDING_STAGE_TOPBAR_HEIGHT;
+  fillRecordingRect(0, y, RECORDING_STAGE_WIDTH, RECORDING_STAGE_PREVIEW_HEIGHT, "#11140f");
+  drawRecordingFittedSource(minwmSource, {
+    x: 0,
+    y,
+    width: RECORDING_STAGE_WIDTH,
+    height: RECORDING_STAGE_PREVIEW_HEIGHT,
   });
 }
 
@@ -2738,13 +2842,13 @@ function recordingRoundedRectPath(x, y, width, height, radius) {
   recordingCtx.quadraticCurveTo(x, y, x + r, y);
 }
 
-async function ensureRecordingEncoder(width, height) {
-  if (recordingEncoderReady) return recordingEncoderReady;
-  recordingEncoderReady = createRecordingEncoder(width, height);
-  return recordingEncoderReady;
+async function ensureRecordingEncoder(track, width, height) {
+  if (track.encoderReady) return track.encoderReady;
+  track.encoderReady = createRecordingEncoder(track, width, height);
+  return track.encoderReady;
 }
 
-async function createRecordingEncoder(width, height) {
+async function createRecordingEncoder(track, width, height) {
   const fps = Math.max(1, recordingFps);
   const bitrate = Math.round(Math.min(
     20_000_000,
@@ -2771,25 +2875,25 @@ async function createRecordingEncoder(width, height) {
     }
   }
   if (!supported) throw new Error("This browser cannot encode H.264 MP4");
-  recordingEncoderConfig = supported;
-  recordingEncoder = new VideoEncoder({
-    output: (chunk, metadata) => recordEncodedChunk(chunk, metadata),
+  track.encoderConfig = supported;
+  track.encoder = new VideoEncoder({
+    output: (chunk, metadata) => recordEncodedChunk(track, chunk, metadata),
     error: (error) => {
       recordingActive = false;
-      addHistory(error.message || "recording encoder failed");
+      addHistory(error.message || `${track.label} encoder failed`);
       updateRecordButton();
     },
   });
-  recordingEncoder.configure(supported);
+  track.encoder.configure(supported);
 }
 
-function recordEncodedChunk(chunk, metadata) {
+function recordEncodedChunk(track, chunk, metadata) {
   if (metadata?.decoderConfig?.description) {
-    recordingEncoderConfig.description = metadata.decoderConfig.description;
+    track.encoderConfig.description = metadata.decoderConfig.description;
   }
   const data = new Uint8Array(chunk.byteLength);
   chunk.copyTo(data);
-  recordingSamples.push({
+  track.samples.push({
     data,
     timestamp: chunk.timestamp,
     duration: chunk.duration || 0,
@@ -2812,8 +2916,8 @@ function sidecarFileName(fileName, extension) {
   return `${String(fileName).replace(/\.[^.]*$/, "")}.${extension}`;
 }
 
-async function saveRecordingArtifactFiles(videoBlob, fileName, { deferDownload = false } = {}) {
-  const artifact = finalizeRecordingArtifact(videoBlob, fileName);
+async function saveRecordingArtifactFiles(outputs, { deferDownload = false } = {}) {
+  const artifact = finalizeRecordingArtifact(outputs);
   const jsonFileName = artifact.recording.json_file;
   const htmlFileName = artifact.recording.html_file;
   const jsonBlob = new Blob(
@@ -2825,7 +2929,7 @@ async function saveRecordingArtifactFiles(videoBlob, fileName, { deferDownload =
     { type: "text/html" },
   );
   const files = [
-    { name: fileName, blob: videoBlob },
+    ...outputs.map((output) => ({ name: output.fileName, blob: output.videoBlob })),
     { name: jsonFileName, blob: jsonBlob },
     { name: htmlFileName, blob: htmlBlob },
   ];
@@ -2834,29 +2938,47 @@ async function saveRecordingArtifactFiles(videoBlob, fileName, { deferDownload =
   } else if (!deferDownload) {
     await saveRecordingFiles(files);
   }
-  setRecordingDownload(videoBlob, fileName);
+  setRecordingDownloads(outputs);
 }
 
-function finalizeRecordingArtifact(videoBlob, fileName) {
+function finalizeRecordingArtifact(outputs) {
   const artifact = recordingArtifact || ensureSessionArtifact();
-  const jsonFileName = sidecarFileName(fileName, "json");
-  const htmlFileName = sidecarFileName(fileName, "html");
+  const primary = outputs.find((output) => output.key === "comparison") || outputs[0];
+  if (!primary) throw new Error("No recording outputs were generated");
+  const sidecarBaseName = primary.fileName.replace(/-comparison\.[^.]*$/, "");
+  const jsonFileName = `${sidecarBaseName}.json`;
+  const htmlFileName = `${sidecarBaseName}.html`;
+  const tracksByKey = Object.fromEntries(recordingTracks.map((track) => [track.key, track]));
+  const videos = Object.fromEntries(outputs.map((output) => {
+    const track = tracksByKey[output.key];
+    return [output.key, {
+      label: output.label,
+      mime_type: output.videoBlob.type || track?.mimeType || "video/mp4",
+      frames: track?.frameIndex || 0,
+      dropped_frames: track?.droppedFrames || 0,
+      encoded_chunks: recordingMode === "mediarecorder-webm"
+        ? track?.mediaChunks.length || 0
+        : track?.samples.length || 0,
+      video_file: output.fileName,
+      video_url: recordingAssetUrl(output.fileName),
+      video_bytes: output.videoBlob.size,
+    }];
+  }));
   artifact.recording = {
     ...(artifact.recording || {}),
     stopped_at: new Date().toISOString(),
     stopped_client_ms: artifactClientMs(artifact),
     mode: recordingMode,
-    mime_type: videoBlob.type || recordingMimeType,
+    mime_type: primary.videoBlob.type || tracksByKey.comparison?.mimeType || "video/mp4",
     fps: recordingFps,
     frames: recordingFrameIndex,
     dropped_frames: recordingDroppedFrames,
     duration_ms: Math.round(recordingElapsedMs),
-    encoded_chunks: recordingMode === "mediarecorder-webm"
-      ? recordingMediaChunks.length
-      : recordingSamples.length,
-    video_file: fileName,
-    video_url: recordingAssetUrl(fileName),
-    video_bytes: videoBlob.size,
+    encoded_chunks: videos.comparison?.encoded_chunks || 0,
+    video_file: primary.fileName,
+    video_url: recordingAssetUrl(primary.fileName),
+    video_bytes: primary.videoBlob.size,
+    videos,
     json_file: jsonFileName,
     json_url: recordingAssetUrl(jsonFileName),
     html_file: htmlFileName,
@@ -3324,13 +3446,13 @@ function escapeHtmlAttribute(value) {
     .replaceAll("'", "&#39;");
 }
 
-function buildRecordingMp4() {
-  if (!recordingEncoderConfig.description) {
+function buildRecordingMp4(track) {
+  if (!track.encoderConfig?.description) {
     throw new Error("H.264 encoder did not return MP4 decoder config");
   }
-  const width = recordingEncoderConfig.width;
-  const height = recordingEncoderConfig.height;
-  const samples = normalizeRecordingSamples(recordingSamples);
+  const width = track.encoderConfig.width;
+  const height = track.encoderConfig.height;
+  const samples = normalizeRecordingSamples(track.samples);
   const mdatPayload = concatBytes(samples.map((sample) => sample.data));
   const ftyp = mp4Box("ftyp", ascii("isom"), u32(0x200), ascii("isom"), ascii("iso2"), ascii("avc1"), ascii("mp41"));
   const mdat = mp4Box("mdat", mdatPayload);
@@ -3340,7 +3462,7 @@ function buildRecordingMp4() {
     height,
     samples,
     firstSampleOffset,
-    avcConfig: new Uint8Array(recordingEncoderConfig.description),
+    avcConfig: new Uint8Array(track.encoderConfig.description),
   });
   return new Blob([ftyp, mdat, moov], { type: "video/mp4" });
 }
@@ -3914,6 +4036,7 @@ function drawFrame(image, { close = true, markRendered = true } = {}) {
   ctx.imageSmoothingEnabled = true;
   ctx.imageSmoothingQuality = "medium";
   ctx.drawImage(drawSource, 0, 0, sourceWidth, sourceHeight);
+  markWorldExperienceReady();
   if (markRendered) renderedPreviewFrames += 1;
   setPreviewState("live");
   if (close && !(image instanceof ImageData)) image.close?.();
@@ -4415,9 +4538,7 @@ function abortCurrentSession(reason = "session closed by client", {
 function closeSession(reason = "session closed by client", clearFrames = true) {
   promptRewriteController.endSession();
   cancelLingbot2Reconnect();
-  sessionLifetimeGuard.cancel();
-  stopSessionCountdown();
-  if (recordingActive) void stopRecording({ reason: "session_closed" });
+  stopWorldExperienceTiming({ recordingReason: "session_closed" });
   clearQueueOnClose = clearFrames;
   dualModelController.close(reason);
 }
@@ -4527,6 +4648,10 @@ async function connect() {
     document.activeElement?.blur?.();
     canvas.tabIndex = 0;
     canvas.focus();
+    worldExperiencePending = true;
+    worldExperienceReady = false;
+    setStatus("Loading world", "live");
+    addHistory("model connected · waiting for first visible Zing frame");
     const connectionReport = await dualModelController.connect(init);
     if (epoch !== streamEpoch) return;
     void rememberEnteredWorld(
@@ -4548,13 +4673,9 @@ async function connect() {
     }
     promptRewriteController.beginSession(init.prompt);
     beginPromptLogSession(init.prompt);
-    sessionLifetimeGuard.start();
-    startSessionCountdown();
-    startRecording({ source: "session" });
-    setStatus("Live", "live");
+    if (!worldExperienceReady) setStatus("Loading world", "live");
   } catch (error) {
-    sessionLifetimeGuard.cancel();
-    stopSessionCountdown();
+    stopWorldExperienceTiming({ recordingReason: "startup_failed" });
     $("connectBtn").disabled = false;
     setModelConnectionState("minwm", "error");
     setStatus("Init failed", "error");
@@ -4637,6 +4758,13 @@ function openPrimarySession(init, url) {
       });
       if (isSessionLifetimeReason(event.reason)) {
         expireSessionLifetime({ closeSessions: true });
+      } else if (!socketCloseExpected) {
+        const hadReadyWorld = worldExperienceReady;
+        stopWorldExperienceTiming({ recordingReason: "primary_disconnected" });
+        lingbot2Session.close("Zing primary session closed");
+        if (hadReadyWorld) {
+          showSessionNotice("Zing 连接已中断，已结束计时并生成当前录像");
+        }
       }
       void traceHttpClient?.flushClientEvents().catch(() => {});
       if (!renderedPreviewFrames) setPreviewState("idle");
@@ -5728,7 +5856,9 @@ $("recordBtn").onclick = async () => {
   if (recordingActive) {
     await stopRecording({ reason: "manual" });
   } else {
-    const sessionLive = sessionCountdownDeadlineMs > Date.now() && !sessionLifetimeExpired;
+    const sessionLive = worldExperienceReady
+      && sessionCountdownDeadlineMs > Date.now()
+      && !sessionLifetimeExpired;
     if (!sessionLive) {
       showSessionNotice("请先进入世界，再开始游玩录像");
       return;
@@ -5736,7 +5866,7 @@ $("recordBtn").onclick = async () => {
     startRecording({ source: "manual" });
   }
 };
-$("recordDownloadBtn").onclick = downloadGameplayRecording;
+$("recordDownloadBtn").onclick = downloadGameplayRecordings;
 $("recordFolderBtn").onclick = () => {
   chooseRecordingDirectory().catch((error) => {
     addHistory(error.message || "record folder selection failed");

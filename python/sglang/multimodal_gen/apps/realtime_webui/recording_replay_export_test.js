@@ -31,12 +31,12 @@ assert.match(
 );
 assert.match(
   appJs,
-  /await recordingEncoder\.flush\(\);\s*if \(!recordingSamples\.length\)/,
+  /await track\.encoder\.flush\(\);\s*if \(!track\.samples\.length\)/,
   "short recordings should flush the encoder before checking for output samples",
 );
 assert.match(
   appJs,
-  /recordingEncoder\?\.encodeQueueSize > 4/,
+  /track\.encoder\?\.encodeQueueSize > 4/,
   "recording backpressure should drop capture frames instead of stalling realtime play",
 );
 assert.doesNotMatch(
@@ -66,13 +66,33 @@ assert.match(
 );
 assert.match(
   appJs,
-  /stopRecording\(\{ reason: "session_timeout" \}\)/,
+  /stopWorldExperienceTiming\(\{ recordingReason: "session_timeout" \}\)/,
   "session timeout should finalize the downloadable gameplay recording",
 );
 assert.match(
   appJs,
-  /setRecordingDownload\(videoBlob, fileName\)/,
-  "finalized gameplay video should be exposed through the download control",
+  /setRecordingDownloads\(outputs\)/,
+  "both finalized gameplay videos should be exposed through one download control",
+);
+assert.match(
+  appJs,
+  /key: "comparison"[\s\S]{0,300}?key: "zing"/,
+  "recording should encode comparison and Zing-only tracks",
+);
+assert.match(
+  appJs,
+  /fileName: `\$\{baseFileName\}-\$\{track\.key\}\.\$\{extension\}`/,
+  "the two synchronized tracks should receive distinct downloadable file names",
+);
+assert.match(
+  appJs,
+  /function downloadGameplayRecordings[\s\S]*?for \(const item of recordingDownloads\)[\s\S]*?link\.click\(\)/,
+  "one download action should synchronously trigger both video downloads",
+);
+assert.match(
+  appJs,
+  /function markWorldExperienceReady\(\)[\s\S]*?source: "first_visible_frame"/,
+  "recording must be gated by the first visible world frame",
 );
 assert.match(
   replayHtmlBuilder,

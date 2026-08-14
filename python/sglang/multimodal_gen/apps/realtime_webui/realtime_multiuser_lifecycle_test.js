@@ -73,8 +73,18 @@ assert.match(
 );
 assert.match(
   appJs,
-  /sessionLifetimeGuard\.start\(\);\s*startSessionCountdown\(\);/,
-  "the countdown should start only after the dual-model connection succeeds",
+  /function markWorldExperienceReady\(\)[\s\S]*?sessionLifetimeGuard\.start\(\);\s*startSessionCountdown\(\);\s*startRecording\(\{ source: "first_visible_frame" \}\)/,
+  "the countdown and recording should start together on the first visible Zing frame",
+);
+assert.match(
+  appJs,
+  /ctx\.drawImage\(drawSource[\s\S]{0,120}?markWorldExperienceReady\(\)/,
+  "drawing the first real Zing frame should unlock the world timer",
+);
+assert.doesNotMatch(
+  appJs.slice(appJs.indexOf("async function connect()"), appJs.indexOf("function openPrimarySession")),
+  /startSessionCountdown\(\)|startRecording\(/,
+  "socket connection success must not start time or recording before a model frame is visible",
 );
 assert.match(
   appJs,
@@ -83,7 +93,7 @@ assert.match(
 );
 assert.match(
   appJs,
-  /function closeSession[\s\S]*?sessionLifetimeGuard\.cancel\(\);\s*stopSessionCountdown\(\);/,
+  /function closeSession[\s\S]*?stopWorldExperienceTiming\(\{ recordingReason: "session_closed" \}\)/,
   "closing a session should stop and hide the countdown",
 );
 
