@@ -1,16 +1,12 @@
 {
   "action": "copy-version-pinned-release",
-  "bytes": null,
-  "destination": "s3://leap-world-model-serving-829115578968-us-east-2/models/lingbot2/robbyant-lingbot-world-v2-14b-causal-fast-diffusers/59cccf49f2d2dd27418ae7a04b82b10868d455c2/releases/REPLACE_AFTER_READONLY_INVENTORY/model/",
+  "bytes": 86071995490,
+  "destination": "s3://leap-world-model-serving-829115578968-us-east-2/models/lingbot2/robbyant-lingbot-world-v2-14b-causal-fast-diffusers/59cccf49f2d2dd27418ae7a04b82b10868d455c2/releases/20260814T054118Z-e0650875/model/",
   "execute": false,
-  "model_object_count": null,
+  "model_object_count": 26,
   "network": false,
-  "release_id": "REPLACE_AFTER_READONLY_INVENTORY",
+  "release_id": "20260814T054118Z-e0650875",
+  "release_spec_ready": true,
   "source": "s3://leap-world-us-west-2/world-model/minwm/serving-artifacts/lingbot2/59cccf49f2d2dd27418ae7a04b82b10868d455c2/model/",
-  "unresolved": [
-    "release_id",
-    "source.artifact_manifest.version_id",
-    "source.object_version_ids",
-    "source.ready.version_id"
-  ]
+  "unresolved": []
 }

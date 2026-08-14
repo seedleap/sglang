@@ -45,6 +45,7 @@ def test_builds_frozen_release_path_from_manifest_sha_and_utc_time():
         source_bucket="source",
         source_region="us-west-2",
         source_prefix="legacy/model/",
+        source_manifest_key=None,
         destination_bucket="serving",
         destination_region="us-east-2",
         model_family="lingbot2",
@@ -58,7 +59,43 @@ def test_builds_frozen_release_path_from_manifest_sha_and_utc_time():
     assert result["release_id"] == f"20260814T010203Z-{manifest_sha[:8]}"
     assert result["source"]["object_count"] == 2
     assert result["source"]["bytes"] == 5
+    assert result["source"]["ready"]["key"] == "legacy/model/_READY"
+    assert result["source"]["artifact_manifest"]["key"] == (
+        "legacy/model/artifact-manifest.json"
+    )
     assert result["destination"]["prefix"] == (
         "models/lingbot2/lingbot-world-v2/revision-1/releases/"
         f"20260814T010203Z-{manifest_sha[:8]}/model"
     )
+
+
+def test_supports_legacy_manifest_key_and_resolved_revision():
+    client = FakeClient()
+    manifest = json.loads(client.manifest_body)
+    manifest["resolved_revision"] = manifest.pop("revision")
+    client.manifest_body = json.dumps(manifest, sort_keys=True).encode()
+    client.ready_body = json.dumps(
+        {
+            "resolved_revision": "revision-1",
+            "manifest_sha256": hashlib.sha256(client.manifest_body).hexdigest(),
+        },
+        sort_keys=True,
+    ).encode()
+
+    result = build_release_spec(
+        client=client,
+        source_bucket="source",
+        source_region="us-west-2",
+        source_prefix="legacy/model",
+        source_manifest_key="legacy/manifest.json",
+        destination_bucket="serving",
+        destination_region="us-east-2",
+        model_family="lingbot2",
+        model_id="lingbot-world-v2",
+        revision="revision-1",
+        rollback_release=None,
+        created_at=datetime(2026, 8, 14, 1, 2, 3, tzinfo=timezone.utc),
+    )
+
+    assert result["source"]["artifact_manifest"]["key"] == "legacy/manifest.json"
+    assert result["source"]["manifest_revision"] == "revision-1"

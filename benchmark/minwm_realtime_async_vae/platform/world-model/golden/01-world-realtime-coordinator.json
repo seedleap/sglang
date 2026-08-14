@@ -10,7 +10,7 @@
     "exec python -m sglang.multimodal_gen.runtime.entrypoints.realtime_coordinator_server --host=0.0.0.0 --port=18081 --backend=dynamodb --table-name=${COORDINATOR_TABLE} --region=${AWS_REGION} --ttl-s=30 --worker-ttl-s=15 --wait-timeout-s=10 --candidate-limit=64 --denoiser-capacity-limit=4 --vae-capacity-limit=16"
   ],
   "businessLineId": "world-model",
-  "clusterName": "world-model",
+  "clusterId": "${WORLD_MODEL_CLUSTER_ID}",
   "command": [
     "/bin/sh",
     "-ec"
@@ -38,19 +38,17 @@
       "value": "service.namespace=world-model,deployment.environment=production"
     }
   ],
+  "gitRepo": "git@github.com:seedleap/sglang.git",
   "image": "${WORLD_REALTIME_COORDINATOR_IMAGE_DIGEST}",
-  "imagePullPolicy": "IfNotPresent",
   "initContainers": [],
-  "kind": "application",
+  "jenkinsJob": "loopit/world-model/world-realtime-coordinator",
   "labels": {
-    "app.kubernetes.io/part-of": "world-studio",
-    "loopit.me/business-line": "world-model",
-    "loopit.me/lane": "default",
-    "loopit.me/managed-by": "platform",
-    "loopit.me/service-id": "world-realtime-coordinator"
+    "app.kubernetes.io/name": "world-realtime-coordinator",
+    "world-model.loopit.me/application-group": "world-studio",
+    "world-model.loopit.me/service": "world-realtime-coordinator"
   },
-  "lane": "default",
   "livenessProbe": {
+    "enabled": true,
     "failureThreshold": 6,
     "path": "/healthz",
     "periodSeconds": 15,
@@ -62,18 +60,89 @@
   "namespace": "world-model",
   "networkPolicy": {
     "defaultDeny": true,
-    "egressToServiceIds": [],
-    "enabled": true,
-    "externalEgress": [
-      "dynamodb.us-east-2.amazonaws.com",
-      "adot-collector.monitoring"
+    "egress": [
+      {
+        "ports": [
+          {
+            "port": 53,
+            "protocol": "UDP"
+          }
+        ],
+        "to": [
+          {
+            "namespaceSelector": {
+              "matchLabels": {
+                "kubernetes.io/metadata.name": "kube-system"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "ports": [
+          {
+            "port": 53,
+            "protocol": "TCP"
+          }
+        ],
+        "to": [
+          {
+            "namespaceSelector": {
+              "matchLabels": {
+                "kubernetes.io/metadata.name": "kube-system"
+              }
+            }
+          }
+        ]
+      }
     ],
-    "ingressFromServiceIds": [
-      "world-realtime-gateway",
-      "minwm-denoiser",
-      "lingbot2-denoiser",
-      "minwm-vae",
-      "lingbot2-vae"
+    "enabled": true,
+    "ingress": [
+      {
+        "from": [
+          {
+            "podSelector": {
+              "matchLabels": {
+                "app.kubernetes.io/name": "world-realtime-gateway"
+              }
+            }
+          },
+          {
+            "podSelector": {
+              "matchLabels": {
+                "app.kubernetes.io/name": "minwm-denoiser"
+              }
+            }
+          },
+          {
+            "podSelector": {
+              "matchLabels": {
+                "app.kubernetes.io/name": "lingbot2-denoiser"
+              }
+            }
+          },
+          {
+            "podSelector": {
+              "matchLabels": {
+                "app.kubernetes.io/name": "minwm-vae"
+              }
+            }
+          },
+          {
+            "podSelector": {
+              "matchLabels": {
+                "app.kubernetes.io/name": "lingbot2-vae"
+              }
+            }
+          }
+        ],
+        "ports": [
+          {
+            "port": 18081,
+            "protocol": "TCP"
+          }
+        ]
+      }
     ]
   },
   "nodeSelector": {},
@@ -81,6 +150,7 @@
     "minAvailable": 1
   },
   "readinessProbe": {
+    "enabled": true,
     "failureThreshold": 6,
     "path": "/healthz",
     "periodSeconds": 5,
@@ -99,7 +169,6 @@
       "memory": "256Mi"
     }
   },
-  "schemaVersion": 1,
   "serviceAccountName": "wm-coordinator",
   "serviceSpec": {
     "headless": false,
@@ -112,6 +181,7 @@
     ]
   },
   "startupProbe": {
+    "enabled": true,
     "failureThreshold": 30,
     "path": "/healthz",
     "periodSeconds": 2,
@@ -125,7 +195,7 @@
     {
       "labelSelector": {
         "matchLabels": {
-          "loopit.me/service-id": "world-realtime-coordinator"
+          "app.kubernetes.io/name": "world-realtime-coordinator"
         }
       },
       "maxSkew": 1,

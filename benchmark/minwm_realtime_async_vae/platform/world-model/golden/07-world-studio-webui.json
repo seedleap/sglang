@@ -8,7 +8,7 @@
   "appName": "World Studio WebUI",
   "args": [],
   "businessLineId": "world-model",
-  "clusterName": "world-model",
+  "clusterId": "${WORLD_MODEL_CLUSTER_ID}",
   "command": [
     "python",
     "server.py"
@@ -73,19 +73,17 @@
       "value": "/run/secrets/realtime-webui/world-image-model-config.json"
     }
   ],
-  "image": "829115578968.dkr.ecr.us-east-2.amazonaws.com/leap-world/minwm-realtime@sha256:38bfc1802736805d98f43aed08c43bf239da010d64d7605b5a96a7f0cb2335cc",
-  "imagePullPolicy": "IfNotPresent",
+  "gitRepo": "git@github.com:seedleap/sglang.git",
+  "image": "${WORLD_STUDIO_WEBUI_IMAGE_DIGEST}",
   "initContainers": [],
-  "kind": "application",
+  "jenkinsJob": "loopit/world-model/world-studio-webui",
   "labels": {
-    "app.kubernetes.io/part-of": "world-studio",
-    "loopit.me/business-line": "world-model",
-    "loopit.me/lane": "default",
-    "loopit.me/managed-by": "platform",
-    "loopit.me/service-id": "world-studio-webui"
+    "app.kubernetes.io/name": "world-studio-webui",
+    "world-model.loopit.me/application-group": "world-studio",
+    "world-model.loopit.me/service": "world-studio-webui"
   },
-  "lane": "default",
   "livenessProbe": {
+    "enabled": true,
     "failureThreshold": 6,
     "path": "/",
     "periodSeconds": 15,
@@ -97,23 +95,68 @@
   "namespace": "world-model",
   "networkPolicy": {
     "defaultDeny": true,
-    "egressToServiceIds": [
-      "world-realtime-gateway"
+    "egress": [
+      {
+        "ports": [
+          {
+            "port": 53,
+            "protocol": "UDP"
+          }
+        ],
+        "to": [
+          {
+            "namespaceSelector": {
+              "matchLabels": {
+                "kubernetes.io/metadata.name": "kube-system"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "ports": [
+          {
+            "port": 53,
+            "protocol": "TCP"
+          }
+        ],
+        "to": [
+          {
+            "namespaceSelector": {
+              "matchLabels": {
+                "kubernetes.io/metadata.name": "kube-system"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "ports": [
+          {
+            "port": 18080,
+            "protocol": "TCP"
+          }
+        ],
+        "to": [
+          {
+            "podSelector": {
+              "matchLabels": {
+                "app.kubernetes.io/name": "world-realtime-gateway"
+              }
+            }
+          }
+        ]
+      }
     ],
     "enabled": true,
-    "externalEgress": [
-      "llm-0jcmcer24vyvd7rr.cn-beijing.maas.aliyuncs.com",
-      "aiplatform.googleapis.com"
-    ],
-    "ingressFromServiceIds": [
-      "istio-ingressgateway"
-    ]
+    "ingress": []
   },
   "nodeSelector": {},
   "podDisruptionBudget": {
     "minAvailable": 1
   },
   "readinessProbe": {
+    "enabled": true,
     "failureThreshold": 6,
     "path": "/runtime-config.js",
     "periodSeconds": 5,
@@ -132,7 +175,6 @@
       "memory": "384Mi"
     }
   },
-  "schemaVersion": 1,
   "serviceAccountName": "wm-webui",
   "serviceSpec": {
     "headless": false,
@@ -145,6 +187,7 @@
     ]
   },
   "startupProbe": {
+    "enabled": true,
     "failureThreshold": 30,
     "path": "/runtime-config.js",
     "periodSeconds": 2,
@@ -158,7 +201,7 @@
     {
       "labelSelector": {
         "matchLabels": {
-          "loopit.me/service-id": "world-studio-webui"
+          "app.kubernetes.io/name": "world-studio-webui"
         }
       },
       "maxSkew": 1,

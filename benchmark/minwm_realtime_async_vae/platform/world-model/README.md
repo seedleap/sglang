@@ -17,17 +17,20 @@ service accounts, pools, and image digests.
   digest-bake files, and the root-EBS/containerd versus NVMe/kubelet split. The
   canary NodePool/device-plugin, Spot-only Pod selector, recovery measurement,
   and captured live evidence were deliberately excluded.
-- Denoiser image:
-  `829115578968.dkr.ecr.us-east-2.amazonaws.com/leap-world/minwm-realtime@sha256:77b975f6758e642462c984dec3e1e51ef806622eb9bf3b9304330f6e072c3209`.
 - minWM model release:
   `models/minwm/wan22-5b-stage3-dmd-47-0808-2fb2cfec2a2/gs3200-ema-student-v1/releases/20260810T042157Z-c302d572/model`.
 - LingBot2 revision:
   `59cccf49f2d2dd27418ae7a04b82b10868d455c2`.
+- LingBot2 reviewed release spec: release ID
+  `20260814T054118Z-e0650875`, 26 objects, 86,071,995,490 bytes, manifest
+  SHA256 `e065087570bde5ae45cac0f678239d6da5dafb7c1af3a2a1be0ddd6ea8929fdd`.
 
 `platform_config.py` is the single source for the eight payload goldens. It
-accepts unresolved image placeholders only for review. A deploy render must
-provide the WM-08 coordinator, gateway, and VAE image references, all pinned by
-`@sha256`; tags and missing inputs fail validation.
+accepts unresolved image placeholders only for review. The checked-in
+`required-inputs.json` is machine-verifiable and deliberately says
+`executionReady=false`: the platform cluster ID, approved typed NetworkPolicy
+peers for external dependencies, and eight WM-08 success callbacks are not yet
+available. These review goldens must not be described as executable payloads.
 
 ## Application mapping and release gates
 
@@ -35,16 +38,20 @@ provide the WM-08 coordinator, gateway, and VAE image references, all pinned by
 |---:|---|---|---|---|
 | 0 | `world-model-artifact-publisher` | Task/Job | `wm-artifact-publisher` | Generate, review, copy, and verify the LingBot2 immutable release; `_READY` must be last |
 | 1 | `world-realtime-coordinator` | Deployment, 2 replicas | `wm-coordinator` | DynamoDB `world-model-realtime`, Pod Identity, `/healthz` |
-| 2 | `minwm-vae` | Deployment/Recreate, 1 L4 | `wm-worker-discovery` | coordinator heartbeat and `/health` |
-| 3 | `lingbot2-vae` | Deployment/Recreate, 1 L4 | `wm-worker-discovery` | coordinator heartbeat and `/health`; required anti-affinity keeps the two VAE Pods on different nodes |
+| 2 | `minwm-vae` | Deployment, 1 L4 | `wm-worker-discovery` | coordinator heartbeat and `/health` |
+| 3 | `lingbot2-vae` | Deployment, 1 L4 | `wm-worker-discovery` | coordinator heartbeat and `/health`; required anti-affinity keeps the two VAE Pods on different nodes |
 | 4 | `minwm-denoiser` | StatefulSet/OnDelete, 2 H100 | `wm-model-fetcher` | minWM release, CRT init, heartbeat, headless Service, VAE, `/health` |
 | 5 | `lingbot2-denoiser` | StatefulSet/OnDelete, 4 H100 | `wm-model-fetcher` | verified LingBot2 release, CRT init, heartbeat, headless Service, VAE, startup warmup/`/health` |
 | 6 | `world-realtime-gateway` | Deployment, 2 replicas | `wm-gateway` | coordinator plus both model worker groups healthy, `/readyz` |
 | 7 | `world-studio-webui` | Deployment, 2 replicas | `wm-webui` | gateway, `world-studio-runtime` Secret references, HappyOyster, prompt rewrite, world image configuration |
 
-Every payload includes the business-line/service/lane labels, opt-in logging,
-default-deny NetworkPolicy intent, resources, probes, volumes, startup command,
-environment names, and dependencies. WebUI keeps Secret values out of Git and
+Every payload uses only WM-01 `serviceCreateRequest` fields. Custom Pod labels,
+annotations and NetworkPolicy are typed fields; platform ownership labels are
+not submitted by WM-09 and remain injected by WM-01. NetworkPolicy rules use
+only explicit `podSelector`/`namespaceSelector`/`ipBlock` peers and ports—there
+is no raw YAML, FQDN pseudo-rule or unrestricted CIDR. Internal service and DNS
+rules are present; external ingress/egress remains a hard required input because
+Kubernetes NetworkPolicy cannot safely represent a hostname. WebUI keeps Secret values out of Git and
 the platform database by using `secretKeyRef` and a read-only Secret volume.
 Tianpeng is excluded. GPU Pods select only `loopit.me/gpu-pool=h100|l4`; no Pod
 selects `karpenter.sh/capacity-type`, so the Spot primary and on-demand fallback
@@ -62,13 +69,17 @@ while the AMI wrapper intentionally leaves the preloaded containerd cache on the
 
 ## Render and image handoff
 
-Review-mode goldens contain only the four explicit WM-08 image placeholders:
+Review-mode goldens contain one distinct placeholder per WM-08 Job:
 
 ```text
 ${WORLD_MODEL_ARTIFACT_PUBLISHER_IMAGE_DIGEST}
 ${WORLD_REALTIME_COORDINATOR_IMAGE_DIGEST}
 ${WORLD_REALTIME_GATEWAY_IMAGE_DIGEST}
-${WORLD_REALTIME_VAE_IMAGE_DIGEST}
+${MINWM_DENOISER_IMAGE_DIGEST}
+${LINGBOT2_DENOISER_IMAGE_DIGEST}
+${MINWM_VAE_IMAGE_DIGEST}
+${LINGBOT2_VAE_IMAGE_DIGEST}
+${WORLD_STUDIO_WEBUI_IMAGE_DIGEST}
 ```
 
 Regenerate or verify the checked-in drafts:
@@ -78,18 +89,29 @@ python3 benchmark/minwm_realtime_async_vae/render_platform_config.py
 python3 benchmark/minwm_realtime_async_vae/render_platform_config.py --check
 ```
 
-For a deploy-ready local render, create a non-secret JSON file whose keys are
-the exact placeholders above and whose values are registry references ending in
-`@sha256:<64 lowercase hex>`, then run:
+Image input is not a free-form placeholder map. It must contain exactly eight
+WM-08 callback records with `status=success`, the reviewed branch, exact
+full-Git-SHA audit tag, and ECR `imageDigest=sha256:<64 lowercase hex>`. The tag
+is checked and retained only as audit evidence; the renderer constructs every
+runtime image as `<repository>@<callback.imageDigest>`. It rejects `latest`, a
+branch tag, a short SHA, a missing service, a failed callback, or a digest/tag
+mismatch. The callbacks must come from a WM-08 contract updated to build the
+WM-09 integration commit: the older frozen `d8019542...` image cannot contain
+WM-09's CRT downloader, release spec, or copy verifier.
+
+Validate a collected callback document without writing payloads:
 
 ```bash
 python3 benchmark/minwm_realtime_async_vae/render_platform_config.py \
   --image-inputs /path/to/reviewed-image-digests.json \
-  --output-dir /tmp/world-model-platform-payloads
+  --check-image-inputs
 ```
 
-The renderer rejects unresolved placeholders or tags in this mode. Rendering
-does not call the Loopit API and does not deploy.
+Image resolution alone does not make the payloads executable: the cluster ID
+and typed external NetworkPolicy peers remain gated by `required-inputs.json`.
+While `executionReady=false`, the CLI refuses to write a resolved deployment
+render even when all eight image callbacks validate. Neither validation nor
+review rendering calls the Loopit API or deploys.
 
 ## LingBot2 versioned release: read-only plan, publish, and verify
 
@@ -108,26 +130,25 @@ s3://leap-world-model-serving-829115578968-us-east-2/
   releases/<UTC>-<artifact-manifest-sha8>/model/
 ```
 
-The current no-credential, zero-network dry-run is checked in as
-`model_releases/lingbot2/.../offline-dry-run.golden.json`. It intentionally
-reports `release_id`, source control-object VersionIds, object VersionIds,
-object count, and total bytes as unresolved instead of fabricating them.
-
-When a read-only AWS identity is available, generate the exact release spec.
-This command performs only `GetObject`/`HeadObject` calls and writes JSON to
-stdout; it does not copy or put any object:
+The checked-in `release-spec.json` was generated with the existing read-only AWS
+identity. It pins `_READY`, the legacy parent `manifest.json`, and all 26 model
+objects by VersionId. The source uses `resolved_revision`; the publisher
+normalizes that versioned source into the destination's
+`artifact-manifest.json` contract without weakening SHA or revision checks.
+Regeneration performs only `GetObject`/`HeadObject` and writes JSON to stdout:
 
 ```bash
 python3 benchmark/minwm_realtime_async_vae/build_model_release_spec.py \
   --source-bucket leap-world-us-west-2 \
   --source-region us-west-2 \
   --source-prefix world-model/minwm/serving-artifacts/lingbot2/59cccf49f2d2dd27418ae7a04b82b10868d455c2/model \
+  --source-manifest-key world-model/minwm/serving-artifacts/lingbot2/59cccf49f2d2dd27418ae7a04b82b10868d455c2/manifest.json \
   --destination-bucket leap-world-model-serving-829115578968-us-east-2 \
   --destination-region us-east-2 \
   --model-family lingbot2 \
   --model-id robbyant-lingbot-world-v2-14b-causal-fast-diffusers \
   --revision 59cccf49f2d2dd27418ae7a04b82b10868d455c2 \
-  > /tmp/lingbot2-release-spec.json
+  > /tmp/lingbot2-release-spec.review.json
 ```
 
 Review the source/destination, every VersionId, object count, total bytes,
@@ -136,7 +157,7 @@ read-only plan (source validation only):
 
 ```bash
 python3 benchmark/minwm_realtime_async_vae/copy_model_release.py \
-  --release /tmp/lingbot2-release-spec.json
+  --release benchmark/minwm_realtime_async_vae/model_releases/lingbot2/59cccf49f2d2dd27418ae7a04b82b10868d455c2/release-spec.json
 ```
 
 The state-changing command is deliberately guarded and was not run in WM-09.
@@ -144,9 +165,9 @@ It requires separate approval plus the exact reviewed release ID:
 
 ```bash
 python3 benchmark/minwm_realtime_async_vae/copy_model_release.py \
-  --release /tmp/lingbot2-release-spec.json \
+  --release benchmark/minwm_realtime_async_vae/model_releases/lingbot2/59cccf49f2d2dd27418ae7a04b82b10868d455c2/release-spec.json \
   --execute \
-  --confirm-release-id <UTC>-<artifact-manifest-sha8>
+  --confirm-release-id 20260814T054118Z-e0650875
 ```
 
 The publisher copies version-pinned model objects, verifies destination size
@@ -158,7 +179,7 @@ writing:
 
 ```bash
 python3 benchmark/minwm_realtime_async_vae/copy_model_release.py \
-  --release /tmp/lingbot2-release-spec.json \
+  --release benchmark/minwm_realtime_async_vae/model_releases/lingbot2/59cccf49f2d2dd27418ae7a04b82b10868d455c2/release-spec.json \
   --verify
 ```
 

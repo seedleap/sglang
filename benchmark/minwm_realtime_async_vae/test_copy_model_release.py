@@ -122,11 +122,13 @@ def test_offline_plan_never_uses_network_and_marks_unresolved_inventory():
         "source.object_version_ids",
         "source.ready.version_id",
     ]
+    assert plan["release_spec_ready"] is False
 
 
 def test_lingbot2_offline_dry_run_matches_reviewed_golden():
+    assert not list(LINGBOT2_RELEASE_ROOT.glob("*template*"))
     release = json.loads(
-        (LINGBOT2_RELEASE_ROOT / "release-spec.template.json").read_text()
+        (LINGBOT2_RELEASE_ROOT / "release-spec.json").read_text()
     )
     expected = json.loads(
         (LINGBOT2_RELEASE_ROOT / "offline-dry-run.golden.json").read_text()
@@ -139,6 +141,10 @@ def test_lingbot2_offline_dry_run_matches_reviewed_golden():
     assert release["destination"]["bucket"] == (
         "leap-world-model-serving-829115578968-us-east-2"
     )
+    assert release["release_id"] == "20260814T054118Z-e0650875"
+    assert release["source"]["object_count"] == 26
+    assert release["source"]["bytes"] == 86071995490
+    assert len(release["source"]["object_version_ids"]) == 26
 
 
 def test_destination_verifier_checks_ready_manifest_and_versioned_objects():

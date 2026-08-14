@@ -12,7 +12,7 @@
     "set -euo pipefail; test -f ${MODEL_PATH}/_READY; test -f ${MODEL_PATH}/model_index.json; test -d ${MODEL_PATH}/transformer; python3 -m sglang.multimodal_gen.runtime.launch_server --model-path ${MODEL_PATH} --pipeline-class-name MinWMCausalDMDPipeline --attention-backend fa --performance-mode speed --num-gpus 2 --tp-size 1 --sp-degree 2 --ulysses-degree 2 --ring-degree 1 --enable-cuda-graph --enable-cfg-parallel false --enable-torch-compile false --warmup-mode off --batching-max-size 1 --batching-delay-ms 2 --realtime-max-sessions 1 --realtime-max-sessions-per-worker 1 --realtime-remote-vae-enabled --realtime-session-idle-timeout-s 60 --realtime-session-max-lifetime-s 90 --realtime-admission-wait-s 10 --realtime-causal-sink-size 8 --realtime-causal-kv-cache-num-frames 32 --enable-trace --otlp-traces-endpoint ${OTEL_EXPORTER_OTLP_ENDPOINT} --host 0.0.0.0 --port 30000 & child=$!; terminate() { kill -TERM ${child} 2>/dev/null || true; wait ${child} || true; exit 143; }; trap terminate TERM INT; wait ${child}"
   ],
   "businessLineId": "world-model",
-  "clusterName": "world-model",
+  "clusterId": "${WORLD_MODEL_CLUSTER_ID}",
   "command": [
     "/bin/bash",
     "-lc"
@@ -44,8 +44,8 @@
       "value": "http://adot-collector.monitoring:4317"
     }
   ],
-  "image": "829115578968.dkr.ecr.us-east-2.amazonaws.com/leap-world/minwm-realtime@sha256:77b975f6758e642462c984dec3e1e51ef806622eb9bf3b9304330f6e072c3209",
-  "imagePullPolicy": "IfNotPresent",
+  "gitRepo": "git@github.com:seedleap/sglang.git",
+  "image": "${MINWM_DENOISER_IMAGE_DIGEST}",
   "initContainers": [
     {
       "args": [
@@ -81,7 +81,7 @@
           "value": "gs3200-ema-student-v1"
         }
       ],
-      "image": "829115578968.dkr.ecr.us-east-2.amazonaws.com/leap-world/minwm-realtime@sha256:77b975f6758e642462c984dec3e1e51ef806622eb9bf3b9304330f6e072c3209",
+      "image": "${MINWM_DENOISER_IMAGE_DIGEST}",
       "imagePullPolicy": "IfNotPresent",
       "name": "model-stager",
       "resources": {
@@ -150,7 +150,7 @@
           }
         }
       ],
-      "image": "829115578968.dkr.ecr.us-east-2.amazonaws.com/leap-world/minwm-realtime@sha256:77b975f6758e642462c984dec3e1e51ef806622eb9bf3b9304330f6e072c3209",
+      "image": "${MINWM_DENOISER_IMAGE_DIGEST}",
       "imagePullPolicy": "IfNotPresent",
       "name": "denoiser-heartbeat",
       "resources": {
@@ -172,17 +172,15 @@
       ]
     }
   ],
-  "kind": "application",
+  "jenkinsJob": "loopit/world-model/minwm-denoiser",
   "labels": {
-    "app.kubernetes.io/part-of": "world-studio",
-    "loopit.me/business-line": "world-model",
+    "app.kubernetes.io/name": "minwm-denoiser",
     "loopit.me/gpu-role": "denoiser",
-    "loopit.me/lane": "default",
-    "loopit.me/managed-by": "platform",
-    "loopit.me/service-id": "minwm-denoiser"
+    "world-model.loopit.me/application-group": "world-studio",
+    "world-model.loopit.me/service": "minwm-denoiser"
   },
-  "lane": "default",
   "livenessProbe": {
+    "enabled": true,
     "failureThreshold": 6,
     "initialDelaySeconds": 60,
     "path": "/health",
@@ -195,17 +193,95 @@
   "namespace": "world-model",
   "networkPolicy": {
     "defaultDeny": true,
-    "egressToServiceIds": [
-      "world-realtime-coordinator",
-      "minwm-vae"
+    "egress": [
+      {
+        "ports": [
+          {
+            "port": 53,
+            "protocol": "UDP"
+          }
+        ],
+        "to": [
+          {
+            "namespaceSelector": {
+              "matchLabels": {
+                "kubernetes.io/metadata.name": "kube-system"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "ports": [
+          {
+            "port": 53,
+            "protocol": "TCP"
+          }
+        ],
+        "to": [
+          {
+            "namespaceSelector": {
+              "matchLabels": {
+                "kubernetes.io/metadata.name": "kube-system"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "ports": [
+          {
+            "port": 18081,
+            "protocol": "TCP"
+          }
+        ],
+        "to": [
+          {
+            "podSelector": {
+              "matchLabels": {
+                "app.kubernetes.io/name": "world-realtime-coordinator"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "ports": [
+          {
+            "port": 18081,
+            "protocol": "TCP"
+          }
+        ],
+        "to": [
+          {
+            "podSelector": {
+              "matchLabels": {
+                "app.kubernetes.io/name": "minwm-vae"
+              }
+            }
+          }
+        ]
+      }
     ],
     "enabled": true,
-    "externalEgress": [
-      "s3.us-east-2.amazonaws.com",
-      "adot-collector.monitoring"
-    ],
-    "ingressFromServiceIds": [
-      "world-realtime-gateway"
+    "ingress": [
+      {
+        "from": [
+          {
+            "podSelector": {
+              "matchLabels": {
+                "app.kubernetes.io/name": "world-realtime-gateway"
+              }
+            }
+          }
+        ],
+        "ports": [
+          {
+            "port": 30000,
+            "protocol": "TCP"
+          }
+        ]
+      }
     ]
   },
   "nodeSelector": {
@@ -215,6 +291,7 @@
     "maxUnavailable": 1
   },
   "readinessProbe": {
+    "enabled": true,
     "failureThreshold": 6,
     "path": "/health",
     "periodSeconds": 10,
@@ -237,7 +314,6 @@
       "nvidia.com/gpu": "2"
     }
   },
-  "schemaVersion": 1,
   "serviceAccountName": "wm-model-fetcher",
   "serviceSpec": {
     "headless": true,
@@ -251,6 +327,7 @@
     "publishNotReadyAddresses": true
   },
   "startupProbe": {
+    "enabled": true,
     "failureThreshold": 270,
     "path": "/health",
     "periodSeconds": 20,

@@ -33,6 +33,7 @@ def build_release_spec(
     source_bucket: str,
     source_region: str,
     source_prefix: str,
+    source_manifest_key: str | None,
     destination_bucket: str,
     destination_region: str,
     model_family: str,
@@ -52,7 +53,11 @@ def build_release_spec(
 
     prefix = source_prefix.strip("/")
     ready_key = f"{prefix}/_READY"
-    manifest_key = f"{prefix}/artifact-manifest.json"
+    manifest_key = (
+        source_manifest_key.strip("/")
+        if source_manifest_key
+        else f"{prefix}/artifact-manifest.json"
+    )
     ready_body, ready_version_id = _read_versioned_object(
         client, source_bucket, ready_key
     )
@@ -98,11 +103,13 @@ def build_release_spec(
             "region": source_region,
             "prefix": prefix,
             "ready": {
+                "key": ready_key,
                 "version_id": ready_version_id,
                 "size": len(ready_body),
                 "sha256": hashlib.sha256(ready_body).hexdigest(),
             },
             "artifact_manifest": {
+                "key": manifest_key,
                 "version_id": manifest_version_id,
                 "size": len(manifest_body),
                 "sha256": manifest_sha256,
@@ -110,7 +117,8 @@ def build_release_spec(
             "object_version_ids": object_version_ids,
             "object_count": len(files),
             "bytes": sum(entry["size"] for entry in files),
-            "manifest_revision": manifest["revision"],
+            "manifest_revision": manifest.get("revision")
+            or manifest["resolved_revision"],
         },
         "destination": {
             "bucket": destination_bucket,
@@ -125,6 +133,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--source-bucket", required=True)
     parser.add_argument("--source-region", required=True)
     parser.add_argument("--source-prefix", required=True)
+    parser.add_argument(
+        "--source-manifest-key",
+        help=(
+            "source manifest object key; defaults to "
+            "<source-prefix>/artifact-manifest.json"
+        ),
+    )
     parser.add_argument("--destination-bucket", required=True)
     parser.add_argument("--destination-region", required=True)
     parser.add_argument("--model-family", required=True)
@@ -149,6 +164,7 @@ def main() -> None:
         source_bucket=args.source_bucket,
         source_region=args.source_region,
         source_prefix=args.source_prefix,
+        source_manifest_key=args.source_manifest_key,
         destination_bucket=args.destination_bucket,
         destination_region=args.destination_region,
         model_family=args.model_family,

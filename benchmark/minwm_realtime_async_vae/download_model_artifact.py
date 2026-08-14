@@ -87,10 +87,26 @@ def validate_control_files(
     if manifest.get("schema_version") != 1:
         raise ValueError("unsupported artifact manifest schema_version")
 
-    revision = manifest.get("revision")
+    manifest_revision = manifest.get("revision")
+    manifest_resolved_revision = manifest.get("resolved_revision")
+    if (
+        manifest_revision is not None
+        and manifest_resolved_revision is not None
+        and manifest_revision != manifest_resolved_revision
+    ):
+        raise ValueError("artifact manifest revision fields differ")
+    revision = manifest_revision or manifest_resolved_revision
     if not isinstance(revision, str) or not revision:
         raise ValueError("artifact manifest has no revision")
-    if ready.get("revision") != revision:
+    ready_revision = ready.get("revision")
+    ready_resolved_revision = ready.get("resolved_revision")
+    if (
+        ready_revision is not None
+        and ready_resolved_revision is not None
+        and ready_revision != ready_resolved_revision
+    ):
+        raise ValueError("_READY revision fields differ")
+    if (ready_revision or ready_resolved_revision) != revision:
         raise ValueError("_READY and artifact manifest revisions differ")
     if expected_revision is not None and revision != expected_revision:
         raise ValueError(

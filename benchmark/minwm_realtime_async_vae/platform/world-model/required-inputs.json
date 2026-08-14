@@ -1,0 +1,293 @@
+{
+  "executionReady": false,
+  "frozenSource": {
+    "branch": "codex/minwm-lingbot2-dual-webui-opt-20260812",
+    "gitSha": "d8019542103c83047997cf6dc2e7014cba8565e3"
+  },
+  "hardGate": "all required inputs must be resolved before deployment render",
+  "requiredInputs": {
+    "clusterRegistration": {
+      "clusterName": "world-model",
+      "requiredField": "clusterId",
+      "state": "missing"
+    },
+    "imageBuildCallbacks": [
+      {
+        "deploymentImageSource": "callback.imageDigest",
+        "requiredAuditTag": "829115578968.dkr.ecr.us-east-2.amazonaws.com/leap-world/minwm-realtime:world-realtime-coordinator-d8019542103c83047997cf6dc2e7014cba8565e3",
+        "requiredBranch": "codex/minwm-lingbot2-dual-webui-opt-20260812",
+        "requiredBuildEvidence": [
+          "buildId",
+          "buildUrl"
+        ],
+        "requiredImageDigestPattern": "sha256:<64-lowercase-hex>",
+        "requiredJenkinsJob": "loopit/world-model/world-realtime-coordinator",
+        "requiredOperator": "jenkins",
+        "requiredStatus": "success",
+        "serviceName": "world-realtime-coordinator",
+        "state": "missing"
+      },
+      {
+        "deploymentImageSource": "callback.imageDigest",
+        "requiredAuditTag": "829115578968.dkr.ecr.us-east-2.amazonaws.com/leap-world/minwm-realtime:minwm-vae-d8019542103c83047997cf6dc2e7014cba8565e3",
+        "requiredBranch": "codex/minwm-lingbot2-dual-webui-opt-20260812",
+        "requiredBuildEvidence": [
+          "buildId",
+          "buildUrl"
+        ],
+        "requiredImageDigestPattern": "sha256:<64-lowercase-hex>",
+        "requiredJenkinsJob": "loopit/world-model/minwm-vae",
+        "requiredOperator": "jenkins",
+        "requiredStatus": "success",
+        "serviceName": "minwm-vae",
+        "state": "missing"
+      },
+      {
+        "deploymentImageSource": "callback.imageDigest",
+        "requiredAuditTag": "829115578968.dkr.ecr.us-east-2.amazonaws.com/leap-world/minwm-realtime:lingbot2-vae-d8019542103c83047997cf6dc2e7014cba8565e3",
+        "requiredBranch": "codex/minwm-lingbot2-dual-webui-opt-20260812",
+        "requiredBuildEvidence": [
+          "buildId",
+          "buildUrl"
+        ],
+        "requiredImageDigestPattern": "sha256:<64-lowercase-hex>",
+        "requiredJenkinsJob": "loopit/world-model/lingbot2-vae",
+        "requiredOperator": "jenkins",
+        "requiredStatus": "success",
+        "serviceName": "lingbot2-vae",
+        "state": "missing"
+      },
+      {
+        "deploymentImageSource": "callback.imageDigest",
+        "requiredAuditTag": "829115578968.dkr.ecr.us-east-2.amazonaws.com/leap-world/minwm-realtime:minwm-denoiser-d8019542103c83047997cf6dc2e7014cba8565e3",
+        "requiredBranch": "codex/minwm-lingbot2-dual-webui-opt-20260812",
+        "requiredBuildEvidence": [
+          "buildId",
+          "buildUrl"
+        ],
+        "requiredImageDigestPattern": "sha256:<64-lowercase-hex>",
+        "requiredJenkinsJob": "loopit/world-model/minwm-denoiser",
+        "requiredOperator": "jenkins",
+        "requiredStatus": "success",
+        "serviceName": "minwm-denoiser",
+        "state": "missing"
+      },
+      {
+        "deploymentImageSource": "callback.imageDigest",
+        "requiredAuditTag": "829115578968.dkr.ecr.us-east-2.amazonaws.com/leap-world/minwm-realtime:lingbot2-denoiser-d8019542103c83047997cf6dc2e7014cba8565e3",
+        "requiredBranch": "codex/minwm-lingbot2-dual-webui-opt-20260812",
+        "requiredBuildEvidence": [
+          "buildId",
+          "buildUrl"
+        ],
+        "requiredImageDigestPattern": "sha256:<64-lowercase-hex>",
+        "requiredJenkinsJob": "loopit/world-model/lingbot2-denoiser",
+        "requiredOperator": "jenkins",
+        "requiredStatus": "success",
+        "serviceName": "lingbot2-denoiser",
+        "state": "missing"
+      },
+      {
+        "deploymentImageSource": "callback.imageDigest",
+        "requiredAuditTag": "829115578968.dkr.ecr.us-east-2.amazonaws.com/leap-world/minwm-realtime:world-realtime-gateway-d8019542103c83047997cf6dc2e7014cba8565e3",
+        "requiredBranch": "codex/minwm-lingbot2-dual-webui-opt-20260812",
+        "requiredBuildEvidence": [
+          "buildId",
+          "buildUrl"
+        ],
+        "requiredImageDigestPattern": "sha256:<64-lowercase-hex>",
+        "requiredJenkinsJob": "loopit/world-model/world-realtime-gateway",
+        "requiredOperator": "jenkins",
+        "requiredStatus": "success",
+        "serviceName": "world-realtime-gateway",
+        "state": "missing"
+      },
+      {
+        "deploymentImageSource": "callback.imageDigest",
+        "requiredAuditTag": "829115578968.dkr.ecr.us-east-2.amazonaws.com/leap-world/minwm-realtime:world-studio-webui-d8019542103c83047997cf6dc2e7014cba8565e3",
+        "requiredBranch": "codex/minwm-lingbot2-dual-webui-opt-20260812",
+        "requiredBuildEvidence": [
+          "buildId",
+          "buildUrl"
+        ],
+        "requiredImageDigestPattern": "sha256:<64-lowercase-hex>",
+        "requiredJenkinsJob": "loopit/world-model/world-studio-webui",
+        "requiredOperator": "jenkins",
+        "requiredStatus": "success",
+        "serviceName": "world-studio-webui",
+        "state": "missing"
+      },
+      {
+        "deploymentImageSource": "callback.imageDigest",
+        "requiredAuditTag": "829115578968.dkr.ecr.us-east-2.amazonaws.com/leap-world/minwm-realtime:model-artifact-publish-d8019542103c83047997cf6dc2e7014cba8565e3",
+        "requiredBranch": "codex/minwm-lingbot2-dual-webui-opt-20260812",
+        "requiredBuildEvidence": [
+          "buildId",
+          "buildUrl"
+        ],
+        "requiredImageDigestPattern": "sha256:<64-lowercase-hex>",
+        "requiredJenkinsJob": "loopit/world-model/model-artifact-publish",
+        "requiredOperator": "jenkins",
+        "requiredStatus": "success",
+        "serviceName": "world-model-artifact-publisher",
+        "state": "missing"
+      }
+    ],
+    "networkPolicyPeers": [
+      {
+        "destinationId": "dynamodb-us-east-2",
+        "direction": "egress",
+        "port": 443,
+        "protocol": "TCP",
+        "requiredTypedPeer": "podSelector+namespaceSelector or approved ipBlock",
+        "serviceName": "world-realtime-coordinator",
+        "state": "missing"
+      },
+      {
+        "destinationId": "adot-collector-monitoring",
+        "direction": "egress",
+        "port": 4317,
+        "protocol": "TCP",
+        "requiredTypedPeer": "podSelector+namespaceSelector or approved ipBlock",
+        "serviceName": "world-realtime-coordinator",
+        "state": "missing"
+      },
+      {
+        "destinationId": "adot-collector-monitoring",
+        "direction": "egress",
+        "port": 4317,
+        "protocol": "TCP",
+        "requiredTypedPeer": "podSelector+namespaceSelector or approved ipBlock",
+        "serviceName": "minwm-vae",
+        "state": "missing"
+      },
+      {
+        "destinationId": "adot-collector-monitoring",
+        "direction": "egress",
+        "port": 4317,
+        "protocol": "TCP",
+        "requiredTypedPeer": "podSelector+namespaceSelector or approved ipBlock",
+        "serviceName": "lingbot2-vae",
+        "state": "missing"
+      },
+      {
+        "destinationId": "s3-us-east-2",
+        "direction": "egress",
+        "port": 443,
+        "protocol": "TCP",
+        "requiredTypedPeer": "podSelector+namespaceSelector or approved ipBlock",
+        "serviceName": "minwm-denoiser",
+        "state": "missing"
+      },
+      {
+        "destinationId": "adot-collector-monitoring",
+        "direction": "egress",
+        "port": 4317,
+        "protocol": "TCP",
+        "requiredTypedPeer": "podSelector+namespaceSelector or approved ipBlock",
+        "serviceName": "minwm-denoiser",
+        "state": "missing"
+      },
+      {
+        "destinationId": "s3-us-east-2",
+        "direction": "egress",
+        "port": 443,
+        "protocol": "TCP",
+        "requiredTypedPeer": "podSelector+namespaceSelector or approved ipBlock",
+        "serviceName": "lingbot2-denoiser",
+        "state": "missing"
+      },
+      {
+        "destinationId": "adot-collector-monitoring",
+        "direction": "egress",
+        "port": 4317,
+        "protocol": "TCP",
+        "requiredTypedPeer": "podSelector+namespaceSelector or approved ipBlock",
+        "serviceName": "lingbot2-denoiser",
+        "state": "missing"
+      },
+      {
+        "destinationId": "istio-ingressgateway",
+        "direction": "ingress",
+        "port": 18080,
+        "protocol": "TCP",
+        "requiredTypedPeer": "podSelector+namespaceSelector or approved ipBlock",
+        "serviceName": "world-realtime-gateway",
+        "state": "missing"
+      },
+      {
+        "destinationId": "cloudwatch-logs-us-east-2",
+        "direction": "egress",
+        "port": 443,
+        "protocol": "TCP",
+        "requiredTypedPeer": "podSelector+namespaceSelector or approved ipBlock",
+        "serviceName": "world-realtime-gateway",
+        "state": "missing"
+      },
+      {
+        "destinationId": "adot-collector-monitoring",
+        "direction": "egress",
+        "port": 4317,
+        "protocol": "TCP",
+        "requiredTypedPeer": "podSelector+namespaceSelector or approved ipBlock",
+        "serviceName": "world-realtime-gateway",
+        "state": "missing"
+      },
+      {
+        "destinationId": "istio-ingressgateway",
+        "direction": "ingress",
+        "port": 18080,
+        "protocol": "TCP",
+        "requiredTypedPeer": "podSelector+namespaceSelector or approved ipBlock",
+        "serviceName": "world-studio-webui",
+        "state": "missing"
+      },
+      {
+        "destinationId": "happyoyster-api",
+        "direction": "egress",
+        "port": 443,
+        "protocol": "TCP",
+        "requiredTypedPeer": "podSelector+namespaceSelector or approved ipBlock",
+        "serviceName": "world-studio-webui",
+        "state": "missing"
+      },
+      {
+        "destinationId": "google-vertex-ai",
+        "direction": "egress",
+        "port": 443,
+        "protocol": "TCP",
+        "requiredTypedPeer": "podSelector+namespaceSelector or approved ipBlock",
+        "serviceName": "world-studio-webui",
+        "state": "missing"
+      },
+      {
+        "destinationId": "s3-us-west-2-source",
+        "direction": "egress",
+        "port": 443,
+        "protocol": "TCP",
+        "requiredTypedPeer": "podSelector+namespaceSelector or approved ipBlock",
+        "serviceName": "world-model-artifact-publisher",
+        "state": "missing"
+      },
+      {
+        "destinationId": "s3-us-east-2-destination",
+        "direction": "egress",
+        "port": 443,
+        "protocol": "TCP",
+        "requiredTypedPeer": "podSelector+namespaceSelector or approved ipBlock",
+        "serviceName": "world-model-artifact-publisher",
+        "state": "missing"
+      }
+    ]
+  },
+  "resolvedInputs": {
+    "lingbot2Release": {
+      "bytes": 86071995490,
+      "manifestSha256": "e065087570bde5ae45cac0f678239d6da5dafb7c1af3a2a1be0ddd6ea8929fdd",
+      "objectCount": 26,
+      "releaseId": "20260814T054118Z-e0650875",
+      "releaseSpec": "model_releases/lingbot2/59cccf49f2d2dd27418ae7a04b82b10868d455c2/release-spec.json"
+    }
+  },
+  "schemaVersion": 1
+}

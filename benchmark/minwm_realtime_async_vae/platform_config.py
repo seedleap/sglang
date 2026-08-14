@@ -16,20 +16,142 @@ BUSINESS_LINE = "world-model"
 NAMESPACE = "world-model"
 APP_GROUP = "world-studio"
 REGISTRY = "829115578968.dkr.ecr.us-east-2.amazonaws.com/leap-world/minwm-realtime"
-DENOISER_IMAGE = (
-    f"{REGISTRY}@sha256:"
-    "77b975f6758e642462c984dec3e1e51ef806622eb9bf3b9304330f6e072c3209"
-)
-WEBUI_IMAGE = (
-    f"{REGISTRY}@sha256:"
-    "38bfc1802736805d98f43aed08c43bf239da010d64d7605b5a96a7f0cb2335cc"
-)
+FROZEN_GIT_SHA = "d8019542103c83047997cf6dc2e7014cba8565e3"
+FROZEN_BRANCH = "codex/minwm-lingbot2-dual-webui-opt-20260812"
+GIT_REPO = "git@github.com:seedleap/sglang.git"
 IMAGE_RE = re.compile(r"^[^\s]+@sha256:[0-9a-f]{64}$")
+CALLBACK_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+CREATE_SERVICE_FIELDS = {
+    "name",
+    "appName",
+    "appGroup",
+    "description",
+    "language",
+    "deployType",
+    "gitRepo",
+    "jenkinsJob",
+    "owners",
+    "developers",
+    "owner",
+    "pipeline",
+    "command",
+    "args",
+    "envVars",
+    "env",
+    "initContainers",
+    "labels",
+    "annotations",
+    "networkPolicy",
+    "configMaps",
+    "affinityRules",
+    "tolerations",
+    "resources",
+    "startupProbe",
+    "readinessProbe",
+    "livenessProbe",
+    "nodeSelector",
+    "affinity",
+    "topologySpreadConstraints",
+    "terminationGracePeriodSeconds",
+    "podDisruptionBudget",
+    "statefulSet",
+    "clusterId",
+    "namespace",
+    "image",
+    "serviceAccountName",
+    "envFromSecrets",
+    "runtimeJobNamespaces",
+    "taskExecutionPolicy",
+    "cronJob",
+    "containerPort",
+    "servicePort",
+    "extraPorts",
+    "volumes",
+    "volumeMounts",
+    "serviceSpec",
+    "replicas",
+    "businessLineId",
+}
+PLATFORM_OWNERSHIP_LABELS = {
+    "business_line_id",
+    "cluster_id",
+    "namespace",
+    "service_id",
+}
+IMAGE_INPUT_SPECS = {
+    "world-realtime-coordinator": {
+        "placeholder": "${WORLD_REALTIME_COORDINATOR_IMAGE_DIGEST}",
+        "tagPrefix": "world-realtime-coordinator",
+        "jenkinsJob": "loopit/world-model/world-realtime-coordinator",
+    },
+    "minwm-vae": {
+        "placeholder": "${MINWM_VAE_IMAGE_DIGEST}",
+        "tagPrefix": "minwm-vae",
+        "jenkinsJob": "loopit/world-model/minwm-vae",
+    },
+    "lingbot2-vae": {
+        "placeholder": "${LINGBOT2_VAE_IMAGE_DIGEST}",
+        "tagPrefix": "lingbot2-vae",
+        "jenkinsJob": "loopit/world-model/lingbot2-vae",
+    },
+    "minwm-denoiser": {
+        "placeholder": "${MINWM_DENOISER_IMAGE_DIGEST}",
+        "tagPrefix": "minwm-denoiser",
+        "jenkinsJob": "loopit/world-model/minwm-denoiser",
+    },
+    "lingbot2-denoiser": {
+        "placeholder": "${LINGBOT2_DENOISER_IMAGE_DIGEST}",
+        "tagPrefix": "lingbot2-denoiser",
+        "jenkinsJob": "loopit/world-model/lingbot2-denoiser",
+    },
+    "world-realtime-gateway": {
+        "placeholder": "${WORLD_REALTIME_GATEWAY_IMAGE_DIGEST}",
+        "tagPrefix": "world-realtime-gateway",
+        "jenkinsJob": "loopit/world-model/world-realtime-gateway",
+    },
+    "world-studio-webui": {
+        "placeholder": "${WORLD_STUDIO_WEBUI_IMAGE_DIGEST}",
+        "tagPrefix": "world-studio-webui",
+        "jenkinsJob": "loopit/world-model/world-studio-webui",
+    },
+    "world-model-artifact-publisher": {
+        "placeholder": "${WORLD_MODEL_ARTIFACT_PUBLISHER_IMAGE_DIGEST}",
+        "tagPrefix": "model-artifact-publish",
+        "jenkinsJob": "loopit/world-model/model-artifact-publish",
+    },
+}
 IMAGE_PLACEHOLDERS = {
-    "${WORLD_MODEL_ARTIFACT_PUBLISHER_IMAGE_DIGEST}",
-    "${WORLD_REALTIME_COORDINATOR_IMAGE_DIGEST}",
-    "${WORLD_REALTIME_GATEWAY_IMAGE_DIGEST}",
-    "${WORLD_REALTIME_VAE_IMAGE_DIGEST}",
+    spec["placeholder"] for spec in IMAGE_INPUT_SPECS.values()
+}
+NETWORK_REQUIRED_INPUTS = {
+    "world-realtime-coordinator": [
+        ("egress", "dynamodb-us-east-2", "TCP", 443),
+        ("egress", "adot-collector-monitoring", "TCP", 4317),
+    ],
+    "minwm-vae": [("egress", "adot-collector-monitoring", "TCP", 4317)],
+    "lingbot2-vae": [("egress", "adot-collector-monitoring", "TCP", 4317)],
+    "minwm-denoiser": [
+        ("egress", "s3-us-east-2", "TCP", 443),
+        ("egress", "adot-collector-monitoring", "TCP", 4317),
+    ],
+    "lingbot2-denoiser": [
+        ("egress", "s3-us-east-2", "TCP", 443),
+        ("egress", "adot-collector-monitoring", "TCP", 4317),
+    ],
+    "world-realtime-gateway": [
+        ("ingress", "istio-ingressgateway", "TCP", 18080),
+        ("egress", "cloudwatch-logs-us-east-2", "TCP", 443),
+        ("egress", "adot-collector-monitoring", "TCP", 4317),
+    ],
+    "world-studio-webui": [
+        ("ingress", "istio-ingressgateway", "TCP", 18080),
+        ("egress", "happyoyster-api", "TCP", 443),
+        ("egress", "google-vertex-ai", "TCP", 443),
+    ],
+    "world-model-artifact-publisher": [
+        ("egress", "s3-us-west-2-source", "TCP", 443),
+        ("egress", "s3-us-east-2-destination", "TCP", 443),
+    ],
 }
 
 MINWM_RELEASE = (
@@ -39,8 +161,81 @@ MINWM_RELEASE = (
 LINGBOT2_REVISION = "59cccf49f2d2dd27418ae7a04b82b10868d455c2"
 LINGBOT2_RELEASE = (
     "models/lingbot2/robbyant-lingbot-world-v2-14b-causal-fast-diffusers/"
-    f"{LINGBOT2_REVISION}/releases/${{LINGBOT2_RELEASE_ID}}/model"
+    f"{LINGBOT2_REVISION}/releases/20260814T054118Z-e0650875/model"
 )
+
+
+def _image_placeholder(service_name: str) -> str:
+    return IMAGE_INPUT_SPECS[service_name]["placeholder"]
+
+
+def required_inputs_document() -> dict[str, Any]:
+    image_callbacks = []
+    for service_name, spec in IMAGE_INPUT_SPECS.items():
+        image_callbacks.append(
+            {
+                "serviceName": service_name,
+                "state": "missing",
+                "requiredStatus": "success",
+                "requiredBranch": FROZEN_BRANCH,
+                "requiredAuditTag": (
+                    f"{REGISTRY}:{spec['tagPrefix']}-{FROZEN_GIT_SHA}"
+                ),
+                "requiredImageDigestPattern": "sha256:<64-lowercase-hex>",
+                "requiredJenkinsJob": spec["jenkinsJob"],
+                "requiredOperator": "jenkins",
+                "requiredBuildEvidence": ["buildId", "buildUrl"],
+                "deploymentImageSource": "callback.imageDigest",
+            }
+        )
+    network_peers = []
+    for service_name, requirements in NETWORK_REQUIRED_INPUTS.items():
+        for direction, destination, protocol, port in requirements:
+            network_peers.append(
+                {
+                    "serviceName": service_name,
+                    "direction": direction,
+                    "destinationId": destination,
+                    "protocol": protocol,
+                    "port": port,
+                    "state": "missing",
+                    "requiredTypedPeer": (
+                        "podSelector+namespaceSelector or approved ipBlock"
+                    ),
+                }
+            )
+    return {
+        "schemaVersion": 1,
+        "executionReady": False,
+        "hardGate": "all required inputs must be resolved before deployment render",
+        "frozenSource": {
+            "branch": FROZEN_BRANCH,
+            "gitSha": FROZEN_GIT_SHA,
+        },
+        "requiredInputs": {
+            "clusterRegistration": {
+                "state": "missing",
+                "clusterName": "world-model",
+                "requiredField": "clusterId",
+            },
+            "imageBuildCallbacks": image_callbacks,
+            "networkPolicyPeers": network_peers,
+        },
+        "resolvedInputs": {
+            "lingbot2Release": {
+                "releaseId": "20260814T054118Z-e0650875",
+                "manifestSha256": (
+                    "e065087570bde5ae45cac0f678239d6da5dafb7c1af3a2a1be0ddd6ea8929fdd"
+                ),
+                "objectCount": 26,
+                "bytes": 86071995490,
+                "releaseSpec": (
+                    "model_releases/lingbot2/"
+                    f"{LINGBOT2_REVISION}/release-spec.json"
+                ),
+            }
+        },
+    }
 
 
 def _env(name: str, value: str) -> dict[str, Any]:
@@ -70,6 +265,7 @@ def _http_probe(
     initial_delay: int | None = None,
 ) -> dict[str, Any]:
     result: dict[str, Any] = {
+        "enabled": True,
         "type": "httpGet",
         "path": path,
         "port": port,
@@ -89,21 +285,80 @@ def _spread(name: str) -> list[dict[str, Any]]:
             "topologyKey": "topology.kubernetes.io/zone",
             "whenUnsatisfiable": "ScheduleAnyway",
             "labelSelector": {
-                "matchLabels": {"loopit.me/service-id": name}
+                "matchLabels": {"app.kubernetes.io/name": name}
             },
         }
     ]
 
 
+SERVICE_PORTS = {
+    "world-realtime-coordinator": 18081,
+    "minwm-vae": 18081,
+    "lingbot2-vae": 18081,
+    "minwm-denoiser": 30000,
+    "lingbot2-denoiser": 30000,
+    "world-realtime-gateway": 18080,
+    "world-studio-webui": 18080,
+}
+
+
+def _service_peer(name: str) -> dict[str, Any]:
+    return {
+        "podSelector": {
+            "matchLabels": {"app.kubernetes.io/name": name}
+        }
+    }
+
+
+def _dns_rules() -> list[dict[str, Any]]:
+    peer = {
+        "namespaceSelector": {
+            "matchLabels": {"kubernetes.io/metadata.name": "kube-system"}
+        }
+    }
+    return [
+        {"to": [peer], "ports": [{"protocol": protocol, "port": 53}]}
+        for protocol in ("UDP", "TCP")
+    ]
+
+
 def _network_policy(
-    *, ingress_from: list[str], egress_to: list[str], external: list[str] | None = None
+    *,
+    service_name: str,
+    ingress_from: list[str],
+    egress_to: list[str],
+    external: list[str] | None = None,
 ) -> dict[str, Any]:
+    del external
+    ingress_peers = [
+        _service_peer(name) for name in ingress_from if name in SERVICE_PORTS
+    ]
+    ingress = []
+    if ingress_peers:
+        ingress.append(
+            {
+                "from": ingress_peers,
+                "ports": [
+                    {"protocol": "TCP", "port": SERVICE_PORTS[service_name]}
+                ],
+            }
+        )
+    egress = _dns_rules()
+    for name in egress_to:
+        if name in SERVICE_PORTS:
+            egress.append(
+                {
+                    "to": [_service_peer(name)],
+                    "ports": [
+                        {"protocol": "TCP", "port": SERVICE_PORTS[name]}
+                    ],
+                }
+            )
     return {
         "enabled": True,
         "defaultDeny": True,
-        "ingressFromServiceIds": ingress_from,
-        "egressToServiceIds": egress_to,
-        "externalEgress": external or [],
+        "ingress": ingress,
+        "egress": egress,
     }
 
 
@@ -117,26 +372,22 @@ def _base_application(
     service_account: str,
 ) -> dict[str, Any]:
     return {
-        "schemaVersion": 1,
-        "kind": "application",
         "name": name,
         "appName": app_name,
         "businessLineId": BUSINESS_LINE,
-        "clusterName": "world-model",
+        "clusterId": "${WORLD_MODEL_CLUSTER_ID}",
         "namespace": NAMESPACE,
         "appGroup": APP_GROUP,
-        "lane": "default",
         "deployType": deploy_type,
+        "gitRepo": GIT_REPO,
+        "jenkinsJob": IMAGE_INPUT_SPECS[name]["jenkinsJob"],
         "replicas": replicas,
         "image": image,
-        "imagePullPolicy": "IfNotPresent",
         "serviceAccountName": service_account,
         "labels": {
-            "loopit.me/business-line": BUSINESS_LINE,
-            "loopit.me/managed-by": "platform",
-            "loopit.me/service-id": name,
-            "loopit.me/lane": "default",
-            "app.kubernetes.io/part-of": APP_GROUP,
+            "app.kubernetes.io/name": name,
+            "world-model.loopit.me/application-group": APP_GROUP,
+            "world-model.loopit.me/service": name,
         },
         "annotations": {
             "logs.loopit.me/enabled": "true",
@@ -163,7 +414,7 @@ def _coordinator() -> dict[str, Any]:
         name=name,
         app_name="World Realtime Coordinator",
         deploy_type="deployment",
-        image="${WORLD_REALTIME_COORDINATOR_IMAGE_DIGEST}",
+        image=_image_placeholder(name),
         replicas=2,
         service_account="wm-coordinator",
     )
@@ -202,6 +453,7 @@ def _coordinator() -> dict[str, Any]:
             "topologySpreadConstraints": _spread(name),
             "podDisruptionBudget": {"minAvailable": 1},
             "networkPolicy": _network_policy(
+                service_name=name,
                 ingress_from=[
                     "world-realtime-gateway",
                     "minwm-denoiser",
@@ -225,14 +477,13 @@ def _vae(*, lingbot2: bool) -> dict[str, Any]:
         name=name,
         app_name="LingBot2 VAE" if lingbot2 else "minWM VAE",
         deploy_type="deployment",
-        image="${WORLD_REALTIME_VAE_IMAGE_DIGEST}",
+        image=_image_placeholder(name),
         replicas=1,
         service_account="wm-worker-discovery",
     )
     app["labels"]["loopit.me/gpu-role"] = "vae"
     app.update(
         {
-            "strategy": {"type": "Recreate"},
             "args": [
                 f"--checkpoint-path={checkpoint}",
                 "--device=cuda",
@@ -271,7 +522,7 @@ def _vae(*, lingbot2: bool) -> dict[str, Any]:
             "initContainers": [
                 {
                     "name": "vae-heartbeat",
-                    "image": "${WORLD_REALTIME_VAE_IMAGE_DIGEST}",
+                    "image": _image_placeholder(name),
                     "imagePullPolicy": "IfNotPresent",
                     "restartPolicy": "Always",
                     "command": ["/bin/sh", "-ec"],
@@ -334,6 +585,7 @@ def _vae(*, lingbot2: bool) -> dict[str, Any]:
             ),
             "podDisruptionBudget": {"maxUnavailable": 1},
             "networkPolicy": _network_policy(
+                service_name=name,
                 ingress_from=[
                     "minwm-denoiser" if not lingbot2 else "lingbot2-denoiser"
                 ],
@@ -345,10 +597,10 @@ def _vae(*, lingbot2: bool) -> dict[str, Any]:
     return app
 
 
-def _model_stager(*, prefix: str, revision: str) -> dict[str, Any]:
+def _model_stager(*, prefix: str, revision: str, image: str) -> dict[str, Any]:
     return {
         "name": "model-stager",
-        "image": DENOISER_IMAGE,
+        "image": image,
         "imagePullPolicy": "IfNotPresent",
         "workingDir": "/opt/sglang",
         "command": ["/bin/bash", "-lc"],
@@ -381,6 +633,7 @@ def _model_stager(*, prefix: str, revision: str) -> dict[str, Any]:
 
 def _denoiser_heartbeat(*, lingbot2: bool) -> dict[str, Any]:
     name = "lingbot2" if lingbot2 else "minwm"
+    service_name = "lingbot2-denoiser" if lingbot2 else "minwm-denoiser"
     capacity = 4 if lingbot2 else 1
     fingerprint = "taew2_1-d26151e7" if lingbot2 else "taew2_2-d053e216"
     revision = (
@@ -390,7 +643,7 @@ def _denoiser_heartbeat(*, lingbot2: bool) -> dict[str, Any]:
     )
     return {
         "name": "denoiser-heartbeat",
-        "image": DENOISER_IMAGE,
+        "image": _image_placeholder(service_name),
         "imagePullPolicy": "IfNotPresent",
         "restartPolicy": "Always",
         "command": ["/bin/sh", "-ec"],
@@ -426,12 +679,13 @@ def _denoiser_heartbeat(*, lingbot2: bool) -> dict[str, Any]:
 def _denoiser(*, lingbot2: bool) -> dict[str, Any]:
     name = "lingbot2-denoiser" if lingbot2 else "minwm-denoiser"
     release = LINGBOT2_RELEASE if lingbot2 else MINWM_RELEASE
+    image = _image_placeholder(name)
     expected_revision = LINGBOT2_REVISION if lingbot2 else "gs3200-ema-student-v1"
     app = _base_application(
         name=name,
         app_name="LingBot2 Denoiser" if lingbot2 else "minWM Denoiser",
         deploy_type="statefulset",
-        image=DENOISER_IMAGE,
+        image=image,
         replicas=1,
         service_account="wm-model-fetcher",
     )
@@ -534,7 +788,9 @@ def _denoiser(*, lingbot2: bool) -> dict[str, Any]:
             ],
             "resources": resources,
             "initContainers": [
-                _model_stager(prefix=release, revision=expected_revision),
+                _model_stager(
+                    prefix=release, revision=expected_revision, image=image
+                ),
                 _denoiser_heartbeat(lingbot2=lingbot2),
             ],
             "volumes": [
@@ -572,6 +828,7 @@ def _denoiser(*, lingbot2: bool) -> dict[str, Any]:
             ),
             "podDisruptionBudget": {"maxUnavailable": 1},
             "networkPolicy": _network_policy(
+                service_name=name,
                 ingress_from=["world-realtime-gateway"],
                 egress_to=[
                     "world-realtime-coordinator",
@@ -593,7 +850,7 @@ def _gateway() -> dict[str, Any]:
         name=name,
         app_name="World Realtime Gateway",
         deploy_type="deployment",
-        image="${WORLD_REALTIME_GATEWAY_IMAGE_DIGEST}",
+        image=_image_placeholder(name),
         replicas=2,
         service_account="wm-gateway",
     )
@@ -642,6 +899,7 @@ def _gateway() -> dict[str, Any]:
             "topologySpreadConstraints": _spread(name),
             "podDisruptionBudget": {"minAvailable": 1},
             "networkPolicy": _network_policy(
+                service_name=name,
                 ingress_from=["world-studio-webui", "istio-ingressgateway"],
                 egress_to=[
                     "world-realtime-coordinator",
@@ -664,7 +922,7 @@ def _webui() -> dict[str, Any]:
         name=name,
         app_name="World Studio WebUI",
         deploy_type="deployment",
-        image=WEBUI_IMAGE,
+        image=_image_placeholder(name),
         replicas=2,
         service_account="wm-webui",
     )
@@ -773,6 +1031,7 @@ def _webui() -> dict[str, Any]:
             "topologySpreadConstraints": _spread(name),
             "podDisruptionBudget": {"minAvailable": 1},
             "networkPolicy": _network_policy(
+                service_name=name,
                 ingress_from=["istio-ingressgateway"],
                 egress_to=["world-realtime-gateway"],
                 external=[
@@ -787,43 +1046,56 @@ def _webui() -> dict[str, Any]:
 
 def artifact_publisher_task() -> dict[str, Any]:
     name = "world-model-artifact-publisher"
+    command = [
+        "python3",
+        "/opt/sglang/benchmark/minwm_realtime_async_vae/copy_model_release.py",
+    ]
+    release_path = (
+        "/opt/sglang/benchmark/minwm_realtime_async_vae/model_releases/lingbot2/"
+        f"{LINGBOT2_REVISION}/release-spec.json"
+    )
     return {
-        "schemaVersion": 1,
-        "kind": "task",
         "name": name,
         "appName": "World Model Artifact Publisher",
         "businessLineId": BUSINESS_LINE,
-        "clusterName": "world-model",
+        "clusterId": "${WORLD_MODEL_CLUSTER_ID}",
         "namespace": NAMESPACE,
         "appGroup": APP_GROUP,
-        "lane": "default",
         "deployType": "job",
-        "image": "${WORLD_MODEL_ARTIFACT_PUBLISHER_IMAGE_DIGEST}",
-        "imagePullPolicy": "IfNotPresent",
+        "gitRepo": GIT_REPO,
+        "jenkinsJob": IMAGE_INPUT_SPECS[name]["jenkinsJob"],
+        "image": _image_placeholder(name),
         "serviceAccountName": "wm-artifact-publisher",
         "labels": {
-            "loopit.me/business-line": BUSINESS_LINE,
-            "loopit.me/managed-by": "platform",
-            "loopit.me/service-id": name,
-            "loopit.me/lane": "default",
-            "app.kubernetes.io/part-of": APP_GROUP,
+            "app.kubernetes.io/name": name,
+            "world-model.loopit.me/application-group": APP_GROUP,
+            "world-model.loopit.me/service": name,
         },
-        "annotations": {"logs.loopit.me/enabled": "true"},
-        "command": [
-            "python3",
-            "/opt/sglang/benchmark/minwm_realtime_async_vae/copy_model_release.py",
-        ],
+        "annotations": {
+            "logs.loopit.me/enabled": "true",
+            "logs.loopit.me/bucket": BUSINESS_LINE,
+        },
+        "command": command,
         "args": [
             "--release",
-            "/opt/sglang/benchmark/minwm_realtime_async_vae/model_releases/lingbot2/"
-            f"{LINGBOT2_REVISION}/release-spec.template.json",
+            release_path,
             "--offline-plan",
         ],
-        "requiredExecutionInputs": [
-            "reviewed release spec generated by build_model_release_spec.py",
-            "--execute",
-            "--confirm-release-id=<reviewed release_id>",
-        ],
+        "taskExecutionPolicy": {
+            "requireDigestImage": True,
+            "commandRules": [
+                {"command": command, "argsExact": ["--release", release_path, "--offline-plan"]},
+                {
+                    "command": command,
+                    "argsPrefix": [
+                        "--release",
+                        release_path,
+                        "--execute",
+                        "--confirm-release-id",
+                    ],
+                },
+            ],
+        },
         "resources": {
             "requests": {"cpu": "4", "memory": "8Gi", "ephemeral-storage": "16Gi"},
             "limits": {"cpu": "8", "memory": "16Gi", "ephemeral-storage": "32Gi"},
@@ -832,9 +1104,8 @@ def artifact_publisher_task() -> dict[str, Any]:
         "tolerations": [],
         "volumes": [],
         "volumeMounts": [],
-        "activeDeadlineSeconds": 10800,
-        "backoffLimit": 1,
         "networkPolicy": _network_policy(
+            service_name=name,
             ingress_from=[],
             egress_to=[],
             external=["s3.us-west-2.amazonaws.com", "s3.us-east-2.amazonaws.com"],
@@ -860,8 +1131,46 @@ def all_platform_configs() -> list[dict[str, Any]]:
 
 
 def resolve_image_inputs(
-    configs: list[dict[str, Any]], image_inputs: dict[str, str]
+    configs: list[dict[str, Any]], image_inputs: dict[str, Any]
 ) -> list[dict[str, Any]]:
+    if image_inputs.get("schemaVersion") != 1:
+        raise ValueError("image inputs must use schemaVersion 1")
+    if image_inputs.get("frozenGitSha") != FROZEN_GIT_SHA:
+        raise ValueError("image inputs do not match the frozen full Git SHA")
+    callbacks = image_inputs.get("callbacks")
+    if not isinstance(callbacks, dict) or set(callbacks) != set(IMAGE_INPUT_SPECS):
+        raise ValueError("image inputs must contain exactly one callback per service")
+
+    resolved_images: dict[str, str] = {}
+    for service_name, spec in IMAGE_INPUT_SPECS.items():
+        callback = callbacks[service_name]
+        if not isinstance(callback, dict):
+            raise ValueError(f"image callback for {service_name} must be an object")
+        expected_tag = f"{REGISTRY}:{spec['tagPrefix']}-{FROZEN_GIT_SHA}"
+        if callback.get("serviceName") != service_name:
+            raise ValueError(f"image callback serviceName mismatch for {service_name}")
+        if str(callback.get("status", "")).lower() != "success":
+            raise ValueError(f"image callback did not succeed for {service_name}")
+        if callback.get("branch") != FROZEN_BRANCH:
+            raise ValueError(f"image callback branch mismatch for {service_name}")
+        if callback.get("jenkinsJob") != spec["jenkinsJob"]:
+            raise ValueError(f"image callback Jenkins Job mismatch for {service_name}")
+        if callback.get("operator") != "jenkins":
+            raise ValueError(f"image callback operator mismatch for {service_name}")
+        if not isinstance(callback.get("buildId"), str) or not callback["buildId"]:
+            raise ValueError(f"image callback buildId is missing for {service_name}")
+        if not isinstance(callback.get("buildUrl"), str) or not callback["buildUrl"]:
+            raise ValueError(f"image callback buildUrl is missing for {service_name}")
+        if callback.get("image") != expected_tag:
+            raise ValueError(
+                f"image callback tag for {service_name} is not the full-SHA audit tag"
+            )
+        digest = callback.get("imageDigest")
+        if not isinstance(digest, str) or not CALLBACK_DIGEST_RE.fullmatch(digest):
+            raise ValueError(f"image callback digest is invalid for {service_name}")
+        repository = expected_tag.rsplit(":", 1)[0]
+        resolved_images[spec["placeholder"]] = f"{repository}@{digest}"
+
     resolved = copy.deepcopy(configs)
 
     def replace(value: Any) -> Any:
@@ -870,9 +1179,9 @@ def resolve_image_inputs(
         if isinstance(value, list):
             return [replace(item) for item in value]
         if isinstance(value, str) and value in IMAGE_PLACEHOLDERS:
-            if value not in image_inputs:
+            if value not in resolved_images:
                 raise ValueError(f"missing image input for {value}")
-            image = image_inputs[value]
+            image = resolved_images[value]
             if not IMAGE_RE.fullmatch(image):
                 raise ValueError(f"image input for {value} is not digest-pinned")
             return image
@@ -899,8 +1208,26 @@ def validate_configs(
     ]:
         raise ValueError("platform configs are not in the frozen release order")
     for config in configs:
+        unknown_fields = set(config) - CREATE_SERVICE_FIELDS
+        if unknown_fields:
+            raise ValueError(
+                f"{config['name']} contains non-typed service fields: "
+                f"{sorted(unknown_fields)}"
+            )
         if config["businessLineId"] != BUSINESS_LINE or config["namespace"] != NAMESPACE:
             raise ValueError("platform config escaped the world-model ownership boundary")
+        if PLATFORM_OWNERSHIP_LABELS.intersection(config.get("labels", {})):
+            raise ValueError(f"{config['name']} overrides platform ownership labels")
+        policy = config.get("networkPolicy")
+        if not isinstance(policy, dict) or set(policy) != {
+            "enabled",
+            "defaultDeny",
+            "ingress",
+            "egress",
+        }:
+            raise ValueError(f"{config['name']} has a non-typed network policy")
+        if not policy["enabled"] or not policy["defaultDeny"]:
+            raise ValueError(f"{config['name']} must use typed default-deny networking")
         if "karpenter.sh/capacity-type" in config.get("nodeSelector", {}):
             raise ValueError(f"{config['name']} pins a Kubernetes capacity type")
         images = [config["image"]] + [

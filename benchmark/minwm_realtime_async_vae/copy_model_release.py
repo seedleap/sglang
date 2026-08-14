@@ -8,7 +8,7 @@ import base64
 import hashlib
 import json
 from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from download_model_artifact import validate_control_files
@@ -30,6 +30,23 @@ def _object_bytes(client: Any, bucket: str, key: str, version_id: str) -> bytes:
     )["Body"].read()
 
 
+def _source_control_key(
+    source: dict[str, Any], control: str, default_name: str
+) -> str:
+    value = source[control]
+    key = value.get("key") if isinstance(value, dict) else None
+    if key is None:
+        key = f"{source['prefix'].strip('/')}/{default_name}"
+    if not isinstance(key, str) or not key or key.startswith("/") or "\\" in key:
+        raise ValueError(f"source.{control}.key is not a safe S3 object key")
+    parsed = PurePosixPath(key)
+    if key != parsed.as_posix() or any(
+        part in {"", ".", ".."} for part in parsed.parts
+    ):
+        raise ValueError(f"source.{control}.key is not a safe S3 object key")
+    return key
+
+
 def load_and_validate_release(
     release_path: Path,
     source_client: Any,
@@ -39,19 +56,22 @@ def load_and_validate_release(
         raise ValueError("unsupported release schema_version")
 
     source = release["source"]
-    source_prefix = source["prefix"].strip("/")
     ready_spec = source["ready"]
     manifest_spec = source["artifact_manifest"]
+    ready_key = _source_control_key(source, "ready", "_READY")
+    manifest_key = _source_control_key(
+        source, "artifact_manifest", "artifact-manifest.json"
+    )
     ready_body = _object_bytes(
         source_client,
         source["bucket"],
-        f"{source_prefix}/_READY",
+        ready_key,
         ready_spec["version_id"],
     )
     manifest_body = _object_bytes(
         source_client,
         source["bucket"],
-        f"{source_prefix}/artifact-manifest.json",
+        manifest_key,
         manifest_spec["version_id"],
     )
 
@@ -67,13 +87,19 @@ def load_and_validate_release(
         raise ValueError("version-pinned artifact manifest does not match release spec")
 
     ready = json.loads(ready_body)
+    expected_revision = (release.get("model") or {}).get("revision")
     manifest, validated_files = validate_control_files(
-        ready_body, manifest_body, ready.get("revision")
+        ready_body, manifest_body, expected_revision
     )
     if ready.get("manifest_sha256") != manifest_spec["sha256"]:
         raise ValueError("source _READY does not authorize artifact manifest")
-    if ready.get("revision") != manifest.get("revision"):
-        raise ValueError("source control file revisions differ")
+    expected_count = source.get("object_count")
+    expected_bytes = source.get("bytes")
+    if expected_count is not None and expected_count != len(validated_files):
+        raise ValueError("source object_count does not match artifact manifest")
+    actual_bytes = sum(entry["size"] for entry in validated_files)
+    if expected_bytes is not None and expected_bytes != actual_bytes:
+        raise ValueError("source bytes does not match artifact manifest")
 
     manifest_files = {entry["path"]: entry for entry in validated_files}
     version_ids = source.get("object_version_ids")
@@ -243,6 +269,7 @@ def offline_plan(release: dict[str, Any]) -> dict[str, Any]:
         "model_object_count": source.get("object_count", len(version_ids) or None),
         "bytes": source.get("bytes"),
         "unresolved": sorted(unresolved),
+        "release_spec_ready": not unresolved,
     }
 
 
