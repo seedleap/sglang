@@ -42,6 +42,8 @@ class FakeVideo extends FakeEventTarget {
     this.videoWidth = 0;
     this.videoHeight = 0;
     this.srcObject = null;
+    this.nextVideoFrameCallback = 1;
+    this.videoFrameCallbacks = new Map();
   }
 
   async play() {
@@ -52,6 +54,23 @@ class FakeVideo extends FakeEventTarget {
   }
 
   pause() {}
+
+  requestVideoFrameCallback(callback) {
+    const id = this.nextVideoFrameCallback++;
+    this.videoFrameCallbacks.set(id, callback);
+    return id;
+  }
+
+  cancelVideoFrameCallback(id) {
+    this.videoFrameCallbacks.delete(id);
+  }
+
+  present(metadata) {
+    const [id, callback] = this.videoFrameCallbacks.entries().next().value || [];
+    if (!callback) return;
+    this.videoFrameCallbacks.delete(id);
+    callback(100, metadata);
+  }
 }
 
 const controlSockets = [];
@@ -199,6 +218,7 @@ const { PrimaryWebRTCSession } = require("./primary_webrtc_session.js");
   const canvas = { hidden: false };
   const states = [];
   const stats = [];
+  const presentedFrames = [];
   let playable = null;
   const session = new PrimaryWebRTCSession({
     video,
@@ -215,6 +235,7 @@ const { PrimaryWebRTCSession } = require("./primary_webrtc_session.js");
     playoutDelayMs: 500,
     onState: (state) => states.push(state),
     onPlayable: (details) => { playable = details; },
+    onPresentedFrame: (details) => presentedFrames.push(details),
     onStats: (snapshot) => stats.push(snapshot),
   });
 
@@ -232,6 +253,28 @@ const { PrimaryWebRTCSession } = require("./primary_webrtc_session.js");
     controlSockets[0].url,
     "ws://webui.example.test/api/webrtc/sessions/session-a/control",
   );
+  session._queueMediaBatch({
+    type: "media_batch",
+    chunk_index: 1,
+    event_id: 5,
+    first_frame_index: 48,
+    num_frames: 1,
+    bridge_encoded_epoch_ms: Date.now() - 25,
+  });
+  video.present({
+    mediaTime: 0,
+    presentedFrames: 1,
+    width: 832,
+    height: 480,
+  });
+  assert.equal(presentedFrames.length, 1);
+  assert.equal(presentedFrames[0].chunkIndex, 1);
+  assert.equal(presentedFrames[0].eventId, 5);
+  assert.equal(presentedFrames[0].sourceFrameIndex, 48);
+  assert.ok(presentedFrames[0].bridgeEncodedEpochMs > 0);
+  assert.ok(stats.some((snapshot) => snapshot.lastPresentedMediaEventId === 5));
+  assert.ok(stats.some((snapshot) => snapshot.lastPresentedTransportMs >= 0));
+  assert.ok(stats.some((snapshot) => snapshot.lastPresentedAfterMetadataMs >= 0));
 
   assert.equal(session.sendEvent({ type: "event", kind: "camera_actions" }), true);
   assert.deepEqual(JSON.parse(controlSockets[0].sent[0]), {
@@ -417,6 +460,28 @@ const { PrimaryWebRTCSession } = require("./primary_webrtc_session.js");
   const completedFrame = managedSession._metadataForFrame({ timestamp: 83333 }, 2);
   assert.equal(completedFrame.numFrameBatches, 3);
   assert.equal(completedFrame.isFinalFrameBatch, true);
+
+  const nativeMappingSession = new PrimaryWebRTCSession({
+    video: new FakeVideo(),
+    canvas: { hidden: false },
+    onPresentedFrame: () => {},
+  });
+  for (let frameIndex = 900; frameIndex <= 904; frameIndex += 1) {
+    nativeMappingSession._queueMediaBatch({
+      type: "media_batch",
+      chunk_index: 56,
+      event_id: frameIndex < 903 ? 20 : 21,
+      first_frame_index: frameIndex,
+      num_frames: 1,
+      bridge_encoded_epoch_ms: 10_000 + (frameIndex - 900) * (1000 / 24),
+    });
+  }
+  const nativeFirst = nativeMappingSession._metadataForFrame({ timestamp: 5_000_000 }, 0);
+  assert.equal(nativeFirst.sourceFrameIndex, 902);
+  assert.equal(nativeFirst.eventId, 20);
+  const nativeAfterRtpGap = nativeMappingSession._metadataForFrame({ timestamp: 5_084_000 }, 1);
+  assert.equal(nativeAfterRtpGap.sourceFrameIndex, 904);
+  assert.equal(nativeAfterRtpGap.eventId, 21);
   const managedCreate = requests.filter(({ url, options }) => (
     url === "./api/webrtc/sessions" && options.method === "POST"
   )).at(-1);

@@ -99,7 +99,10 @@ const MAX_DECODE_QUEUE_BYTES = configuredNumber(
   192 * 1024 * 1024,
 );
 const RECENT_DROP_DISPLAY_MS = 1800;
-const CONTROL_TRANSITION_FLUSH_DELAY_MS = 50;
+const CONTROL_TRANSITION_FLUSH_DELAY_MS = Math.max(
+  0,
+  configuredNumber("controlTransitionFlushDelayMs", 50),
+);
 const SESSION_HEARTBEAT_MS = 15000;
 const PLAYBACK_ACK_INTERVAL_MS = 50;
 // Keep ACK flow-control opt-in until every deployed realtime worker supports
@@ -815,6 +818,7 @@ if (PRIMARY_WEBRTC_ENABLED) {
       if (!managedPlayback) {
         primaryHasVisibleFrame = true;
         renderedPreviewFrames = Math.max(1, renderedPreviewFrames);
+        schedulePrimaryPlaybackAck();
       }
       primaryWebRTCStats = { ...primaryWebRTCStats, width, height };
       markClientTrace("client.webrtc_first_frame", {
@@ -827,6 +831,7 @@ if (PRIMARY_WEBRTC_ENABLED) {
       updateStats();
     },
     onFrame: (frame) => receiveManagedWebRTCFrame(frame),
+    onPresentedFrame: (frame) => receiveNativeWebRTCFrame(frame),
     onStats: (stats) => {
       primaryWebRTCStats = { ...primaryWebRTCStats, ...stats };
       frames = Number(primaryWebRTCStats.framesDecoded || primaryWebRTCStats.sourceFrames || 0);
@@ -1829,23 +1834,23 @@ function isWorkerDecodableRawContentType(contentType) {
 function updateStats() {
   if (PRIMARY_WEBRTC_ENABLED) {
     const rtc = primaryWebRTCStats;
-    const playback = playbackController.snapshot();
     const managed = PRIMARY_WEBRTC_MANAGED_PLAYBACK && rtc.managedPlayback !== false;
     renderModelTelemetry("minwm", {
       frames: Number(rtc.framesDecoded || rtc.sourceFrames || 0),
       bytes: Number(rtc.bytesReceived || 0),
-      sourceFps: managed ? playback.sourceFps : previewPlaybackTargetFps("minwm"),
-      serverFps: managed ? playback.serverFps : previewPlaybackTargetFps("minwm"),
+      sourceFps: previewPlaybackTargetFps("minwm"),
+      serverFps: previewPlaybackTargetFps("minwm"),
       deliveryFps: Number(rtc.receiveFps || 0),
       renderFps: managed ? fpsSamples.length : Number(rtc.receiveFps || 0).toFixed(1),
-      bufferMs: managed ? playback.bufferMs : Number(rtc.jitterBufferMs || 0),
-      networkBufferMs: managed ? Number(rtc.jitterBufferMs || 0) : 0,
-      queueFrames: managed ? playback.queueFrames : 0,
-      droppedFrames: Number(rtc.framesDropped || 0) + (managed ? playback.droppedFrames : 0),
+      bufferMs: Number(rtc.jitterBufferMs || 0),
+      networkBufferMs: Number(rtc.jitterBufferMs || 0),
+      queueFrames: 0,
+      droppedFrames: Number(rtc.framesDropped || 0)
+        + Number(rtc.transportDiscardedFrames || 0),
       lastChunk: managed ? lastRenderedChunk : null,
     });
     $("minwmDecodeText").textContent = managed
-      ? "native H.264 · managed"
+      ? "native H.264 · low latency"
       : "native H.264";
     const networkParts = [];
     if (rtc.jitterMs > 0) networkParts.push(`jitter ${Math.round(rtc.jitterMs)}ms`);
@@ -4496,15 +4501,11 @@ function receiveManagedWebRTCFrame({
   const item = {
     image: frame,
     chunk: header.chunk_index,
+    eventId: header.event_id,
     receivedAt: header.__received_at,
     decodedAt: header.__received_at,
     decodeMs: 0,
   };
-  if (!renderedPreviewFrames && !primaryHasVisibleFrame) {
-    drawFrame(frame, { close: false, markRendered: false });
-  }
-  const enqueueResult = playbackController.enqueueDecodedFrames(header, [item], now);
-  closeFrames(enqueueResult.droppedFrames);
   lastReceivedChunk = lastReceivedChunk === null
     ? header.chunk_index
     : Math.max(lastReceivedChunk, header.chunk_index);
@@ -4521,9 +4522,81 @@ function receiveManagedWebRTCFrame({
       Number(sourceFrameIndex || 0) + 1,
     ),
   };
+
+  // WebRTC already paces decoded frames through its jitter buffer. Feeding
+  // those frames through the WebSocket playback buffer a second time creates
+  // a feedback loop: the queue waits for lead that a paced stream cannot
+  // build, repeatedly stalls, then drops frames. Keep the event cutover rule
+  // from the WebSocket path, but render the newest eligible decoded frame
+  // immediately.
+  if (lastSentEventId > 0 && header.event_id < lastSentEventId) {
+    frame.close?.();
+    primaryWebRTCStats.transportDiscardedFrames = Number(
+      primaryWebRTCStats.transportDiscardedFrames || 0,
+    ) + 1;
+    updateStats();
+    return;
+  }
+  drawFrame(item.image);
+  fpsSamples.push(now);
+  fpsSamples = fpsSamples.filter((timestamp) => now - timestamp < 1000);
+  lastRenderedChunk = item.chunk;
+  lastRenderedEventId = Number(item.eventId || lastRenderedEventId || 0);
+  lastDisplayLagMs = now - (item.receivedAt || now);
+  recordChunkFirstRendered(item.chunk, {
+    webrtc_low_latency: true,
+    display_lag_ms: lastDisplayLagMs,
+    decode_ms: 0,
+  });
   updateControlDebugText();
   updateStats();
   schedulePrimaryPlaybackAck();
+}
+
+function receiveNativeWebRTCFrame({
+  presentedAt,
+  chunkIndex,
+  eventId,
+  frameBatchIndex,
+}) {
+  if (PRIMARY_WEBRTC_MANAGED_PLAYBACK) return;
+  const now = Number(presentedAt || performance.now());
+  const chunk = Number(chunkIndex || 0);
+  const mediaEventId = Number(eventId || 0);
+  const previousRenderedChunk = lastRenderedChunk;
+  const chunkAdvanced = previousRenderedChunk !== null && chunk > previousRenderedChunk;
+  // The first frame of chunk N proves that every frame the browser could
+  // present from chunk N-1 is behind the playhead. This is more reliable than
+  // the upstream completion marker, which races ahead of H.264 pacing.
+  if (chunkAdvanced) {
+    const completedChunk = chunk - 1;
+    lastReceivedChunk = lastReceivedChunk === null
+      ? completedChunk
+      : Math.max(lastReceivedChunk, completedChunk);
+  }
+  lastReceivedFrameBatchIndex = Number(frameBatchIndex || 0);
+  if (mediaEventId > 0) {
+    lastSampledEventId = mediaEventId;
+    markModelEventApplied("minwm", mediaEventId);
+  }
+  lastRenderedChunk = chunk;
+  lastRenderedEventId = mediaEventId || lastRenderedEventId;
+  lastDisplayLagMs = 0;
+  fpsSamples.push(now);
+  fpsSamples = fpsSamples.filter((timestamp) => now - timestamp < 1000);
+  renderedPreviewFrames += 1;
+  recordChunkFirstRendered(chunk, {
+    webrtc_native_playback: true,
+    display_lag_ms: 0,
+    decode_ms: 0,
+  });
+  updateControlDebugText();
+  updateStats();
+  // Native WebRTC playback still needs the same server-side ACK window as the
+  // WebSocket path. The ACK is based on a frame the browser actually
+  // presented, so it bounds upstream lead without adding a second client
+  // playback queue.
+  if (chunkAdvanced) schedulePrimaryPlaybackAck();
 }
 
 function renderLoop(now) {

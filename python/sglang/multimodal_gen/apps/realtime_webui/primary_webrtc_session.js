@@ -118,6 +118,7 @@
       onState = () => {},
       onPlayable = () => {},
       onFrame = null,
+      onPresentedFrame = null,
       onStats = () => {},
       onError = () => {},
     }) {
@@ -146,6 +147,7 @@
       this.onState = onState;
       this.onPlayable = onPlayable;
       this.onFrame = onFrame;
+      this.onPresentedFrame = onPresentedFrame;
       this.onStats = onStats;
       this.onError = onError;
       this.sessionId = "";
@@ -169,10 +171,12 @@
       this.receiver = null;
       this.trackReader = null;
       this.trackPump = null;
+      this.presentedFrameCallback = 0;
       this.mediaBatches = [];
       this.mediaFps = 24;
       this.firstFrameTimestampUs = null;
       this.timestampFrameBase = 0;
+      this.mediaEpochOffsetMs = null;
       this.processedFrames = 0;
       this.controlSentEpochByEvent = new Map();
       this.playableResolve = null;
@@ -280,9 +284,11 @@
       const trackReader = this.trackReader;
       this.trackReader = null;
       this.trackPump = null;
+      this._stopPresentedFrameMonitor();
       this.mediaBatches = [];
       this.firstFrameTimestampUs = null;
       this.timestampFrameBase = 0;
+      this.mediaEpochOffsetMs = null;
       this.processedFrames = 0;
       this.controlSentEpochByEvent.clear();
       this.lastProcessedMediaEventId = 0;
@@ -476,6 +482,7 @@
           if (!stream) return;
           this.video.srcObject = stream;
           this.video.hidden = false;
+          this._startPresentedFrameMonitor(generation);
           void this.video.play?.().catch(() => {});
         };
         peer.onconnectionstatechange = () => {
@@ -598,8 +605,10 @@
       this.receiver = null;
       this.trackReader = null;
       this.trackPump = null;
+      this._stopPresentedFrameMonitor();
       this.whepResourceUrl = "";
       this.firstFrameTimestampUs = null;
+      this.mediaEpochOffsetMs = null;
       this.timestampFrameBase = Math.max(
         this.processedFrames,
         Number(this.mediaBatches[0]?.firstFrameIndex || 0),
@@ -660,6 +669,8 @@
         frameBatchIndex: Number(event.frame_batch_index || 0),
         numFrameBatches: Number(event.num_frame_batches || 0),
         isFinalFrameBatch: Boolean(event.is_final_frame_batch),
+        bridgeEncodedEpochMs: Number(event.bridge_encoded_epoch_ms || 0),
+        metadataReceivedAtMs: global.performance?.now?.() ?? Date.now(),
       };
       if (this.mediaBatches.some((item) => (
         item.firstFrameIndex === batch.firstFrameIndex
@@ -692,8 +703,55 @@
 
     _metadataForFrame(frame, fallbackIndex) {
       const timestampUs = Number(frame?.timestamp);
+      if (!this._canManagePlayback() && Number.isFinite(timestampUs)) {
+        const epochBatches = this.mediaBatches.filter(
+          (item) => item.bridgeEncodedEpochMs > 0,
+        );
+        if (epochBatches.length) {
+          if (this.mediaEpochOffsetMs === null) {
+            // MediaMTX preserves RTP timeline gaps while the bridge may shed
+            // stale source frames.  Therefore mediaTime cannot be converted
+            // to the bridge's contiguous frame counter after a long session.
+            // Anchor the RTP clock to a recent per-frame encoder timestamp
+            // instead; both clocks then advance monotonically across drops.
+            const marginFrames = Math.max(1, Math.round(this.mediaFps * 0.08));
+            const anchor = epochBatches[Math.max(0, epochBatches.length - 1 - marginFrames)];
+            this.mediaEpochOffsetMs = anchor.bridgeEncodedEpochMs - timestampUs / 1000;
+            this.firstFrameTimestampUs = timestampUs;
+            this.timestampFrameBase = anchor.firstFrameIndex;
+            this.onStats({
+              mediaEpochOffsetMs: this.mediaEpochOffsetMs,
+              timestampFrameBase: this.timestampFrameBase,
+            });
+          }
+          const targetEpochMs = timestampUs / 1000 + this.mediaEpochOffsetMs;
+          let batch = epochBatches[0];
+          for (const candidate of epochBatches) {
+            if (
+              Math.abs(candidate.bridgeEncodedEpochMs - targetEpochMs)
+              <= Math.abs(batch.bridgeEncodedEpochMs - targetEpochMs)
+            ) batch = candidate;
+          }
+          return this._metadataFromBatch(batch, batch.firstFrameIndex);
+        }
+      }
       if (this.firstFrameTimestampUs === null && Number.isFinite(timestampUs)) {
         this.firstFrameTimestampUs = timestampUs;
+        if (!this._canManagePlayback() && this.mediaBatches.length) {
+          // WHEP joins an already-running H.264 publisher. Browser mediaTime
+          // starts at the first received RTP frame, not bridge frame zero, so
+          // align it to the current metadata live edge. Keep a small margin
+          // because the TCP control side channel can lead RTP by a few frames.
+          const latestFrameIndex = Number(
+            this.mediaBatches.at(-1)?.lastFrameIndex || 0,
+          );
+          const transportMarginFrames = Math.max(1, Math.round(this.mediaFps * 0.08));
+          this.timestampFrameBase = Math.max(
+            Number(this.mediaBatches[0]?.firstFrameIndex || 0),
+            latestFrameIndex - transportMarginFrames,
+          );
+          this.onStats({ timestampFrameBase: this.timestampFrameBase });
+        }
       }
       const sourceFrameIndex = Number.isFinite(timestampUs) && this.firstFrameTimestampUs !== null
         ? this.timestampFrameBase + Math.max(0, Math.round(
@@ -710,6 +768,10 @@
         item.firstFrameIndex <= sourceFrameIndex
         && item.lastFrameIndex >= sourceFrameIndex
       ));
+      return this._metadataFromBatch(batch, sourceFrameIndex);
+    }
+
+    _metadataFromBatch(batch, sourceFrameIndex) {
       return {
         sourceFrameIndex,
         chunkIndex: batch?.chunkIndex ?? Math.floor(sourceFrameIndex / 16),
@@ -725,6 +787,8 @@
         isFinalFrameBatch: batch
           ? batch.isFinalFrameBatch && sourceFrameIndex >= batch.lastFrameIndex
           : true,
+        bridgeEncodedEpochMs: Number(batch?.bridgeEncodedEpochMs || 0),
+        metadataReceivedAtMs: Number(batch?.metadataReceivedAtMs || 0),
       };
     }
 
@@ -777,6 +841,65 @@
         this._setState("error", { message: error.message, protocol: "webrtc", codec: "h264" });
         this.onError(error);
       });
+    }
+
+    _startPresentedFrameMonitor(generation) {
+      this._stopPresentedFrameMonitor();
+      if (
+        !this.onPresentedFrame
+        || typeof this.video.requestVideoFrameCallback !== "function"
+      ) return;
+      const handleFrame = (now, presentation = {}) => {
+        if (generation !== this.generation || this.expectedClose) return;
+        const mediaTimeSeconds = Number(presentation.mediaTime);
+        const timestamp = Number.isFinite(mediaTimeSeconds)
+          ? mediaTimeSeconds * 1_000_000
+          : Number.NaN;
+        const sequence = this.processedFrames++;
+        const metadata = this._metadataForFrame({ timestamp }, sequence);
+        if (metadata.eventId > this.lastProcessedMediaEventId) {
+          this.lastProcessedMediaEventId = metadata.eventId;
+          this.onStats({ lastPresentedMediaEventId: metadata.eventId });
+        }
+        this.onPresentedFrame({
+          presentedAt: Number(now || 0),
+          mediaTime: Number.isFinite(mediaTimeSeconds) ? mediaTimeSeconds : null,
+          presentedFrames: Number(presentation.presentedFrames || 0),
+          width: Number(presentation.width || this.video.videoWidth || 0),
+          height: Number(presentation.height || this.video.videoHeight || 0),
+          sequence,
+          ...metadata,
+        });
+        if (metadata.bridgeEncodedEpochMs > 0) {
+          const sentEpochMs = this.controlSentEpochByEvent.get(metadata.eventId) || 0;
+          const presentedAtMs = global.performance?.now?.() ?? Date.now();
+          this.onStats({
+            lastPresentedTransportMs: Math.max(
+              0,
+              Date.now() - metadata.bridgeEncodedEpochMs,
+            ),
+            lastPresentedAfterMetadataMs: metadata.metadataReceivedAtMs > 0
+              ? Math.max(0, presentedAtMs - metadata.metadataReceivedAtMs)
+              : 0,
+            lastPresentedControlToVideoMs: sentEpochMs
+              ? Math.max(0, Date.now() - sentEpochMs)
+              : 0,
+            lastPresentedSourceFrameIndex: metadata.sourceFrameIndex,
+          });
+        }
+        this.presentedFrameCallback = this.video.requestVideoFrameCallback(handleFrame);
+      };
+      this.presentedFrameCallback = this.video.requestVideoFrameCallback(handleFrame);
+    }
+
+    _stopPresentedFrameMonitor() {
+      if (
+        this.presentedFrameCallback
+        && typeof this.video.cancelVideoFrameCallback === "function"
+      ) {
+        try { this.video.cancelVideoFrameCallback(this.presentedFrameCallback); } catch {}
+      }
+      this.presentedFrameCallback = 0;
     }
 
     _waitForPlayable(generation) {

@@ -41,6 +41,27 @@ ALLOWED_CONTROL_KINDS = {
 }
 
 
+def _raw_channel_filter(channel_order: str) -> str:
+    """Return the FFmpeg filter that normalizes packed source bytes to RGB."""
+    # The remote VAE raw transport used by the Zing lab currently emits packed
+    # GBR bytes even though the wire content type is application/x-raw-rgb.
+    # Keep the correction explicit and configurable so conventional RGB
+    # producers do not receive an unconditional channel swap.
+    if channel_order == "gbr":
+        return (
+            "colorchannelmixer="
+            "rr=0:rg=0:rb=1:"
+            "gr=1:gg=0:gb=0:"
+            "br=0:bg=1:bb=0,"
+        )
+    return ""
+
+
+def _playback_ack_enabled(init: dict[str, Any]) -> bool:
+    """Preserve ACK limiting for both Canvas and native video playback."""
+    return bool(init.get("playback_ack_enabled"))
+
+
 def _bounded_int(value: Any, *, default: int, minimum: int, maximum: int) -> int:
     try:
         parsed = int(value)
@@ -96,6 +117,17 @@ def _encoded_image_to_rgb(frame: bytes, *, width: int, height: int) -> bytes:
     return image.tobytes()
 
 
+@dataclass(frozen=True)
+class _QueuedFrame:
+    rgb: bytes
+    chunk_index: int
+    event_id: int
+    frame_batch_index: int
+    num_frame_batches: int
+    is_final_frame_batch: bool
+    bridge_received_epoch_ms: float
+
+
 @dataclass
 class WebRTCBridgeSession:
     manager: "WebRTCBridgeManager"
@@ -113,6 +145,7 @@ class WebRTCBridgeSession:
     ffmpeg: asyncio.subprocess.Process | None = None
     upstream: Any = None
     task: asyncio.Task | None = None
+    encoder_task: asyncio.Task | None = None
     stderr_task: asyncio.Task | None = None
     connected: asyncio.Event = field(default_factory=asyncio.Event)
     stopped: asyncio.Event = field(default_factory=asyncio.Event)
@@ -129,6 +162,14 @@ class WebRTCBridgeSession:
     dropped_source_bytes: int = 0
     last_media_event_id: int = 0
     last_media_event_epoch_ms: float = 0.0
+    queue_overflow_dropped_frames: int = 0
+    control_dropped_frames: int = 0
+    frame_queue: asyncio.Queue[_QueuedFrame] = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.frame_queue = asyncio.Queue(
+            maxsize=self.manager.bridge_max_queued_frames
+        )
 
     @property
     def media_path(self) -> str:
@@ -176,7 +217,13 @@ class WebRTCBridgeSession:
                 await upstream.send_bytes(msgspec.msgpack.encode(self.init))
                 self.state = "generating"
                 self.connected.set()
+                self.encoder_task = asyncio.create_task(
+                    self._encode_frames(),
+                    name=f"webrtc-encoder-{self.session_id}",
+                )
                 async for message in upstream:
+                    if self.encoder_task.done():
+                        await self.encoder_task
                     if message.type == WSMsgType.BINARY:
                         await self._receive_binary(bytes(message.data))
                     elif message.type == WSMsgType.TEXT:
@@ -187,7 +234,7 @@ class WebRTCBridgeSession:
                         WSMsgType.ERROR,
                     }:
                         break
-                if self.state not in {"closing", "closed"}:
+                if self.state not in {"closing", "closed", "error"}:
                     self.state = "closed"
         except asyncio.CancelledError:
             raise
@@ -199,6 +246,7 @@ class WebRTCBridgeSession:
             await self._broadcast({"type": "error", "message": self.error})
         finally:
             self.upstream = None
+            await self._stop_encoder()
             await self._stop_ffmpeg()
             self.stopped.set()
 
@@ -222,14 +270,10 @@ class WebRTCBridgeSession:
             )
             raise RuntimeError(str(detail))
         if message_type == "media_chunk_complete":
-            completion = {
-                "type": "media_chunk_complete",
-                "chunk_index": int(message.get("chunk_index") or 0),
-                "event_id": int(message.get("event_id") or 0),
-                "num_frames": int(message.get("num_frames") or 0),
-            }
-            self.media_batch_history.append(completion)
-            await self._broadcast(completion)
+            # Per-frame bridge metadata already carries is_final_frame_batch.
+            # Forwarding this completion immediately would race ahead of the
+            # independently paced encoder and could falsely mark an early
+            # frame as the end of the chunk in the browser.
             return
         if message_type not in {"frame_batch", "frame_batch_header"}:
             return
@@ -263,30 +307,16 @@ class WebRTCBridgeSession:
                 dropped_frames,
             )
             return
-        if self.ffmpeg is None:
-            await self._start_ffmpeg(width, height)
-
         frames = _split_payload(header, payload)
         bridge_received_epoch_ms = time.time() * 1000
         if event_id != self.last_media_event_id:
             self.last_media_event_id = event_id
             self.last_media_event_epoch_ms = bridge_received_epoch_ms
-        raw_num_frame_batches = int(header.get("num_frame_batches") or 0)
+        chunk_index = int(header.get("chunk_index") or 0)
+        frame_batch_index = int(header.get("frame_batch_index") or 0)
+        num_frame_batches = int(header.get("num_frame_batches") or 0)
         is_final_frame_batch = bool(header.get("is_final_frame_batch"))
-        media_batch = {
-            "type": "media_batch",
-            "chunk_index": int(header.get("chunk_index") or 0),
-            "event_id": int(header.get("event_id") or 0),
-            "first_frame_index": self.frames,
-            "num_frames": len(frames),
-            "frame_batch_index": int(header.get("frame_batch_index") or 0),
-            "num_frame_batches": raw_num_frame_batches,
-            "is_final_frame_batch": is_final_frame_batch,
-            "bridge_received_epoch_ms": bridge_received_epoch_ms,
-        }
-        self.media_batch_history.append(media_batch)
-        await self._broadcast(media_batch)
-        for frame in frames:
+        for frame_index, frame in enumerate(frames):
             if content_type == RAW_RGB_CONTENT_TYPE:
                 rgb = frame
             elif content_type in ENCODED_IMAGE_TYPES:
@@ -298,13 +328,90 @@ class WebRTCBridgeSession:
                 )
             else:
                 raise ValueError(f"unsupported realtime frame content type: {content_type}")
-            if self.ffmpeg is None or self.ffmpeg.stdin is None:
-                raise RuntimeError("H.264 encoder is unavailable")
-            await self._pace_frame()
-            self.ffmpeg.stdin.write(rgb)
-            await self.ffmpeg.stdin.drain()
-            self.frames += 1
-        self.state = "streaming"
+            queued = _QueuedFrame(
+                rgb=rgb,
+                chunk_index=chunk_index,
+                event_id=event_id,
+                frame_batch_index=frame_batch_index,
+                num_frame_batches=num_frame_batches,
+                is_final_frame_batch=(
+                    is_final_frame_batch and frame_index == len(frames) - 1
+                ),
+                bridge_received_epoch_ms=bridge_received_epoch_ms,
+            )
+            self._enqueue_frame(queued)
+
+    def _enqueue_frame(self, frame: _QueuedFrame) -> None:
+        if self.minimum_event_id and frame.event_id < self.minimum_event_id:
+            self.dropped_frames += 1
+            self.dropped_source_bytes += len(frame.rgb)
+            self.control_dropped_frames += 1
+            return
+        if self.frame_queue.full():
+            dropped = self.frame_queue.get_nowait()
+            self.frame_queue.task_done()
+            self.dropped_frames += 1
+            self.dropped_source_bytes += len(dropped.rgb)
+            self.queue_overflow_dropped_frames += 1
+        self.frame_queue.put_nowait(frame)
+
+    async def _encode_frames(self) -> None:
+        while True:
+            frame = await self.frame_queue.get()
+            try:
+                # Check after pacing as well as at enqueue time. A control event
+                # can arrive while this frame is waiting for its presentation
+                # deadline, and that stale frame must not enter the encoder.
+                await self._pace_frame()
+                if self.minimum_event_id and frame.event_id < self.minimum_event_id:
+                    self.dropped_frames += 1
+                    self.dropped_source_bytes += len(frame.rgb)
+                    self.control_dropped_frames += 1
+                    continue
+                if self.ffmpeg is None:
+                    await self._start_ffmpeg(self.width, self.height)
+                if self.ffmpeg is None or self.ffmpeg.stdin is None:
+                    raise RuntimeError("H.264 encoder is unavailable")
+                media_batch = {
+                    "type": "media_batch",
+                    "chunk_index": frame.chunk_index,
+                    "event_id": frame.event_id,
+                    "first_frame_index": self.frames,
+                    "num_frames": 1,
+                    "frame_batch_index": frame.frame_batch_index,
+                    "num_frame_batches": frame.num_frame_batches,
+                    "is_final_frame_batch": frame.is_final_frame_batch,
+                    "bridge_received_epoch_ms": frame.bridge_received_epoch_ms,
+                    "bridge_encoded_epoch_ms": time.time() * 1000,
+                }
+                self.media_batch_history.append(media_batch)
+                await self._broadcast(media_batch)
+                self.ffmpeg.stdin.write(frame.rgb)
+                await self.ffmpeg.stdin.drain()
+                self.frames += 1
+                self.state = "streaming"
+            finally:
+                self.frame_queue.task_done()
+
+    def _discard_queued_before(self, event_id: int) -> int:
+        retained: list[_QueuedFrame] = []
+        dropped = 0
+        while True:
+            try:
+                frame = self.frame_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            self.frame_queue.task_done()
+            if frame.event_id < event_id:
+                dropped += 1
+                self.dropped_frames += 1
+                self.dropped_source_bytes += len(frame.rgb)
+                self.control_dropped_frames += 1
+            else:
+                retained.append(frame)
+        for frame in retained:
+            self.frame_queue.put_nowait(frame)
+        return dropped
 
     async def _pace_frame(self) -> None:
         interval = 1 / max(1, self.media_fps)
@@ -320,7 +427,9 @@ class WebRTCBridgeSession:
         fps = _bounded_int(self.init.get("fps"), default=16, minimum=1, maximum=60)
         self.media_fps = fps
         self.next_frame_deadline = None
-        gop = max(8, fps)
+        # A short GOP bounds decoder recovery after the bridge sheds stale
+        # pre-control frames.  One second was visibly too long on WAN links.
+        gop = max(4, fps // 2)
         rtsp_url = f"{self.manager.media_rtsp_base.rstrip('/')}/{self.media_path}"
         command = [
             self.manager.ffmpeg_bin,
@@ -355,6 +464,12 @@ class WebRTCBridgeSession:
             self.manager.h264_profile,
             "-level:v",
             "3.1",
+            "-vf",
+            (
+                _raw_channel_filter(self.manager.raw_channel_order)
+                + "scale=in_range=pc:out_range=tv:"
+                "in_color_matrix=bt709:out_color_matrix=bt709"
+            ),
             "-pix_fmt",
             "yuv420p",
             "-colorspace",
@@ -419,6 +534,14 @@ class WebRTCBridgeSession:
         event_id = int(envelope.get("event_id") or 0)
         if envelope.get("kind") in {"camera_actions", "prompt", "scene_cut"}:
             self.minimum_event_id = max(self.minimum_event_id, event_id)
+            dropped = self._discard_queued_before(self.minimum_event_id)
+            if dropped:
+                LOGGER.info(
+                    "WebRTC bridge %s discarded %s queued frames before event=%s",
+                    self.session_id,
+                    dropped,
+                    self.minimum_event_id,
+                )
         await upstream.send_bytes(msgspec.msgpack.encode(envelope))
 
     async def _broadcast(self, payload: dict[str, Any]) -> None:
@@ -453,6 +576,15 @@ class WebRTCBridgeSession:
             await asyncio.gather(self.stderr_task, return_exceptions=True)
             self.stderr_task = None
 
+    async def _stop_encoder(self) -> None:
+        task = self.encoder_task
+        self.encoder_task = None
+        if task is None:
+            return
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
     async def stop(self, reason: str = "client stopped") -> None:
         if self.state in {"closing", "closed"} and self.stopped.is_set():
             return
@@ -463,6 +595,7 @@ class WebRTCBridgeSession:
         if self.task is not None and not self.task.done():
             self.task.cancel()
             await asyncio.gather(self.task, return_exceptions=True)
+        await self._stop_encoder()
         await self._stop_ffmpeg()
         self.state = "closed"
         self.stopped.set()
@@ -482,6 +615,7 @@ class WebRTCBridgeSession:
             "h264_profile": self.manager.h264_profile,
             "h264_crf": self.manager.h264_crf,
             "h264_vbv_buffer_ms": self.manager.h264_vbv_buffer_ms,
+            "raw_channel_order": self.manager.raw_channel_order,
             "frames": self.frames,
             "source_bytes": self.source_bytes,
             "average_source_mbps": round(self.source_bytes * 8 / elapsed / 1_000_000, 3),
@@ -489,6 +623,10 @@ class WebRTCBridgeSession:
             "dropped_batches": self.dropped_batches,
             "dropped_frames": self.dropped_frames,
             "dropped_source_bytes": self.dropped_source_bytes,
+            "queued_frames": self.frame_queue.qsize(),
+            "max_queued_frames": self.frame_queue.maxsize,
+            "queue_overflow_dropped_frames": self.queue_overflow_dropped_frames,
+            "control_dropped_frames": self.control_dropped_frames,
             "last_media_event_id": self.last_media_event_id,
             "last_media_event_epoch_ms": self.last_media_event_epoch_ms,
             "width": self.width,
@@ -543,11 +681,25 @@ class WebRTCBridgeManager:
             minimum=100,
             maximum=2000,
         )
+        requested_raw_channel_order = os.environ.get(
+            "WEBRTC_RAW_CHANNEL_ORDER", "rgb"
+        ).lower()
+        self.raw_channel_order = (
+            requested_raw_channel_order
+            if requested_raw_channel_order in {"rgb", "gbr"}
+            else "rgb"
+        )
         self.max_sessions = _bounded_int(
             os.environ.get("WEBRTC_BRIDGE_MAX_SESSIONS"),
             default=8,
             minimum=1,
             maximum=64,
+        )
+        self.bridge_max_queued_frames = _bounded_int(
+            os.environ.get("WEBRTC_BRIDGE_MAX_QUEUED_FRAMES"),
+            default=24,
+            minimum=4,
+            maximum=120,
         )
         self.ttl_s = _bounded_int(
             os.environ.get("WEBRTC_BRIDGE_SESSION_TTL_S"),
@@ -587,9 +739,10 @@ class WebRTCBridgeManager:
         init["realtime_output_format"] = "raw"
         init.pop("realtime_preview_max_width", None)
         init.pop("output_compression", None)
-        init["playback_ack_enabled"] = bool(
-            body.get("managed_playback") and init.get("playback_ack_enabled")
-        )
+        # ACK-aware output limiting is independent from client-side managed
+        # playback. Native <video> presentation callbacks provide truthful
+        # rendered-chunk ACKs without routing frames through the Canvas queue.
+        init["playback_ack_enabled"] = _playback_ack_enabled(init)
         init.setdefault("trace_id", f"webrtc-{uuid.uuid4()}")
         codec = str(body.get("codec") or "h264").lower()
         if codec != "h264":

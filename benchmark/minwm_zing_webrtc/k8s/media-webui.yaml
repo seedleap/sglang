@@ -21,8 +21,8 @@ data:
     webrtc: true
     webrtcAddress: :8889
     webrtcAllowOrigins: ['*']
-    webrtcLocalUDPAddress: ''
-    webrtcLocalTCPAddress: :8189
+    webrtcLocalUDPAddress: ":8189"
+    webrtcLocalTCPAddress: ":8190"
     webrtcIPsFromInterfaces: false
     webrtcAdditionalHosts: [REPLACE_WITH_MEDIA_PUBLIC_HOST]
     paths:
@@ -59,7 +59,8 @@ spec:
           ports:
             - {name: rtsp, containerPort: 8554, protocol: TCP}
             - {name: whep, containerPort: 8889, protocol: TCP}
-            - {name: ice-tcp, containerPort: 8189, protocol: TCP}
+            - {name: ice-udp, containerPort: 8189, protocol: UDP}
+            - {name: ice-tcp, containerPort: 8190, protocol: TCP}
             - {name: api, containerPort: 9997, protocol: TCP}
             - {name: metrics, containerPort: 9998, protocol: TCP}
           readinessProbe:
@@ -102,7 +103,7 @@ metadata:
     service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing
     service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: ip
     service.beta.kubernetes.io/aws-load-balancer-healthcheck-protocol: TCP
-    service.beta.kubernetes.io/aws-load-balancer-healthcheck-port: traffic-port
+    service.beta.kubernetes.io/aws-load-balancer-healthcheck-port: "8889"
 spec:
   type: LoadBalancer
   externalTrafficPolicy: Cluster
@@ -110,7 +111,8 @@ spec:
     app.kubernetes.io/name: zing-webrtc-mediamtx
   ports:
     - {name: whep, port: 80, targetPort: whep, protocol: TCP}
-    - {name: ice-tcp, port: 8189, targetPort: ice-tcp, protocol: TCP}
+    - {name: ice-udp, port: 8189, targetPort: ice-udp, protocol: UDP}
+    - {name: ice-tcp, port: 8190, targetPort: ice-tcp, protocol: TCP}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -149,13 +151,15 @@ spec:
             - {name: WEBRTC_MEDIA_RTSP_BASE, value: rtsp://zing-webrtc-mediamtx:8554}
             - {name: WEBRTC_MEDIA_HTTP_BASE, value: http://REPLACE_WITH_MEDIA_PUBLIC_HOST}
             - {name: WEBRTC_BRIDGE_MAX_SESSIONS, value: "8"}
+            - {name: WEBRTC_BRIDGE_MAX_QUEUED_FRAMES, value: "24"}
             - {name: WEBRTC_BRIDGE_SESSION_TTL_S, value: "600"}
             - {name: WEBRTC_H264_PRESET, value: faster}
             - {name: WEBRTC_H264_PROFILE, value: main}
-            - {name: WEBRTC_H264_CRF, value: "20"}
-            - {name: WEBRTC_H264_VBV_BUFFER_MS, value: "250"}
+            - {name: WEBRTC_H264_CRF, value: "18"}
+            - {name: WEBRTC_H264_VBV_BUFFER_MS, value: "125"}
+            - {name: WEBRTC_RAW_CHANNEL_ORDER, value: gbr}
             - name: REALTIME_UI_CONFIG_JSON
-              value: '{"generationModes":["i2v","t2v"],"defaultGenerationMode":"i2v","availableModels":["minwm"],"modelSlotCount":1,"singleExperience":true,"sessionMaxLifetimeSeconds":600,"primaryTransport":"webrtc-h264","webrtcManagedPlayback":true,"playbackAckEnabled":true,"webrtcBitrateKbps":2200,"webrtcPlayoutDelayMs":250,"targetFps":24,"sinkSize":9,"windowFrames":18,"dualModels":{"minwm":{"label":"Zing"}}}'
+              value: '{"generationModes":["i2v","t2v"],"defaultGenerationMode":"i2v","availableModels":["minwm"],"modelSlotCount":1,"singleExperience":true,"sessionMaxLifetimeSeconds":600,"primaryTransport":"webrtc-h264","webrtcManagedPlayback":false,"playbackAckEnabled":true,"webrtcBitrateKbps":3200,"webrtcPlayoutDelayMs":0,"controlTransitionFlushDelayMs":0,"targetFps":24,"sinkSize":9,"windowFrames":18,"dualModels":{"minwm":{"label":"Zing"}}}'
           ports:
             - {name: http, containerPort: 18080}
           startupProbe:

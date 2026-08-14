@@ -8,6 +8,8 @@ import msgspec.msgpack
 from sglang.multimodal_gen.apps.realtime_webui.webrtc_bridge import (
     RAW_RGB_CONTENT_TYPE,
     WebRTCBridgeSession,
+    _playback_ack_enabled,
+    _raw_channel_filter,
 )
 
 
@@ -22,7 +24,11 @@ class _FakeUpstream:
 
 
 def _session() -> WebRTCBridgeSession:
-    manager = SimpleNamespace(media_http_base="http://media", h264_preset="superfast")
+    manager = SimpleNamespace(
+        media_http_base="http://media",
+        h264_preset="superfast",
+        bridge_max_queued_frames=4,
+    )
     return WebRTCBridgeSession(
         manager=manager,
         session_id="test",
@@ -69,3 +75,87 @@ def test_bridge_control_event_cuts_over_stale_media_before_encoding():
         assert session.dropped_source_bytes == 12
 
     asyncio.run(run())
+
+
+def test_raw_channel_filter_normalizes_lab_gbr_transport():
+    assert _raw_channel_filter("rgb") == ""
+    assert _raw_channel_filter("invalid") == ""
+    assert _raw_channel_filter("gbr") == (
+        "colorchannelmixer="
+        "rr=0:rg=0:rb=1:"
+        "gr=1:gg=0:gb=0:"
+        "br=0:bg=1:bb=0,"
+    )
+
+
+def test_bridge_control_event_discards_already_queued_stale_frames():
+    async def run():
+        session = _session()
+        upstream = _FakeUpstream()
+        session.upstream = upstream
+        await session._handle_frame_payload(
+            {
+                "type": "frame_batch",
+                "chunk_index": 12,
+                "event_id": 6,
+                "content_type": RAW_RGB_CONTENT_TYPE,
+                "width": 2,
+                "height": 2,
+                "channels": 3,
+                "num_frames": 2,
+            },
+            b"x" * 24,
+        )
+        assert session.frame_queue.qsize() == 2
+
+        await session.send_control(
+            {
+                "type": "event",
+                "kind": "camera_actions",
+                "event_id": 7,
+                "payload": {"mode": "state", "transitions": []},
+            }
+        )
+
+        assert session.frame_queue.empty()
+        assert session.control_dropped_frames == 2
+        assert session.dropped_frames == 2
+
+    asyncio.run(run())
+
+
+def test_bridge_queue_is_bounded_and_keeps_newest_frames():
+    async def run():
+        session = _session()
+        for event_id in range(1, 6):
+            await session._handle_frame_payload(
+                {
+                    "type": "frame_batch",
+                    "chunk_index": event_id,
+                    "event_id": event_id,
+                    "content_type": RAW_RGB_CONTENT_TYPE,
+                    "width": 1,
+                    "height": 1,
+                    "channels": 3,
+                    "num_frames": 1,
+                },
+                bytes([event_id]) * 3,
+            )
+
+        assert session.frame_queue.qsize() == 4
+        assert session.queue_overflow_dropped_frames == 1
+        assert session.dropped_frames == 1
+        queued_event_ids = []
+        while not session.frame_queue.empty():
+            frame = session.frame_queue.get_nowait()
+            session.frame_queue.task_done()
+            queued_event_ids.append(frame.event_id)
+        assert queued_event_ids == [2, 3, 4, 5]
+
+    asyncio.run(run())
+
+
+def test_native_webrtc_session_preserves_playback_ack_opt_in():
+    assert _playback_ack_enabled({"playback_ack_enabled": True}) is True
+    assert _playback_ack_enabled({"playback_ack_enabled": False}) is False
+    assert _playback_ack_enabled({}) is False
