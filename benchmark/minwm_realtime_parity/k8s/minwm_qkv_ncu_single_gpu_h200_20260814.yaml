@@ -16,7 +16,7 @@ spec:
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: minwm-qkv-ncu-single-gpu-h200-20260814-03
+  name: minwm-qkv-ncu-single-gpu-h200-20260814-04
   namespace: default
   labels:
     seedleap.ai/owner: chenshengdong
@@ -24,8 +24,8 @@ metadata:
     seedleap.ai/task: minwm-fusedops-s4
   annotations:
     seedleap.ai/capacity-type: spot
-    seedleap.ai/resource-isolation: full 8-GPU H200 node; GPU0/GPU1 independent single-GPU A/B pairs
-    seedleap.ai/sglang-git-ref: "b39b23c65314a3cf5f4c93370e79801154eaf79b"
+    seedleap.ai/resource-isolation: reuse existing Spot node; request 4/8 H200; four independent single-GPU lanes; no distributed SP
+    seedleap.ai/sglang-git-ref: "de30b59fb3d22d5a329041ce4f5afbbd8b9043da"
 spec:
   backoffLimit: 0
   activeDeadlineSeconds: 3600
@@ -38,11 +38,9 @@ spec:
           operator: Equal
           value: minwm-test-phx2-karpenter
           effect: NoSchedule
-      nodeSelector:
-        karpenter.sh/capacity-type: spot
-        karpenter.sh/nodepool: minwm-test-phx2-p5e-spot
-        node.kubernetes.io/instance-type: p5e.48xlarge
-        topology.kubernetes.io/zone: us-west-2-phx-2a
+      # Reuse the node already provisioned by the failed preflight instead of
+      # asking Karpenter for another p5e.48xlarge.
+      nodeName: i-0a29920a9951065c6
       containers:
         - name: ncu
           image: 829115578968.dkr.ecr.us-east-2.amazonaws.com/leap-world/minwm-training@sha256:bedc07ea3ba55059a8c1c569c3b177c4d00d41f37d4fa9105375531534ef5f2a
@@ -61,7 +59,7 @@ spec:
             - -lc
             - |
               set -euo pipefail
-              run_dir="/results/attempts/${HOSTNAME}/minwm-qkv-ncu-single-gpu-h200-20260814-03"
+              run_dir="/results/attempts/${HOSTNAME}/minwm-qkv-ncu-single-gpu-h200-20260814-04"
               mkdir -p "$run_dir"
               record_exit() {
                 local status=$?
@@ -71,37 +69,58 @@ spec:
               trap record_exit EXIT
               find /results/attempts -maxdepth 5 -type f -printf '%p\t%s bytes\n' | sort | tee "$run_dir/prior-pvc-files.txt"
               git clone --no-checkout "https://x-access-token:${GITHUB_TOKEN}@github.com/seedleap/sglang.git" /workspace/sglang
-              git -C /workspace/sglang checkout --detach b39b23c65314a3cf5f4c93370e79801154eaf79b
+              git -C /workspace/sglang checkout --detach de30b59fb3d22d5a329041ce4f5afbbd8b9043da
               cd /workspace/sglang
-              test "$(git rev-parse HEAD)" = b39b23c65314a3cf5f4c93370e79801154eaf79b
+              test "$(git rev-parse HEAD)" = de30b59fb3d22d5a329041ce4f5afbbd8b9043da
               export PYTHONPATH="$PWD/python"
-              ncu --version | tee "$run_dir/ncu-version.txt"
+              ncu_bin="$(command -v ncu || true)"
+              if [[ -z "$ncu_bin" ]]; then
+                ncu_bin="$(find /opt /usr/local -type f -name ncu -perm -111 2>/dev/null | head -n 1 || true)"
+              fi
+              if [[ -z "$ncu_bin" ]]; then
+                echo "ncu unavailable in image" >&2
+                exit 30
+              fi
+              "$ncu_bin" --version | tee "$run_dir/ncu-version.txt"
               nvidia-smi -q -d CLOCK,POWER,TEMPERATURE > "$run_dir/gpu-before.txt"
               profile_pair() {
-                local gpu="$1" first="$2" second="$3"
+                local gpu="$1" m="$2" order="$3" first="$4" second="$5"
                 for mode in "$first" "$second"; do
-                  CUDA_VISIBLE_DEVICES="$gpu" ncu --set full --target-processes all --force-overwrite \
-                    --nvtx --nvtx-include "minwm_qkv_${mode}/" \
-                    -o "$run_dir/gpu${gpu}-${mode}" \
-                    python benchmark/minwm_realtime_parity/profile_minwm_qkv_ncu.py --mode "$mode" --iterations 1 \
-                    > "$run_dir/gpu${gpu}-${mode}.stdout" 2> "$run_dir/gpu${gpu}-${mode}.stderr"
-                  ncu --import "$run_dir/gpu${gpu}-${mode}.ncu-rep" --csv --page details \
-                    > "$run_dir/gpu${gpu}-${mode}.csv"
+                  lane="m${m}-gpu${gpu}-${mode}"
+                  CUDA_VISIBLE_DEVICES="$gpu" "$ncu_bin" \
+                    --target-processes all \
+                    --profile-from-start off \
+                    --replay-mode kernel \
+                    --set full \
+                    --force-overwrite \
+                    --export "$run_dir/${lane}" \
+                    python benchmark/minwm_realtime_parity/profile_minwm_qkv_ncu.py \
+                      --mode "$mode" --m "$m" --order "$order" --profile \
+                      --output "$run_dir/${lane}-timing.json" \
+                    > "$run_dir/${lane}.stdout" 2> "$run_dir/${lane}.stderr"
+                  "$ncu_bin" --import "$run_dir/${lane}.ncu-rep" --page raw --csv \
+                    > "$run_dir/${lane}-raw.csv"
                 done
               }
-              profile_pair 0 baseline fused &
-              profile_pair 1 fused baseline &
-              wait
+              profile_pair 0 429 baseline-first baseline fused & p0=$!
+              profile_pair 1 429 fused-first fused baseline & p1=$!
+              profile_pair 2 215 baseline-first baseline fused & p2=$!
+              profile_pair 3 215 fused-first fused baseline & p3=$!
+              status=0
+              for pid in "$p0" "$p1" "$p2" "$p3"; do
+                wait "$pid" || status=1
+              done
               sha256sum "$run_dir"/* > "$run_dir/SHA256SUMS"
+              exit "$status"
           resources:
             requests:
               cpu: "32"
               memory: 128Gi
-              nvidia.com/gpu: "8"
+              nvidia.com/gpu: "4"
             limits:
               cpu: "64"
               memory: 256Gi
-              nvidia.com/gpu: "8"
+              nvidia.com/gpu: "4"
           volumeMounts:
             - name: results
               mountPath: /results
