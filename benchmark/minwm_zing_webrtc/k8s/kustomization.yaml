@@ -2,6 +2,7 @@ apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
   - namespace-nodepools.yaml
+  - l4-device-plugin.yaml
   - control-plane.yaml
   - gpu-workers.yaml
   - media-webui.yaml

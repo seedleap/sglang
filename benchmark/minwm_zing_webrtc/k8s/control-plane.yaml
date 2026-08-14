@@ -37,14 +37,15 @@ spec:
           image: REPLACE_WITH_CPU_IMAGE
           command: [/bin/sh, -ec]
           args:
-            - >-
-              exec python -m sglang.multimodal_gen.runtime.entrypoints.realtime_coordinator_server
-              --host=0.0.0.0
-              --port=18081
-              --backend=memory
-              --ttl-s=30
-              --worker-ttl-s=15
-              --wait-timeout-s=15
+            - |
+              export PYTHONPATH="/opt/sglang/python${PYTHONPATH:+:${PYTHONPATH}}"
+              exec python -m sglang.multimodal_gen.runtime.entrypoints.realtime_coordinator_server \
+              --host=0.0.0.0 \
+              --port=18081 \
+              --backend=memory \
+              --ttl-s=30 \
+              --worker-ttl-s=15 \
+              --wait-timeout-s=15 \
               --candidate-limit=16
           ports:
             - {name: http, containerPort: 18081}
@@ -101,19 +102,20 @@ spec:
           image: REPLACE_WITH_CPU_IMAGE
           command: [/bin/sh, -ec]
           args:
-            - >-
-              exec python -m sglang.multimodal_gen.runtime.entrypoints.realtime_gateway_server
-              --host=0.0.0.0
-              --port=18080
-              --coordinator-url=http://zing-webrtc-coordinator:18081
-              --model-revision=${MODEL_REVISION}
-              --vae-fingerprint=${VAE_FINGERPRINT}
-              --internal-output-url=ws://${POD_IP}:18080/v1/internal/realtime_output
-              --output-queue-depth=128
-              --output-enqueue-timeout-s=0
-              --output-drain-timeout-s=120
-              --lease-renew-interval-s=10
-              --release-grace-s=0.5
+            - |
+              export PYTHONPATH="/opt/sglang/python${PYTHONPATH:+:${PYTHONPATH}}"
+              exec python -m sglang.multimodal_gen.runtime.entrypoints.realtime_gateway_server \
+              --host=0.0.0.0 \
+              --port=18080 \
+              --coordinator-url=http://zing-webrtc-coordinator:18081 \
+              --model-revision=${MODEL_REVISION} \
+              --vae-fingerprint=${VAE_FINGERPRINT} \
+              --internal-output-url=ws://${POD_IP}:18080/v1/internal/realtime_output \
+              --output-queue-depth=128 \
+              --output-enqueue-timeout-s=0 \
+              --output-drain-timeout-s=120 \
+              --lease-renew-interval-s=10 \
+              --release-grace-s=0.5 \
               --max-admission-waiters=64
           env:
             - name: POD_IP
@@ -121,7 +123,7 @@ spec:
             - {name: MODEL_REVISION, value: zing-gs3200-20260810}
             - {name: VAE_FINGERPRINT, value: taew2_2-d053e216}
             - name: REALTIME_UI_CONFIG_JSON
-              value: '{"generationModes":["i2v","t2v"],"defaultGenerationMode":"i2v","modelSlotCount":1,"singleExperience":true,"sessionMaxLifetimeSeconds":600,"dualModels":{"minwm":{"label":"Zing","targetFps":16,"sinkSize":8}}}'
+              value: '{"generationModes":["i2v","t2v"],"defaultGenerationMode":"i2v","availableModels":["minwm"],"modelSlotCount":1,"singleExperience":true,"sessionMaxLifetimeSeconds":600,"dualModels":{"minwm":{"label":"Zing","targetFps":16,"sinkSize":8}}}'
           ports:
             - {name: http, containerPort: 18080}
           startupProbe:

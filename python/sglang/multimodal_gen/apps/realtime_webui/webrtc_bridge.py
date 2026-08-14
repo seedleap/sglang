@@ -21,6 +21,7 @@ import uuid
 from dataclasses import dataclass, field
 from io import BytesIO
 from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import msgspec
 from aiohttp import WSMsgType, web
@@ -133,6 +134,14 @@ class WebRTCBridgeSession:
     def whep_url(self) -> str:
         return f"{self.manager.media_http_base.rstrip('/')}/{self.media_path}/whep"
 
+    @property
+    def upstream_url(self) -> str:
+        parsed = urlsplit(self.manager.upstream_ws)
+        query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+        query["user_id"] = f"webrtc-{self.session_id}"
+        query["trace_id"] = str(self.init.get("trace_id") or self.session_id)
+        return urlunsplit(parsed._replace(query=urlencode(query)))
+
     async def start(self) -> None:
         self.task = asyncio.create_task(self._run(), name=f"webrtc-bridge-{self.session_id}")
         try:
@@ -147,7 +156,7 @@ class WebRTCBridgeSession:
         try:
             client = self.manager.app[self.manager.upstream_session_key]
             async with client.ws_connect(
-                self.manager.upstream_ws,
+                self.upstream_url,
                 max_msg_size=0,
                 heartbeat=20,
             ) as upstream:

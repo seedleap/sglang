@@ -105,7 +105,7 @@ assert.match(html, /model_session\.js\?v=dual-model-v10/);
 assert.match(html, /dual_model_controller\.js\?v=dual-model-v6/);
 assert.match(html, /prompt_rewrite_controller\.js\?v=prompt-rewrite-v2/);
 assert.match(html, /styles\.css\?v=world-studio-v7/);
-assert.match(html, /app\.js\?v=world-studio-v27/);
+assert.match(html, /app\.js\?v=world-studio-v28/);
 assert.doesNotMatch(
   app,
   /window\.location\.hostname === "localhost"/,

@@ -1,0 +1,50 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: zing-webrtc-l4-nvidia-device-plugin
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/name: zing-webrtc-l4-nvidia-device-plugin
+    app.kubernetes.io/part-of: minwm-zing-webrtc-lab
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: zing-webrtc-l4-nvidia-device-plugin
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: zing-webrtc-l4-nvidia-device-plugin
+        app.kubernetes.io/part-of: minwm-zing-webrtc-lab
+    spec:
+      priorityClassName: system-node-critical
+      nodeSelector:
+        karpenter.sh/nodepool: zing-webrtc-l4-isolated
+      tolerations:
+        - {key: nvidia.com/gpu, operator: Exists, effect: NoSchedule}
+        - {key: seedleap.ai/zing-webrtc-l4, operator: Equal, value: isolated, effect: NoSchedule}
+      containers:
+        - name: nvidia-device-plugin
+          image: nvcr.io/nvidia/k8s-device-plugin@sha256:5f19f1a3907a36401318219b1173c4e0e92ab3ef928219c40773bd5f898dc81f
+          imagePullPolicy: IfNotPresent
+          command: [nvidia-device-plugin]
+          env:
+            - {name: MPS_ROOT, value: /run/nvidia/mps}
+            - {name: NVIDIA_VISIBLE_DEVICES, value: all}
+            - {name: NVIDIA_DRIVER_CAPABILITIES, value: "compute,utility"}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: kubelet-device-plugins-dir, mountPath: /var/lib/kubelet/device-plugins}
+            - {name: mps-shm, mountPath: /dev/shm}
+            - {name: mps-root, mountPath: /mps}
+            - {name: cdi-root, mountPath: /var/run/cdi}
+      volumes:
+        - name: kubelet-device-plugins-dir
+          hostPath: {path: /var/lib/kubelet/device-plugins, type: Directory}
+        - name: mps-root
+          hostPath: {path: /run/nvidia/mps, type: DirectoryOrCreate}
+        - name: mps-shm
+          hostPath: {path: /run/nvidia/mps/shm}
+        - name: cdi-root
+          hostPath: {path: /var/run/cdi, type: DirectoryOrCreate}

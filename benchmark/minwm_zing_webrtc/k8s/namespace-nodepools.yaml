@@ -51,7 +51,7 @@ spec:
 apiVersion: karpenter.sh/v1
 kind: NodePool
 metadata:
-  name: zing-webrtc-l4
+  name: zing-webrtc-l4-isolated
   labels:
     app.kubernetes.io/part-of: minwm-zing-webrtc-lab
 spec:
@@ -88,6 +88,9 @@ spec:
       taints:
         - key: nvidia.com/gpu
           value: "true"
+          effect: NoSchedule
+        - key: seedleap.ai/zing-webrtc-l4
+          value: isolated
           effect: NoSchedule
 ---
 apiVersion: karpenter.sh/v1

@@ -90,7 +90,7 @@ async function createOne(index, preset, firstFrame) {
   control.onmessage = (message) => {
     try {
       const event = JSON.parse(message.data);
-      if (event.type === "error") $("status-${index}").textContent = event.message;
+      if (event.type === "error") $(`status-${index}`).textContent = event.message;
     } catch {}
   };
   sessions.set(info.id, { ...info, index, control, iframeMounted: false });
@@ -110,8 +110,8 @@ async function start() {
   results.forEach((result, index) => {
     if (result.status === "rejected") {
       failures += 1;
-      const status = $("status-${index}");
-      const metrics = $("metrics-${index}");
+      const status = $(`status-${index}`);
+      const metrics = $(`metrics-${index}`);
       if (status) { status.textContent = "失败"; status.className = "error"; }
       if (metrics) metrics.textContent = result.reason?.message || String(result.reason);
     }
@@ -127,10 +127,12 @@ async function poll() {
       const response = await fetch(`./api/webrtc/sessions/${id}`, { cache: "no-store" });
       if (!response.ok) throw new Error(`status ${response.status}`);
       const status = await response.json();
-      $("status-${session.index}").textContent = status.state;
-      $("metrics-${session.index}").textContent = `${status.width || "-"}x${status.height || "-"} · ${status.codec.toUpperCase()} ${status.bitrate_kbps}kbps · frames=${status.frames} · source=${status.average_source_mbps}Mbps`;
+      $(`status-${session.index}`).textContent = status.state;
+      $(`metrics-${session.index}`).textContent = status.error
+        ? status.error
+        : `${status.width || "-"}x${status.height || "-"} · ${status.codec.toUpperCase()} ${status.bitrate_kbps}kbps · frames=${status.frames} · source=${status.average_source_mbps}Mbps`;
       if (status.frames > 0 && !session.iframeMounted) {
-        const media = $("media-${session.index}");
+        const media = $(`media-${session.index}`);
         const iframe = document.createElement("iframe");
         iframe.allow = "autoplay; fullscreen";
         iframe.src = status.stream_page_url;
@@ -138,8 +140,8 @@ async function poll() {
         session.iframeMounted = true;
       }
     } catch (error) {
-      $("status-${session.index}").textContent = "状态丢失";
-      $("metrics-${session.index}").textContent = error.message;
+      $(`status-${session.index}`).textContent = "状态丢失";
+      $(`metrics-${session.index}`).textContent = error.message;
     }
   }));
 }

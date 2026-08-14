@@ -150,7 +150,7 @@ spec:
             - {name: WEBRTC_BRIDGE_MAX_SESSIONS, value: "8"}
             - {name: WEBRTC_BRIDGE_SESSION_TTL_S, value: "600"}
             - name: REALTIME_UI_CONFIG_JSON
-              value: '{"generationModes":["i2v","t2v"],"defaultGenerationMode":"i2v","modelSlotCount":1,"singleExperience":true,"sessionMaxLifetimeSeconds":600,"dualModels":{"minwm":{"label":"Zing","targetFps":16,"sinkSize":8}}}'
+              value: '{"generationModes":["i2v","t2v"],"defaultGenerationMode":"i2v","availableModels":["minwm"],"modelSlotCount":1,"singleExperience":true,"sessionMaxLifetimeSeconds":600,"dualModels":{"minwm":{"label":"Zing","targetFps":16,"sinkSize":8}}}'
           ports:
             - {name: http, containerPort: 18080}
           startupProbe:

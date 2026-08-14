@@ -20,6 +20,21 @@ compatible stateless T2V requests. Realtime I2V sessions retain independent
 causal KV state and are measured as concurrent sessions; they are intentionally
 not fused into a single tensor batch by the scheduler.
 
+## Validated profile (2026-08-14)
+
+The isolated stack sustained 1, 2, 4, 6, and 8 simultaneous H.264/WHEP
+sessions. Eight sessions remained healthy for more than 45 seconds. Aggregate
+generation throughput plateaued around 37--38 source frames per second: about
+20 FPS per user at one session, 15.7 FPS at two, 9.3--9.6 FPS at four,
+6.3--6.6 FPS at six, and 4.6--4.8 FPS at eight.
+
+Scheduler telemetry showed `avg_size=1.00`, `merged_rate=0.0%`, and
+`stop_reason=head:realtime_session` under the eight-session load. Therefore the
+current realtime result measures concurrent session admission and time-slicing
+on the two-H100 SP=2 worker, not tensor-fused realtime dynamic batching. The
+configured admission ceiling is eight; raising it without changing the worker
+topology will reduce per-session FPS further.
+
 Build and deploy:
 
 ```bash
