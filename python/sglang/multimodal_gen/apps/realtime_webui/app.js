@@ -139,6 +139,7 @@ const RECORDING_STAGE_TOPBAR_HEIGHT = 48;
 const RECORDING_STAGE_PREVIEW_HEIGHT = RECORDING_STAGE_HEIGHT - RECORDING_STAGE_TOPBAR_HEIGHT;
 const RECORDING_STAGE_PADDING = 18;
 const RECORDING_PROMPT_STATUS_HOLD_MS = 1600;
+const RECORDING_READY_TOAST_MS = 5000;
 
 function applyRuntimeUiConfig() {
   for (const key of ["minwm", "lingbot2"]) {
@@ -479,6 +480,8 @@ let recordingMode = "";
 let recordingDirectoryHandle = null;
 let recordingBaseFileName = "";
 let recordingDownloads = [];
+let recordingReadyToastTimer = 0;
+let recordingReadyToastHideTimer = 0;
 let recordingPromptDraft = "";
 let recordingPromptSubmitted = "";
 let recordingPromptStatus = "idle";
@@ -823,6 +826,7 @@ function isSessionLifetimeReason(reason) {
 function resetSessionLifetimeUi() {
   sessionLifetimeGuard.cancel();
   stopSessionCountdown();
+  hideRecordingReadyToast({ immediate: true });
   sessionLifetimeExpired = false;
   worldExperiencePending = false;
   worldExperienceReady = false;
@@ -894,6 +898,36 @@ function stopSessionCountdown() {
 function showSessionNotice(message) {
   $("sessionNotice").textContent = message;
   $("sessionNotice").hidden = false;
+}
+
+function hideRecordingReadyToast({ immediate = false } = {}) {
+  if (recordingReadyToastTimer) window.clearTimeout(recordingReadyToastTimer);
+  if (recordingReadyToastHideTimer) window.clearTimeout(recordingReadyToastHideTimer);
+  recordingReadyToastTimer = 0;
+  recordingReadyToastHideTimer = 0;
+  const toast = $("recordingReadyToast");
+  if (!toast) return;
+  toast.classList.remove("is-visible");
+  if (immediate) {
+    toast.hidden = true;
+    return;
+  }
+  recordingReadyToastHideTimer = window.setTimeout(() => {
+    if (!toast.classList.contains("is-visible")) toast.hidden = true;
+    recordingReadyToastHideTimer = 0;
+  }, 180);
+}
+
+function showRecordingReadyToast() {
+  const toast = $("recordingReadyToast");
+  if (!toast) return;
+  hideRecordingReadyToast({ immediate: true });
+  toast.hidden = false;
+  window.requestAnimationFrame(() => toast.classList.add("is-visible"));
+  recordingReadyToastTimer = window.setTimeout(
+    () => hideRecordingReadyToast(),
+    RECORDING_READY_TOAST_MS,
+  );
 }
 
 function isExperienceBusyError(error) {
@@ -2336,6 +2370,7 @@ async function stopRecording({ reason = "manual" } = {}) {
     addHistory(`both gameplay recordings ready · ${recordingFrameIndex} synchronized frames · ${extension}`);
     if (["session_timeout", "session_closed", "primary_disconnected"].includes(reason)) {
       showSessionNotice("两份游玩录像已生成，可点击右上角同步下载");
+      showRecordingReadyToast();
     }
   } catch (error) {
     if (error?.name === "AbortError") {

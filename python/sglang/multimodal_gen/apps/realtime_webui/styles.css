@@ -1365,6 +1365,54 @@ body.world-studio {
   opacity: 0.5;
 }
 
+.world-studio .recording-ready-toast {
+  position: fixed;
+  top: 66px;
+  right: 22px;
+  z-index: 80;
+  display: flex;
+  width: min(340px, calc(100vw - 32px));
+  align-items: center;
+  gap: 11px;
+  border: 1px solid rgba(121, 223, 189, 0.42);
+  border-radius: 13px;
+  padding: 12px 14px;
+  background: rgba(18, 31, 27, 0.96);
+  color: var(--ws-text);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.38);
+  opacity: 0;
+  transform: translateY(-10px);
+  transition: opacity 160ms ease, transform 160ms ease;
+  pointer-events: none;
+}
+.world-studio .recording-ready-toast[hidden] { display: none; }
+.world-studio .recording-ready-toast.is-visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+.world-studio .recording-ready-toast-icon {
+  display: grid;
+  flex: 0 0 28px;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  border-radius: 50%;
+  background: rgba(121, 223, 189, 0.16);
+  color: var(--ws-accent);
+  font-size: 15px;
+  font-weight: 800;
+}
+.world-studio .recording-ready-toast > span:last-child {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+.world-studio .recording-ready-toast strong { font-size: 12px; }
+.world-studio .recording-ready-toast small {
+  color: var(--ws-muted);
+  font-size: 11px;
+}
+
 @keyframes gameplayRecordingPulse {
   0%, 100% { opacity: 0.55; }
   50% { opacity: 1; }

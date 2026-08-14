@@ -100,6 +100,16 @@ assert.match(
   "recording must be gated by the first visible world frame",
 );
 assert.match(
+  appJs,
+  /const RECORDING_READY_TOAST_MS = 5000;/,
+  "the recording-ready toast should stay visible for five seconds",
+);
+assert.match(
+  appJs,
+  /\["session_timeout", "session_closed", "primary_disconnected"\][\s\S]{0,220}?showRecordingReadyToast\(\)/,
+  "world-ending recording paths should show the download reminder toast",
+);
+assert.match(
   replayHtmlBuilder,
   /class="replay-stage"/,
   "exported replay index should render a stage-style video area",

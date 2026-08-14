@@ -104,8 +104,8 @@ assert.match(html, /playback_controller\.js\?v=realtime-playback-v33/);
 assert.match(html, /model_session\.js\?v=dual-model-v8/);
 assert.match(html, /dual_model_controller\.js\?v=dual-model-v4/);
 assert.match(html, /prompt_rewrite_controller\.js\?v=prompt-rewrite-v2/);
-assert.match(html, /styles\.css\?v=world-studio-v6/);
-assert.match(html, /app\.js\?v=world-studio-v23/);
+assert.match(html, /styles\.css\?v=world-studio-v7/);
+assert.match(html, /app\.js\?v=world-studio-v24/);
 assert.doesNotMatch(
   app,
   /window\.location\.hostname === "localhost"/,
@@ -157,6 +157,7 @@ assert.match(html, /id="voicePromptBtn"/, "runtime prompt composer should expose
 assert.match(html, /id="recordBtn"[^>]*class="gameplay-record-button"/, "gameplay recording must be visible");
 assert.match(html, /id="recordDownloadBtn"[^>]*class="gameplay-download-button"/, "finished gameplay must be downloadable");
 assert.match(html, /下载两份录像/, "one action should download comparison and Zing-only videos");
+assert.match(html, /id="recordingReadyToast"[^>]*role="status"[^>]*hidden/, "finished worlds should announce downloadable recordings");
 assert.match(html, /data-action="w"[^>]*>W<\/button>/, "movement controls should use compact keycaps");
 assert.match(html, /data-action="i"[^>]*>↑<\/button>/, "look-up should use an arrow keycap");
 assert.match(html, /data-action="j"[^>]*>←<\/button>/, "look-left should use an arrow keycap");

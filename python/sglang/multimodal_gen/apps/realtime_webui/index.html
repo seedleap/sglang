@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>World Studio · 实时模型对比</title>
-    <link rel="stylesheet" href="./styles.css?v=world-studio-v6" />
+    <link rel="stylesheet" href="./styles.css?v=world-studio-v7" />
   </head>
   <body class="world-studio">
     <header class="app-header">
@@ -29,6 +29,11 @@
         </button>
       </div>
     </header>
+
+    <div id="recordingReadyToast" class="recording-ready-toast" role="status" aria-live="polite" aria-atomic="true" hidden>
+      <span class="recording-ready-toast-icon" aria-hidden="true">✓</span>
+      <span><strong>录像已生成</strong><small>可在右上角下载对比版和 Zing 版</small></span>
+    </div>
 
     <main class="shell">
       <section class="panel controls" aria-label="世界设置">
@@ -293,6 +298,6 @@
     <script src="./fullscreen_controller.js?v=dual-fullscreen-v1"></script>
     <script src="./trace_topology.js?v=realtime-trace-topology-v6"></script>
     <script src="./trace_transport.js?v=realtime-trace-http-v2"></script>
-    <script src="./app.js?v=world-studio-v23"></script>
+    <script src="./app.js?v=world-studio-v24"></script>
   </body>
 </html>
