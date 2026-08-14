@@ -105,7 +105,7 @@ assert.match(html, /model_session\.js\?v=dual-model-v10/);
 assert.match(html, /dual_model_controller\.js\?v=dual-model-v6/);
 assert.match(html, /prompt_rewrite_controller\.js\?v=prompt-rewrite-v2/);
 assert.match(html, /styles\.css\?v=world-studio-v7/);
-assert.match(html, /app\.js\?v=world-studio-v26/);
+assert.match(html, /app\.js\?v=world-studio-v27/);
 assert.doesNotMatch(
   app,
   /window\.location\.hostname === "localhost"/,
@@ -191,6 +191,10 @@ assert.doesNotMatch(
 );
 assert.match(app, /window\.SpeechRecognition \|\| window\.webkitSpeechRecognition/);
 assert.match(app, /recognition\.lang = "zh-CN"/);
+assert.match(app, /if \(!window\.isSecureContext\)/);
+assert.match(app, /secureBaseUrl/);
+assert.match(app, /"not-allowed": "麦克风未授权"/);
+assert.match(app, /status\.textContent = next \? "正在聆听" : idleStatus/);
 assert.match(
   app,
   /button\.addEventListener\("pointerdown", \(event\) => \{[\s\S]*?event\.preventDefault\(\);[\s\S]*?focusInputAtEnd\(\);/,

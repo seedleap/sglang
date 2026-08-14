@@ -6081,6 +6081,31 @@ function setupVoicePromptInput() {
   const button = $("voicePromptBtn");
   const status = $("voicePromptStatus");
   const input = $("runtimePrompt");
+  const secureBaseUrl = String(UI_CONFIG.secureBaseUrl || "").trim();
+  if (!window.isSecureContext) {
+    if (secureBaseUrl) {
+      status.textContent = "切换 HTTPS";
+      button.title = "点击切换到 HTTPS 后使用语音输入";
+      button.onclick = () => {
+        try {
+          const secureUrl = new URL(
+            `${window.location.pathname}${window.location.search}${window.location.hash}`,
+            secureBaseUrl,
+          );
+          if (secureUrl.protocol !== "https:") throw new Error("secureBaseUrl must use HTTPS");
+          window.location.assign(secureUrl);
+        } catch (error) {
+          status.textContent = "需要 HTTPS";
+          button.disabled = true;
+        }
+      };
+    } else {
+      button.disabled = true;
+      button.title = "语音输入需要 HTTPS 安全连接";
+      status.textContent = "需要 HTTPS";
+    }
+    return;
+  }
   const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
   if (!SpeechRecognition) {
     button.disabled = true;
@@ -6095,6 +6120,15 @@ function setupVoicePromptInput() {
   recognition.interimResults = true;
   let listening = false;
   let prefix = "";
+  let idleStatus = "点击说话";
+
+  const speechErrorLabels = {
+    "not-allowed": "麦克风未授权",
+    "service-not-allowed": "语音服务未授权",
+    "audio-capture": "未检测到麦克风",
+    network: "语音服务网络异常",
+    "no-speech": "未听清，请重试",
+  };
 
   function focusInputAtEnd() {
     input.focus({ preventScroll: true });
@@ -6106,11 +6140,12 @@ function setupVoicePromptInput() {
     listening = next;
     button.classList.toggle("is-listening", next);
     button.setAttribute("aria-pressed", next ? "true" : "false");
-    status.textContent = next ? "正在聆听" : "点击说话";
+    status.textContent = next ? "正在聆听" : idleStatus;
   }
 
   recognition.onstart = () => {
     prefix = input.value.trim();
+    idleStatus = "点击说话";
     setListening(true);
   };
   recognition.onresult = (event) => {
@@ -6125,15 +6160,13 @@ function setupVoicePromptInput() {
       input.setSelectionRange(end, end);
     }
     input.dispatchEvent(new Event("input", { bubbles: true }));
+    if (transcript) idleStatus = "已识别";
   };
   recognition.onerror = (event) => {
+    idleStatus = event.error === "aborted"
+      ? "点击说话"
+      : speechErrorLabels[event.error] || "语音识别失败";
     setListening(false);
-    if (event.error !== "aborted" && event.error !== "no-speech") {
-      status.textContent = "请重试";
-      window.setTimeout(() => {
-        if (!listening) status.textContent = "点击说话";
-      }, 1600);
-    }
   };
   recognition.onend = () => {
     setListening(false);
@@ -6148,9 +6181,14 @@ function setupVoicePromptInput() {
     focusInputAtEnd();
     try {
       if (listening) recognition.stop();
-      else recognition.start();
+      else {
+        idleStatus = "正在启动";
+        status.textContent = idleStatus;
+        recognition.start();
+      }
     } catch (error) {
-      status.textContent = "请重试";
+      idleStatus = "请重试";
+      setListening(false);
     }
   };
 }

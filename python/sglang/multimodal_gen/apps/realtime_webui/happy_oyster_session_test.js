@@ -22,7 +22,7 @@ assert.match(html, /happy_oyster_sdk\.js\?v=happyoyster-sdk-0\.1\.0-ticket-only/
 assert.match(html, /happy_oyster_session\.js/);
 assert.match(html, /happy_oyster_session\.js\?v=happyoyster-session-v5/);
 assert.match(html, /dual_model_controller\.js\?v=dual-model-v6/);
-assert.match(html, /app\.js\?v=world-studio-v26/);
+assert.match(html, /app\.js\?v=world-studio-v27/);
 assert.match(html, /styles\.css\?v=world-studio-v7/);
 assert.match(app, /happyoyster:\s*happyOysterSession/);
 assert.match(app, /enabled:\s*\(init\) => modelSelected\("happyoyster"\)/);
