@@ -13,7 +13,7 @@ service accounts, pools, and image digests.
 - Production code baseline:
   `origin/codex/minwm-lingbot2-dual-webui-opt-20260812@d8019542103c83047997cf6dc2e7014cba8565e3`.
 - Image build source: WM-09 implementation commit
-  `codex/wm09-sglang-platform-config-20260814@03afce6463bda488fbfc124fa0c8d8efd104a080`.
+  `codex/wm09-sglang-platform-config-20260814@1ca860b194386fe55cef64aa08a26b46d1943048`.
   WM-08 must freeze this exact branch and commit before any of the eight images
   is built; the production baseline remains the lineage base, not the image
   source.
@@ -105,7 +105,7 @@ is checked and retained only as audit evidence; the renderer constructs every
 runtime image as `<repository>@<callback.imageDigest>`. It rejects `latest`, a
 branch tag, a short SHA, a missing service, a failed callback, or a digest/tag
 mismatch. The callbacks must come from a WM-08 contract updated to build
-`03afce6463bda488fbfc124fa0c8d8efd104a080`: the older frozen `d8019542...`
+`1ca860b194386fe55cef64aa08a26b46d1943048`: the older frozen `d8019542...`
 image cannot contain WM-09's CRT downloader compatibility, exact release spec,
 or copy verifier. `required-inputs.json` records this WM-08 contract update as a
 missing hard input, including both the lineage baseline and required image
