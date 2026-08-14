@@ -75,6 +75,19 @@
     if (h264.length) transceiver.setCodecPreferences([...h264, ...auxiliaries]);
   }
 
+  function configureReceiverPlayoutDelay(transceiver, playoutDelayMs) {
+    const receiver = transceiver?.receiver;
+    if (!receiver || !Number.isFinite(playoutDelayMs) || playoutDelayMs <= 0) return;
+    const boundedDelayMs = Math.min(4000, Math.max(0, playoutDelayMs));
+    try {
+      if ("jitterBufferTarget" in receiver) {
+        receiver.jitterBufferTarget = boundedDelayMs;
+      } else if ("playoutDelayHint" in receiver) {
+        receiver.playoutDelayHint = boundedDelayMs / 1000;
+      }
+    } catch {}
+  }
+
   class PrimaryWebRTCSession {
     constructor({
       video,
@@ -82,6 +95,7 @@
       endpoint = "./api/webrtc/sessions",
       codec = "h264",
       bitrateKbps = 3500,
+      playoutDelayMs = 0,
       fetchImpl = global.fetch?.bind(global),
       WebSocketImpl = global.WebSocket,
       RTCPeerConnectionImpl = global.RTCPeerConnection,
@@ -100,6 +114,7 @@
       this.endpoint = endpoint.replace(/\/$/, "");
       this.codec = codec;
       this.bitrateKbps = bitrateKbps;
+      this.playoutDelayMs = Math.min(4000, Math.max(0, Number(playoutDelayMs) || 0));
       this.fetchImpl = fetchImpl;
       this.WebSocketImpl = WebSocketImpl;
       this.RTCPeerConnectionImpl = RTCPeerConnectionImpl;
@@ -359,6 +374,7 @@
         this.peer = peer;
         const transceiver = peer.addTransceiver("video", { direction: "recvonly" });
         preferH264(transceiver);
+        configureReceiverPlayoutDelay(transceiver, this.playoutDelayMs);
         peer.ontrack = (event) => {
           if (generation !== this.generation) return;
           const stream = event.streams?.[0]
@@ -475,6 +491,9 @@
             const jitterBufferMs = jitterBufferCount
               ? Number(report.jitterBufferDelay || 0) * 1000 / jitterBufferCount
               : 0;
+            const jitterBufferTargetMs = jitterBufferCount
+              ? Number(report.jitterBufferTargetDelay || 0) * 1000 / jitterBufferCount
+              : 0;
             this.onStats({
               framesDecoded,
               framesDropped: Number(report.framesDropped || 0),
@@ -483,6 +502,8 @@
               receiveMbps,
               jitterMs: Number(report.jitter || 0) * 1000,
               jitterBufferMs,
+              jitterBufferTargetMs,
+              configuredPlayoutDelayMs: this.playoutDelayMs,
               codec: "h264",
               protocol: "webrtc",
             });

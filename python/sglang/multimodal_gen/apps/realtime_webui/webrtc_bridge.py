@@ -274,15 +274,21 @@ class WebRTCBridgeSession:
             "-c:v",
             "libx264",
             "-preset",
-            "ultrafast",
+            self.manager.h264_preset,
             "-tune",
             "zerolatency",
             "-profile:v",
-            "baseline",
+            self.manager.h264_profile,
             "-level:v",
             "3.1",
             "-pix_fmt",
             "yuv420p",
+            "-colorspace",
+            "bt709",
+            "-color_primaries",
+            "bt709",
+            "-color_trc",
+            "bt709",
             "-g",
             str(gop),
             "-keyint_min",
@@ -389,6 +395,8 @@ class WebRTCBridgeSession:
             "error": self.error,
             "codec": self.codec,
             "bitrate_kbps": self.bitrate_kbps,
+            "h264_preset": self.manager.h264_preset,
+            "h264_profile": self.manager.h264_profile,
             "frames": self.frames,
             "source_bytes": self.source_bytes,
             "average_source_mbps": round(self.source_bytes * 8 / elapsed / 1_000_000, 3),
@@ -415,6 +423,23 @@ class WebRTCBridgeManager:
             "WEBRTC_MEDIA_HTTP_BASE", "http://127.0.0.1:8889"
         )
         self.ffmpeg_bin = os.environ.get("FFMPEG_BIN", "ffmpeg")
+        requested_h264_preset = os.environ.get(
+            "WEBRTC_H264_PRESET", "superfast"
+        ).lower()
+        self.h264_preset = (
+            requested_h264_preset
+            if requested_h264_preset
+            in {"ultrafast", "superfast", "veryfast", "faster", "fast", "medium"}
+            else "superfast"
+        )
+        requested_h264_profile = os.environ.get(
+            "WEBRTC_H264_PROFILE", "main"
+        ).lower()
+        self.h264_profile = (
+            requested_h264_profile
+            if requested_h264_profile in {"baseline", "main", "high"}
+            else "main"
+        )
         self.max_sessions = _bounded_int(
             os.environ.get("WEBRTC_BRIDGE_MAX_SESSIONS"),
             default=8,

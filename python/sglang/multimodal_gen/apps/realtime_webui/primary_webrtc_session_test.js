@@ -87,12 +87,17 @@ class FakePeerConnection extends FakeEventTarget {
     this.connectionState = "new";
     this.localDescription = null;
     this.codecPreferences = [];
+    this.receiver = {
+      jitterBufferTarget: null,
+      playoutDelayHint: null,
+    };
     this.closed = false;
     peers.push(this);
   }
 
   addTransceiver() {
     return {
+      receiver: this.receiver,
       setCodecPreferences: (codecs) => {
         this.codecPreferences = codecs;
       },
@@ -122,6 +127,7 @@ class FakePeerConnection extends FakeEventTarget {
       bytesReceived: 200000,
       jitter: 0.004,
       jitterBufferDelay: 0.2,
+      jitterBufferTargetDelay: 16,
       jitterBufferEmittedCount: 32,
     }]]);
   }
@@ -201,6 +207,7 @@ const { PrimaryWebRTCSession } = require("./primary_webrtc_session.js");
     startupTimeoutMs: 1000,
     controlKeepaliveMs: 5,
     controlReconnectBaseMs: 1,
+    playoutDelayMs: 500,
     onState: (state) => states.push(state),
     onPlayable: (details) => { playable = details; },
     onStats: (snapshot) => stats.push(snapshot),
@@ -213,6 +220,8 @@ const { PrimaryWebRTCSession } = require("./primary_webrtc_session.js");
   assert.equal(playable.codec, "h264");
   assert.deepEqual(states.slice(0, 2), ["connecting", "live"]);
   assert.equal(peers[0].codecPreferences[0].mimeType, "video/H264");
+  assert.equal(peers[0].receiver.jitterBufferTarget, 500);
+  assert.equal(peers[0].receiver.playoutDelayHint, null);
   assert.match(peers[0].remoteDescription.sdp, /H264\/90000/);
   assert.equal(
     controlSockets[0].url,
@@ -226,6 +235,7 @@ const { PrimaryWebRTCSession } = require("./primary_webrtc_session.js");
   });
   await new Promise((resolve) => setTimeout(resolve, 0));
   assert.ok(stats.some((snapshot) => snapshot.framesDecoded === 32));
+  assert.ok(stats.some((snapshot) => snapshot.jitterBufferTargetMs === 500));
 
   controlSockets[0].close(1002);
   await new Promise((resolve) => setTimeout(resolve, 10));

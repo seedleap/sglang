@@ -13,6 +13,10 @@ const PRIMARY_WEBRTC_BITRATE_KBPS = Math.max(
   250,
   Math.min(20000, Math.trunc(configuredNumber("webrtcBitrateKbps", 3500))),
 );
+const PRIMARY_WEBRTC_PLAYOUT_DELAY_MS = Math.max(
+  0,
+  Math.min(4000, configuredNumber("webrtcPlayoutDelayMs", 0)),
+);
 const DEFAULT_LINGBOT2_MODEL = "robbyant/lingbot-world-v2-14b-causal-fast-diffusers";
 const SESSION_ARTIFACT_SCHEMA_VERSION = 1;
 const SESSION_ARTIFACT_EVENT_LIMIT = 20000;
@@ -773,6 +777,7 @@ if (PRIMARY_WEBRTC_ENABLED) {
     canvas,
     codec: "h264",
     bitrateKbps: PRIMARY_WEBRTC_BITRATE_KBPS,
+    playoutDelayMs: PRIMARY_WEBRTC_PLAYOUT_DELAY_MS,
     onState: (state, details = {}) => {
       setModelConnectionState("minwm", state);
       if (state === "connecting") {
