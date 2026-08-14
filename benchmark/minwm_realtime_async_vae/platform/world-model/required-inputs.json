@@ -2,7 +2,7 @@
   "executionReady": false,
   "frozenSource": {
     "branch": "codex/wm09-sglang-platform-config-20260814",
-    "gitSha": "5ded4b5de2702d063cb9421d5c7049c0570c013b"
+    "gitSha": "43c63ff4d0c456ae6a8496e12fbb369b5c321fe8"
   },
   "hardGate": "all required inputs must be resolved before deployment render",
   "productionBaseline": {
@@ -18,7 +18,7 @@
     "imageBuildCallbacks": [
       {
         "deploymentImageSource": "callback.imageDigest",
-        "requiredAuditTag": "829115578968.dkr.ecr.us-east-2.amazonaws.com/leap-world/minwm-realtime:world-realtime-coordinator-5ded4b5de2702d063cb9421d5c7049c0570c013b",
+        "requiredAuditTag": "829115578968.dkr.ecr.us-east-2.amazonaws.com/leap-world/minwm-realtime:world-realtime-coordinator-43c63ff4d0c456ae6a8496e12fbb369b5c321fe8",
         "requiredBranch": "codex/wm09-sglang-platform-config-20260814",
         "requiredBuildEvidence": [
           "buildId",
@@ -33,7 +33,7 @@
       },
       {
         "deploymentImageSource": "callback.imageDigest",
-        "requiredAuditTag": "829115578968.dkr.ecr.us-east-2.amazonaws.com/leap-world/minwm-realtime:minwm-vae-5ded4b5de2702d063cb9421d5c7049c0570c013b",
+        "requiredAuditTag": "829115578968.dkr.ecr.us-east-2.amazonaws.com/leap-world/minwm-realtime:minwm-vae-43c63ff4d0c456ae6a8496e12fbb369b5c321fe8",
         "requiredBranch": "codex/wm09-sglang-platform-config-20260814",
         "requiredBuildEvidence": [
           "buildId",
@@ -48,7 +48,7 @@
       },
       {
         "deploymentImageSource": "callback.imageDigest",
-        "requiredAuditTag": "829115578968.dkr.ecr.us-east-2.amazonaws.com/leap-world/minwm-realtime:lingbot2-vae-5ded4b5de2702d063cb9421d5c7049c0570c013b",
+        "requiredAuditTag": "829115578968.dkr.ecr.us-east-2.amazonaws.com/leap-world/minwm-realtime:lingbot2-vae-43c63ff4d0c456ae6a8496e12fbb369b5c321fe8",
         "requiredBranch": "codex/wm09-sglang-platform-config-20260814",
         "requiredBuildEvidence": [
           "buildId",
@@ -63,7 +63,7 @@
       },
       {
         "deploymentImageSource": "callback.imageDigest",
-        "requiredAuditTag": "829115578968.dkr.ecr.us-east-2.amazonaws.com/leap-world/minwm-realtime:minwm-denoiser-5ded4b5de2702d063cb9421d5c7049c0570c013b",
+        "requiredAuditTag": "829115578968.dkr.ecr.us-east-2.amazonaws.com/leap-world/minwm-realtime:minwm-denoiser-43c63ff4d0c456ae6a8496e12fbb369b5c321fe8",
         "requiredBranch": "codex/wm09-sglang-platform-config-20260814",
         "requiredBuildEvidence": [
           "buildId",
@@ -78,7 +78,7 @@
       },
       {
         "deploymentImageSource": "callback.imageDigest",
-        "requiredAuditTag": "829115578968.dkr.ecr.us-east-2.amazonaws.com/leap-world/minwm-realtime:lingbot2-denoiser-5ded4b5de2702d063cb9421d5c7049c0570c013b",
+        "requiredAuditTag": "829115578968.dkr.ecr.us-east-2.amazonaws.com/leap-world/minwm-realtime:lingbot2-denoiser-43c63ff4d0c456ae6a8496e12fbb369b5c321fe8",
         "requiredBranch": "codex/wm09-sglang-platform-config-20260814",
         "requiredBuildEvidence": [
           "buildId",
@@ -93,7 +93,7 @@
       },
       {
         "deploymentImageSource": "callback.imageDigest",
-        "requiredAuditTag": "829115578968.dkr.ecr.us-east-2.amazonaws.com/leap-world/minwm-realtime:world-realtime-gateway-5ded4b5de2702d063cb9421d5c7049c0570c013b",
+        "requiredAuditTag": "829115578968.dkr.ecr.us-east-2.amazonaws.com/leap-world/minwm-realtime:world-realtime-gateway-43c63ff4d0c456ae6a8496e12fbb369b5c321fe8",
         "requiredBranch": "codex/wm09-sglang-platform-config-20260814",
         "requiredBuildEvidence": [
           "buildId",
@@ -108,7 +108,7 @@
       },
       {
         "deploymentImageSource": "callback.imageDigest",
-        "requiredAuditTag": "829115578968.dkr.ecr.us-east-2.amazonaws.com/leap-world/minwm-realtime:world-studio-webui-5ded4b5de2702d063cb9421d5c7049c0570c013b",
+        "requiredAuditTag": "829115578968.dkr.ecr.us-east-2.amazonaws.com/leap-world/minwm-realtime:world-studio-webui-43c63ff4d0c456ae6a8496e12fbb369b5c321fe8",
         "requiredBranch": "codex/wm09-sglang-platform-config-20260814",
         "requiredBuildEvidence": [
           "buildId",
@@ -123,7 +123,7 @@
       },
       {
         "deploymentImageSource": "callback.imageDigest",
-        "requiredAuditTag": "829115578968.dkr.ecr.us-east-2.amazonaws.com/leap-world/minwm-realtime:model-artifact-publish-5ded4b5de2702d063cb9421d5c7049c0570c013b",
+        "requiredAuditTag": "829115578968.dkr.ecr.us-east-2.amazonaws.com/leap-world/minwm-realtime:model-artifact-publish-43c63ff4d0c456ae6a8496e12fbb369b5c321fe8",
         "requiredBranch": "codex/wm09-sglang-platform-config-20260814",
         "requiredBuildEvidence": [
           "buildId",
@@ -303,7 +303,7 @@
       "reason": "the production baseline does not contain the WM-09 release spec, CRT downloader compatibility, or publisher verifier",
       "requiredBranch": "codex/wm09-sglang-platform-config-20260814",
       "requiredCallbackDigestField": "imageDigest",
-      "requiredGitSha": "5ded4b5de2702d063cb9421d5c7049c0570c013b",
+      "requiredGitSha": "43c63ff4d0c456ae6a8496e12fbb369b5c321fe8",
       "requiredTagFormat": "<service-tag-prefix>-<full-40-character-git-sha>",
       "runtimeImageFormat": "<ecr-repository>@<callback.imageDigest>",
       "state": "missing"

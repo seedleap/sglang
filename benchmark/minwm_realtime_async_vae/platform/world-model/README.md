@@ -13,7 +13,7 @@ service accounts, pools, and image digests.
 - Production code baseline:
   `origin/codex/minwm-lingbot2-dual-webui-opt-20260812@d8019542103c83047997cf6dc2e7014cba8565e3`.
 - Image build source: WM-09 implementation commit
-  `codex/wm09-sglang-platform-config-20260814@5ded4b5de2702d063cb9421d5c7049c0570c013b`.
+  `codex/wm09-sglang-platform-config-20260814@43c63ff4d0c456ae6a8496e12fbb369b5c321fe8`.
   WM-08 must freeze this exact branch and commit before any of the eight images
   is built; the production baseline remains the lineage base, not the image
   source.
