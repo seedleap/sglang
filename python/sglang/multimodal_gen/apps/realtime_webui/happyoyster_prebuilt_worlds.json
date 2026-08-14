@@ -1,5 +1,62 @@
 {
   "schemaVersion": 1,
-  "generatedAt": null,
-  "worlds": {}
+  "generatedAt": "2026-08-14T03:16:23.308563+00:00",
+  "worlds": {
+    "alpine-run": {
+      "name": "Alpine Run",
+      "encryptedWorldId": "5Bo-5QBUfxF_j7AWwlN2ApaSASbCNH22yCf7hQ64F7Q"
+    },
+    "asylum-corridor": {
+      "name": "Asylum Corridor",
+      "encryptedWorldId": "5Bo-5QBUfxF_j7AWwlN2AkXVLmeWbRGQcXtzCncLymM"
+    },
+    "citadel-approach": {
+      "name": "Citadel Approach",
+      "encryptedWorldId": "5Bo-5QBUfxF_j7AWwlN2AuafaDfEv-7Z1FVMbI5xH-o"
+    },
+    "dragon-dolly": {
+      "name": "Dragon Dolly",
+      "encryptedWorldId": "5Bo-5QBUfxF_j7AWwlN2AlT4kPozVxAeerecJ9RUo_A"
+    },
+    "dragon-ride": {
+      "name": "Dragon Ride",
+      "encryptedWorldId": "5Bo-5QBUfxF_j7AWwlN2AuXE68-yocXkk2HgOTyilow"
+    },
+    "ice-kayak": {
+      "name": "Ice Kayak",
+      "encryptedWorldId": "5Bo-5QBUfxF_j7AWwlN2Ar2o1TICEjOBOdEinU1eaFg"
+    },
+    "mars-mountain": {
+      "name": "Mars Mountain",
+      "encryptedWorldId": "5Bo-5QBUfxF_j7AWwlN2AtUkzbagX38wBwyXffBrP28"
+    },
+    "misted-kingdom": {
+      "name": "Misted Kingdom",
+      "encryptedWorldId": "5Bo-5QBUfxF_j7AWwlN2Ah1SfMY5SvpwWiLD0f4Y_sY"
+    },
+    "penguin-colony": {
+      "name": "Penguin Colony",
+      "encryptedWorldId": "5Bo-5QBUfxF_j7AWwlN2Ak_X49Hk3BaUSpZvuP3zZi4"
+    },
+    "reef-patrol": {
+      "name": "Reef Patrol",
+      "encryptedWorldId": "5Bo-5QBUfxF_j7AWwlN2AtWcESwo3fKLj1hg9yaY8Hk"
+    },
+    "roman-chariot": {
+      "name": "Roman Chariot",
+      "encryptedWorldId": "5Bo-5QBUfxF_j7AWwlN2Ao-sLQNNmHNQZk1oPs1V7GA"
+    },
+    "seaside-adventurer": {
+      "name": "Seaside Adventurer",
+      "encryptedWorldId": "5Bo-5QBUfxF_j7AWwlN2AoSCzo-At1qiPzAfn79kMn4"
+    },
+    "spring-valley": {
+      "name": "Spring Valley",
+      "encryptedWorldId": "5Bo-5QBUfxF_j7AWwlN2AiCNjeBXDYm7y7BNKXuXJvc"
+    },
+    "storm-crossing": {
+      "name": "Storm Crossing",
+      "encryptedWorldId": "5Bo-5QBUfxF_j7AWwlN2AtFyFuo0x2joMrt3drCAu7Q"
+    }
+  }
 }
