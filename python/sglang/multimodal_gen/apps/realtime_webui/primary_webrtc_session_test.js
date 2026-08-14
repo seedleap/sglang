@@ -255,6 +255,26 @@ const { PrimaryWebRTCSession } = require("./primary_webrtc_session.js");
     && snapshot.controlBridgeRoundTripMs >= 20
     && snapshot.controlBridgeForwardMs === 0.4
   )));
+  const mediaEventSentAt = Date.now() - 40;
+  assert.equal(session.sendEvent({
+    type: "event",
+    kind: "camera_actions",
+    event_id: 9,
+    client_sent_epoch_ms: mediaEventSentAt,
+  }), true);
+  controlSockets[0].emit("message", { data: JSON.stringify({
+    type: "media_batch",
+    chunk_index: 2,
+    event_id: 9,
+    first_frame_index: 32,
+    num_frames: 16,
+    bridge_received_epoch_ms: Date.now() - 10,
+  }) });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.ok(stats.some((snapshot) => (
+    snapshot.lastMediaEventId === 9
+    && snapshot.mediaControlToBatchMs >= 30
+  )));
 
   controlSockets[0].close(1002);
   await new Promise((resolve) => setTimeout(resolve, 10));

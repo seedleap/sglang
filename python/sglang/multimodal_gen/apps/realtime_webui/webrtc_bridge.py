@@ -127,6 +127,8 @@ class WebRTCBridgeSession:
     dropped_batches: int = 0
     dropped_frames: int = 0
     dropped_source_bytes: int = 0
+    last_media_event_id: int = 0
+    last_media_event_epoch_ms: float = 0.0
 
     @property
     def media_path(self) -> str:
@@ -265,6 +267,10 @@ class WebRTCBridgeSession:
             await self._start_ffmpeg(width, height)
 
         frames = _split_payload(header, payload)
+        bridge_received_epoch_ms = time.time() * 1000
+        if event_id != self.last_media_event_id:
+            self.last_media_event_id = event_id
+            self.last_media_event_epoch_ms = bridge_received_epoch_ms
         raw_num_frame_batches = int(header.get("num_frame_batches") or 0)
         is_final_frame_batch = bool(header.get("is_final_frame_batch"))
         media_batch = {
@@ -276,6 +282,7 @@ class WebRTCBridgeSession:
             "frame_batch_index": int(header.get("frame_batch_index") or 0),
             "num_frame_batches": raw_num_frame_batches,
             "is_final_frame_batch": is_final_frame_batch,
+            "bridge_received_epoch_ms": bridge_received_epoch_ms,
         }
         self.media_batch_history.append(media_batch)
         await self._broadcast(media_batch)
@@ -321,6 +328,12 @@ class WebRTCBridgeSession:
             "-loglevel",
             "warning",
             "-nostdin",
+            "-fflags",
+            "nobuffer",
+            "-flags",
+            "low_delay",
+            "-avioflags",
+            "direct",
             "-f",
             "rawvideo",
             "-pixel_format",
@@ -358,12 +371,18 @@ class WebRTCBridgeSession:
             "0",
             "-bf",
             "0",
-            "-b:v",
-            f"{self.bitrate_kbps}k",
+            "-crf",
+            str(self.manager.h264_crf),
             "-maxrate",
             f"{self.bitrate_kbps}k",
             "-bufsize",
-            f"{self.bitrate_kbps * 2}k",
+            f"{max(128, self.bitrate_kbps * self.manager.h264_vbv_buffer_ms // 1000)}k",
+            "-flush_packets",
+            "1",
+            "-muxdelay",
+            "0",
+            "-muxpreload",
+            "0",
             "-f",
             "rtsp",
             "-rtsp_transport",
@@ -461,6 +480,8 @@ class WebRTCBridgeSession:
             "bitrate_kbps": self.bitrate_kbps,
             "h264_preset": self.manager.h264_preset,
             "h264_profile": self.manager.h264_profile,
+            "h264_crf": self.manager.h264_crf,
+            "h264_vbv_buffer_ms": self.manager.h264_vbv_buffer_ms,
             "frames": self.frames,
             "source_bytes": self.source_bytes,
             "average_source_mbps": round(self.source_bytes * 8 / elapsed / 1_000_000, 3),
@@ -468,6 +489,8 @@ class WebRTCBridgeSession:
             "dropped_batches": self.dropped_batches,
             "dropped_frames": self.dropped_frames,
             "dropped_source_bytes": self.dropped_source_bytes,
+            "last_media_event_id": self.last_media_event_id,
+            "last_media_event_epoch_ms": self.last_media_event_epoch_ms,
             "width": self.width,
             "height": self.height,
             "created_at": self.created_at,
@@ -507,6 +530,18 @@ class WebRTCBridgeManager:
             requested_h264_profile
             if requested_h264_profile in {"baseline", "main", "high"}
             else "main"
+        )
+        self.h264_crf = _bounded_int(
+            os.environ.get("WEBRTC_H264_CRF"),
+            default=20,
+            minimum=12,
+            maximum=35,
+        )
+        self.h264_vbv_buffer_ms = _bounded_int(
+            os.environ.get("WEBRTC_H264_VBV_BUFFER_MS"),
+            default=250,
+            minimum=100,
+            maximum=2000,
         )
         self.max_sessions = _bounded_int(
             os.environ.get("WEBRTC_BRIDGE_MAX_SESSIONS"),

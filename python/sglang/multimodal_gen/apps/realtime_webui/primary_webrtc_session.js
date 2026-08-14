@@ -173,6 +173,7 @@
       this.firstFrameTimestampUs = null;
       this.timestampFrameBase = 0;
       this.processedFrames = 0;
+      this.controlSentEpochByEvent = new Map();
       this.playableResolve = null;
       this.playableReject = null;
       this.handleVideoPlayable = () => this._markPlayable();
@@ -244,6 +245,19 @@
 
     sendEvent(envelope) {
       if (!this.control || this.control.readyState !== CONTROL_OPEN) return false;
+      const eventId = Number(envelope?.event_id || 0);
+      if (
+        eventId > 0
+        && ["camera_actions", "prompt", "scene_cut"].includes(String(envelope?.kind || ""))
+      ) {
+        this.controlSentEpochByEvent.set(
+          eventId,
+          Number(envelope?.client_sent_epoch_ms || Date.now()),
+        );
+        if (this.controlSentEpochByEvent.size > 64) {
+          this.controlSentEpochByEvent.delete(this.controlSentEpochByEvent.keys().next().value);
+        }
+      }
       this.control.send(JSON.stringify(envelope));
       return true;
     }
@@ -269,6 +283,7 @@
       this.firstFrameTimestampUs = null;
       this.timestampFrameBase = 0;
       this.processedFrames = 0;
+      this.controlSentEpochByEvent.clear();
       this._stopStats();
       this._stopControlKeepalive();
       if (this.controlReconnectTimer) global.clearTimeout(this.controlReconnectTimer);
@@ -653,6 +668,12 @@
       if (this.mediaBatches.length > 1024) {
         this.mediaBatches.splice(0, this.mediaBatches.length - 1024);
       }
+      const sentEpochMs = this.controlSentEpochByEvent.get(batch.eventId) || 0;
+      this.onStats({
+        lastMediaEventId: batch.eventId,
+        lastMediaBatchBridgeEpochMs: Number(event.bridge_received_epoch_ms || 0),
+        mediaControlToBatchMs: sentEpochMs ? Math.max(0, Date.now() - sentEpochMs) : 0,
+      });
     }
 
     _finalizeMediaChunk(event) {
