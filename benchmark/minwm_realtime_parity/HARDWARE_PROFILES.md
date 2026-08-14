@@ -24,6 +24,27 @@ deployment manifests. Do not use old dated YAML as a template.
 5. Record the detected hardware, selected profile, SGLang/model commits, image
    digest, and result URI with the run artifacts.
 
+## RTX 6000 labels and `vae_cpu_offload`
+
+Do not derive memory policy from the string `6000`. NVIDIA's full-card published
+capacities differ by generation: RTX 6000 Ada has 48 GB, while the RTX PRO 6000
+Blackwell Server, Workstation, and Max-Q editions have 96 GB. A cloud device or
+partition labelled `6000` can expose a different amount, including about 32 GiB.
+The value reported inside the workload is authoritative.
+
+Use this decision table when Codex renders a job:
+
+| Visible memory and architecture | `vae_cpu_offload` | Decision |
+| --- | --- | --- |
+| SM120 and <=36,864 MiB | `true` | Required by the current 32 GiB candidate |
+| SM120 and >=65,536 MiB | omitted / `false` | High-memory speed default |
+| Any other capacity or compute capability, including a 48 GB Ada card | `true` initially | Experimental; do not disable until the same device passes the acceptance gates |
+
+Always record the queried GPU name, total MiB, compute capability, and the final
+offload value. A familiar product name is not evidence that offload can be
+disabled. The conservative `true` setting for unclassified hardware is a first
+validation candidate, not a claim that the hardware profile is production-ready.
+
 ## Checkpoint and request invariants
 
 These values align the current MinWM checkpoint with the Tianpeng setting. They
