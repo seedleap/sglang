@@ -784,14 +784,29 @@ if (PRIMARY_WEBRTC_ENABLED) {
     onState: (state, details = {}) => {
       setModelConnectionState("minwm", state);
       if (state === "connecting") {
-        setStatus("Connecting WebRTC", "live");
-        setPreviewState("waiting");
+        if (details.reconnecting) {
+          setStatus("Reconnecting WebRTC", "live");
+          markClientTrace("client.webrtc_reconnecting", {
+            reason: details.reason || "media transport interrupted",
+            attempt: Number(details.attempt || 0),
+          });
+        } else {
+          setStatus("Connecting WebRTC", "live");
+          setPreviewState("waiting");
+        }
       } else if (state === "live") {
         setStatus("Live", "live");
         setPreviewState("live");
-        addHistory(details.reconnected
-          ? "Zing control channel reconnected"
+        addHistory(details.mediaReconnected
+          ? "Zing WebRTC media reconnected"
+          : details.reconnected
+            ? "Zing control channel reconnected"
           : `Zing media live · H.264 WebRTC · ${details.width || "-"}x${details.height || "-"}`);
+        if (details.mediaReconnected) {
+          markClientTrace("client.webrtc_media_reconnected", {
+            attempt: Number(details.attempt || 0),
+          });
+        }
       } else if (state === "closed") {
         $("connectBtn").disabled = false;
         if (!sessionLifetimeExpired) setStatus("Closed");

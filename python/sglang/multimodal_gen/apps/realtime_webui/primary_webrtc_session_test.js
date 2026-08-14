@@ -210,6 +210,8 @@ const { PrimaryWebRTCSession } = require("./primary_webrtc_session.js");
     startupTimeoutMs: 1000,
     controlKeepaliveMs: 5,
     controlReconnectBaseMs: 1,
+    mediaDisconnectGraceMs: 5,
+    mediaReconnectBaseMs: 1,
     playoutDelayMs: 500,
     onState: (state) => states.push(state),
     onPlayable: (details) => { playable = details; },
@@ -250,6 +252,22 @@ const { PrimaryWebRTCSession } = require("./primary_webrtc_session.js");
     kind: "camera_actions",
     event_id: 2,
   });
+
+  peers[0].connectionState = "disconnected";
+  peers[0].onconnectionstatechange();
+  assert.equal(states.at(-1), "connecting");
+  peers[0].connectionState = "connected";
+  peers[0].onconnectionstatechange();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(peers.length, 1, "transient disconnect should recover without renegotiation");
+  assert.equal(states.at(-1), "live");
+
+  peers[0].connectionState = "failed";
+  peers[0].onconnectionstatechange();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(peers.length, 2, "failed media should negotiate a fresh WHEP peer");
+  assert.equal(session.connected, true);
+  assert.equal(states.at(-1), "live");
 
   await session.close("test complete");
   assert.equal(video.srcObject, null);

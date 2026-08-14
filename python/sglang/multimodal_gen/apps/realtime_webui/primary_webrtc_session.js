@@ -112,6 +112,9 @@
       startupTimeoutMs = 30000,
       controlKeepaliveMs = 10000,
       controlReconnectBaseMs = 250,
+      mediaDisconnectGraceMs = 6000,
+      mediaReconnectBaseMs = 500,
+      mediaReconnectMaxAttempts = 8,
       onState = () => {},
       onPlayable = () => {},
       onFrame = null,
@@ -134,6 +137,12 @@
       this.startupTimeoutMs = startupTimeoutMs;
       this.controlKeepaliveMs = controlKeepaliveMs;
       this.controlReconnectBaseMs = controlReconnectBaseMs;
+      this.mediaDisconnectGraceMs = Math.max(0, Number(mediaDisconnectGraceMs) || 0);
+      this.mediaReconnectBaseMs = Math.max(50, Number(mediaReconnectBaseMs) || 500);
+      this.mediaReconnectMaxAttempts = Math.max(
+        1,
+        Math.trunc(Number(mediaReconnectMaxAttempts) || 8),
+      );
       this.onState = onState;
       this.onPlayable = onPlayable;
       this.onFrame = onFrame;
@@ -142,6 +151,7 @@
       this.sessionId = "";
       this.control = null;
       this.peer = null;
+      this.whepUrl = "";
       this.whepResourceUrl = "";
       this.generation = 0;
       this.state = "idle";
@@ -151,6 +161,9 @@
       this.controlKeepaliveTimer = 0;
       this.controlReconnectTimer = 0;
       this.controlReconnectAttempt = 0;
+      this.mediaReconnectTimer = 0;
+      this.mediaReconnectAttempt = 0;
+      this.mediaReconnectInFlight = false;
       this.lastRtcSample = null;
       this.receiver = null;
       this.trackReader = null;
@@ -158,6 +171,7 @@
       this.mediaBatches = [];
       this.mediaFps = 24;
       this.firstFrameTimestampUs = null;
+      this.timestampFrameBase = 0;
       this.processedFrames = 0;
       this.playableResolve = null;
       this.playableReject = null;
@@ -213,7 +227,8 @@
         this.mediaFps = Math.max(1, Number(init?.fps || 24));
         await this._openControl(generation);
         const status = await this._waitForPublisher(generation);
-        await this._openWhep(status.whep_url || info.whep_url, generation);
+        this.whepUrl = String(status.whep_url || info.whep_url || "");
+        await this._openWhep(this.whepUrl, generation);
         await this._waitForPlayable(generation);
         this._startStats();
         return info;
@@ -244,6 +259,7 @@
       this.control = null;
       this.peer = null;
       this.receiver = null;
+      this.whepUrl = "";
       this.whepResourceUrl = "";
       this.playable = false;
       const trackReader = this.trackReader;
@@ -251,12 +267,17 @@
       this.trackPump = null;
       this.mediaBatches = [];
       this.firstFrameTimestampUs = null;
+      this.timestampFrameBase = 0;
       this.processedFrames = 0;
       this._stopStats();
       this._stopControlKeepalive();
       if (this.controlReconnectTimer) global.clearTimeout(this.controlReconnectTimer);
       this.controlReconnectTimer = 0;
       this.controlReconnectAttempt = 0;
+      if (this.mediaReconnectTimer) global.clearTimeout(this.mediaReconnectTimer);
+      this.mediaReconnectTimer = 0;
+      this.mediaReconnectAttempt = 0;
+      this.mediaReconnectInFlight = false;
       this.playableReject?.(new Error(reason));
       this.playableResolve = null;
       this.playableReject = null;
@@ -429,12 +450,7 @@
           void this.video.play?.().catch(() => {});
         };
         peer.onconnectionstatechange = () => {
-          if (generation !== this.generation || this.expectedClose) return;
-          if (["failed", "disconnected"].includes(peer.connectionState)) {
-            const error = new Error(`WebRTC media ${peer.connectionState}`);
-            this._setState("error", { message: error.message });
-            this.onError(error);
-          }
+          this._handlePeerConnectionState(peer, generation);
         };
         try {
           const offer = await peer.createOffer();
@@ -450,8 +466,12 @@
           if (!/H264\/90000/i.test(answerSdp)) {
             throw new Error("WHEP answer did not negotiate H.264");
           }
-          this.whepResourceUrl = response.headers?.get?.("location") || whepUrl;
+          const resourceLocation = response.headers?.get?.("location") || "";
+          this.whepResourceUrl = resourceLocation
+            ? new URL(resourceLocation, whepUrl).toString()
+            : whepUrl;
           await peer.setRemoteDescription({ type: "answer", sdp: answerSdp });
+          this._handlePeerConnectionState(peer, generation);
           return;
         } catch (error) {
           lastError = error;
@@ -461,6 +481,133 @@
         }
       }
       throw lastError || new Error("WHEP negotiation timed out");
+    }
+
+    _handlePeerConnectionState(peer, generation) {
+      if (
+        generation !== this.generation
+        || this.expectedClose
+        || this.peer !== peer
+      ) return;
+      const state = String(peer.connectionState || "");
+      if (state === "connected") {
+        const recovered = Boolean(
+          this.mediaReconnectTimer
+          || this.mediaReconnectInFlight
+          || this.mediaReconnectAttempt,
+        );
+        const attempt = this.mediaReconnectAttempt;
+        if (this.mediaReconnectTimer) global.clearTimeout(this.mediaReconnectTimer);
+        this.mediaReconnectTimer = 0;
+        this.mediaReconnectAttempt = 0;
+        this.mediaReconnectInFlight = false;
+        if (recovered && this.playable) {
+          this._setState("live", {
+            protocol: "webrtc",
+            codec: "h264",
+            reconnected: true,
+            mediaReconnected: true,
+            attempt,
+            width: Number(this.canvas?.width || this.video.videoWidth || 0),
+            height: Number(this.canvas?.height || this.video.videoHeight || 0),
+          });
+        }
+        return;
+      }
+      if (state === "disconnected") {
+        this._scheduleMediaReconnect(
+          generation,
+          "media disconnected",
+          this.mediaDisconnectGraceMs,
+        );
+      } else if (state === "failed") {
+        if (this.mediaReconnectTimer) global.clearTimeout(this.mediaReconnectTimer);
+        this.mediaReconnectTimer = 0;
+        this._scheduleMediaReconnect(generation, "media failed", 0);
+      }
+    }
+
+    _scheduleMediaReconnect(generation, reason, delayMs = null) {
+      if (
+        this.mediaReconnectTimer
+        || this.mediaReconnectInFlight
+        || generation !== this.generation
+        || this.expectedClose
+        || !this.sessionId
+        || !this.whepUrl
+      ) return;
+      const attempt = this.mediaReconnectAttempt + 1;
+      const retryDelayMs = delayMs === null
+        ? Math.min(8000, this.mediaReconnectBaseMs * (2 ** Math.min(attempt - 1, 4)))
+        : Math.max(0, Number(delayMs) || 0);
+      this._setState("connecting", {
+        protocol: "webrtc",
+        codec: "h264",
+        reconnecting: true,
+        reason,
+        attempt,
+      });
+      this.mediaReconnectTimer = global.setTimeout(() => {
+        this.mediaReconnectTimer = 0;
+        void this._reconnectMedia(generation, reason);
+      }, retryDelayMs);
+    }
+
+    async _reconnectMedia(generation, reason) {
+      if (
+        this.mediaReconnectInFlight
+        || generation !== this.generation
+        || this.expectedClose
+        || !this.sessionId
+      ) return;
+      this.mediaReconnectInFlight = true;
+      this.mediaReconnectAttempt += 1;
+      const attempt = this.mediaReconnectAttempt;
+      const previousPeer = this.peer;
+      const previousReader = this.trackReader;
+      this.peer = null;
+      this.receiver = null;
+      this.trackReader = null;
+      this.trackPump = null;
+      this.whepResourceUrl = "";
+      this.firstFrameTimestampUs = null;
+      this.timestampFrameBase = Math.max(
+        this.processedFrames,
+        Number(this.mediaBatches[0]?.firstFrameIndex || 0),
+      );
+      this.video.srcObject = null;
+      try {
+        void Promise.resolve(previousReader?.cancel?.("WebRTC media reconnect")).catch(() => {});
+      } catch {}
+      try {
+        previousPeer?.close?.();
+      } catch {}
+      try {
+        await this._openWhep(this.whepUrl, generation);
+        if (generation !== this.generation || this.expectedClose) return;
+        this.mediaReconnectInFlight = false;
+        this._startStats();
+        this._handlePeerConnectionState(this.peer, generation);
+      } catch (error) {
+        this.mediaReconnectInFlight = false;
+        if (generation !== this.generation || this.expectedClose) return;
+        if (attempt >= this.mediaReconnectMaxAttempts) {
+          const terminalError = new Error(
+            `WebRTC media reconnect failed after ${attempt} attempts: ${error.message || reason}`,
+          );
+          this._setState("error", {
+            message: terminalError.message,
+            protocol: "webrtc",
+            codec: "h264",
+          });
+          this.onError(terminalError);
+          return;
+        }
+        this._scheduleMediaReconnect(
+          generation,
+          error.message || reason || "media reconnect failed",
+        );
+      }
     }
 
     _canManagePlayback() {
@@ -514,7 +661,7 @@
         this.firstFrameTimestampUs = timestampUs;
       }
       const sourceFrameIndex = Number.isFinite(timestampUs) && this.firstFrameTimestampUs !== null
-        ? Math.max(0, Math.round(
+        ? this.timestampFrameBase + Math.max(0, Math.round(
             (timestampUs - this.firstFrameTimestampUs) * this.mediaFps / 1_000_000,
           ))
         : fallbackIndex;
@@ -722,6 +869,8 @@
               totalFreezesDurationMs: Number(report.totalFreezesDuration || 0) * 1000,
               roundTripTimeMs,
               availableIncomingMbps: availableIncomingBitrate / 1_000_000,
+              connectionState: String(peer.connectionState || ""),
+              iceConnectionState: String(peer.iceConnectionState || ""),
               managedPlayback: this._canManagePlayback(),
               codec: "h264",
               protocol: "webrtc",
