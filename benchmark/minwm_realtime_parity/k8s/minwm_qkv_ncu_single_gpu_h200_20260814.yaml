@@ -16,7 +16,7 @@ spec:
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: minwm-qkv-ncu-single-gpu-h200-20260814-02
+  name: minwm-qkv-ncu-single-gpu-h200-20260814-03
   namespace: default
   labels:
     seedleap.ai/owner: chenshengdong
@@ -61,7 +61,7 @@ spec:
             - -lc
             - |
               set -euo pipefail
-              run_dir="/results/attempts/${HOSTNAME}/minwm-qkv-ncu-single-gpu-h200-20260814-02"
+              run_dir="/results/attempts/${HOSTNAME}/minwm-qkv-ncu-single-gpu-h200-20260814-03"
               mkdir -p "$run_dir"
               record_exit() {
                 local status=$?
@@ -70,7 +70,8 @@ spec:
               }
               trap record_exit EXIT
               find /results/attempts -maxdepth 5 -type f -printf '%p\t%s bytes\n' | sort | tee "$run_dir/prior-pvc-files.txt"
-              git clone --depth=1 --branch codex/minwm-fusedops-ncu-single-gpu "https://x-access-token:${GITHUB_TOKEN}@github.com/seedleap/sglang.git" /workspace/sglang
+              git clone --no-checkout "https://x-access-token:${GITHUB_TOKEN}@github.com/seedleap/sglang.git" /workspace/sglang
+              git -C /workspace/sglang checkout --detach b39b23c65314a3cf5f4c93370e79801154eaf79b
               cd /workspace/sglang
               test "$(git rev-parse HEAD)" = b39b23c65314a3cf5f4c93370e79801154eaf79b
               export PYTHONPATH="$PWD/python"

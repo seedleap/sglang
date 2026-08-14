@@ -28,6 +28,10 @@ Spot 节点获得后，GPU0 与 GPU1 跑独立同构 A/B pair（交叉顺序）�
 `...-02` 启动时必须先列出旧 attempt 文件并记录大小，之后才允许采集。首版缺少 NVTX 过滤且
 对多次迭代做 full-set replay，不能把失败解释成 kernel 结论。
 
+`...-02` 复现并定位了 runner provenance 缺口：shallow clone 可变分支后断言旧 SHA，分支在
+manifest 提交后已前进，因此在 NCU 预检前失败。`...-03` 改为完整 SHA 的 detached checkout；
+前两次均只属于 runner-invalid，不得进入性能结论。
+
 ## 验收与决策
 
 1. candidate projection duration 至少不差于 baseline 总 duration，且 Tensor throughput 不降；
