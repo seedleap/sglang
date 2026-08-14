@@ -97,6 +97,10 @@ const SESSION_MAX_LIFETIME_SECONDS = Math.max(
 );
 const SESSION_MAX_LIFETIME_MS = SESSION_MAX_LIFETIME_SECONDS * 1000;
 const EXPERIENCE_BUSY_MESSAGE = `当前正有人体验，请等待${SESSION_MAX_LIFETIME_SECONDS}s`;
+const GAMEPLAY_RECORDING_FPS = Math.max(
+  8,
+  Math.min(24, Math.trunc(configuredNumber("gameplayRecordingFps", 15))),
+);
 const BROWSER_USER_ID_STORAGE_KEY = "sglang-realtime-user-id";
 const MIN_RENDER_TIMER_FPS = 30;
 const MAX_RENDER_TIMER_FPS = 60;
@@ -130,19 +134,13 @@ const CONTROL_ACTION_META = {
   k: { label: "Pitch -", type: "rotation", axis: "-pitch", amount: "4deg/frame" },
   l: { label: "Yaw +", type: "rotation", axis: "+yaw", amount: "6deg/frame" },
 };
-const RECORDING_STAGE_WIDTH = 1600;
-const RECORDING_STAGE_TOPBAR_HEIGHT = 54;
-const RECORDING_STAGE_PREVIEW_HEIGHT = 586;
-const RECORDING_STAGE_CONTROLS_HEIGHT = 144;
-const RECORDING_STAGE_TIMELINE_HEIGHT = 48;
-const RECORDING_STAGE_TELEMETRY_HEIGHT = 96;
-const RECORDING_STAGE_HEIGHT =
-  RECORDING_STAGE_TOPBAR_HEIGHT +
-  RECORDING_STAGE_PREVIEW_HEIGHT +
-  RECORDING_STAGE_CONTROLS_HEIGHT +
-  RECORDING_STAGE_TIMELINE_HEIGHT +
-  RECORDING_STAGE_TELEMETRY_HEIGHT;
+const RECORDING_STAGE_WIDTH = 1280;
+const RECORDING_STAGE_HEIGHT = 720;
+const RECORDING_STAGE_TOPBAR_HEIGHT = 48;
+const RECORDING_STAGE_PREVIEW_HEIGHT = RECORDING_STAGE_HEIGHT - RECORDING_STAGE_TOPBAR_HEIGHT;
 const RECORDING_STAGE_PADDING = 18;
+const RECORDING_PROMPT_STATUS_HOLD_MS = 1600;
+const RECORDING_READY_TOAST_MS = 5000;
 
 function applyRuntimeUiConfig() {
   for (const key of ["minwm", "lingbot2"]) {
@@ -526,22 +524,27 @@ let socketServerError = "";
 let renderedPreviewFrames = 0;
 let previewScaleFrame = 0;
 let recordingActive = false;
-let recordingSamples = [];
-let recordingEncoder = null;
-let recordingEncoderReady = null;
-let recordingEncoderConfig = null;
+let recordingTracks = [];
 let recordingFrameIndex = 0;
 let recordingFps = DEFAULT_TARGET_FPS;
 let recordingTimer = 0;
+let recordingFrameTimer = 0;
+let recordingStartedPerfMs = 0;
+let recordingElapsedMs = 0;
+let recordingDroppedFrames = 0;
 let recordingSaving = false;
-let recordingEncodeChain = Promise.resolve();
 let recordingMode = "";
-let recordingMediaRecorder = null;
-let recordingMediaChunks = [];
-let recordingCaptureStream = null;
-let recordingMimeType = "video/mp4";
 let recordingDirectoryHandle = null;
 let recordingBaseFileName = "";
+let recordingDownloads = [];
+let recordingReadyToastTimer = 0;
+let recordingReadyToastHideTimer = 0;
+let recordingPromptDraft = "";
+let recordingPromptSubmitted = "";
+let recordingPromptStatus = "idle";
+let recordingPromptStatusPerfMs = 0;
+let recordingPromptChangeType = "";
+const recordingActionPulseUntil = new Map();
 let currentSessionArtifact = null;
 let recordingArtifact = null;
 let currentTrace = null;
@@ -588,7 +591,9 @@ const lingbot2Canvas = $("lingbot2Viewport");
 const scratchCanvas = document.createElement("canvas");
 const scratchCtx = scratchCanvas.getContext("2d", { alpha: false });
 const recordingCanvas = document.createElement("canvas");
-const recordingCtx = recordingCanvas.getContext("2d", { alpha: false });
+let recordingCtx = recordingCanvas.getContext("2d", { alpha: false });
+const zingRecordingCanvas = document.createElement("canvas");
+const zingRecordingCtx = zingRecordingCanvas.getContext("2d", { alpha: false });
 const playbackController = new RealtimePlaybackController({
   mode: "adaptive",
   targetFps: DEFAULT_TARGET_FPS,
@@ -918,7 +923,10 @@ const promptRewriteController = new PromptRewriteController({
     if (metadata.phase === "restore" && eventId) {
       setPromptRewriteStatus("已恢复上一条持久指令", "persistent");
     }
-    if (eventId) appendPromptLog(prompt, metadata);
+    if (eventId) {
+      appendPromptLog(prompt, metadata);
+      markRecordingPromptSent(prompt, metadata, eventId);
+    }
     return eventId;
   },
   restoreDelayMs: 10000,
@@ -930,6 +938,8 @@ let lastRenderedEventId = 0;
 let primaryHasVisibleFrame = false;
 let sessionCountdownTimer = 0;
 let sessionCountdownDeadlineMs = 0;
+let worldExperiencePending = false;
+let worldExperienceReady = false;
 const sessionLifetimeGuard = new SessionLifetimeGuard({
   durationMs: SESSION_MAX_LIFETIME_MS,
   onExpire: () => expireSessionLifetime({ closeSessions: true }),
@@ -942,19 +952,43 @@ function isSessionLifetimeReason(reason) {
 function resetSessionLifetimeUi() {
   sessionLifetimeGuard.cancel();
   stopSessionCountdown();
+  hideRecordingReadyToast({ immediate: true });
   sessionLifetimeExpired = false;
   sessionPlayable = false;
+  worldExperiencePending = false;
+  worldExperienceReady = false;
   $("sessionNotice").hidden = true;
+  updateRecordButton();
+}
+
+function markWorldExperienceReady(modelKey) {
+  if (!worldExperiencePending || worldExperienceReady || sessionLifetimeExpired) return false;
+  worldExperiencePending = false;
+  worldExperienceReady = true;
+  sessionLifetimeGuard.start();
+  startSessionCountdown();
+  startRecording({ source: "first_visible_frame" });
+  setStatus("Live", "live");
+  $("sessionNotice").hidden = true;
+  addHistory(`world ready · ${modelLabel(modelKey)} visible · timer and dual recordings started`);
+  return true;
+}
+
+function stopWorldExperienceTiming({ recordingReason = "session_closed" } = {}) {
+  worldExperiencePending = false;
+  worldExperienceReady = false;
+  sessionPlayable = false;
+  sessionLifetimeGuard.cancel();
+  stopSessionCountdown();
+  if (recordingActive) void stopRecording({ reason: recordingReason });
+  updateRecordButton();
 }
 
 function markSessionPlayable(modelKey) {
   if (sessionPlayable || sessionLifetimeExpired || !modelSelected(modelKey)) return false;
   sessionPlayable = true;
-  sessionLifetimeGuard.start();
-  startSessionCountdown();
-  setStatus("Live", "live");
+  markWorldExperienceReady(modelKey);
   recordTrajectoryEvent("session_playable", { model: modelKey });
-  addHistory(`可玩计时开始 · ${modelLabel(modelKey)} 首帧已显示`);
   return true;
 }
 
@@ -1021,6 +1055,36 @@ function showSessionNotice(message) {
   $("sessionNotice").hidden = false;
 }
 
+function hideRecordingReadyToast({ immediate = false } = {}) {
+  if (recordingReadyToastTimer) window.clearTimeout(recordingReadyToastTimer);
+  if (recordingReadyToastHideTimer) window.clearTimeout(recordingReadyToastHideTimer);
+  recordingReadyToastTimer = 0;
+  recordingReadyToastHideTimer = 0;
+  const toast = $("recordingReadyToast");
+  if (!toast) return;
+  toast.classList.remove("is-visible");
+  if (immediate) {
+    toast.hidden = true;
+    return;
+  }
+  recordingReadyToastHideTimer = window.setTimeout(() => {
+    if (!toast.classList.contains("is-visible")) toast.hidden = true;
+    recordingReadyToastHideTimer = 0;
+  }, 180);
+}
+
+function showRecordingReadyToast() {
+  const toast = $("recordingReadyToast");
+  if (!toast) return;
+  hideRecordingReadyToast({ immediate: true });
+  toast.hidden = false;
+  window.requestAnimationFrame(() => toast.classList.add("is-visible"));
+  recordingReadyToastTimer = window.setTimeout(
+    () => hideRecordingReadyToast(),
+    RECORDING_READY_TOAST_MS,
+  );
+}
+
 function isExperienceBusyError(error) {
   const reason = String(error?.reason || "");
   const message = String(error?.message || error || "");
@@ -1029,8 +1093,7 @@ function isExperienceBusyError(error) {
 
 function handleExperienceBusy() {
   promptRewriteController.endSession();
-  sessionLifetimeGuard.cancel();
-  stopSessionCountdown();
+  stopWorldExperienceTiming({ recordingReason: "admission_rejected" });
   dualModelController.close("showcase session is occupied");
   $("connectBtn").disabled = false;
   setStatus("Busy", "error");
@@ -1043,10 +1106,12 @@ function expireSessionLifetime({ closeSessions = false } = {}) {
   if (sessionLifetimeExpired) return;
   sessionLifetimeExpired = true;
   promptRewriteController.endSession();
-  sessionLifetimeGuard.cancel();
-  stopSessionCountdown();
+  const finalizingRecording = recordingActive;
+  stopWorldExperienceTiming({ recordingReason: "session_timeout" });
   if (closeSessions) dualModelController.close("maximum session lifetime reached");
-  showSessionNotice("连接已断开，请重新连接");
+  showSessionNotice(finalizingRecording
+    ? "本轮体验已结束，正在生成游玩录像…"
+    : "连接已断开，请重新连接");
   $("connectBtn").disabled = false;
   setStatus("Disconnected", "error");
   addHistory("连接已断开，请重新连接");
@@ -1749,20 +1814,169 @@ function closeFrames(items) {
 
 function recordingFileName(extension = "mp4") {
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-  return `sglang-realtime-${stamp}.${extension}`;
+  return `world-studio-gameplay-${stamp}.${extension}`;
+}
+
+function createRecordingTrack({ key, label, variant, canvas: targetCanvas, ctx: targetCtx }) {
+  return {
+    key,
+    label,
+    variant,
+    canvas: targetCanvas,
+    ctx: targetCtx,
+    samples: [],
+    encoder: null,
+    encoderReady: null,
+    encoderConfig: null,
+    encodeChain: Promise.resolve(),
+    mediaRecorder: null,
+    mediaChunks: [],
+    captureStream: null,
+    mimeType: recordingMode === "mediarecorder-webm"
+      ? supportedWebmMimeType()
+      : "video/mp4",
+    frameIndex: 0,
+    lastTimestampUs: -1,
+    droppedFrames: 0,
+  };
 }
 
 function updateRecordButton() {
   const button = $("recordBtn");
   button.classList.toggle("is-recording", recordingActive);
   button.classList.toggle("is-saving", recordingSaving);
-  button.disabled = recordingSaving;
+  const sessionLive = worldExperienceReady
+    && sessionCountdownDeadlineMs > Date.now()
+    && !sessionLifetimeExpired;
+  button.disabled = recordingSaving || (!recordingActive && !sessionLive);
   button.setAttribute("aria-pressed", recordingActive ? "true" : "false");
   $("recordLabel").textContent = recordingSaving
-    ? "Saving"
-    : recordingActive ? "Stop" : "Record";
-  const elapsedMs = recordingActive ? recordingFrameIndex / Math.max(1, recordingFps) * 1000 : 0;
+    ? "生成录像"
+    : recordingActive ? "录制中" : "游玩录像";
+  const elapsedMs = recordingActive
+    ? Math.max(0, performance.now() - recordingStartedPerfMs)
+    : recordingElapsedMs;
   $("recordDuration").textContent = formatRecordingDuration(elapsedMs);
+  button.title = recordingActive
+    ? "点击提前结束录像"
+    : sessionLive ? "开始录制当前游玩" : "进入世界后自动开始录制";
+  updateRecordingDownloadButton();
+}
+
+function updateRecordingDownloadButton() {
+  const button = $("recordDownloadBtn");
+  if (!button) return;
+  const ready = recordingDownloads.length === 2;
+  button.hidden = !ready;
+  button.disabled = !ready || recordingSaving;
+  button.setAttribute("aria-disabled", !ready || recordingSaving ? "true" : "false");
+  button.title = ready
+    ? `同步下载 ${recordingDownloads.map((item) => item.fileName).join("、")}`
+    : "两份录像生成后可下载";
+}
+
+function setRecordingDownloads(outputs = []) {
+  for (const item of recordingDownloads) {
+    if (item.url) URL.revokeObjectURL(item.url);
+  }
+  recordingDownloads = outputs
+    .filter((item) => item?.videoBlob && item?.fileName)
+    .map((item) => ({
+      ...item,
+      url: URL.createObjectURL(item.videoBlob),
+    }));
+  updateRecordingDownloadButton();
+}
+
+function downloadGameplayRecordings(event) {
+  if (recordingDownloads.length !== 2 || recordingSaving) {
+    event?.preventDefault?.();
+    return;
+  }
+  event?.preventDefault?.();
+  for (const item of recordingDownloads) {
+    const link = document.createElement("a");
+    link.href = item.url;
+    link.download = item.fileName;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+  }
+  addHistory(`downloaded both gameplay recordings · ${recordingDownloads.map((item) => item.fileName).join(" · ")}`);
+}
+
+function resetRecordingPromptOverlay() {
+  recordingPromptDraft = $("runtimePrompt")?.value || "";
+  recordingPromptSubmitted = "";
+  recordingPromptStatus = recordingPromptDraft ? "typing" : "idle";
+  recordingPromptStatusPerfMs = performance.now();
+  recordingPromptChangeType = "";
+}
+
+function updateRecordingPromptDraft(value) {
+  const next = String(value || "");
+  if (next === recordingPromptDraft) return;
+  recordingPromptDraft = next;
+  if (!recordingPromptSubmitted) {
+    recordingPromptStatus = next ? "typing" : "idle";
+    recordingPromptStatusPerfMs = performance.now();
+  }
+  if (recordingActive) recordTrajectoryEvent("runtime_prompt_input", { value: next });
+}
+
+function markRecordingPromptSubmitted(prompt) {
+  recordingPromptSubmitted = String(prompt || "").trim();
+  recordingPromptStatus = "rewriting";
+  recordingPromptStatusPerfMs = performance.now();
+  recordingPromptChangeType = "";
+  if (recordingActive) {
+    recordTrajectoryEvent("runtime_prompt_submitted", {
+      prompt: recordingPromptSubmitted,
+    });
+  }
+}
+
+function markRecordingPromptSent(prompt, metadata = {}, eventId = null) {
+  if (metadata.trigger === "rule" || metadata.phase === "restore") return;
+  recordingPromptSubmitted = String(
+    metadata.instruction || recordingPromptSubmitted || prompt || "",
+  ).trim();
+  recordingPromptStatus = "sent";
+  recordingPromptStatusPerfMs = performance.now();
+  recordingPromptChangeType = metadata.changeType || "persistent";
+  if (recordingActive) {
+    recordTrajectoryEvent("runtime_prompt_sent", {
+      event_id: eventId,
+      user_prompt: recordingPromptSubmitted,
+      rewritten_prompt: prompt,
+      change_type: recordingPromptChangeType,
+    });
+  }
+}
+
+function markRecordingPromptFailed(message = "") {
+  recordingPromptStatus = "error";
+  recordingPromptStatusPerfMs = performance.now();
+  if (recordingActive) {
+    recordTrajectoryEvent("runtime_prompt_failed", {
+      user_prompt: recordingPromptSubmitted,
+      error: String(message || "prompt rewrite failed"),
+    });
+  }
+}
+
+function recordingPromptOverlaySnapshot(now = performance.now()) {
+  const heldStatus = ["sent", "error"].includes(recordingPromptStatus);
+  if (heldStatus && now - recordingPromptStatusPerfMs > RECORDING_PROMPT_STATUS_HOLD_MS) {
+    recordingPromptSubmitted = "";
+    recordingPromptStatus = recordingPromptDraft ? "typing" : "idle";
+    recordingPromptChangeType = "";
+  }
+  return {
+    text: recordingPromptSubmitted || recordingPromptDraft,
+    status: recordingPromptStatus,
+    changeType: recordingPromptChangeType,
+  };
 }
 
 function formatRecordingDuration(elapsedMs) {
@@ -2241,7 +2455,7 @@ function jsonSafe(value, depth = 0) {
   return String(value);
 }
 
-function startRecording() {
+function startRecording({ source = "manual" } = {}) {
   if (recordingActive || recordingSaving) return;
   recordingMode = selectRecordingMode();
   if (!recordingMode) {
@@ -2250,43 +2464,62 @@ function startRecording() {
     return;
   }
   recordingActive = true;
-  recordingSamples = [];
-  recordingEncoder = null;
-  recordingEncoderReady = null;
-  recordingEncoderConfig = null;
-  recordingMediaRecorder = null;
-  recordingMediaChunks = [];
-  recordingCaptureStream = null;
-  recordingMimeType = recordingMode === "mediarecorder-webm"
-    ? supportedWebmMimeType()
-    : "video/mp4";
+  setRecordingDownloads([]);
+  recordingTracks = [
+    createRecordingTrack({
+      key: "comparison",
+      label: "Zing × LingBot2",
+      variant: "comparison",
+      canvas: recordingCanvas,
+      ctx: recordingCtx,
+    }),
+    createRecordingTrack({
+      key: "zing",
+      label: "Zing",
+      variant: "zing",
+      canvas: zingRecordingCanvas,
+      ctx: zingRecordingCtx,
+    }),
+  ];
   recordingFrameIndex = 0;
-  recordingFps = Math.max(1, previewPlaybackTargetFps());
-  recordingEncodeChain = Promise.resolve();
+  recordingFps = Math.max(1, Math.min(GAMEPLAY_RECORDING_FPS, previewPlaybackTargetFps()));
+  recordingStartedPerfMs = performance.now();
+  recordingElapsedMs = 0;
+  recordingDroppedFrames = 0;
   recordingBaseFileName = recordingFileName().replace(/\.[^.]*$/, "");
+  recordingActionPulseUntil.clear();
+  resetRecordingPromptOverlay();
   recordingArtifact = ensureSessionArtifact();
   recordingArtifact.recording = {
     base_file_name: recordingBaseFileName,
     started_at: new Date().toISOString(),
     started_client_ms: artifactClientMs(recordingArtifact),
     mode: recordingMode,
-    mime_type: recordingMimeType,
+    mime_type: recordingTracks[0].mimeType,
     capture_scope: "stage",
     capture_width: RECORDING_STAGE_WIDTH,
     capture_height: RECORDING_STAGE_HEIGHT,
     target_fps: recordingFps,
+    timing: "wall_clock",
+    source,
+    variants: recordingTracks.map((track) => track.key),
   };
-  if (recordingMode === "mediarecorder-webm") startWebmRecording();
-  recordTrajectoryEvent("record_start", { target_fps: recordingFps });
+  if (recordingMode === "mediarecorder-webm") {
+    for (const track of recordingTracks) startWebmRecording(track);
+  }
+  startRecordingFramePump();
+  recordTrajectoryEvent("record_start", { target_fps: recordingFps, source });
   recordingTimer = window.setInterval(updateRecordButton, 250);
   updateRecordButton();
   updateRecordFolderButton();
-  addHistory("recording started");
+  addHistory("dual recording started · comparison + Zing");
 }
 
-async function stopRecording() {
+async function stopRecording({ reason = "manual" } = {}) {
   if (!recordingActive || recordingSaving) return;
+  recordingElapsedMs = Math.max(0, performance.now() - recordingStartedPerfMs);
   recordingActive = false;
+  stopRecordingFramePump();
   if (recordingTimer) {
     window.clearInterval(recordingTimer);
     recordingTimer = 0;
@@ -2296,86 +2529,108 @@ async function stopRecording() {
   updateRecordFolderButton();
 
   const extension = recordingMode === "mediarecorder-webm" ? "webm" : "mp4";
-  const fileName = `${recordingBaseFileName || recordingFileName(extension).replace(/\.[^.]*$/, "")}.${extension}`;
   try {
     recordTrajectoryEvent("record_stop", {
-      encoded_frames: recordingSamples.length,
+      encoded_frames: Object.fromEntries(
+        recordingTracks.map((track) => [track.key, track.samples.length]),
+      ),
       captured_frames: recordingFrameIndex,
       mode: recordingMode,
+      reason,
+      elapsed_ms: Math.round(recordingElapsedMs),
+      dropped_frames: Object.fromEntries(
+        recordingTracks.map((track) => [track.key, track.droppedFrames]),
+      ),
     });
-    const videoBlob = recordingMode === "mediarecorder-webm"
-      ? await stopWebmRecording()
-      : await buildMp4RecordingBlob();
-    await saveRecordingArtifactFiles(videoBlob, fileName);
-    addHistory(`saved ${recordingFrameIndex} frames · ${extension}/json/html`);
+    const baseFileName = recordingBaseFileName
+      || recordingFileName(extension).replace(/\.[^.]*$/, "");
+    const outputs = await Promise.all(recordingTracks.map(async (track) => ({
+      key: track.key,
+      label: track.label,
+      fileName: `${baseFileName}-${track.key}.${extension}`,
+      videoBlob: recordingMode === "mediarecorder-webm"
+        ? await stopWebmRecording(track)
+        : await buildMp4RecordingBlob(track),
+    })));
+    await saveRecordingArtifactFiles(outputs, { deferDownload: true });
+    addHistory(`both gameplay recordings ready · ${recordingFrameIndex} synchronized frames · ${extension}`);
+    if (["session_timeout", "session_closed", "primary_disconnected"].includes(reason)) {
+      showSessionNotice("两份游玩录像已生成，可点击右上角同步下载");
+      showRecordingReadyToast();
+    }
   } catch (error) {
     if (error?.name === "AbortError") {
       addHistory("recording save canceled");
     } else {
       addHistory(error.message || "recording save failed");
       setStatus("Save failed", "error");
+      showSessionNotice("游玩录像生成失败，请重新体验后再试");
     }
   } finally {
-    recordingEncoder?.close?.();
-    recordingEncoder = null;
-    recordingEncoderReady = null;
-    stopRecordingCaptureStream();
-    recordingMediaRecorder = null;
-    recordingMediaChunks = [];
-    recordingCaptureStream = null;
+    for (const track of recordingTracks) {
+      track.encoder?.close?.();
+      track.encoder = null;
+      track.encoderReady = null;
+      stopRecordingCaptureStream(track);
+      track.mediaRecorder = null;
+      track.mediaChunks = [];
+      track.captureStream = null;
+    }
     recordingMode = "";
     recordingSaving = false;
-    recordingSamples = [];
+    recordingTracks = [];
     updateRecordButton();
     updateRecordFolderButton();
   }
 }
 
-async function buildMp4RecordingBlob() {
-  await recordingEncodeChain;
-  if (!recordingEncoder || !recordingSamples.length) throw new Error("No frames were recorded");
-  await recordingEncoder.flush();
-  return buildRecordingMp4();
+async function buildMp4RecordingBlob(track) {
+  await track.encodeChain;
+  if (!track.encoder) throw new Error(`No ${track.label} frames were recorded`);
+  await track.encoder.flush();
+  if (!track.samples.length) throw new Error(`No ${track.label} frames were recorded`);
+  return buildRecordingMp4(track);
 }
 
-function startWebmRecording() {
-  drawRecordingStageFrame(canvas);
-  recordingMediaChunks = [];
-  recordingCaptureStream = recordingCanvas.captureStream(recordingFps);
-  recordingMediaRecorder = new MediaRecorder(
-    recordingCaptureStream,
-    recordingMimeType ? { mimeType: recordingMimeType } : undefined,
+function startWebmRecording(track) {
+  drawRecordingStageFrame(canvas, track);
+  track.mediaChunks = [];
+  track.captureStream = track.canvas.captureStream(recordingFps);
+  track.mediaRecorder = new MediaRecorder(
+    track.captureStream,
+    track.mimeType ? { mimeType: track.mimeType } : undefined,
   );
-  recordingMimeType = recordingMediaRecorder.mimeType || recordingMimeType || "video/webm";
-  recordingMediaRecorder.ondataavailable = (event) => {
-    if (event.data?.size) recordingMediaChunks.push(event.data);
+  track.mimeType = track.mediaRecorder.mimeType || track.mimeType || "video/webm";
+  track.mediaRecorder.ondataavailable = (event) => {
+    if (event.data?.size) track.mediaChunks.push(event.data);
   };
-  recordingMediaRecorder.onerror = (event) => {
+  track.mediaRecorder.onerror = (event) => {
     recordingActive = false;
-    addHistory(event.error?.message || "recording media recorder failed");
+    stopRecordingFramePump();
+    addHistory(event.error?.message || `${track.label} recorder failed`);
     updateRecordButton();
   };
-  recordingMediaRecorder.start(250);
+  track.mediaRecorder.start(250);
 }
 
-function stopWebmRecording() {
+function stopWebmRecording(track) {
   return new Promise((resolve, reject) => {
-    const recorder = recordingMediaRecorder;
+    const recorder = track.mediaRecorder;
     if (!recorder) {
-      reject(new Error("No WebM recorder was started"));
+      reject(new Error(`No ${track.label} WebM recorder was started`));
       return;
     }
     recorder.onstop = () => {
-      stopRecordingCaptureStream();
-      if (!recordingMediaChunks.length) {
-        reject(new Error("No frames were recorded"));
+      stopRecordingCaptureStream(track);
+      if (!track.mediaChunks.length) {
+        reject(new Error(`No ${track.label} frames were recorded`));
         return;
       }
-      resolve(new Blob(recordingMediaChunks, { type: recordingMimeType || "video/webm" }));
+      resolve(new Blob(track.mediaChunks, { type: track.mimeType || "video/webm" }));
     };
     recorder.onerror = (event) => {
-      stopRecordingCaptureStream();
-      reject(event.error || new Error("recording media recorder failed"));
+      stopRecordingCaptureStream(track);
+      reject(event.error || new Error(`${track.label} recorder failed`));
     };
     if (recorder.state === "inactive") {
       recorder.onstop();
@@ -2390,83 +2645,113 @@ function stopWebmRecording() {
   });
 }
 
-function stopRecordingCaptureStream() {
-  for (const track of recordingCaptureStream?.getTracks?.() || []) track.stop();
-  recordingCaptureStream = null;
+function stopRecordingCaptureStream(track) {
+  for (const streamTrack of track?.captureStream?.getTracks?.() || []) streamTrack.stop();
+  if (track) track.captureStream = null;
 }
 
-function recordDecodedFrameBatch(decodedFrames) {
-  if (!recordingActive || recordingSaving) return;
-  for (const item of decodedFrames) {
-    if (!recordingActive) break;
-    recordDecodedFrame(item.image);
-  }
-  updateRecordButton();
+function startRecordingFramePump() {
+  stopRecordingFramePump();
+  captureRecordingFrame();
+  recordingFrameTimer = window.setInterval(
+    captureRecordingFrame,
+    Math.max(32, Math.round(1000 / Math.max(1, recordingFps))),
+  );
 }
 
-function recordDecodedFrame(image) {
+function stopRecordingFramePump() {
+  if (recordingFrameTimer) window.clearInterval(recordingFrameTimer);
+  recordingFrameTimer = 0;
+}
+
+function captureRecordingFrame() {
   if (!recordingActive || recordingSaving) return;
+  const elapsedMs = Math.max(0, performance.now() - recordingStartedPerfMs);
+  recordingElapsedMs = elapsedMs;
+  for (const track of recordingTracks) drawRecordingStageFrame(canvas, track);
+  recordingFrameIndex += 1;
   if (recordingMode === "mediarecorder-webm") {
-    drawRecordingStageFrame(image);
-    recordingFrameIndex += 1;
-    recordingMediaRecorder?.requestData?.();
+    for (const track of recordingTracks) track.frameIndex += 1;
     return;
   }
-  const frameIndex = recordingFrameIndex;
+  for (const track of recordingTracks) captureRecordingTrack(track, elapsedMs);
+  recordingDroppedFrames = recordingTracks.reduce(
+    (sum, track) => sum + track.droppedFrames,
+    0,
+  );
+}
+
+function captureRecordingTrack(track, elapsedMs) {
+  if (track.encoder?.encodeQueueSize > 4) {
+    track.droppedFrames += 1;
+    return;
+  }
+  const frameIndex = track.frameIndex;
   const duration = Math.round(1_000_000 / Math.max(1, recordingFps));
-  const timestamp = frameIndex * duration;
+  const timestamp = Math.max(track.lastTimestampUs + 1, Math.round(elapsedMs * 1000));
+  track.lastTimestampUs = timestamp;
   let frame;
   try {
-    frame = createRecordingFrame(image, timestamp, duration);
+    frame = new VideoFrame(track.canvas, { timestamp, duration });
   } catch (error) {
     recordingActive = false;
-    addHistory(error.message || "recording frame capture failed");
+    stopRecordingFramePump();
+    addHistory(error.message || `${track.label} frame capture failed`);
     updateRecordButton();
     return;
   }
-  recordingFrameIndex += 1;
-  recordingEncodeChain = recordingEncodeChain
+  track.frameIndex += 1;
+  track.encodeChain = track.encodeChain
     .then(async () => {
-      await ensureRecordingEncoder(frame.displayWidth, frame.displayHeight);
-      recordingEncoder.encode(frame, { keyFrame: frameIndex === 0 || frameIndex % 120 === 0 });
-      frame.close();
+      try {
+        await ensureRecordingEncoder(track, frame.displayWidth, frame.displayHeight);
+        track.encoder.encode(frame, { keyFrame: frameIndex === 0 || frameIndex % 120 === 0 });
+      } finally {
+        frame.close();
+      }
     })
     .catch((error) => {
-      frame.close();
       recordingActive = false;
-      addHistory(error.message || "recording encode failed");
+      stopRecordingFramePump();
+      addHistory(error.message || `${track.label} encode failed`);
       updateRecordButton();
     });
 }
 
-function createRecordingFrame(image, timestamp, duration) {
-  drawRecordingStageFrame(image);
-  return new VideoFrame(recordingCanvas, { timestamp, duration });
-}
-
-function drawRecordingStageFrame(image) {
-  ensureRecordingStageCanvas();
+function drawRecordingStageFrame(image, track = recordingTracks[0] || {
+  variant: "comparison",
+  canvas: recordingCanvas,
+  ctx: recordingCtx,
+}) {
+  const previousCtx = recordingCtx;
+  recordingCtx = track.ctx;
+  ensureRecordingStageCanvas(track.canvas);
   const minwmSource = recordingDrawableSource(image || canvas);
   recordingCtx.save();
-  recordingCtx.imageSmoothingEnabled = true;
-  recordingCtx.imageSmoothingQuality = "medium";
-  recordingCtx.fillStyle = "#11140f";
-  recordingCtx.fillRect(0, 0, RECORDING_STAGE_WIDTH, RECORDING_STAGE_HEIGHT);
-  drawRecordingTopbar();
-  drawRecordingComparisonPreview(minwmSource, lingbot2Canvas);
-  drawRecordingControls();
-  drawRecordingTimeline();
-  drawRecordingTelemetry();
-  recordingCtx.restore();
+  try {
+    recordingCtx.imageSmoothingEnabled = true;
+    recordingCtx.imageSmoothingQuality = "medium";
+    recordingCtx.fillStyle = "#11140f";
+    recordingCtx.fillRect(0, 0, RECORDING_STAGE_WIDTH, RECORDING_STAGE_HEIGHT);
+    drawRecordingTopbar(track.variant);
+    if (track.variant === "zing") drawRecordingZingPreview(minwmSource);
+    else drawRecordingComparisonPreview(minwmSource, lingbot2Canvas);
+    drawRecordingBottomGradient();
+    drawRecordingControls();
+    drawRecordingPromptComposer();
+  } finally {
+    recordingCtx.restore();
+    recordingCtx = previousCtx;
+  }
 }
 
-function ensureRecordingStageCanvas() {
+function ensureRecordingStageCanvas(targetCanvas = recordingCanvas) {
   if (
-    recordingCanvas.width !== RECORDING_STAGE_WIDTH ||
-    recordingCanvas.height !== RECORDING_STAGE_HEIGHT
+    targetCanvas.width !== RECORDING_STAGE_WIDTH ||
+    targetCanvas.height !== RECORDING_STAGE_HEIGHT
   ) {
-    recordingCanvas.width = RECORDING_STAGE_WIDTH;
-    recordingCanvas.height = RECORDING_STAGE_HEIGHT;
+    targetCanvas.width = RECORDING_STAGE_WIDTH;
+    targetCanvas.height = RECORDING_STAGE_HEIGHT;
   }
 }
 
@@ -2482,65 +2767,61 @@ function recordingDrawableSource(image) {
   return image || canvas;
 }
 
-function drawRecordingTopbar() {
+function drawRecordingTopbar(variant = "comparison") {
   const y = 0;
-  fillRecordingRect(0, y, RECORDING_STAGE_WIDTH, RECORDING_STAGE_TOPBAR_HEIGHT, "#10140f");
+  fillRecordingRect(0, y, RECORDING_STAGE_WIDTH, RECORDING_STAGE_TOPBAR_HEIGHT, "#0b1110");
   recordingCtx.fillStyle = "rgba(232, 234, 223, 0.12)";
   recordingCtx.fillRect(0, RECORDING_STAGE_TOPBAR_HEIGHT - 1, RECORDING_STAGE_WIDTH, 1);
 
   let x = RECORDING_STAGE_PADDING;
-  const dotKind = $("statusDot")?.classList.contains("live")
-    ? "live"
-    : $("statusDot")?.classList.contains("error") ? "error" : "";
   recordingCtx.beginPath();
-  recordingCtx.arc(x + 6, y + RECORDING_STAGE_TOPBAR_HEIGHT / 2, 5, 0, Math.PI * 2);
-  recordingCtx.fillStyle = dotKind === "live" ? "#8ecf9d" : dotKind === "error" ? "#b9543c" : "#687164";
-  recordingCtx.fill();
-  x += 24;
-  drawRecordingLabel(recordingElementText("statusText", "Idle"), x, y + 33, {
-    color: "#e8eadf",
-    font: "18px ui-sans-serif, system-ui, sans-serif",
-    maxWidth: 120,
-  });
-  x += 126;
-  drawRecordingLabel(`chunk ${recordingElementText("minwmChunkText", "-")}`, x, y + 33, {
-    color: "#e8eadf",
-    font: "15px ui-sans-serif, system-ui, sans-serif",
-    maxWidth: 96,
-  });
-  x += 118;
-  drawRecordingPill(x, y + 11, 126, 32, {
-    label: recordingActive ? "Stop" : "Record",
-    detail: recordingElementText("recordDuration", "00:00"),
-    active: recordingActive,
-  });
-  x += 146;
-  drawRecordingPill(x, y + 11, 86, 32, {
-    label: recordingElementText("recordFolderLabel", "Folder"),
-    active: $("recordFolderBtn")?.classList.contains("is-selected"),
+  recordingCtx.moveTo(x, 33);
+  recordingCtx.lineTo(x + 12, 13);
+  recordingCtx.lineTo(x + 24, 33);
+  recordingCtx.closePath();
+  recordingCtx.strokeStyle = "#79dfbd";
+  recordingCtx.lineWidth = 4;
+  recordingCtx.stroke();
+  x += 38;
+  drawRecordingLabel("World Studio", x, y + 31, {
+    color: "#f7faf8",
+    font: "700 17px ui-sans-serif, system-ui, sans-serif",
+    maxWidth: 150,
   });
 
-  let right = RECORDING_STAGE_WIDTH - RECORDING_STAGE_PADDING;
-  right = drawRecordingTopbarStatRight(`buffer ${recordingElementText("minwmBufferText", "-")}`, right, y);
-  right = drawRecordingTopbarStatRight(`action ${recordingElementText("actionStateText", "-")}`, right, y);
-  right = drawRecordingTopbarStatRight(recordingElementText("minwmRateText", "-"), right, y);
-  right = drawRecordingTopbarStatRight(`output ${recordingElementText("outputSizeText", "-")}`, right, y);
-  drawRecordingTopbarStatRight(
-    `Preview ${recordingElementText("previewScaleText", "100%")}`,
-    right,
-    y,
-  );
+  x += 174;
+  recordingCtx.beginPath();
+  recordingCtx.arc(x + 5, y + RECORDING_STAGE_TOPBAR_HEIGHT / 2, 5, 0, Math.PI * 2);
+  recordingCtx.fillStyle = recordingActive ? "#e48674" : "#687164";
+  recordingCtx.fill();
+  drawRecordingLabel(recordingSaving ? "正在生成录像" : "游玩录制", x + 17, y + 30, {
+    color: "rgba(247, 250, 248, 0.82)",
+    font: "600 14px ui-sans-serif, system-ui, sans-serif",
+    maxWidth: 110,
+  });
+  drawRecordingLabel(formatRecordingDuration(recordingElapsedMs), x + 128, y + 30, {
+    color: "#f7faf8",
+    font: "700 14px ui-monospace, SFMono-Regular, monospace",
+    maxWidth: 60,
+  });
+
+  drawRecordingLabel(variant === "zing" ? "Zing" : "Zing  ×  LingBot2", RECORDING_STAGE_WIDTH - RECORDING_STAGE_PADDING, y + 30, {
+    align: "right",
+    color: "rgba(247, 250, 248, 0.72)",
+    font: "600 14px ui-sans-serif, system-ui, sans-serif",
+    maxWidth: 180,
+  });
 }
 
-function drawRecordingTopbarStatRight(text, right, y) {
-  recordingCtx.font = "600 15px ui-sans-serif, system-ui, sans-serif";
-  const width = Math.min(recordingCtx.measureText(text).width, 250);
-  drawRecordingLabel(text, right - width, y + 33, {
-    color: "#fffdf7",
-    font: "600 15px ui-sans-serif, system-ui, sans-serif",
-    maxWidth: width,
+function drawRecordingZingPreview(minwmSource) {
+  const y = RECORDING_STAGE_TOPBAR_HEIGHT;
+  fillRecordingRect(0, y, RECORDING_STAGE_WIDTH, RECORDING_STAGE_PREVIEW_HEIGHT, "#11140f");
+  drawRecordingFittedSource(minwmSource, {
+    x: 0,
+    y,
+    width: RECORDING_STAGE_WIDTH,
+    height: RECORDING_STAGE_PREVIEW_HEIGHT,
   });
-  return right - width - 24;
 }
 
 function drawRecordingComparisonPreview(minwmSource, lingbot2Source) {
@@ -2588,170 +2869,142 @@ function drawRecordingFittedSource(source, previewRect) {
 }
 
 function drawRecordingControls() {
-  const y = RECORDING_STAGE_TOPBAR_HEIGHT + RECORDING_STAGE_PREVIEW_HEIGHT;
-  fillRecordingRect(0, y, RECORDING_STAGE_WIDTH, RECORDING_STAGE_CONTROLS_HEIGHT, "#151912");
-  recordingCtx.fillStyle = "rgba(232, 234, 223, 0.12)";
-  recordingCtx.fillRect(0, y, RECORDING_STAGE_WIDTH, 1);
-  const gap = 38;
-  const clusterWidth = (RECORDING_STAGE_WIDTH - RECORDING_STAGE_PADDING * 2 - gap) / 2;
-  drawRecordingControlCluster("MOVE", RECORDING_STAGE_PADDING, y + 24, clusterWidth, [
+  const y = RECORDING_STAGE_HEIGHT - 112;
+  drawRecordingControlCluster("移动", 24, y, [
     [null, "w", null],
     ["a", "s", "d"],
   ]);
-  drawRecordingControlCluster(
-    "LOOK",
-    RECORDING_STAGE_PADDING + clusterWidth + gap,
-    y + 24,
-    clusterWidth,
-    [
-      [null, "i", null],
-      ["j", "k", "l"],
-    ],
-  );
+  drawRecordingControlCluster("视角", 176, y, [
+    [null, "i", null],
+    ["j", "k", "l"],
+  ]);
 }
 
-function drawRecordingControlCluster(title, x, y, width, rows) {
-  drawRecordingLabel(title, x, y + 61, {
-    color: "rgba(232, 234, 223, 0.62)",
-    font: "15px ui-sans-serif, system-ui, sans-serif",
-    maxWidth: 66,
+function drawRecordingControlCluster(title, x, y, rows) {
+  drawRecordingLabel(title, x, y - 8, {
+    color: "rgba(255, 255, 255, 0.7)",
+    font: "600 11px ui-sans-serif, system-ui, sans-serif",
+    maxWidth: 72,
   });
-  const padX = x + 72;
-  const cellGap = 8;
-  const buttonWidth = (width - 72 - cellGap * 2) / 3;
-  const buttonHeight = 44;
+  const cellGap = 5;
+  const buttonSize = 38;
   rows.forEach((row, rowIndex) => {
     row.forEach((action, columnIndex) => {
       if (!action) return;
       drawRecordingControlButton(
         action,
-        padX + columnIndex * (buttonWidth + cellGap),
-        y + rowIndex * (buttonHeight + cellGap),
-        buttonWidth,
-        buttonHeight,
+        x + columnIndex * (buttonSize + cellGap),
+        y + rowIndex * (buttonSize + cellGap),
+        buttonSize,
+        buttonSize,
       );
     });
   });
 }
 
 function drawRecordingControlButton(action, x, y, width, height) {
-  const active = controlStateController?.activeActions?.has(action);
-  const radius = 5;
-  fillRecordingRoundedRect(x, y, width, height, radius, active ? "#8c9288" : "#eef1ec");
+  const active = controlStateController?.activeActions?.has(action)
+    || Number(recordingActionPulseUntil.get(action) || 0) > performance.now();
+  const radius = 10;
+  fillRecordingRoundedRect(
+    x,
+    y,
+    width,
+    height,
+    radius,
+    active ? "rgba(121, 223, 189, 0.92)" : "rgba(15, 19, 18, 0.72)",
+  );
   strokeRecordingRoundedRect(
     x,
     y,
     width,
     height,
     radius,
-    active ? "#aeb4aa" : "rgba(232, 234, 223, 0.18)",
+    active ? "rgba(227, 255, 246, 0.94)" : "rgba(255, 255, 255, 0.35)",
   );
-  const meta = CONTROL_ACTION_META[action] || {};
-  drawRecordingLabel(meta.label || action.toUpperCase(), x + width / 2, y + 28, {
-    align: "center",
-    color: active ? "#fffdf7" : "#11140f",
-    font: "16px ui-sans-serif, system-ui, sans-serif",
-    maxWidth: width - 34,
-  });
   const keyLabel = action === "i" ? "↑" : action === "j" ? "←" : action === "k" ? "↓" : action === "l" ? "→" : action.toUpperCase();
-  drawRecordingLabel(keyLabel, x + width - 16, y + 16, {
-    align: "right",
-    color: active ? "rgba(255, 253, 247, 0.78)" : "#687164",
-    font: "700 13px ui-sans-serif, system-ui, sans-serif",
-    maxWidth: 28,
+  drawRecordingLabel(keyLabel, x + width / 2, y + 25, {
+    align: "center",
+    color: active ? "#0b1411" : "rgba(255, 255, 255, 0.9)",
+    font: "700 16px ui-sans-serif, system-ui, sans-serif",
+    maxWidth: width - 10,
   });
 }
 
-function drawRecordingTimeline() {
-  const y = RECORDING_STAGE_TOPBAR_HEIGHT +
-    RECORDING_STAGE_PREVIEW_HEIGHT +
-    RECORDING_STAGE_CONTROLS_HEIGHT;
-  fillRecordingRect(0, y, RECORDING_STAGE_WIDTH, RECORDING_STAGE_TIMELINE_HEIGHT, "#11140f");
-  recordingCtx.fillStyle = "rgba(232, 234, 223, 0.12)";
-  recordingCtx.fillRect(0, y, RECORDING_STAGE_WIDTH, 1);
-  const text = [
-    recordingElementText("queueText", "queue 0"),
-    recordingElementText("frameText", "frames 0"),
-    recordingElementText("byteText", "0 MB"),
-  ].join("   ");
-  drawRecordingLabel(text, RECORDING_STAGE_WIDTH - RECORDING_STAGE_PADDING, y + 31, {
-    align: "right",
-    color: "#e8eadf",
-    font: "16px ui-sans-serif, system-ui, sans-serif",
-    maxWidth: RECORDING_STAGE_WIDTH - RECORDING_STAGE_PADDING * 2,
-  });
+function drawRecordingBottomGradient() {
+  const height = 210;
+  const y = RECORDING_STAGE_HEIGHT - height;
+  const gradient = recordingCtx.createLinearGradient(0, y, 0, RECORDING_STAGE_HEIGHT);
+  gradient.addColorStop(0, "rgba(5, 10, 9, 0)");
+  gradient.addColorStop(0.46, "rgba(5, 10, 9, 0.46)");
+  gradient.addColorStop(1, "rgba(5, 10, 9, 0.9)");
+  fillRecordingRect(0, y, RECORDING_STAGE_WIDTH, height, gradient);
 }
 
-function drawRecordingTelemetry() {
-  const y = RECORDING_STAGE_TOPBAR_HEIGHT +
-    RECORDING_STAGE_PREVIEW_HEIGHT +
-    RECORDING_STAGE_CONTROLS_HEIGHT +
-    RECORDING_STAGE_TIMELINE_HEIGHT;
-  fillRecordingRect(0, y, RECORDING_STAGE_WIDTH, RECORDING_STAGE_TELEMETRY_HEIGHT, "#11140f");
-  const rows = [
-    [
-      ["Zing chunk", recordingElementText("minwmChunkText", "-")],
-      ["Zing rate", recordingElementText("minwmRateText", "-")],
-      ["Zing frames", recordingElementText("minwmFramesText", "-")],
-    ],
-    [
-      ["Zing buffer", recordingElementText("minwmBufferText", "-")],
-      ["Zing decode", recordingElementText("minwmDecodeText", "-")],
-      ["Zing lag", recordingElementText("minwmDisplayLagText", "-")],
-    ],
-  ];
-  const cellWidth = RECORDING_STAGE_WIDTH / 3;
-  const cellHeight = RECORDING_STAGE_TELEMETRY_HEIGHT / 2;
-  rows.forEach((row, rowIndex) => {
-    row.forEach(([label, value], columnIndex) => {
-      const x = columnIndex * cellWidth;
-      const cellY = y + rowIndex * cellHeight;
-      recordingCtx.fillStyle = "rgba(232, 234, 223, 0.1)";
-      recordingCtx.fillRect(x, cellY, cellWidth, 1);
-      if (columnIndex > 0) recordingCtx.fillRect(x, cellY, 1, cellHeight);
-      drawRecordingLabel(label, x + 18, cellY + 30, {
-        color: "rgba(232, 234, 223, 0.62)",
-        font: "15px ui-sans-serif, system-ui, sans-serif",
-        maxWidth: cellWidth * 0.45,
-      });
-      drawRecordingLabel(value, x + cellWidth - 18, cellY + 30, {
-        align: "right",
-        color: "#fffdf7",
-        font: "700 16px ui-sans-serif, system-ui, sans-serif",
-        maxWidth: cellWidth * 0.5,
-      });
-    });
-  });
-}
+function drawRecordingPromptComposer() {
+  const snapshot = recordingPromptOverlaySnapshot();
+  const x = 450;
+  const y = RECORDING_STAGE_HEIGHT - 88;
+  const width = 700;
+  const height = 56;
+  const sendSize = 42;
+  const sendX = x + width - sendSize - 7;
+  const sent = snapshot.status === "sent";
+  const failed = snapshot.status === "error";
 
-function drawRecordingPill(x, y, width, height, { label, detail = "", active = false }) {
+  fillRecordingRoundedRect(x, y, width, height, 18, "rgba(244, 247, 245, 0.82)");
+  strokeRecordingRoundedRect(x, y, width, height, 18, "rgba(255, 255, 255, 0.82)");
+
+  const displayText = snapshot.text || "输入世界指令…";
+  const textColor = snapshot.text ? "#17201d" : "rgba(23, 32, 29, 0.48)";
+  drawRecordingLabel(displayText, x + 20, y + 35, {
+    color: textColor,
+    font: "500 18px ui-sans-serif, system-ui, sans-serif",
+    maxWidth: width - sendSize - 54,
+  });
+
+  if (snapshot.text && ["typing", "rewriting"].includes(snapshot.status)) {
+    recordingCtx.font = "500 18px ui-sans-serif, system-ui, sans-serif";
+    const cursorX = Math.min(
+      sendX - 16,
+      x + 21 + recordingCtx.measureText(snapshot.text).width,
+    );
+    if (Math.floor(performance.now() / 450) % 2 === 0) {
+      fillRecordingRect(cursorX, y + 17, 1.5, 22, "rgba(23, 32, 29, 0.78)");
+    }
+  }
+
   fillRecordingRoundedRect(
-    x,
-    y,
-    width,
-    height,
-    6,
-    active ? "#b9543c" : "rgba(238, 241, 236, 0.08)",
+    sendX,
+    y + 7,
+    sendSize,
+    sendSize,
+    14,
+    failed ? "#e48674" : sent ? "#79dfbd" : "rgba(24, 34, 31, 0.9)",
   );
-  strokeRecordingRoundedRect(x, y, width, height, 6, "rgba(232, 234, 223, 0.24)");
-  drawRecordingLabel(label, x + 14, y + 21, {
-    color: "#e8eadf",
-    font: "14px ui-sans-serif, system-ui, sans-serif",
-    maxWidth: width - (detail ? 62 : 28),
+  drawRecordingLabel(sent ? "✓" : failed ? "!" : "→", sendX + sendSize / 2, y + 34, {
+    align: "center",
+    color: sent ? "#0b1411" : "#f7faf8",
+    font: "700 20px ui-sans-serif, system-ui, sans-serif",
+    maxWidth: 26,
   });
-  if (detail) {
-    drawRecordingLabel(detail, x + width - 12, y + 21, {
+
+  if (snapshot.status === "rewriting") {
+    drawRecordingLabel("AI 改写中", sendX - 14, y - 8, {
       align: "right",
-      color: "rgba(232, 234, 223, 0.78)",
-      font: "14px ui-sans-serif, system-ui, sans-serif",
-      maxWidth: 48,
+      color: "rgba(255, 255, 255, 0.82)",
+      font: "600 11px ui-sans-serif, system-ui, sans-serif",
+      maxWidth: 90,
+    });
+  } else if (sent) {
+    const typeLabel = snapshot.changeType === "one_time" ? "一次性指令已发送" : "持久指令已发送";
+    drawRecordingLabel(typeLabel, sendX - 14, y - 8, {
+      align: "right",
+      color: "#b7f4df",
+      font: "600 11px ui-sans-serif, system-ui, sans-serif",
+      maxWidth: 120,
     });
   }
-}
-
-function recordingElementText(id, fallback = "-") {
-  const value = $(id)?.textContent;
-  return value && String(value).trim() ? String(value).trim() : fallback;
 }
 
 function drawRecordingLabel(text, x, y, {
@@ -2810,17 +3063,17 @@ function recordingRoundedRectPath(x, y, width, height, radius) {
   recordingCtx.quadraticCurveTo(x, y, x + r, y);
 }
 
-async function ensureRecordingEncoder(width, height) {
-  if (recordingEncoderReady) return recordingEncoderReady;
-  recordingEncoderReady = createRecordingEncoder(width, height);
-  return recordingEncoderReady;
+async function ensureRecordingEncoder(track, width, height) {
+  if (track.encoderReady) return track.encoderReady;
+  track.encoderReady = createRecordingEncoder(track, width, height);
+  return track.encoderReady;
 }
 
-async function createRecordingEncoder(width, height) {
+async function createRecordingEncoder(track, width, height) {
   const fps = Math.max(1, recordingFps);
   const bitrate = Math.round(Math.min(
-    180_000_000,
-    Math.max(24_000_000, width * height * fps * 0.8),
+    20_000_000,
+    Math.max(6_000_000, width * height * fps * 0.45),
   ));
   const configs = [
     { codec: "avc1.640028", width, height, bitrate, framerate: fps },
@@ -2843,25 +3096,25 @@ async function createRecordingEncoder(width, height) {
     }
   }
   if (!supported) throw new Error("This browser cannot encode H.264 MP4");
-  recordingEncoderConfig = supported;
-  recordingEncoder = new VideoEncoder({
-    output: (chunk, metadata) => recordEncodedChunk(chunk, metadata),
+  track.encoderConfig = supported;
+  track.encoder = new VideoEncoder({
+    output: (chunk, metadata) => recordEncodedChunk(track, chunk, metadata),
     error: (error) => {
       recordingActive = false;
-      addHistory(error.message || "recording encoder failed");
+      addHistory(error.message || `${track.label} encoder failed`);
       updateRecordButton();
     },
   });
-  recordingEncoder.configure(supported);
+  track.encoder.configure(supported);
 }
 
-function recordEncodedChunk(chunk, metadata) {
+function recordEncodedChunk(track, chunk, metadata) {
   if (metadata?.decoderConfig?.description) {
-    recordingEncoderConfig.description = metadata.decoderConfig.description;
+    track.encoderConfig.description = metadata.decoderConfig.description;
   }
   const data = new Uint8Array(chunk.byteLength);
   chunk.copyTo(data);
-  recordingSamples.push({
+  track.samples.push({
     data,
     timestamp: chunk.timestamp,
     duration: chunk.duration || 0,
@@ -2884,8 +3137,8 @@ function sidecarFileName(fileName, extension) {
   return `${String(fileName).replace(/\.[^.]*$/, "")}.${extension}`;
 }
 
-async function saveRecordingArtifactFiles(videoBlob, fileName) {
-  const artifact = finalizeRecordingArtifact(videoBlob, fileName);
+async function saveRecordingArtifactFiles(outputs, { deferDownload = false } = {}) {
+  const artifact = finalizeRecordingArtifact(outputs);
   const jsonFileName = artifact.recording.json_file;
   const htmlFileName = artifact.recording.html_file;
   const jsonBlob = new Blob(
@@ -2896,31 +3149,57 @@ async function saveRecordingArtifactFiles(videoBlob, fileName) {
     [buildReplayHtml(artifact)],
     { type: "text/html" },
   );
-  await saveRecordingFiles([
-    { name: fileName, blob: videoBlob },
+  const files = [
+    ...outputs.map((output) => ({ name: output.fileName, blob: output.videoBlob })),
     { name: jsonFileName, blob: jsonBlob },
     { name: htmlFileName, blob: htmlBlob },
-  ]);
+  ];
+  if (recordingDirectoryHandle) {
+    await saveRecordingFiles(files);
+  } else if (!deferDownload) {
+    await saveRecordingFiles(files);
+  }
+  setRecordingDownloads(outputs);
 }
 
-function finalizeRecordingArtifact(videoBlob, fileName) {
+function finalizeRecordingArtifact(outputs) {
   const artifact = recordingArtifact || ensureSessionArtifact();
-  const jsonFileName = sidecarFileName(fileName, "json");
-  const htmlFileName = sidecarFileName(fileName, "html");
+  const primary = outputs.find((output) => output.key === "comparison") || outputs[0];
+  if (!primary) throw new Error("No recording outputs were generated");
+  const sidecarBaseName = primary.fileName.replace(/-comparison\.[^.]*$/, "");
+  const jsonFileName = `${sidecarBaseName}.json`;
+  const htmlFileName = `${sidecarBaseName}.html`;
+  const tracksByKey = Object.fromEntries(recordingTracks.map((track) => [track.key, track]));
+  const videos = Object.fromEntries(outputs.map((output) => {
+    const track = tracksByKey[output.key];
+    return [output.key, {
+      label: output.label,
+      mime_type: output.videoBlob.type || track?.mimeType || "video/mp4",
+      frames: track?.frameIndex || 0,
+      dropped_frames: track?.droppedFrames || 0,
+      encoded_chunks: recordingMode === "mediarecorder-webm"
+        ? track?.mediaChunks.length || 0
+        : track?.samples.length || 0,
+      video_file: output.fileName,
+      video_url: recordingAssetUrl(output.fileName),
+      video_bytes: output.videoBlob.size,
+    }];
+  }));
   artifact.recording = {
     ...(artifact.recording || {}),
     stopped_at: new Date().toISOString(),
     stopped_client_ms: artifactClientMs(artifact),
     mode: recordingMode,
-    mime_type: videoBlob.type || recordingMimeType,
+    mime_type: primary.videoBlob.type || tracksByKey.comparison?.mimeType || "video/mp4",
     fps: recordingFps,
     frames: recordingFrameIndex,
-    encoded_chunks: recordingMode === "mediarecorder-webm"
-      ? recordingMediaChunks.length
-      : recordingSamples.length,
-    video_file: fileName,
-    video_url: recordingAssetUrl(fileName),
-    video_bytes: videoBlob.size,
+    dropped_frames: recordingDroppedFrames,
+    duration_ms: Math.round(recordingElapsedMs),
+    encoded_chunks: videos.comparison?.encoded_chunks || 0,
+    video_file: primary.fileName,
+    video_url: recordingAssetUrl(primary.fileName),
+    video_bytes: primary.videoBlob.size,
+    videos,
     json_file: jsonFileName,
     json_url: recordingAssetUrl(jsonFileName),
     html_file: htmlFileName,
@@ -3388,13 +3667,13 @@ function escapeHtmlAttribute(value) {
     .replaceAll("'", "&#39;");
 }
 
-function buildRecordingMp4() {
-  if (!recordingEncoderConfig.description) {
+function buildRecordingMp4(track) {
+  if (!track.encoderConfig?.description) {
     throw new Error("H.264 encoder did not return MP4 decoder config");
   }
-  const width = recordingEncoderConfig.width;
-  const height = recordingEncoderConfig.height;
-  const samples = normalizeRecordingSamples(recordingSamples);
+  const width = track.encoderConfig.width;
+  const height = track.encoderConfig.height;
+  const samples = normalizeRecordingSamples(track.samples);
   const mdatPayload = concatBytes(samples.map((sample) => sample.data));
   const ftyp = mp4Box("ftyp", ascii("isom"), u32(0x200), ascii("isom"), ascii("iso2"), ascii("avc1"), ascii("mp41"));
   const mdat = mp4Box("mdat", mdatPayload);
@@ -3404,7 +3683,7 @@ function buildRecordingMp4() {
     height,
     samples,
     firstSampleOffset,
-    avcConfig: new Uint8Array(recordingEncoderConfig.description),
+    avcConfig: new Uint8Array(track.encoderConfig.description),
   });
   return new Blob([ftyp, mdat, moov], { type: "video/mp4" });
 }
@@ -4507,8 +4786,7 @@ function abortCurrentSession(reason = "session closed by client", {
 function closeSession(reason = "session closed by client", clearFrames = true) {
   promptRewriteController.endSession();
   cancelLingbot2Reconnect();
-  sessionLifetimeGuard.cancel();
-  stopSessionCountdown();
+  stopWorldExperienceTiming({ recordingReason: "session_closed" });
   clearQueueOnClose = clearFrames;
   dualModelController.close(reason);
 }
@@ -4531,6 +4809,9 @@ function waitForSocketClose(socket, timeoutMs = RECONNECT_CLOSE_TIMEOUT_MS) {
 }
 
 async function connect() {
+  if (recordingActive) {
+    await stopRecording({ reason: "session_replaced" });
+  }
   promptRewriteController.endSession();
   setPromptRewriteStatus("进入世界后可发送新指令", "");
   cancelLingbot2Reconnect();
@@ -4619,6 +4900,10 @@ async function connect() {
     document.activeElement?.blur?.();
     canvas.tabIndex = 0;
     canvas.focus();
+    worldExperiencePending = true;
+    worldExperienceReady = false;
+    setStatus("Loading world", "live");
+    addHistory("model connected · waiting for first visible Zing frame");
     const connectionReport = await dualModelController.connect(init);
     if (epoch !== streamEpoch) return;
     void rememberEnteredWorld(
@@ -4644,10 +4929,9 @@ async function connect() {
     }
     promptRewriteController.beginSession(init.prompt);
     beginPromptLogSession(init.prompt);
-    setStatus("Starting", "live");
+    if (!worldExperienceReady) setStatus("Loading world", "live");
   } catch (error) {
-    sessionLifetimeGuard.cancel();
-    stopSessionCountdown();
+    stopWorldExperienceTiming({ recordingReason: "startup_failed" });
     $("connectBtn").disabled = false;
     setModelConnectionState("minwm", "error");
     setStatus("Init failed", "error");
@@ -4730,6 +5014,13 @@ function openPrimarySession(init, url) {
       });
       if (isSessionLifetimeReason(event.reason)) {
         expireSessionLifetime({ closeSessions: true });
+      } else if (!socketCloseExpected) {
+        const hadReadyWorld = worldExperienceReady;
+        stopWorldExperienceTiming({ recordingReason: "primary_disconnected" });
+        lingbot2Session.close("Zing primary session closed");
+        if (hadReadyWorld) {
+          showSessionNotice("Zing 连接已中断，已结束计时并生成当前录像");
+        }
       }
       void traceHttpClient?.flushClientEvents().catch(() => {});
       if (!renderedPreviewFrames) setPreviewState("idle");
@@ -4878,8 +5169,8 @@ async function decodeAndEnqueueFrameBatch(header, data, epoch) {
       decode_ms: decodedFrames[0].decodeMs || lastDecodeMs,
     });
   }
-  // record source frames before preview playback can hold or drop for latency
-  recordDecodedFrameBatch(decodedFrames);
+  // Gameplay recording runs from a wall-clock frame pump so control and prompt
+  // timing stays accurate even when model delivery stalls or skips frames.
   const enqueueResult = playbackController.enqueueDecodedFrames(header, decodedFrames, now);
   closeFrames(enqueueResult.droppedFrames);
   lastSampledEventId = Number(header.event_id || lastSampledEventId);
@@ -5741,6 +6032,7 @@ async function sendRuntimePromptUpdate() {
   }
   if (runtimePromptRewritePending) return;
   runtimePromptRewritePending = true;
+  markRecordingPromptSubmitted(prompt);
   input.blur();
   canvas.focus({ preventScroll: true });
   $("sendPromptBtn").disabled = true;
@@ -5749,12 +6041,14 @@ async function sendRuntimePromptUpdate() {
     const result = await promptRewriteController.submit(prompt);
     if (result.ignored) return;
     input.value = "";
+    updateRecordingPromptDraft("");
     if (result.change_type === "one_time") {
       setPromptRewriteStatus("已发送 · 一次性指令，10 秒后恢复持久状态", "one_time");
     } else {
       setPromptRewriteStatus("已发送 · 持久指令", "persistent");
     }
   } catch (error) {
+    markRecordingPromptFailed(error.message || error);
     setPromptRewriteStatus(error.message || "指令改写失败，请重试", "error");
     addHistory(`prompt rewrite failed · ${error.message || error}`);
     input.focus({ preventScroll: true });
@@ -5769,6 +6063,9 @@ $("runtimePrompt").addEventListener("keydown", (event) => {
   if (event.key !== "Enter" || event.shiftKey || event.isComposing) return;
   event.preventDefault();
   sendRuntimePromptUpdate();
+});
+$("runtimePrompt").addEventListener("input", (event) => {
+  updateRecordingPromptDraft(event.currentTarget.value);
 });
 
 function setupVoicePromptInput() {
@@ -5851,13 +6148,21 @@ function setupVoicePromptInput() {
 
 setupVoicePromptInput();
 setupFirstFrameDropZone();
-$("recordBtn").onclick = () => {
+$("recordBtn").onclick = async () => {
   if (recordingActive) {
-    stopRecording();
+    await stopRecording({ reason: "manual" });
   } else {
-    startRecording();
+    const sessionLive = worldExperienceReady
+      && sessionCountdownDeadlineMs > Date.now()
+      && !sessionLifetimeExpired;
+    if (!sessionLive) {
+      showSessionNotice("请先进入世界，再开始游玩录像");
+      return;
+    }
+    startRecording({ source: "manual" });
   }
 };
+$("recordDownloadBtn").onclick = downloadGameplayRecordings;
 $("recordFolderBtn").onclick = () => {
   chooseRecordingDirectory().catch((error) => {
     addHistory(error.message || "record folder selection failed");
@@ -5969,6 +6274,9 @@ class ControlStateController {
     if (active === hadAction) return false;
     if (active) {
       this.activeActions.add(action);
+      if (recordingActive) {
+        recordingActionPulseUntil.set(action, performance.now() + 120);
+      }
     } else {
       this.activeActions.delete(action);
     }

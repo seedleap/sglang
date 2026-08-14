@@ -1288,6 +1288,135 @@ body.world-studio {
 }
 .world-studio .session-countdown b { color: var(--ws-text); }
 .world-studio .session-countdown[hidden] { display: none; }
+.world-studio .gameplay-record-button,
+.world-studio .gameplay-download-button {
+  display: inline-flex;
+  height: 30px;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  border: 1px solid var(--ws-line);
+  border-radius: 999px;
+  padding: 0 12px;
+  background: rgba(255, 255, 255, 0.045);
+  color: var(--ws-text);
+  box-shadow: none;
+  font-size: 11px;
+  font-weight: 620;
+  cursor: pointer;
+  text-decoration: none;
+}
+.world-studio .gameplay-record-button:hover:not(:disabled),
+.world-studio .gameplay-download-button:hover:not(:disabled) {
+  border-color: rgba(121, 223, 189, 0.5);
+  background: rgba(121, 223, 189, 0.1);
+  transform: none;
+}
+.world-studio .gameplay-record-button:disabled {
+  cursor: default;
+  opacity: 0.44;
+}
+.world-studio .gameplay-record-button i {
+  display: block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--ws-muted);
+}
+.world-studio .gameplay-record-button b {
+  min-width: 34px;
+  color: var(--ws-muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+.world-studio .gameplay-record-button #recordLabel {
+  flex: 0 0 auto;
+  min-width: 48px;
+  text-align: left;
+}
+.world-studio .gameplay-record-button.is-recording {
+  border-color: rgba(228, 134, 116, 0.44);
+  background: rgba(228, 134, 116, 0.1);
+}
+.world-studio .gameplay-record-button.is-recording i {
+  background: var(--ws-danger);
+  box-shadow: 0 0 0 4px rgba(228, 134, 116, 0.1);
+  animation: gameplayRecordingPulse 1.3s ease-in-out infinite;
+}
+.world-studio .gameplay-record-button.is-saving { cursor: wait; }
+.world-studio .gameplay-download-button {
+  border-color: rgba(121, 223, 189, 0.35);
+  background: rgba(121, 223, 189, 0.1);
+  color: var(--ws-accent);
+}
+.world-studio .gameplay-download-button svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.8;
+}
+.world-studio .gameplay-download-button[hidden] { display: none; }
+.world-studio .gameplay-download-button[aria-disabled="true"] {
+  pointer-events: none;
+  opacity: 0.5;
+}
+
+.world-studio .recording-ready-toast {
+  position: fixed;
+  top: 66px;
+  right: 22px;
+  z-index: 80;
+  display: flex;
+  width: min(340px, calc(100vw - 32px));
+  align-items: center;
+  gap: 11px;
+  border: 1px solid rgba(121, 223, 189, 0.42);
+  border-radius: 13px;
+  padding: 12px 14px;
+  background: rgba(18, 31, 27, 0.96);
+  color: var(--ws-text);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.38);
+  opacity: 0;
+  transform: translateY(-10px);
+  transition: opacity 160ms ease, transform 160ms ease;
+  pointer-events: none;
+}
+.world-studio .recording-ready-toast[hidden] { display: none; }
+.world-studio .recording-ready-toast.is-visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+.world-studio .recording-ready-toast-icon {
+  display: grid;
+  flex: 0 0 28px;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  border-radius: 50%;
+  background: rgba(121, 223, 189, 0.16);
+  color: var(--ws-accent);
+  font-size: 15px;
+  font-weight: 800;
+}
+.world-studio .recording-ready-toast > span:last-child {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+.world-studio .recording-ready-toast strong { font-size: 12px; }
+.world-studio .recording-ready-toast small {
+  color: var(--ws-muted);
+  font-size: 11px;
+}
+
+@keyframes gameplayRecordingPulse {
+  0%, 100% { opacity: 0.55; }
+  50% { opacity: 1; }
+}
 
 .world-studio .shell {
   display: grid;

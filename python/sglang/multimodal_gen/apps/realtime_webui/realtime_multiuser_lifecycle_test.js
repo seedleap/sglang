@@ -73,8 +73,13 @@ assert.match(
 );
 assert.match(
   appJs,
-  /function markSessionPlayable[\s\S]*?sessionLifetimeGuard\.start\(\);\s*startSessionCountdown\(\);/,
+  /function markSessionPlayable[\s\S]*?markWorldExperienceReady\(modelKey\)/,
   "the countdown should start only when a selected model renders a playable frame",
+);
+assert.match(
+  appJs,
+  /function markWorldExperienceReady\(modelKey\)[\s\S]*?sessionLifetimeGuard\.start\(\);\s*startSessionCountdown\(\);\s*startRecording\(\{ source: "first_visible_frame" \}\)/,
+  "the countdown and recording should start together on the first selected-model frame",
 );
 assert.match(
   appJs,
@@ -93,7 +98,7 @@ assert.match(
 );
 assert.match(
   appJs,
-  /function closeSession[\s\S]*?sessionLifetimeGuard\.cancel\(\);\s*stopSessionCountdown\(\);/,
+  /function closeSession[\s\S]*?stopWorldExperienceTiming\(\{ recordingReason: "session_closed" \}\)/,
   "closing a session should stop and hide the countdown",
 );
 
