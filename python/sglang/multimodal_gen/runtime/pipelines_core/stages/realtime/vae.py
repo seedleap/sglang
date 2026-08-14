@@ -24,9 +24,7 @@ from sglang.multimodal_gen.runtime.realtime.session import (
 from sglang.multimodal_gen.runtime.server_args import ServerArgs
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 from sglang.multimodal_gen.runtime.utils.realtime_trace import (
-    log_realtime_memory_checkpoint,
     log_realtime_trace_for_batch,
-    realtime_memory_trace_metadata,
     realtime_trace_span,
     tensor_trace_metadata,
 )
@@ -72,15 +70,12 @@ class RealtimeVAEDecodeState(BaseRealtimeState):
 class RealtimeImageVAEEncodingStage(ImageVAEEncodingStage):
     """Reuse the first chunk's conditioning image latent across a realtime session."""
 
-    def component_uses(
-        self, server_args: ServerArgs, stage_name: str | None = None
-    ):
+    def component_uses(self, server_args: ServerArgs, stage_name: str | None = None):
         uses = super().component_uses(server_args, stage_name)
         vae_config = getattr(server_args.pipeline_config, "vae_config", None)
-        if (
-            CausalVaeDecodingStage._taehv_checkpoint_path(vae_config) is not None
-            and getattr(server_args, "vae_cpu_offload", False)
-        ):
+        if CausalVaeDecodingStage._taehv_checkpoint_path(
+            vae_config
+        ) is not None and getattr(server_args, "vae_cpu_offload", False):
             # TAEHV only needs the native VAE for the first conditioning-image
             # encode. Avoid prefetching it beside another large component, and
             # make the residency manager clear released allocator storage.
@@ -116,15 +111,6 @@ class RealtimeImageVAEEncodingStage(ImageVAEEncodingStage):
                 return batch
 
         if batch.condition_image is None:
-            if batch.block_idx == 0:
-                log_realtime_memory_checkpoint(
-                    logger,
-                    batch,
-                    "first_image_vae_encode_gate",
-                    component="vae_encoder",
-                    condition_image_present=False,
-                    skipped=True,
-                )
             if state is not None and state.image_latent is not None:
                 batch.image_latent = state.image_latent
                 log_realtime_trace_for_batch(
@@ -149,29 +135,7 @@ class RealtimeImageVAEEncodingStage(ImageVAEEncodingStage):
             chunk_index=batch.block_idx,
             first_chunk=batch.block_idx == 0,
         ) as trace_span:
-            if batch.block_idx == 0:
-                log_realtime_memory_checkpoint(
-                    logger,
-                    batch,
-                    "before_first_image_vae_encode",
-                    component="vae_encoder",
-                )
             batch = super().forward(batch, server_args)
-            if batch.block_idx == 0:
-                log_realtime_memory_checkpoint(
-                    logger,
-                    batch,
-                    "after_first_image_vae_encode",
-                    component="vae_encoder",
-                )
-                log_realtime_memory_checkpoint(
-                    logger,
-                    batch,
-                    "first_image_vae_encode_gate",
-                    component="vae_encoder",
-                    condition_image_present=True,
-                    skipped=False,
-                )
             trace_span.add_fields(
                 **tensor_trace_metadata(batch.image_latent, prefix="image_latent"),
             )
@@ -195,12 +159,6 @@ class CausalVaeDecodingStage(DecodingStage):
                 self.server_args.pipeline_config.vae_precision
             ]
             self._get_or_load_taehv_model(checkpoint_path, vae_dtype)
-            taehv_loaded_memory = realtime_memory_trace_metadata()
-            if taehv_loaded_memory:
-                logger.info(
-                    "realtime_memory_checkpoint checkpoint=taehv_loaded %s",
-                    taehv_loaded_memory,
-                )
 
     @staticmethod
     def _taehv_checkpoint_path(vae_config) -> str | None:
@@ -209,9 +167,7 @@ class CausalVaeDecodingStage(DecodingStage):
             path = path.strip()
         return path or None
 
-    def component_uses(
-        self, server_args: ServerArgs, stage_name: str | None = None
-    ):
+    def component_uses(self, server_args: ServerArgs, stage_name: str | None = None):
         vae_config = getattr(server_args.pipeline_config, "vae_config", None)
         if self._taehv_checkpoint_path(vae_config) is not None:
             # The native VAE remains an encoder-only dependency for I2V. TAEHV
@@ -504,21 +460,9 @@ class CausalVaeDecodingStage(DecodingStage):
             taehv_checkpoint_path=taehv_checkpoint_path,
             vae_precision=server_args.pipeline_config.vae_precision,
             vae_tiling=server_args.pipeline_config.vae_tiling,
-            use_parallel_decode=bool(
-                getattr(vae_config, "use_parallel_decode", False)
-            ),
+            use_parallel_decode=bool(getattr(vae_config, "use_parallel_decode", False)),
             parallel_decode_mode=getattr(vae_config, "parallel_decode_mode", None),
         ) as trace_span:
-            log_realtime_memory_checkpoint(
-                logger,
-                batch,
-                "before_vae_decode",
-                component="vae_decoder",
-                decoder_backend="taehv"
-                if taehv_checkpoint_path is not None
-                else "causal_vae",
-                chunk_index=batch.block_idx,
-            )
             frames = self.decode_causal(
                 batch.latents,
                 server_args,
@@ -526,16 +470,6 @@ class CausalVaeDecodingStage(DecodingStage):
                 decode_state=decode_state,
             )
             trace_span.add_fields(**tensor_trace_metadata(frames, prefix="frames"))
-            log_realtime_memory_checkpoint(
-                logger,
-                batch,
-                "after_vae_decode",
-                component="vae_decoder",
-                decoder_backend="taehv"
-                if taehv_checkpoint_path is not None
-                else "causal_vae",
-                chunk_index=batch.block_idx,
-            )
         with realtime_trace_span(
             logger,
             batch,
@@ -549,16 +483,6 @@ class CausalVaeDecodingStage(DecodingStage):
             frames = server_args.pipeline_config.post_decoding(frames, server_args)
             trace_span.add_fields(
                 **tensor_trace_metadata(frames, prefix="post_decoded_frames")
-            )
-            log_realtime_memory_checkpoint(
-                logger,
-                batch,
-                "after_post_decode",
-                component="post_decode",
-                decoder_backend="taehv"
-                if taehv_checkpoint_path is not None
-                else "causal_vae",
-                chunk_index=batch.block_idx,
             )
 
         return OutputBatch(

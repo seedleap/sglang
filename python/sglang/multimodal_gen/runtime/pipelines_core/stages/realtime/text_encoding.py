@@ -24,12 +24,6 @@ from sglang.multimodal_gen.runtime.realtime.session import (
     BaseRealtimeState,
 )
 from sglang.multimodal_gen.runtime.server_args import ServerArgs
-from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
-from sglang.multimodal_gen.runtime.utils.realtime_trace import (
-    log_realtime_memory_checkpoint,
-)
-
-logger = init_logger(__name__)
 
 
 def _normalize_prompt_value(
@@ -112,9 +106,7 @@ class RealtimeTextState(BaseRealtimeState):
 class RealtimeTextEncodingStage(TextEncodingStage):
     """Cache text encoder outputs across realtime chunks by prompt identity."""
 
-    def component_uses(
-        self, server_args: ServerArgs, stage_name: str | None = None
-    ):
+    def component_uses(self, server_args: ServerArgs, stage_name: str | None = None):
         uses = super().component_uses(server_args, stage_name)
         if getattr(server_args, "text_encoder_cpu_offload", False):
             # Realtime sessions cache prompt embeddings. Keep the opt-in CPU
@@ -174,21 +166,7 @@ class RealtimeTextEncodingStage(TextEncodingStage):
         state.clear_text_cache()
 
         # perform regular text encoding
-        log_realtime_memory_checkpoint(
-            logger,
-            batch,
-            "before_text_encode",
-            component="text_encoder",
-            chunk_index=batch.block_idx,
-        )
         batch = super().forward(batch, server_args)
-        log_realtime_memory_checkpoint(
-            logger,
-            batch,
-            "after_text_encode",
-            component="text_encoder",
-            chunk_index=batch.block_idx,
-        )
 
         state.cache_key = cache_key
         self._store_outputs(batch, state)

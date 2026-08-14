@@ -114,6 +114,51 @@ def test_minwm_denoising_declares_transformer_residency_use(monkeypatch):
     assert calls == [("transformer", "transformer", transformer)]
 
 
+def test_minwm_runtime_alignment_logs_once_after_cache_init(monkeypatch):
+    from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.minwm import (
+        minwm_causal_denoising,
+    )
+
+    log_calls = []
+    monkeypatch.setattr(
+        minwm_causal_denoising,
+        "logger",
+        SimpleNamespace(info=lambda *args: log_calls.append(args)),
+    )
+    stage = MinWMCausalDMDDenoisingStage.__new__(MinWMCausalDMDDenoisingStage)
+    stage.transformer = SimpleNamespace(
+        config=SimpleNamespace(
+            arch_config=SimpleNamespace(local_attn_size=32),
+        )
+    )
+    stage.sink_size = 8
+    stage.sliding_window_num_frames = 32
+    batch = SimpleNamespace(
+        realtime_causal_sink_size=8,
+        realtime_causal_kv_cache_num_frames=32,
+    )
+    cache_ctx = SimpleNamespace(
+        kv_cache=[
+            SimpleNamespace(
+                rope_position_mode="block_relative",
+                rope_max_frame_gap=12,
+                prompt_first_frame_pin_enabled=True,
+                allow_growth=False,
+                cache_size=32,
+                sink_tokens=8,
+                scene_cut_rope_offset=0,
+                scene_cut_sink_enabled=False,
+            )
+        ]
+    )
+
+    stage._log_runtime_alignment_once(batch, cache_ctx)
+    stage._log_runtime_alignment_once(batch, cache_ctx)
+
+    assert len(log_calls) == 1
+    assert log_calls[0][0].startswith("MINWM_RUNTIME_ALIGNMENT")
+
+
 @pytest.mark.parametrize(
     ("requested_mode", "first_frame", "expected_mode"),
     [

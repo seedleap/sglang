@@ -16,7 +16,6 @@ from types import SimpleNamespace
 from typing import Any, Callable
 
 TRACE_LOG_PREFIX = "realtime_trace"
-REALTIME_MEMORY_TRACE_ENV = "SGLANG_REALTIME_MEMORY_TRACE"
 CLIENT_TRACE_EVENT_KIND = "client_trace"
 MAX_TRACE_ID_LENGTH = 128
 MAX_CLIENT_TRACE_EVENTS = 32
@@ -258,49 +257,6 @@ def tensor_trace_metadata(value: Any, *, prefix: str) -> dict[str, Any]:
     except Exception:
         pass
     return metadata
-
-
-def realtime_memory_trace_metadata() -> dict[str, float]:
-    """Return opt-in allocator watermarks for realtime memory qualification."""
-    if os.getenv(REALTIME_MEMORY_TRACE_ENV, "0") != "1":
-        return {}
-
-    try:
-        import torch
-
-        device_module = torch.get_device_module()
-        if not device_module.is_available():
-            return {}
-        mib = 1024**2
-        return {
-            "torch_allocated_mib": round(device_module.memory_allocated() / mib, 2),
-            "torch_reserved_mib": round(device_module.memory_reserved() / mib, 2),
-            "torch_max_allocated_mib": round(
-                device_module.max_memory_allocated() / mib, 2
-            ),
-            "torch_max_reserved_mib": round(
-                device_module.max_memory_reserved() / mib, 2
-            ),
-        }
-    except (AttributeError, RuntimeError):
-        return {}
-
-
-def log_realtime_memory_checkpoint(
-    logger, batch, checkpoint: str, *, component: str, **fields: Any
-) -> None:
-    memory = realtime_memory_trace_metadata()
-    if not memory:
-        return
-    log_realtime_trace_for_batch(
-        logger,
-        batch,
-        "server.memory_checkpoint",
-        checkpoint=checkpoint,
-        component=component,
-        **fields,
-        **memory,
-    )
 
 
 def realtime_trace_payload(session, event: str, **fields: Any) -> dict[str, Any]:

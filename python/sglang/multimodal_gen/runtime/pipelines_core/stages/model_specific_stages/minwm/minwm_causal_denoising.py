@@ -65,7 +65,6 @@ from sglang.multimodal_gen.runtime.realtime.states import (
 from sglang.multimodal_gen.runtime.server_args import ServerArgs
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 from sglang.multimodal_gen.runtime.utils.realtime_trace import (
-    log_realtime_memory_checkpoint,
     realtime_trace_span,
     tensor_trace_metadata,
 )
@@ -818,54 +817,47 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
         action_window = torch.cat([history[:, -history_frames:], current], dim=1)
         return {"action": action_window}
 
+    def _log_runtime_alignment_once(
+        self,
+        batch: Req,
+        cache_ctx: CausalDMDRealtimeCacheContext,
+    ) -> None:
+        if getattr(self, "_runtime_alignment_logged", False):
+            return
+        self._runtime_alignment_logged = True
+        arch_config = self.transformer.config.arch_config
+        cache = cache_ctx.kv_cache[0]
+        logger.info(
+            "MINWM_RUNTIME_ALIGNMENT local_attn_size=%d sink_size=%d "
+            "window_size=%d rope_position_mode=%s rope_gap=%d "
+            "prompt_first_frame_pin_enabled=%s request_sink_size=%s "
+            "request_window_size=%s allow_growth=%s cache_tokens=%d "
+            "sink_tokens=%d scene_cut_rope_offset=%d "
+            "scene_cut_sink_enabled=%s",
+            int(arch_config.local_attn_size),
+            int(self.sink_size),
+            int(self.sliding_window_num_frames),
+            cache.rope_position_mode,
+            int(cache.rope_max_frame_gap),
+            bool(cache.prompt_first_frame_pin_enabled),
+            getattr(batch, "realtime_causal_sink_size", None),
+            getattr(batch, "realtime_causal_kv_cache_num_frames", None),
+            bool(cache.allow_growth),
+            int(cache.cache_size),
+            int(cache.sink_tokens),
+            int(cache.scene_cut_rope_offset),
+            bool(cache.scene_cut_sink_enabled),
+        )
+
     def _prepare_realtime_causal_caches(
         self,
         batch: Req,
         server_args: ServerArgs,
         ctx: CausalDMDForwardContext,
     ) -> CausalDMDRealtimeCacheContext:
-        if batch.block_idx == 0:
-            log_realtime_memory_checkpoint(
-                logger,
-                batch,
-                "before_dit_cache_init",
-                component="dit_cache",
-            )
         cache_ctx = super()._prepare_realtime_causal_caches(batch, server_args, ctx)
         if batch.block_idx == 0:
-            log_realtime_memory_checkpoint(
-                logger,
-                batch,
-                "after_dit_cache_init",
-                component="dit_cache",
-            )
-        if (
-            batch.block_idx == 0
-            and os.getenv("MINWM_RUNTIME_ALIGNMENT_LOG", "0") == "1"
-        ):
-            arch_config = self.transformer.config.arch_config
-            cache = cache_ctx.kv_cache[0]
-            logger.info(
-                "MINWM_RUNTIME_ALIGNMENT local_attn_size=%d sink_size=%d "
-                "window_size=%d rope_position_mode=%s rope_gap=%d "
-                "prompt_first_frame_pin_enabled=%s request_sink_size=%s "
-                "request_window_size=%s allow_growth=%s cache_tokens=%d "
-                "sink_tokens=%d scene_cut_rope_offset=%d "
-                "scene_cut_sink_enabled=%s",
-                int(arch_config.local_attn_size),
-                int(self.sink_size),
-                int(self.sliding_window_num_frames),
-                cache.rope_position_mode,
-                int(cache.rope_max_frame_gap),
-                bool(cache.prompt_first_frame_pin_enabled),
-                getattr(batch, "realtime_causal_sink_size", None),
-                getattr(batch, "realtime_causal_kv_cache_num_frames", None),
-                bool(cache.allow_growth),
-                int(cache.cache_size),
-                int(cache.sink_tokens),
-                int(cache.scene_cut_rope_offset),
-                bool(cache.scene_cut_sink_enabled),
-            )
+            self._log_runtime_alignment_once(batch, cache_ctx)
         if (batch.condition_inputs or {}).get(MINWM_PROMPT_UPDATED_CONDITION):
             self._reset_crossattn_cache(cache_ctx.crossattn_cache)
             condition_switch = (batch.condition_inputs or {}).get(

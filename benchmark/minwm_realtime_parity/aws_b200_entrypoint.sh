@@ -194,25 +194,20 @@ if [[ -n "${MINWM_REUSE_MODEL_RUN_ID:-}" ]]; then
   echo "reused-local-model:${MINWM_REUSE_MODEL_RUN_ID}" \
     | tee "${RESULTS}/conversion.log"
 else
-  convert_args=(
-    --minwm-checkpoint "${CHECKPOINT}"
-    --donor-diffusers-dir "${PRETRAINED}"
-    --output-dir "${MODEL_DIR}"
-    --link-donor
-    --source-uri "${MINWM_CHECKPOINT_SOURCE_URI}"
-    --source-version-id "${MINWM_CHECKPOINT_SOURCE_VERSION}"
-    --source-etag "${MINWM_CHECKPOINT_SOURCE_ETAG}"
-    --local-attn-size "${MINWM_CONVERT_LOCAL_ATTN_SIZE:--1}"
-    --sink-size "${MINWM_CONVERT_SINK_SIZE:-0}"
-    --sliding-window-num-frames "${MINWM_CONVERT_WINDOW_SIZE:-128}"
-    --rope-position-mode "${MINWM_CONVERT_ROPE_POSITION_MODE:-absolute}"
-    --rope-max-frame-gap "${MINWM_CONVERT_ROPE_MAX_FRAME_GAP:-1}"
-  )
-  if [[ "${MINWM_CONVERT_PROMPT_FIRST_FRAME_PIN_ENABLED:-0}" == "1" ]]; then
-    convert_args+=(--prompt-first-frame-pin-enabled)
-  fi
   python3 /workspace/sglang/python/sglang/multimodal_gen/tools/convert_minwm_checkpoint.py \
-    "${convert_args[@]}" | tee "${RESULTS}/conversion.log"
+    --minwm-checkpoint "${CHECKPOINT}" \
+    --donor-diffusers-dir "${PRETRAINED}" \
+    --output-dir "${MODEL_DIR}" \
+    --link-donor \
+    --source-uri "${MINWM_CHECKPOINT_SOURCE_URI}" \
+    --source-version-id "${MINWM_CHECKPOINT_SOURCE_VERSION}" \
+    --source-etag "${MINWM_CHECKPOINT_SOURCE_ETAG}" \
+    --local-attn-size "${MINWM_CONVERT_LOCAL_ATTN_SIZE:--1}" \
+    --sink-size "${MINWM_CONVERT_SINK_SIZE:-0}" \
+    --sliding-window-num-frames "${MINWM_CONVERT_WINDOW_SIZE:-128}" \
+    --rope-position-mode "${MINWM_CONVERT_ROPE_POSITION_MODE:-absolute}" \
+    --rope-max-frame-gap "${MINWM_CONVERT_ROPE_MAX_FRAME_GAP:-1}" \
+    | tee "${RESULTS}/conversion.log"
 fi
 cp "${MODEL_DIR}/minwm_conversion_manifest.json" "${RESULTS}/"
 

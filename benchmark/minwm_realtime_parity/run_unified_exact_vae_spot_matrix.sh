@@ -13,13 +13,6 @@ PARITY_MIN_PSNR_DB="${MINWM_PARITY_MIN_PSNR_DB:-58}"
 SP_DEGREES="${MINWM_SP_DEGREES:-1 2 4}"
 VAE_GPU_INDICES="${MINWM_VAE_GPU_INDICES:-${MINWM_VAE_GPU_INDEX:-7}}"
 VAE_PARALLEL_SIZE="${MINWM_VAE_PARALLEL_SIZE:-1}"
-EXPECTED_GPU_COUNT="${MINWM_EXPECTED_GPU_COUNT:-8}"
-ALLOW_SHARED_VAE_GPU="${MINWM_ALLOW_SHARED_VAE_GPU:-false}"
-DEDICATED_VAE_CUDA_STREAM="${MINWM_DEDICATED_VAE_CUDA_STREAM:-false}"
-REPETITIONS="${MINWM_MATRIX_REPETITIONS:-1}"
-ENABLE_CUDA_MPS="${MINWM_ENABLE_CUDA_MPS:-false}"
-MEMORY_GATE_DENOISER_MIB="${MINWM_OVERLAP_DENOISER_PEAK_MIB:-0}"
-MEMORY_GATE_VAE_MIB="${MINWM_OVERLAP_VAE_PEAK_MIB:-0}"
 WARMUP_CHUNKS="${MINWM_THROUGHPUT_WARMUP_CHUNKS:-20}"
 MEASURED_CHUNKS="${MINWM_THROUGHPUT_MEASURED_CHUNKS:-200}"
 CASES_PATH="${MINWM_THROUGHPUT_CASES_PATH:-${SCRIPT_DIR}/cases_720p_compile_smoke.json}"
@@ -247,17 +240,6 @@ run_lane() {
 run_lane local 1 local-sp1
 
 vae_log="${RESULT_ROOT}/${MINWM_MATRIX_ID}-exact-vae-worker.log"
-if [[ "${ALLOW_SHARED_VAE_GPU}" == "true" ]] && (( MEMORY_GATE_DENOISER_MIB > 0 && MEMORY_GATE_VAE_MIB > 0 )); then
-  if ! python3 "${SCRIPT_DIR}/check_vae_overlap_memory_gate.py" \
-      --gpu "${vae_gpu_indices[0]}" \
-      --denoiser-peak-mib "${MEMORY_GATE_DENOISER_MIB}" \
-      --vae-peak-mib "${MEMORY_GATE_VAE_MIB}" \
-      --output "${RESULT_ROOT}/memory-admission.json"; then
-    persist_results
-    echo "MINWM_UNIFIED_EXACT_MEMORY_GATE_REJECTED fallback=serial_or_second_gpu" >&2
-    exit 3
-  fi
-fi
 vae_launcher=(python3)
 if (( VAE_PARALLEL_SIZE > 1 )); then
   vae_launcher=(torchrun --standalone --nproc-per-node "${VAE_PARALLEL_SIZE}")
