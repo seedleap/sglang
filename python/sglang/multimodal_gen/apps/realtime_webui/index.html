@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>World Studio · 实时模型对比</title>
-    <link rel="stylesheet" href="./styles.css?v=world-studio-v5" />
+    <link rel="stylesheet" href="./styles.css?v=world-studio-v6" />
   </head>
   <body class="world-studio">
     <header class="app-header">
@@ -18,6 +18,15 @@
         <span id="sessionCountdown" class="session-countdown" role="timer" hidden>
           剩余 <b id="sessionCountdownText">01:30</b>
         </span>
+        <button id="recordBtn" class="gameplay-record-button" type="button" aria-pressed="false" disabled>
+          <i aria-hidden="true"></i>
+          <span id="recordLabel">游玩录像</span>
+          <b id="recordDuration">00:00</b>
+        </button>
+        <a id="recordDownloadBtn" class="gameplay-download-button" href="#" download hidden>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12M7 10l5 5 5-5M5 21h14" /></svg>
+          <span>下载录像</span>
+        </a>
       </div>
     </header>
 
@@ -261,7 +270,6 @@
               <input id="smoothCatchupRate" type="range" min="1" max="2.5" step="0.05" value="1.1" />
               <b id="smoothCatchupRateText">1.10x</b>
               <input id="zingFrameInterpolation" type="checkbox" />
-              <button id="recordBtn" type="button"><span id="recordLabel">Record</span><span id="recordDuration">00:00</span></button>
               <button id="recordFolderBtn" type="button"><span id="recordFolderLabel">Folder</span></button>
               <div id="historyList"></div>
             </div>
@@ -285,6 +293,6 @@
     <script src="./fullscreen_controller.js?v=dual-fullscreen-v1"></script>
     <script src="./trace_topology.js?v=realtime-trace-topology-v6"></script>
     <script src="./trace_transport.js?v=realtime-trace-http-v2"></script>
-    <script src="./app.js?v=world-studio-v18"></script>
+    <script src="./app.js?v=world-studio-v21"></script>
   </body>
 </html>

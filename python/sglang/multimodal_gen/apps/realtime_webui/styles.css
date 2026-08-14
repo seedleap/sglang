@@ -1288,6 +1288,87 @@ body.world-studio {
 }
 .world-studio .session-countdown b { color: var(--ws-text); }
 .world-studio .session-countdown[hidden] { display: none; }
+.world-studio .gameplay-record-button,
+.world-studio .gameplay-download-button {
+  display: inline-flex;
+  height: 30px;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  border: 1px solid var(--ws-line);
+  border-radius: 999px;
+  padding: 0 12px;
+  background: rgba(255, 255, 255, 0.045);
+  color: var(--ws-text);
+  box-shadow: none;
+  font-size: 11px;
+  font-weight: 620;
+  cursor: pointer;
+  text-decoration: none;
+}
+.world-studio .gameplay-record-button:hover:not(:disabled),
+.world-studio .gameplay-download-button:hover:not(:disabled) {
+  border-color: rgba(121, 223, 189, 0.5);
+  background: rgba(121, 223, 189, 0.1);
+  transform: none;
+}
+.world-studio .gameplay-record-button:disabled {
+  cursor: default;
+  opacity: 0.44;
+}
+.world-studio .gameplay-record-button i {
+  display: block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--ws-muted);
+}
+.world-studio .gameplay-record-button b {
+  min-width: 34px;
+  color: var(--ws-muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+.world-studio .gameplay-record-button #recordLabel {
+  flex: 0 0 auto;
+  min-width: 48px;
+  text-align: left;
+}
+.world-studio .gameplay-record-button.is-recording {
+  border-color: rgba(228, 134, 116, 0.44);
+  background: rgba(228, 134, 116, 0.1);
+}
+.world-studio .gameplay-record-button.is-recording i {
+  background: var(--ws-danger);
+  box-shadow: 0 0 0 4px rgba(228, 134, 116, 0.1);
+  animation: gameplayRecordingPulse 1.3s ease-in-out infinite;
+}
+.world-studio .gameplay-record-button.is-saving { cursor: wait; }
+.world-studio .gameplay-download-button {
+  border-color: rgba(121, 223, 189, 0.35);
+  background: rgba(121, 223, 189, 0.1);
+  color: var(--ws-accent);
+}
+.world-studio .gameplay-download-button svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.8;
+}
+.world-studio .gameplay-download-button[hidden] { display: none; }
+.world-studio .gameplay-download-button[aria-disabled="true"] {
+  pointer-events: none;
+  opacity: 0.5;
+}
+
+@keyframes gameplayRecordingPulse {
+  0%, 100% { opacity: 0.55; }
+  50% { opacity: 1; }
+}
 
 .world-studio .shell {
   display: grid;

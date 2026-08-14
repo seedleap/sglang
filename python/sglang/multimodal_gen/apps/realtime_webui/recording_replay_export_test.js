@@ -20,6 +20,61 @@ assert.match(
   "recording metadata should describe that the stage was captured",
 );
 assert.match(
+  appJs,
+  /timing:\s*"wall_clock"/,
+  "gameplay recordings should preserve real user timing independently of model FPS",
+);
+assert.match(
+  appJs,
+  /function startRecordingFramePump\(\)/,
+  "recording should use a wall-clock frame pump",
+);
+assert.match(
+  appJs,
+  /await recordingEncoder\.flush\(\);\s*if \(!recordingSamples\.length\)/,
+  "short recordings should flush the encoder before checking for output samples",
+);
+assert.match(
+  appJs,
+  /recordingEncoder\?\.encodeQueueSize > 4/,
+  "recording backpressure should drop capture frames instead of stalling realtime play",
+);
+assert.doesNotMatch(
+  appJs,
+  /recordDecodedFrameBatch\(decodedFrames\)/,
+  "decoded model batches must not drive recording time",
+);
+assert.match(
+  appJs,
+  /function drawRecordingPromptComposer\(\)/,
+  "downloaded gameplay should include the prompt composer overlay",
+);
+assert.match(
+  appJs,
+  /runtime_prompt_input/,
+  "recording should retain the user's real prompt input timeline",
+);
+assert.match(
+  appJs,
+  /runtime_prompt_submitted/,
+  "recording should distinguish submit time from model send time",
+);
+assert.match(
+  appJs,
+  /runtime_prompt_sent/,
+  "recording should mark the exact model send event",
+);
+assert.match(
+  appJs,
+  /stopRecording\(\{ reason: "session_timeout" \}\)/,
+  "session timeout should finalize the downloadable gameplay recording",
+);
+assert.match(
+  appJs,
+  /setRecordingDownload\(videoBlob, fileName\)/,
+  "finalized gameplay video should be exposed through the download control",
+);
+assert.match(
   replayHtmlBuilder,
   /class="replay-stage"/,
   "exported replay index should render a stage-style video area",
