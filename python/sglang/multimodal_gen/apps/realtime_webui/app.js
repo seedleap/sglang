@@ -6780,6 +6780,7 @@ window.__sglangRealtimeDebug = () => ({
   frames,
   lastDecodeMs,
   lastDisplayLagMs,
+  lastRenderedEventId,
   lastSampledEventId,
   lastSentEventId,
   pendingDecodeBatches,
