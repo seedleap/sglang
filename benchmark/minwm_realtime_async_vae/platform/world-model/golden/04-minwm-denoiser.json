@@ -49,7 +49,7 @@
   "initContainers": [
     {
       "args": [
-        "exec python3 benchmark/minwm_realtime_async_vae/download_model_artifact.py --bucket ${MODEL_BUCKET} --prefix ${MODEL_PREFIX} --destination /model-cache/model --lock-path /model-cache/.download.lock --region ${AWS_REGION} --expected-revision ${MODEL_REVISION} --concurrency 128 --part-size-mib 16"
+        "exec python3 benchmark/minwm_realtime_async_vae/download_model_artifact.py --bucket \"${MODEL_BUCKET}\" --model-s3-uri \"${MODEL_S3_URI:-}\" --model-name \"${MODEL_NAME}\" --model-version \"${MODEL_VERSION}\" --model-release-id \"${MODEL_RELEASE_ID}\" --destination /model-cache/model --lock-path /model-cache/.download.lock --region \"${AWS_REGION}\" --expected-revision \"${MODEL_SOURCE_REVISION}\" --concurrency 128 --part-size-mib 16"
       ],
       "command": [
         "/bin/bash",
@@ -73,12 +73,24 @@
           "value": "leap-world-model-serving-829115578968-us-east-2"
         },
         {
-          "name": "MODEL_PREFIX",
-          "value": "models/minwm/wan22-5b-stage3-dmd-47-0808-2fb2cfec2a2/gs3200-ema-student-v1/releases/20260810T042157Z-c302d572/model"
+          "name": "MODEL_NAME",
+          "value": "minwm-async-denoiser-0"
         },
         {
-          "name": "MODEL_REVISION",
+          "name": "MODEL_VERSION",
+          "value": "wan22-5b-stage3-dmd-47-0808-2fb2cfec2a2-gs3200-ema-student-v1"
+        },
+        {
+          "name": "MODEL_RELEASE_ID",
+          "value": "20260810T042157Z-c302d572"
+        },
+        {
+          "name": "MODEL_SOURCE_REVISION",
           "value": "gs3200-ema-student-v1"
+        },
+        {
+          "name": "MODEL_S3_URI",
+          "value": ""
         }
       ],
       "image": "${MINWM_DENOISER_IMAGE_DIGEST}",

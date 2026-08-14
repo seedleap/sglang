@@ -5,7 +5,6 @@ import subprocess
 import sys
 
 import pytest
-
 from platform_config import (
     FROZEN_BRANCH,
     FROZEN_GIT_SHA,
@@ -16,8 +15,8 @@ from platform_config import (
     REGISTRY,
     all_platform_configs,
     applications,
-    resolve_image_inputs,
     required_inputs_document,
+    resolve_image_inputs,
     validate_configs,
 )
 from render_platform_config import DEFAULT_OUTPUT, render_documents
@@ -40,9 +39,7 @@ def _image_callbacks() -> dict:
                 "operator": "jenkins",
                 "buildId": str(index),
                 "buildUrl": f"https://jenkins.example/job/{index}/",
-                "image": (
-                    f"{REGISTRY}:{spec['tagPrefix']}-{FROZEN_GIT_SHA}"
-                ),
+                "image": (f"{REGISTRY}:{spec['tagPrefix']}-{FROZEN_GIT_SHA}"),
                 "imageDigest": "sha256:" + str(index) * 64,
             }
             for index, (service_name, spec) in enumerate(
@@ -76,20 +73,43 @@ def test_seven_applications_and_task_follow_frozen_release_order():
 
 
 @pytest.mark.parametrize(
-    ("name", "gpu_count", "release_fragment"),
+    (
+        "name",
+        "gpu_count",
+        "model_name",
+        "model_version",
+        "release_id",
+        "source_revision",
+    ),
     [
-        ("minwm-denoiser", "2", "/releases/20260810T042157Z-c302d572/model"),
-        ("lingbot2-denoiser", "4", "/releases/20260814T054118Z-e0650875/model"),
+        (
+            "minwm-denoiser",
+            "2",
+            "minwm-async-denoiser-0",
+            ("wan22-5b-stage3-dmd-47-0808-2fb2cfec2a2-" "gs3200-ema-student-v1"),
+            "20260810T042157Z-c302d572",
+            "gs3200-ema-student-v1",
+        ),
+        (
+            "lingbot2-denoiser",
+            "4",
+            "lingbot2-denoiser",
+            "robbyant-lingbot-world-v2-14b-causal-fast-diffusers",
+            "20260814T054118Z-e0650875",
+            "59cccf49f2d2dd27418ae7a04b82b10868d455c2",
+        ),
     ],
 )
 def test_denoisers_use_crt_nvme_immutable_release_and_digest_images(
-    name, gpu_count, release_fragment
+    name, gpu_count, model_name, model_version, release_id, source_revision
 ):
     config = _by_name(name)
     stager, heartbeat = config["initContainers"]
     command = " ".join(stager["args"])
     env = {item["name"]: item.get("value") for item in stager["env"]}
-    cache = next(volume for volume in config["volumes"] if volume["name"] == "model-cache")
+    cache = next(
+        volume for volume in config["volumes"] if volume["name"] == "model-cache"
+    )
 
     assert config["deployType"] == "statefulset"
     assert config["statefulSet"]["updateStrategy"] == {"type": "OnDelete"}
@@ -99,7 +119,17 @@ def test_denoisers_use_crt_nvme_immutable_release_and_digest_images(
     assert "download_model_artifact.py" in command
     assert "--concurrency 128" in command
     assert "--part-size-mib 16" in command
-    assert release_fragment in env["MODEL_PREFIX"]
+    assert "--model-s3-uri" in command
+    assert "--model-name" in command
+    assert "--model-version" in command
+    assert "--model-release-id" in command
+    assert "--prefix" not in command
+    assert env["MODEL_NAME"] == model_name
+    assert env["MODEL_VERSION"] == model_version
+    assert env["MODEL_RELEASE_ID"] == release_id
+    assert env["MODEL_S3_URI"] == ""
+    assert env["MODEL_SOURCE_REVISION"] == source_revision
+    assert env["MODEL_BUCKET"] == ("leap-world-model-serving-829115578968-us-east-2")
     assert cache["type"] == "emptyDir"
     assert config["nodeSelector"] == {"loopit.me/gpu-pool": "h100"}
     assert "karpenter.sh/capacity-type" not in config["nodeSelector"]
@@ -183,12 +213,18 @@ def test_network_policy_uses_only_typed_selectors_ports_and_ip_blocks():
             for rule in policy[direction]:
                 assert rule[peer_field]
                 assert rule["ports"]
-                assert all(set(peer) <= {
-                    "podSelector",
-                    "namespaceSelector",
-                    "ipBlock",
-                } for peer in rule[peer_field])
-                assert all(port["protocol"] in {"TCP", "UDP", "SCTP"} for port in rule["ports"])
+                assert all(
+                    set(peer)
+                    <= {
+                        "podSelector",
+                        "namespaceSelector",
+                        "ipBlock",
+                    }
+                    for peer in rule[peer_field]
+                )
+                assert all(
+                    port["protocol"] in {"TCP", "UDP", "SCTP"} for port in rule["ports"]
+                )
 
 
 def test_required_inputs_keep_unresolved_deployment_non_executable():

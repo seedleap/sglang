@@ -11,7 +11,6 @@ import copy
 import re
 from typing import Any
 
-
 BUSINESS_LINE = "world-model"
 NAMESPACE = "world-model"
 APP_GROUP = "world-studio"
@@ -122,9 +121,7 @@ IMAGE_INPUT_SPECS = {
         "jenkinsJob": "loopit/world-model/model-artifact-publish",
     },
 }
-IMAGE_PLACEHOLDERS = {
-    spec["placeholder"] for spec in IMAGE_INPUT_SPECS.values()
-}
+IMAGE_PLACEHOLDERS = {spec["placeholder"] for spec in IMAGE_INPUT_SPECS.values()}
 NETWORK_REQUIRED_INPUTS = {
     "world-realtime-coordinator": [
         ("egress", "dynamodb-us-east-2", "TCP", 443),
@@ -156,15 +153,15 @@ NETWORK_REQUIRED_INPUTS = {
     ],
 }
 
-MINWM_RELEASE = (
-    "models/minwm/wan22-5b-stage3-dmd-47-0808-2fb2cfec2a2/"
-    "gs3200-ema-student-v1/releases/20260810T042157Z-c302d572/model"
-)
+MODEL_BUCKET = "leap-world-model-serving-829115578968-us-east-2"
+MINWM_MODEL_NAME = "minwm-async-denoiser-0"
+MINWM_MODEL_VERSION = "wan22-5b-stage3-dmd-47-0808-2fb2cfec2a2-gs3200-ema-student-v1"
+MINWM_SOURCE_REVISION = "gs3200-ema-student-v1"
+MINWM_RELEASE_ID = "20260810T042157Z-c302d572"
 LINGBOT2_REVISION = "59cccf49f2d2dd27418ae7a04b82b10868d455c2"
-LINGBOT2_RELEASE = (
-    "models/lingbot2/robbyant-lingbot-world-v2-14b-causal-fast-diffusers/"
-    f"{LINGBOT2_REVISION}/releases/20260814T054118Z-e0650875/model"
-)
+LINGBOT2_MODEL_NAME = "lingbot2-denoiser"
+LINGBOT2_MODEL_VERSION = "robbyant-lingbot-world-v2-14b-causal-fast-diffusers"
+LINGBOT2_RELEASE_ID = "20260814T054118Z-e0650875"
 
 
 def _image_placeholder(service_name: str) -> str:
@@ -250,8 +247,7 @@ def required_inputs_document() -> dict[str, Any]:
                 "objectCount": 26,
                 "bytes": 86071995490,
                 "releaseSpec": (
-                    "model_releases/lingbot2/"
-                    f"{LINGBOT2_REVISION}/release-spec.json"
+                    "model_releases/lingbot2/" f"{LINGBOT2_REVISION}/release-spec.json"
                 ),
             }
         },
@@ -269,9 +265,7 @@ def _field_env(name: str, field_path: str) -> dict[str, Any]:
 def _secret_env(name: str, key: str) -> dict[str, Any]:
     return {
         "name": name,
-        "valueFrom": {
-            "secretKeyRef": {"name": "world-studio-runtime", "key": key}
-        },
+        "valueFrom": {"secretKeyRef": {"name": "world-studio-runtime", "key": key}},
     }
 
 
@@ -304,9 +298,7 @@ def _spread(name: str) -> list[dict[str, Any]]:
             "maxSkew": 1,
             "topologyKey": "topology.kubernetes.io/zone",
             "whenUnsatisfiable": "ScheduleAnyway",
-            "labelSelector": {
-                "matchLabels": {"app.kubernetes.io/name": name}
-            },
+            "labelSelector": {"matchLabels": {"app.kubernetes.io/name": name}},
         }
     ]
 
@@ -323,11 +315,7 @@ SERVICE_PORTS = {
 
 
 def _service_peer(name: str) -> dict[str, Any]:
-    return {
-        "podSelector": {
-            "matchLabels": {"app.kubernetes.io/name": name}
-        }
-    }
+    return {"podSelector": {"matchLabels": {"app.kubernetes.io/name": name}}}
 
 
 def _dns_rules() -> list[dict[str, Any]]:
@@ -358,9 +346,7 @@ def _network_policy(
         ingress.append(
             {
                 "from": ingress_peers,
-                "ports": [
-                    {"protocol": "TCP", "port": SERVICE_PORTS[service_name]}
-                ],
+                "ports": [{"protocol": "TCP", "port": SERVICE_PORTS[service_name]}],
             }
         )
     egress = _dns_rules()
@@ -369,9 +355,7 @@ def _network_policy(
             egress.append(
                 {
                     "to": [_service_peer(name)],
-                    "ports": [
-                        {"protocol": "TCP", "port": SERVICE_PORTS[name]}
-                    ],
+                    "ports": [{"protocol": "TCP", "port": SERVICE_PORTS[name]}],
                 }
             )
     return {
@@ -453,7 +437,10 @@ def _coordinator() -> dict[str, Any]:
                 _env("COORDINATOR_TABLE", "world-model-realtime"),
                 _env("AWS_REGION", "us-east-2"),
                 _env("OTEL_SERVICE_NAME", name),
-                _env("OTEL_EXPORTER_OTLP_ENDPOINT", "http://adot-collector.monitoring:4317"),
+                _env(
+                    "OTEL_EXPORTER_OTLP_ENDPOINT",
+                    "http://adot-collector.monitoring:4317",
+                ),
                 _env(
                     "OTEL_RESOURCE_ATTRIBUTES",
                     "service.namespace=world-model,deployment.environment=production",
@@ -482,7 +469,10 @@ def _coordinator() -> dict[str, Any]:
                     "lingbot2-vae",
                 ],
                 egress_to=[],
-                external=["dynamodb.us-east-2.amazonaws.com", "adot-collector.monitoring"],
+                external=[
+                    "dynamodb.us-east-2.amazonaws.com",
+                    "adot-collector.monitoring",
+                ],
             ),
         }
     )
@@ -519,7 +509,10 @@ def _vae(*, lingbot2: bool) -> dict[str, Any]:
             "env": [
                 _env("WORKER_EPOCH_FILE", "/var/run/minwm-worker/epoch"),
                 _env("OTEL_SERVICE_NAME", name),
-                _env("OTEL_EXPORTER_OTLP_ENDPOINT", "http://adot-collector.monitoring:4317"),
+                _env(
+                    "OTEL_EXPORTER_OTLP_ENDPOINT",
+                    "http://adot-collector.monitoring:4317",
+                ),
                 _env(
                     "OTEL_RESOURCE_ATTRIBUTES",
                     f"service.namespace=world-model,worker.role=vae,model.name={'lingbot2' if lingbot2 else 'minwm'}",
@@ -600,9 +593,7 @@ def _vae(*, lingbot2: bool) -> dict[str, Any]:
             "terminationGracePeriodSeconds": 60,
             "startupProbe": _http_probe("/health", 18081, period=10, failures=180),
             "readinessProbe": _http_probe("/health", 18081, period=5),
-            "livenessProbe": _http_probe(
-                "/health", 18081, period=30, initial_delay=30
-            ),
+            "livenessProbe": _http_probe("/health", 18081, period=30, initial_delay=30),
             "podDisruptionBudget": {"maxUnavailable": 1},
             "networkPolicy": _network_policy(
                 service_name=name,
@@ -617,7 +608,14 @@ def _vae(*, lingbot2: bool) -> dict[str, Any]:
     return app
 
 
-def _model_stager(*, prefix: str, revision: str, image: str) -> dict[str, Any]:
+def _model_stager(
+    *,
+    model_name: str,
+    model_version: str,
+    release_id: str,
+    source_revision: str,
+    image: str,
+) -> dict[str, Any]:
     return {
         "name": "model-stager",
         "image": image,
@@ -626,18 +624,25 @@ def _model_stager(*, prefix: str, revision: str, image: str) -> dict[str, Any]:
         "command": ["/bin/bash", "-lc"],
         "args": [
             "exec python3 benchmark/minwm_realtime_async_vae/download_model_artifact.py "
-            "--bucket ${MODEL_BUCKET} --prefix ${MODEL_PREFIX} "
+            '--bucket "${MODEL_BUCKET}" --model-s3-uri "${MODEL_S3_URI:-}" '
+            '--model-name "${MODEL_NAME}" --model-version "${MODEL_VERSION}" '
+            '--model-release-id "${MODEL_RELEASE_ID}" '
             "--destination /model-cache/model --lock-path /model-cache/.download.lock "
-            "--region ${AWS_REGION} --expected-revision ${MODEL_REVISION} "
+            '--region "${AWS_REGION}" --expected-revision "${MODEL_SOURCE_REVISION}" '
             "--concurrency 128 --part-size-mib 16"
         ],
         "env": [
             _env("AWS_REGION", "us-east-2"),
             _env("AWS_DEFAULT_REGION", "us-east-2"),
             _env("AWS_EC2_METADATA_DISABLED", "true"),
-            _env("MODEL_BUCKET", "leap-world-model-serving-829115578968-us-east-2"),
-            _env("MODEL_PREFIX", prefix),
-            _env("MODEL_REVISION", revision),
+            _env("MODEL_BUCKET", MODEL_BUCKET),
+            _env("MODEL_NAME", model_name),
+            _env("MODEL_VERSION", model_version),
+            _env("MODEL_RELEASE_ID", release_id),
+            _env("MODEL_SOURCE_REVISION", source_revision),
+            # Non-empty values override the derived serving path for an explicit
+            # immutable rollback while retaining metadata identity validation.
+            _env("MODEL_S3_URI", ""),
         ],
         "resources": {
             "requests": {"cpu": "8", "memory": "32Gi", "ephemeral-storage": "32Gi"},
@@ -698,9 +703,11 @@ def _denoiser_heartbeat(*, lingbot2: bool) -> dict[str, Any]:
 
 def _denoiser(*, lingbot2: bool) -> dict[str, Any]:
     name = "lingbot2-denoiser" if lingbot2 else "minwm-denoiser"
-    release = LINGBOT2_RELEASE if lingbot2 else MINWM_RELEASE
     image = _image_placeholder(name)
-    expected_revision = LINGBOT2_REVISION if lingbot2 else "gs3200-ema-student-v1"
+    model_name = LINGBOT2_MODEL_NAME if lingbot2 else MINWM_MODEL_NAME
+    model_version = LINGBOT2_MODEL_VERSION if lingbot2 else MINWM_MODEL_VERSION
+    release_id = LINGBOT2_RELEASE_ID if lingbot2 else MINWM_RELEASE_ID
+    expected_revision = LINGBOT2_REVISION if lingbot2 else MINWM_SOURCE_REVISION
     app = _base_application(
         name=name,
         app_name="LingBot2 Denoiser" if lingbot2 else "minWM Denoiser",
@@ -804,12 +811,19 @@ def _denoiser(*, lingbot2: bool) -> dict[str, Any]:
                 _env("MODEL_REVISION", expected_revision),
                 _env("WORKER_EPOCH_FILE", "/var/run/minwm-worker/epoch"),
                 _env("OTEL_SERVICE_NAME", name),
-                _env("OTEL_EXPORTER_OTLP_ENDPOINT", "http://adot-collector.monitoring:4317"),
+                _env(
+                    "OTEL_EXPORTER_OTLP_ENDPOINT",
+                    "http://adot-collector.monitoring:4317",
+                ),
             ],
             "resources": resources,
             "initContainers": [
                 _model_stager(
-                    prefix=release, revision=expected_revision, image=image
+                    model_name=model_name,
+                    model_version=model_version,
+                    release_id=release_id,
+                    source_revision=expected_revision,
+                    image=image,
                 ),
                 _denoiser_heartbeat(lingbot2=lingbot2),
             ],
@@ -843,9 +857,7 @@ def _denoiser(*, lingbot2: bool) -> dict[str, Any]:
             "terminationGracePeriodSeconds": 90,
             "startupProbe": _http_probe("/health", 30000, period=20, failures=270),
             "readinessProbe": _http_probe("/health", 30000, period=10),
-            "livenessProbe": _http_probe(
-                "/health", 30000, period=30, initial_delay=60
-            ),
+            "livenessProbe": _http_probe("/health", 30000, period=30, initial_delay=60),
             "podDisruptionBudget": {"maxUnavailable": 1},
             "networkPolicy": _network_policy(
                 service_name=name,
@@ -903,7 +915,10 @@ def _gateway() -> dict[str, Any]:
                 _env("AWS_REGION", "us-east-2"),
                 _env("AWS_DEFAULT_REGION", "us-east-2"),
                 _env("OTEL_SERVICE_NAME", name),
-                _env("OTEL_EXPORTER_OTLP_ENDPOINT", "http://adot-collector.monitoring:4317"),
+                _env(
+                    "OTEL_EXPORTER_OTLP_ENDPOINT",
+                    "http://adot-collector.monitoring:4317",
+                ),
             ],
             "resources": {
                 "requests": {"cpu": "500m", "memory": "512Mi"},
@@ -959,7 +974,10 @@ def _webui() -> dict[str, Any]:
                     "HAPPYOYSTER_TOKEN_BASE_URL",
                     "https://llm-0jcmcer24vyvd7rr.cn-beijing.maas.aliyuncs.com",
                 ),
-                _env("HAPPYOYSTER_PUBLIC_IMAGE_BASE_URL", "https://seedleap-world.loopit.me"),
+                _env(
+                    "HAPPYOYSTER_PUBLIC_IMAGE_BASE_URL",
+                    "https://seedleap-world.loopit.me",
+                ),
                 _env("REALTIME_UPSTREAM_HTTP", "http://world-realtime-gateway:18080"),
                 _env("REALTIME_UPSTREAM_WS", "ws://world-realtime-gateway:18080"),
                 _env(
@@ -1045,7 +1063,9 @@ def _webui() -> dict[str, Any]:
                 },
                 {"name": "tmp", "mountPath": "/tmp"},
             ],
-            "startupProbe": _http_probe("/runtime-config.js", 18080, period=2, failures=30),
+            "startupProbe": _http_probe(
+                "/runtime-config.js", 18080, period=2, failures=30
+            ),
             "readinessProbe": _http_probe("/runtime-config.js", 18080, period=5),
             "livenessProbe": _http_probe("/", 18080, period=15),
             "topologySpreadConstraints": _spread(name),
@@ -1104,7 +1124,10 @@ def artifact_publisher_task() -> dict[str, Any]:
         "taskExecutionPolicy": {
             "requireDigestImage": True,
             "commandRules": [
-                {"command": command, "argsExact": ["--release", release_path, "--offline-plan"]},
+                {
+                    "command": command,
+                    "argsExact": ["--release", release_path, "--offline-plan"],
+                },
                 {
                     "command": command,
                     "argsPrefix": [
@@ -1234,8 +1257,13 @@ def validate_configs(
                 f"{config['name']} contains non-typed service fields: "
                 f"{sorted(unknown_fields)}"
             )
-        if config["businessLineId"] != BUSINESS_LINE or config["namespace"] != NAMESPACE:
-            raise ValueError("platform config escaped the world-model ownership boundary")
+        if (
+            config["businessLineId"] != BUSINESS_LINE
+            or config["namespace"] != NAMESPACE
+        ):
+            raise ValueError(
+                "platform config escaped the world-model ownership boundary"
+            )
         if PLATFORM_OWNERSHIP_LABELS.intersection(config.get("labels", {})):
             raise ValueError(f"{config['name']} overrides platform ownership labels")
         policy = config.get("networkPolicy")

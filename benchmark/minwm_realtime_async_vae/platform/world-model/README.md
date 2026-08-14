@@ -23,7 +23,7 @@ service accounts, pools, and image digests.
   canary NodePool/device-plugin, Spot-only Pod selector, recovery measurement,
   and captured live evidence were deliberately excluded.
 - minWM model release:
-  `models/minwm/wan22-5b-stage3-dmd-47-0808-2fb2cfec2a2/gs3200-ema-student-v1/releases/20260810T042157Z-c302d572/model`.
+  `models/minwm-async-denoiser-0/wan22-5b-stage3-dmd-47-0808-2fb2cfec2a2-gs3200-ema-student-v1/20260810T042157Z-c302d572`.
 - LingBot2 revision:
   `59cccf49f2d2dd27418ae7a04b82b10868d455c2`.
 - LingBot2 reviewed release spec: release ID
@@ -65,9 +65,13 @@ WM-04 foundation controller per D-03; it is not an eighth resident application
 or a platform CronJob in this draft.
 
 Both denoisers use the AWS CRT transfer manager with 128 concurrent transfers
-and 16 MiB parts. The init validates `_READY`, the artifact-manifest SHA256,
-every path, file size, and file SHA256 while holding a file lock. It activates a
-staging directory atomically and writes the local `_READY` last. `model-cache`
+and 16 MiB parts. The init resolves a release root from `MODEL_NAME`,
+`MODEL_VERSION`, and `MODEL_RELEASE_ID`, or uses an explicit immutable
+`MODEL_S3_URI` release-root override for rollback. Before CRT starts, it validates
+`info.json`, `artifact-manifest.json`, and `_READY`, including the info/manifest
+SHA256 chain and the raw source revision. It then validates every path, file
+size, and file SHA256 while holding a file lock, activates a staging directory
+atomically, and writes the local `_READY` last. `model-cache`
 is an `emptyDir`; Karpenter/nodeadm places kubelet data on instance-store RAID0,
 while the AMI wrapper intentionally leaves the preloaded containerd cache on the
 200 GiB root EBS volume.
@@ -133,9 +137,13 @@ The destination shares the existing minWM serving bucket and has this shape:
 
 ```text
 s3://leap-world-model-serving-829115578968-us-east-2/
-  models/lingbot2/robbyant-lingbot-world-v2-14b-causal-fast-diffusers/
-  59cccf49f2d2dd27418ae7a04b82b10868d455c2/
-  releases/<UTC>-<artifact-manifest-sha8>/model/
+  models/lingbot2-denoiser/
+  robbyant-lingbot-world-v2-14b-causal-fast-diffusers/
+  <UTC>-<artifact-manifest-sha8>/
+    info.json
+    artifact-manifest.json
+    _READY
+    model/
 ```
 
 The checked-in `release-spec.json` was generated with the existing read-only AWS
@@ -153,6 +161,8 @@ python3 benchmark/minwm_realtime_async_vae/build_model_release_spec.py \
   --source-manifest-key world-model/minwm/serving-artifacts/lingbot2/59cccf49f2d2dd27418ae7a04b82b10868d455c2/manifest.json \
   --destination-bucket leap-world-model-serving-829115578968-us-east-2 \
   --destination-region us-east-2 \
+  --serving-model-name lingbot2-denoiser \
+  --model-version robbyant-lingbot-world-v2-14b-causal-fast-diffusers \
   --model-family lingbot2 \
   --model-id robbyant-lingbot-world-v2-14b-causal-fast-diffusers \
   --revision 59cccf49f2d2dd27418ae7a04b82b10868d455c2 \
@@ -183,9 +193,10 @@ python3 benchmark/minwm_realtime_async_vae/copy_model_release.py \
   --confirm-release-id 20260814T054118Z-e0650875
 ```
 
-The publisher copies version-pinned model objects, verifies destination size
-and SHA256, writes `artifact-manifest.json`, then `release-manifest.json`, and
-finally `_READY`. The release manifest records model/revision metadata through
+The publisher copies version-pinned model objects under `model/`, verifies
+destination size and SHA256, writes `artifact-manifest.json`,
+`release-manifest.json`, then `info.json`, and finally `_READY`. The release
+manifest records model/revision metadata through
 the reviewed spec, source location, source and destination VersionIds, object
 count, total bytes, and rollback release. Verification can be repeated without
 writing:
@@ -207,8 +218,8 @@ request at each GPU gate. Stop immediately on failure.
 
 Rollback in reverse order: WebUI, gateway, denoisers, VAEs, coordinator. For an
 application regression select the previous platform publish record/image digest.
-For a model regression change only the denoiser's immutable `MODEL_PREFIX` to
-the reviewed rollback release and restart the StatefulSet Pod under the platform
-OnDelete workflow. Never overwrite or delete the failed release during incident
-response. Cloudflare origin rollback belongs to WM-12 and is not part of this
-application rollback.
+For a model regression set only the denoiser's `MODEL_S3_URI` to the reviewed
+immutable release-root URI and restart the StatefulSet Pod under the platform
+OnDelete workflow. The override still has to match the configured model identity.
+Never overwrite or delete the failed release during incident response. Cloudflare
+origin rollback belongs to WM-12 and is not part of this application rollback.

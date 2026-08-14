@@ -12,7 +12,6 @@ from typing import Any
 
 from download_model_artifact import validate_control_files
 
-
 MODEL_COMPONENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 REVISION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$")
 
@@ -30,9 +29,7 @@ def parse_created_at(value: str | None) -> datetime:
     return created_at.astimezone(timezone.utc)
 
 
-def _read_versioned_object(
-    client: Any, bucket: str, key: str
-) -> tuple[bytes, str]:
+def _read_versioned_object(client: Any, bucket: str, key: str) -> tuple[bytes, str]:
     response = client.get_object(Bucket=bucket, Key=key)
     version_id = response.get("VersionId")
     if not isinstance(version_id, str) or not version_id:
@@ -49,6 +46,8 @@ def build_release_spec(
     source_manifest_key: str | None,
     destination_bucket: str,
     destination_region: str,
+    serving_model_name: str,
+    model_version: str,
     model_family: str,
     model_id: str,
     revision: str,
@@ -56,7 +55,12 @@ def build_release_spec(
     created_at: datetime,
 ) -> dict[str, Any]:
     """Inventory an existing immutable source without writing any S3 object."""
-    for name, value in (("model-family", model_family), ("model-id", model_id)):
+    for name, value in (
+        ("serving-model-name", serving_model_name),
+        ("model-version", model_version),
+        ("model-family", model_family),
+        ("model-id", model_id),
+    ):
         if not MODEL_COMPONENT_RE.fullmatch(value):
             raise ValueError(f"{name} is not a safe release path component")
     if not REVISION_RE.fullmatch(revision):
@@ -96,9 +100,7 @@ def build_release_spec(
     manifest_sha256 = hashlib.sha256(manifest_body).hexdigest()
     release_timestamp = created_at.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     release_id = f"{release_timestamp}-{manifest_sha256[:8]}"
-    destination_prefix = (
-        f"models/{model_family}/{model_id}/{revision}/releases/{release_id}/model"
-    )
+    destination_prefix = f"models/{serving_model_name}/{model_version}/{release_id}"
     return {
         "schema_version": 1,
         "release_id": release_id,
@@ -106,6 +108,8 @@ def build_release_spec(
         .isoformat(timespec="seconds")
         .replace("+00:00", "Z"),
         "model": {
+            "serving_name": serving_model_name,
+            "version": model_version,
             "family": model_family,
             "id": model_id,
             "revision": revision,
@@ -155,6 +159,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--destination-bucket", required=True)
     parser.add_argument("--destination-region", required=True)
+    parser.add_argument("--serving-model-name", required=True)
+    parser.add_argument("--model-version", required=True)
     parser.add_argument("--model-family", required=True)
     parser.add_argument("--model-id", required=True)
     parser.add_argument("--revision", required=True)
@@ -187,6 +193,8 @@ def main() -> None:
         source_manifest_key=args.source_manifest_key,
         destination_bucket=args.destination_bucket,
         destination_region=args.destination_region,
+        serving_model_name=args.serving_model_name,
+        model_version=args.model_version,
         model_family=args.model_family,
         model_id=args.model_id,
         revision=args.revision,

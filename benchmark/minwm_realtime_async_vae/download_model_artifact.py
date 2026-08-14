@@ -16,9 +16,12 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path, PurePosixPath
 from typing import Any
+from urllib.parse import urlsplit
 
 MAX_CONTROL_FILE_BYTES = 16 * 1024 * 1024
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+MODEL_COMPONENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+S3_BUCKET_RE = re.compile(r"^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$")
 
 
 def _sha256_bytes(payload: bytes) -> str:
@@ -66,9 +69,67 @@ def _safe_relative_path(raw_path: Any) -> Path:
         or any(part in {"", ".", ".."} for part in pure_path.parts)
     ):
         raise ValueError(f"unsafe manifest file path: {raw_path!r}")
-    if raw_path in {"_READY", "artifact-manifest.json"}:
+    if raw_path in {"_READY", "artifact-manifest.json", "info.json"}:
         raise ValueError(f"manifest cannot overwrite control file: {raw_path!r}")
     return Path(*pure_path.parts)
+
+
+def _safe_model_component(name: str, value: str) -> str:
+    if not MODEL_COMPONENT_RE.fullmatch(value):
+        raise ValueError(f"{name} is not a safe model path component")
+    return value
+
+
+def _safe_s3_prefix(prefix: str) -> str:
+    normalized = prefix.strip("/")
+    if not normalized or "\\" in normalized:
+        raise ValueError("S3 prefix cannot be empty or contain a backslash")
+    parsed = PurePosixPath(normalized)
+    if normalized != parsed.as_posix() or any(
+        part in {"", ".", ".."} for part in parsed.parts
+    ):
+        raise ValueError("S3 prefix is not a safe object-key prefix")
+    return normalized
+
+
+def resolve_model_source(
+    *,
+    bucket: str | None,
+    prefix: str | None,
+    model_s3_uri: str | None,
+    model_name: str,
+    model_version: str,
+    model_release_id: str,
+) -> tuple[str, str]:
+    """Resolve an explicit rollback URI or the versioned serving convention."""
+    _safe_model_component("model-name", model_name)
+    _safe_model_component("model-version", model_version)
+    _safe_model_component("model-release-id", model_release_id)
+
+    if model_s3_uri:
+        parsed = urlsplit(model_s3_uri)
+        if (
+            parsed.scheme != "s3"
+            or not parsed.netloc
+            or not parsed.path
+            or parsed.query
+            or parsed.fragment
+            or "%" in parsed.path
+        ):
+            raise ValueError(
+                "model-s3-uri must be an unambiguous s3://bucket/prefix URI"
+            )
+        if not S3_BUCKET_RE.fullmatch(parsed.netloc):
+            raise ValueError("model-s3-uri has an invalid S3 bucket name")
+        return parsed.netloc, _safe_s3_prefix(parsed.path)
+
+    if not bucket:
+        raise ValueError("bucket is required when model-s3-uri is not set")
+    if not S3_BUCKET_RE.fullmatch(bucket):
+        raise ValueError("bucket is not a valid S3 bucket name")
+    if prefix:
+        return bucket, _safe_s3_prefix(prefix)
+    return bucket, f"models/{model_name}/{model_version}/{model_release_id}"
 
 
 def validate_control_files(
@@ -144,14 +205,77 @@ def validate_control_files(
     return manifest, files
 
 
+def validate_release_controls(
+    info_body: bytes,
+    ready_body: bytes,
+    manifest_body: bytes,
+    *,
+    expected_model_name: str,
+    expected_model_version: str,
+    expected_release_id: str,
+    expected_revision: str | None,
+) -> tuple[dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
+    """Validate the release identity and immutable artifact authorization chain."""
+    info = _load_json(info_body, "model info")
+    ready = _load_json(ready_body, "_READY")
+    if info.get("schema_version") != 1:
+        raise ValueError("unsupported model info schema_version")
+
+    expected_identity = {
+        "model_name": expected_model_name,
+        "model_version": expected_model_version,
+        "release_id": expected_release_id,
+    }
+    for field, expected in expected_identity.items():
+        actual = info.get(field)
+        if actual != expected:
+            raise ValueError(
+                f"model info {field} {actual!r} does not match expected {expected!r}"
+            )
+
+    info_sha256 = ready.get("info_sha256")
+    if not isinstance(info_sha256, str) or not SHA256_RE.fullmatch(info_sha256):
+        raise ValueError("_READY has no valid info_sha256")
+    if _sha256_bytes(info_body) != info_sha256:
+        raise ValueError("model info SHA256 does not match _READY")
+    if ready.get("release_id") != expected_release_id:
+        raise ValueError("_READY release_id does not match model info")
+
+    info_manifest_sha256 = info.get("artifact_manifest_sha256")
+    if (
+        not isinstance(info_manifest_sha256, str)
+        or not SHA256_RE.fullmatch(info_manifest_sha256)
+        or info_manifest_sha256 != ready.get("manifest_sha256")
+    ):
+        raise ValueError("model info does not authorize the artifact manifest")
+
+    source_revision = info.get("source_revision")
+    source_uri = info.get("source_uri")
+    if not isinstance(source_revision, str) or not source_revision:
+        raise ValueError("model info has no source_revision")
+    if not isinstance(source_uri, str) or not source_uri.startswith("s3://"):
+        raise ValueError("model info has no valid source_uri")
+
+    manifest, files = validate_control_files(
+        ready_body, manifest_body, expected_revision
+    )
+    revision = manifest.get("revision") or manifest.get("resolved_revision")
+    if revision != source_revision:
+        raise ValueError("artifact revision does not match model info source_revision")
+    return info, manifest, files
+
+
 def _cache_matches(
     destination: Path,
+    info_body: bytes,
     ready_body: bytes,
     manifest_body: bytes,
     files: list[dict[str, Any]],
 ) -> bool:
     try:
         if (destination / "_READY").read_bytes() != ready_body:
+            return False
+        if (destination / "info.json").read_bytes() != info_body:
             return False
         if (destination / "artifact-manifest.json").read_bytes() != manifest_body:
             return False
@@ -207,7 +331,7 @@ def _download_files(
                 # rename callback has published the requested destination path.
                 future = manager.download(
                     bucket,
-                    f"{prefix}/{entry['path']}",
+                    f"{prefix}/model/{entry['path']}",
                     stream,
                 )
                 futures.append((entry, destination, stream, future))
@@ -265,14 +389,18 @@ def stage_model(
     prefix: str,
     destination: Path,
     lock_path: Path,
+    expected_model_name: str,
+    expected_model_version: str,
+    expected_release_id: str,
     expected_revision: str | None,
     concurrency: int,
     part_size: int,
     manager_factory: Callable[[Any, int, int], Any] = create_crt_transfer_manager,
 ) -> dict[str, Any]:
-    prefix = prefix.strip("/")
-    if not prefix:
-        raise ValueError("S3 prefix cannot be empty")
+    prefix = _safe_s3_prefix(prefix)
+    _safe_model_component("model-name", expected_model_name)
+    _safe_model_component("model-version", expected_model_version)
+    _safe_model_component("model-release-id", expected_release_id)
     if concurrency < 1 or concurrency > 128:
         raise ValueError("concurrency must be between 1 and 128")
     if part_size < 8 * 1024 * 1024 or part_size > 512 * 1024 * 1024:
@@ -283,22 +411,34 @@ def stage_model(
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with lock_path.open("a+b") as lock_stream:
         fcntl.flock(lock_stream, fcntl.LOCK_EX)
-        ready_body = _read_control_object(client, bucket, f"{prefix}/_READY")
+        # Read immutable metadata and the manifest first. _READY is read last so
+        # a partially published release can never authorize a download.
+        info_body = _read_control_object(client, bucket, f"{prefix}/info.json")
         manifest_body = _read_control_object(
             client, bucket, f"{prefix}/artifact-manifest.json"
         )
-        manifest, files = validate_control_files(
-            ready_body, manifest_body, expected_revision
+        ready_body = _read_control_object(client, bucket, f"{prefix}/_READY")
+        info, manifest, files = validate_release_controls(
+            info_body,
+            ready_body,
+            manifest_body,
+            expected_model_name=expected_model_name,
+            expected_model_version=expected_model_version,
+            expected_release_id=expected_release_id,
+            expected_revision=expected_revision,
         )
         total_bytes = sum(entry["size"] for entry in files)
 
-        if _cache_matches(destination, ready_body, manifest_body, files):
+        if _cache_matches(destination, info_body, ready_body, manifest_body, files):
             return {
                 "backend": "awscrt",
                 "bytes": total_bytes,
                 "cache_hit": True,
                 "destination": str(destination),
-                "revision": manifest["revision"],
+                "model_name": info["model_name"],
+                "model_version": info["model_version"],
+                "release_id": info["release_id"],
+                "revision": info["source_revision"],
             }
 
         staging = destination.parent / f".{destination.name}.staging.{uuid.uuid4().hex}"
@@ -321,6 +461,7 @@ def stage_model(
             _verify_sha256(staging, files)
             verify_elapsed_seconds = time.monotonic() - verify_started
             (staging / "artifact-manifest.json").write_bytes(manifest_body)
+            (staging / "info.json").write_bytes(info_body)
             # The completion marker is deliberately written last.
             (staging / "_READY").write_bytes(ready_body)
             _activate_staging(staging, destination)
@@ -344,15 +485,22 @@ def stage_model(
                 total_bytes * 8 / elapsed_seconds / 1e9, 3
             ),
             "part_size_bytes": part_size,
-            "revision": manifest["revision"],
+            "model_name": info["model_name"],
+            "model_version": info["model_version"],
+            "release_id": info["release_id"],
+            "revision": info["source_revision"],
             "verify_elapsed_seconds": round(verify_elapsed_seconds, 3),
         }
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--bucket", required=True)
-    parser.add_argument("--prefix", required=True)
+    parser.add_argument("--bucket")
+    parser.add_argument("--prefix")
+    parser.add_argument("--model-s3-uri")
+    parser.add_argument("--model-name", required=True)
+    parser.add_argument("--model-version", required=True)
+    parser.add_argument("--model-release-id", required=True)
     parser.add_argument("--destination", type=Path, required=True)
     parser.add_argument("--lock-path", type=Path, required=True)
     parser.add_argument("--region", default=os.environ.get("AWS_REGION", "us-east-2"))
@@ -367,6 +515,14 @@ def main() -> None:
     from botocore.config import Config
 
     args = parse_args()
+    bucket, prefix = resolve_model_source(
+        bucket=args.bucket,
+        prefix=args.prefix,
+        model_s3_uri=args.model_s3_uri,
+        model_name=args.model_name,
+        model_version=args.model_version,
+        model_release_id=args.model_release_id,
+    )
     client = boto3.client(
         "s3",
         region_name=args.region,
@@ -374,10 +530,13 @@ def main() -> None:
     )
     result = stage_model(
         client=client,
-        bucket=args.bucket,
-        prefix=args.prefix,
+        bucket=bucket,
+        prefix=prefix,
         destination=args.destination,
         lock_path=args.lock_path,
+        expected_model_name=args.model_name,
+        expected_model_version=args.model_version,
+        expected_release_id=args.model_release_id,
         expected_revision=args.expected_revision,
         concurrency=args.concurrency,
         part_size=args.part_size_mib * 1024 * 1024,

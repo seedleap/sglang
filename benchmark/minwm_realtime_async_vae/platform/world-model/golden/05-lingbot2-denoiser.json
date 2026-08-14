@@ -49,7 +49,7 @@
   "initContainers": [
     {
       "args": [
-        "exec python3 benchmark/minwm_realtime_async_vae/download_model_artifact.py --bucket ${MODEL_BUCKET} --prefix ${MODEL_PREFIX} --destination /model-cache/model --lock-path /model-cache/.download.lock --region ${AWS_REGION} --expected-revision ${MODEL_REVISION} --concurrency 128 --part-size-mib 16"
+        "exec python3 benchmark/minwm_realtime_async_vae/download_model_artifact.py --bucket \"${MODEL_BUCKET}\" --model-s3-uri \"${MODEL_S3_URI:-}\" --model-name \"${MODEL_NAME}\" --model-version \"${MODEL_VERSION}\" --model-release-id \"${MODEL_RELEASE_ID}\" --destination /model-cache/model --lock-path /model-cache/.download.lock --region \"${AWS_REGION}\" --expected-revision \"${MODEL_SOURCE_REVISION}\" --concurrency 128 --part-size-mib 16"
       ],
       "command": [
         "/bin/bash",
@@ -73,12 +73,24 @@
           "value": "leap-world-model-serving-829115578968-us-east-2"
         },
         {
-          "name": "MODEL_PREFIX",
-          "value": "models/lingbot2/robbyant-lingbot-world-v2-14b-causal-fast-diffusers/59cccf49f2d2dd27418ae7a04b82b10868d455c2/releases/20260814T054118Z-e0650875/model"
+          "name": "MODEL_NAME",
+          "value": "lingbot2-denoiser"
         },
         {
-          "name": "MODEL_REVISION",
+          "name": "MODEL_VERSION",
+          "value": "robbyant-lingbot-world-v2-14b-causal-fast-diffusers"
+        },
+        {
+          "name": "MODEL_RELEASE_ID",
+          "value": "20260814T054118Z-e0650875"
+        },
+        {
+          "name": "MODEL_SOURCE_REVISION",
           "value": "59cccf49f2d2dd27418ae7a04b82b10868d455c2"
+        },
+        {
+          "name": "MODEL_S3_URI",
+          "value": ""
         }
       ],
       "image": "${LINGBOT2_DENOISER_IMAGE_DIGEST}",

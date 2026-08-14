@@ -2,6 +2,14 @@
   "schema_version": 1,
   "release_id": "20260810T042157Z-c302d572",
   "release_manifest_created_at": "2026-08-13T12:27:10Z",
+  "model": {
+    "serving_name": "minwm-async-denoiser-0",
+    "version": "wan22-5b-stage3-dmd-47-0808-2fb2cfec2a2-gs3200-ema-student-v1",
+    "family": "minwm",
+    "id": "wan22-5b-stage3-dmd-47-0808-2fb2cfec2a2",
+    "revision": "gs3200-ema-student-v1",
+    "rollback_release": null
+  },
   "source": {
     "bucket": "leap-world-us-west-2",
     "region": "us-west-2",
@@ -41,6 +49,6 @@
   "destination": {
     "bucket": "leap-world-model-serving-829115578968-us-east-2",
     "region": "us-east-2",
-    "prefix": "models/minwm/wan22-5b-stage3-dmd-47-0808-2fb2cfec2a2/gs3200-ema-student-v1/releases/20260810T042157Z-c302d572/model"
+    "prefix": "models/minwm-async-denoiser-0/wan22-5b-stage3-dmd-47-0808-2fb2cfec2a2-gs3200-ema-student-v1/20260810T042157Z-c302d572"
   }
 }

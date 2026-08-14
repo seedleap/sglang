@@ -1,10 +1,12 @@
 {
   "destination": {
     "bucket": "leap-world-model-serving-829115578968-us-east-2",
-    "prefix": "models/lingbot2/robbyant-lingbot-world-v2-14b-causal-fast-diffusers/59cccf49f2d2dd27418ae7a04b82b10868d455c2/releases/20260814T054118Z-e0650875/model",
+    "prefix": "models/lingbot2-denoiser/robbyant-lingbot-world-v2-14b-causal-fast-diffusers/20260814T054118Z-e0650875",
     "region": "us-east-2"
   },
   "model": {
+    "serving_name": "lingbot2-denoiser",
+    "version": "robbyant-lingbot-world-v2-14b-causal-fast-diffusers",
     "family": "lingbot2",
     "id": "robbyant-lingbot-world-v2-14b-causal-fast-diffusers",
     "revision": "59cccf49f2d2dd27418ae7a04b82b10868d455c2",

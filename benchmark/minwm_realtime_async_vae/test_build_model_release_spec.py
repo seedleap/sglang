@@ -6,7 +6,6 @@ import json
 from datetime import datetime, timezone
 
 import pytest
-
 from build_model_release_spec import build_release_spec, parse_created_at
 
 
@@ -50,6 +49,8 @@ def test_builds_frozen_release_path_from_manifest_sha_and_utc_time():
         source_manifest_key=None,
         destination_bucket="serving",
         destination_region="us-east-2",
+        serving_model_name="lingbot2-denoiser",
+        model_version="lingbot-world-v2",
         model_family="lingbot2",
         model_id="lingbot-world-v2",
         revision="revision-1",
@@ -66,8 +67,8 @@ def test_builds_frozen_release_path_from_manifest_sha_and_utc_time():
         "legacy/model/artifact-manifest.json"
     )
     assert result["destination"]["prefix"] == (
-        "models/lingbot2/lingbot-world-v2/revision-1/releases/"
-        f"20260814T010203Z-{manifest_sha[:8]}/model"
+        "models/lingbot2-denoiser/lingbot-world-v2/"
+        f"20260814T010203Z-{manifest_sha[:8]}"
     )
 
 
@@ -92,6 +93,8 @@ def test_supports_legacy_manifest_key_and_resolved_revision():
         source_manifest_key="legacy/manifest.json",
         destination_bucket="serving",
         destination_region="us-east-2",
+        serving_model_name="lingbot2-denoiser",
+        model_version="lingbot-world-v2",
         model_family="lingbot2",
         model_id="lingbot-world-v2",
         revision="revision-1",

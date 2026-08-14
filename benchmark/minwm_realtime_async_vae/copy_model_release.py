@@ -11,7 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from download_model_artifact import validate_control_files
+from download_model_artifact import validate_control_files, validate_release_controls
 
 
 def _sha256(payload: bytes) -> str:
@@ -30,9 +30,7 @@ def _object_bytes(client: Any, bucket: str, key: str, version_id: str) -> bytes:
     )["Body"].read()
 
 
-def _source_control_key(
-    source: dict[str, Any], control: str, default_name: str
-) -> str:
+def _source_control_key(source: dict[str, Any], control: str, default_name: str) -> str:
     value = source[control]
     key = value.get("key") if isinstance(value, dict) else None
     if key is None:
@@ -164,7 +162,7 @@ def _copy_one(
     source = release["source"]
     destination = release["destination"]
     source_key = f"{source['prefix'].strip('/')}/{path}"
-    destination_key = f"{destination['prefix'].strip('/')}/{path}"
+    destination_key = f"{destination['prefix'].strip('/')}/model/{path}"
 
     existing = _destination_head(
         destination_client, destination["bucket"], destination_key
@@ -279,21 +277,31 @@ def verify_destination_release(
     destination = release["destination"]
     bucket = destination["bucket"]
     prefix = destination["prefix"].strip("/")
-    release_root = prefix.rsplit("/model", 1)[0]
 
-    ready_body = destination_client.get_object(
-        Bucket=bucket, Key=f"{prefix}/_READY"
-    )["Body"].read()
+    ready_body = destination_client.get_object(Bucket=bucket, Key=f"{prefix}/_READY")[
+        "Body"
+    ].read()
+    info_body = destination_client.get_object(Bucket=bucket, Key=f"{prefix}/info.json")[
+        "Body"
+    ].read()
     manifest_body = destination_client.get_object(
         Bucket=bucket, Key=f"{prefix}/artifact-manifest.json"
     )["Body"].read()
     release_manifest_body = destination_client.get_object(
-        Bucket=bucket, Key=f"{release_root}/release-manifest.json"
+        Bucket=bucket, Key=f"{prefix}/release-manifest.json"
     )["Body"].read()
     ready = json.loads(ready_body)
     release_manifest = json.loads(release_manifest_body)
-    if ready.get("manifest_sha256") != _sha256(manifest_body):
-        raise ValueError("destination _READY does not authorize artifact manifest")
+    model = release["model"]
+    _, _, validated_files = validate_release_controls(
+        info_body,
+        ready_body,
+        manifest_body,
+        expected_model_name=model["serving_name"],
+        expected_model_version=model["version"],
+        expected_release_id=release["release_id"],
+        expected_revision=model["revision"],
+    )
     if ready.get("release_manifest_sha256") != _sha256(release_manifest_body):
         raise ValueError("destination _READY does not authorize release-manifest")
     if ready.get("release_id") != release["release_id"]:
@@ -304,11 +312,23 @@ def verify_destination_release(
     objects = release_manifest.get("objects")
     if not isinstance(objects, list) or not objects:
         raise ValueError("destination release-manifest has no model objects")
+    expected_objects = {entry["path"]: entry for entry in validated_files}
+    actual_objects = {entry.get("path"): entry for entry in objects}
+    if set(actual_objects) != set(expected_objects):
+        raise ValueError("destination release-manifest object paths differ")
     for entry in objects:
         path = entry["path"]
+        expected = expected_objects[path]
+        if (entry.get("size"), entry.get("sha256")) != (
+            expected["size"],
+            expected["sha256"],
+        ):
+            raise ValueError(
+                f"destination release-manifest metadata differs for {path}"
+            )
         response = destination_client.head_object(
             Bucket=bucket,
-            Key=f"{prefix}/{path}",
+            Key=f"{prefix}/model/{path}",
             VersionId=entry["destination_version_id"],
             ChecksumMode="ENABLED",
         )
@@ -360,7 +380,6 @@ def execute_copy(
         f"{destination_prefix}/artifact-manifest.json",
         manifest_body,
     )
-    release_root = destination_prefix.rsplit("/model", 1)[0]
     release_manifest = {
         "schema_version": 1,
         "release_id": release["release_id"],
@@ -384,13 +403,41 @@ def execute_copy(
     release_manifest_version_id = _put_control_object(
         destination_client,
         destination["bucket"],
-        f"{release_root}/release-manifest.json",
+        f"{destination_prefix}/release-manifest.json",
         release_manifest_body,
+    )
+    model = release["model"]
+    info = {
+        "schema_version": 1,
+        "model_name": model["serving_name"],
+        "model_version": model["version"],
+        "release_id": release["release_id"],
+        "created_at": release["release_manifest_created_at"],
+        "source_revision": model["revision"],
+        "source_uri": (
+            f"s3://{release['source']['bucket']}/"
+            f"{release['source']['prefix'].strip('/')}/"
+        ),
+        "artifact_manifest_sha256": _sha256(manifest_body),
+    }
+    info_body = json.dumps(
+        info,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    info_version_id = _put_control_object(
+        destination_client,
+        destination["bucket"],
+        f"{destination_prefix}/info.json",
+        info_body,
     )
     destination_ready = json.loads(ready_body)
     destination_ready.update(
         {
             "release_id": release["release_id"],
+            "info_sha256": _sha256(info_body),
+            "info_version_id": info_version_id,
             "release_manifest_sha256": _sha256(release_manifest_body),
             "release_manifest_version_id": release_manifest_version_id,
         }
@@ -410,7 +457,7 @@ def execute_copy(
     return {
         "bucket": destination["bucket"],
         "prefix": destination_prefix,
-        "object_count": len(copied) + 3,
+        "object_count": len(copied) + 4,
         "bytes": sum(entry["size"] for entry in manifest_files.values()),
         "release_manifest_version_id": release_manifest_version_id,
         "ready_version_id": ready_version_id,
@@ -472,7 +519,7 @@ def main() -> None:
         "source": f"s3://{release['source']['bucket']}/{release['source']['prefix']}/",
         "destination": f"s3://{release['destination']['bucket']}/{release['destination']['prefix']}/",
         "model_object_count": len(manifest_files),
-        "control_object_count": 3,
+        "control_object_count": 4,
         "bytes": sum(entry["size"] for entry in manifest_files.values()),
     }
     print(json.dumps(plan, sort_keys=True), flush=True)

@@ -1,7 +1,7 @@
 {
   "action": "copy-version-pinned-release",
   "bytes": 86071995490,
-  "destination": "s3://leap-world-model-serving-829115578968-us-east-2/models/lingbot2/robbyant-lingbot-world-v2-14b-causal-fast-diffusers/59cccf49f2d2dd27418ae7a04b82b10868d455c2/releases/20260814T054118Z-e0650875/model/",
+  "destination": "s3://leap-world-model-serving-829115578968-us-east-2/models/lingbot2-denoiser/robbyant-lingbot-world-v2-14b-causal-fast-diffusers/20260814T054118Z-e0650875/",
   "execute": false,
   "model_object_count": 26,
   "network": false,
