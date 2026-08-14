@@ -21,8 +21,8 @@ data:
     webrtc: true
     webrtcAddress: :8889
     webrtcAllowOrigins: ['*']
-    webrtcLocalUDPAddress: :8189
-    webrtcLocalTCPAddress: ''
+    webrtcLocalUDPAddress: ''
+    webrtcLocalTCPAddress: :8189
     webrtcIPsFromInterfaces: false
     webrtcAdditionalHosts: [REPLACE_WITH_MEDIA_PUBLIC_HOST]
     paths:
@@ -59,7 +59,7 @@ spec:
           ports:
             - {name: rtsp, containerPort: 8554, protocol: TCP}
             - {name: whep, containerPort: 8889, protocol: TCP}
-            - {name: ice-udp, containerPort: 8189, protocol: UDP}
+            - {name: ice-tcp, containerPort: 8189, protocol: TCP}
             - {name: api, containerPort: 9997, protocol: TCP}
             - {name: metrics, containerPort: 9998, protocol: TCP}
           readinessProbe:
@@ -110,7 +110,7 @@ spec:
     app.kubernetes.io/name: zing-webrtc-mediamtx
   ports:
     - {name: whep, port: 80, targetPort: whep, protocol: TCP}
-    - {name: ice-udp, port: 8189, targetPort: ice-udp, protocol: UDP}
+    - {name: ice-tcp, port: 8189, targetPort: ice-tcp, protocol: TCP}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -150,7 +150,7 @@ spec:
             - {name: WEBRTC_MEDIA_HTTP_BASE, value: http://REPLACE_WITH_MEDIA_PUBLIC_HOST}
             - {name: WEBRTC_BRIDGE_MAX_SESSIONS, value: "8"}
             - {name: WEBRTC_BRIDGE_SESSION_TTL_S, value: "600"}
-            - {name: WEBRTC_H264_PRESET, value: veryfast}
+            - {name: WEBRTC_H264_PRESET, value: faster}
             - {name: WEBRTC_H264_PROFILE, value: main}
             - {name: WEBRTC_H264_CRF, value: "20"}
             - {name: WEBRTC_H264_VBV_BUFFER_MS, value: "250"}
