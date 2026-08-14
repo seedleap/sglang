@@ -4,20 +4,112 @@
 from __future__ import annotations
 
 import argparse
+import inspect
 import json
 import time
 from collections.abc import Callable
 
 import torch
+import torch.nn.functional as F
 
-from sglang.multimodal_gen.runtime.models.dits.minwm import (
-    _minwm_adaln,
-    _minwm_adaln_op,
-    _minwm_layer_norm,
-    _minwm_layer_norm_op,
-    _MinWMSegmentCompile,
-)
-from sglang.multimodal_gen.runtime.models.dits import minwm as minwm_module
+
+# Keep this golden repro Torch-only.  Importing ``sglang`` executes the package
+# initializer and pulls in unrelated serving dependencies, while the behavior
+# under test is fully defined by these source-shaped copies from minwm.py.  This
+# also lets the H200 job preserve the image-native Torch/CUDA runtime exactly.
+_MINWM_SEGMENT_COMPILE = True
+_MINWM_CUDA_GRAPH_ACTIVE = False
+
+
+class _MinWMSegmentCompile:
+    """Mirror minwm.py's shared, dynamic segment-compile cache."""
+
+    _compiled = {}
+
+    @classmethod
+    def get(cls, function, use_compile: bool):
+        if not use_compile or not _MINWM_SEGMENT_COMPILE or _MINWM_CUDA_GRAPH_ACTIVE:
+            return function
+        if function not in cls._compiled:
+            kwargs = {}
+            if "recompile_limit" in inspect.signature(torch.compile).parameters:
+                kwargs["recompile_limit"] = 64
+            if torch.are_deterministic_algorithms_enabled():
+                kwargs["options"] = {"deterministic": True}
+            cls._compiled[function] = torch.compile(
+                function, dynamic=True, mode=None, **kwargs
+            )
+        return cls._compiled[function]
+
+
+def _minwm_layer_norm(
+    hidden_states: torch.Tensor,
+    *,
+    eps: float,
+    weight: torch.Tensor | None = None,
+    bias: torch.Tensor | None = None,
+) -> torch.Tensor:
+    weight = weight.to(hidden_states.dtype) if weight is not None else None
+    bias = bias.to(hidden_states.dtype) if bias is not None else None
+    return _MinWMSegmentCompile.get(_minwm_layer_norm_op, hidden_states.is_cuda)(
+        hidden_states, weight, bias, eps
+    )
+
+
+def _minwm_layer_norm_op(
+    hidden_states: torch.Tensor,
+    weight: torch.Tensor | None,
+    bias: torch.Tensor | None,
+    eps: float,
+) -> torch.Tensor:
+    return F.layer_norm(
+        hidden_states.float(),
+        (hidden_states.shape[-1],),
+        weight.float() if weight is not None else None,
+        bias.float() if bias is not None else None,
+        eps,
+    ).type_as(hidden_states)
+
+
+def _minwm_adaln_op(
+    x: torch.Tensor,
+    m_shift: torch.Tensor | None = None,
+    m_scale: torch.Tensor | None = None,
+    e_shift: torch.Tensor | None = None,
+    e_scale: torch.Tensor | None = None,
+    eps: float = 1e-6,
+    y: torch.Tensor | None = None,
+    m_gate: torch.Tensor | None = None,
+    e_gate: torch.Tensor | None = None,
+    r: torch.Tensor | None = None,
+    weight: torch.Tensor | None = None,
+    bias: torch.Tensor | None = None,
+    cast_norm: bool = False,
+):
+    if y is not None:
+        x = (x.float() + y.float() * (m_gate.float() + e_gate.float())).type_as(x)
+    if r is not None:
+        x = x + r
+    if m_shift is None:
+        return x
+    h = F.layer_norm(
+        x.float(),
+        (x.shape[-1],),
+        weight.float() if weight is not None else None,
+        bias.float() if bias is not None else None,
+        eps,
+    )
+    shift, scale = m_shift + e_shift, m_scale + e_scale
+    if cast_norm:
+        h = h.type_as(x)
+        return x, h * (1 + scale) + shift
+    return x, (h * (1 + scale.float()) + shift.float()).type_as(x)
+
+
+def _minwm_adaln(hidden_states: torch.Tensor, *args, **kwargs):
+    return _MinWMSegmentCompile.get(_minwm_adaln_op, hidden_states.is_cuda)(
+        hidden_states, *args, **kwargs
+    )
 
 
 def _round_fp32_to_bf16_fp32(values: torch.Tensor) -> torch.Tensor:
@@ -443,8 +535,9 @@ def main() -> None:
     args = parse_args()
     if not torch.cuda.is_available():
         raise SystemExit("CUDA is required")
-    minwm_module._MINWM_SEGMENT_COMPILE = not args.disable_segment_compile
-    minwm_module._MinWMSegmentCompile._compiled.clear()
+    global _MINWM_SEGMENT_COMPILE
+    _MINWM_SEGMENT_COMPILE = not args.disable_segment_compile
+    _MinWMSegmentCompile._compiled.clear()
     operation, reference, materialized_reference = build_candidate(
         args.candidate,
         args.batch_size,
