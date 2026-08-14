@@ -817,6 +817,38 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
         action_window = torch.cat([history[:, -history_frames:], current], dim=1)
         return {"action": action_window}
 
+    def _log_runtime_alignment_once(
+        self,
+        batch: Req,
+        cache_ctx: CausalDMDRealtimeCacheContext,
+    ) -> None:
+        if getattr(self, "_runtime_alignment_logged", False):
+            return
+        self._runtime_alignment_logged = True
+        arch_config = self.transformer.config.arch_config
+        cache = cache_ctx.kv_cache[0]
+        logger.info(
+            "MINWM_RUNTIME_ALIGNMENT local_attn_size=%d sink_size=%d "
+            "window_size=%d rope_position_mode=%s rope_gap=%d "
+            "prompt_first_frame_pin_enabled=%s request_sink_size=%s "
+            "request_window_size=%s allow_growth=%s cache_tokens=%d "
+            "sink_tokens=%d scene_cut_rope_offset=%d "
+            "scene_cut_sink_enabled=%s",
+            int(arch_config.local_attn_size),
+            int(self.sink_size),
+            int(self.sliding_window_num_frames),
+            cache.rope_position_mode,
+            int(cache.rope_max_frame_gap),
+            bool(cache.prompt_first_frame_pin_enabled),
+            getattr(batch, "realtime_causal_sink_size", None),
+            getattr(batch, "realtime_causal_kv_cache_num_frames", None),
+            bool(cache.allow_growth),
+            int(cache.cache_size),
+            int(cache.sink_tokens),
+            int(cache.scene_cut_rope_offset),
+            bool(cache.scene_cut_sink_enabled),
+        )
+
     def _prepare_realtime_causal_caches(
         self,
         batch: Req,
@@ -824,6 +856,8 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
         ctx: CausalDMDForwardContext,
     ) -> CausalDMDRealtimeCacheContext:
         cache_ctx = super()._prepare_realtime_causal_caches(batch, server_args, ctx)
+        if batch.block_idx == 0:
+            self._log_runtime_alignment_once(batch, cache_ctx)
         if (batch.condition_inputs or {}).get(MINWM_PROMPT_UPDATED_CONDITION):
             self._reset_crossattn_cache(cache_ctx.crossattn_cache)
             condition_switch = (batch.condition_inputs or {}).get(
@@ -1115,24 +1149,32 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
 
     @torch.no_grad()
     def forward(self, batch: Req, server_args: ServerArgs) -> Req:
-        if getattr(batch, "realtime_trace_id", None):
-            with realtime_trace_span(
-                logger,
-                batch,
-                "server.model_denoise_complete",
-                component="minwm_denoising",
-                input_tensor=batch.latents,
-                chunk_index=batch.block_idx,
-                event_id=getattr(batch, "realtime_event_id", None),
-                stage=self.__class__.__name__,
-                num_inference_steps=getattr(batch, "num_inference_steps", None),
-            ) as trace_span:
-                result = self._forward_impl(batch, server_args)
-                trace_span.add_fields(
-                    **tensor_trace_metadata(result.latents, prefix="latents"),
-                )
-                return result
-        return self._forward_impl(batch, server_args)
+        component_name = self._component_name_for_stage_module(
+            self.transformer, "transformer"
+        )
+        with self.use_declared_component(
+            component_name=component_name,
+            module=self.transformer,
+            phase=component_name,
+        ):
+            if getattr(batch, "realtime_trace_id", None):
+                with realtime_trace_span(
+                    logger,
+                    batch,
+                    "server.model_denoise_complete",
+                    component="minwm_denoising",
+                    input_tensor=batch.latents,
+                    chunk_index=batch.block_idx,
+                    event_id=getattr(batch, "realtime_event_id", None),
+                    stage=self.__class__.__name__,
+                    num_inference_steps=getattr(batch, "num_inference_steps", None),
+                ) as trace_span:
+                    result = self._forward_impl(batch, server_args)
+                    trace_span.add_fields(
+                        **tensor_trace_metadata(result.latents, prefix="latents"),
+                    )
+                    return result
+            return self._forward_impl(batch, server_args)
 
     def _forward_impl(self, batch: Req, server_args: ServerArgs) -> Req:
         self._minwm_cuda_graph_enabled = bool(

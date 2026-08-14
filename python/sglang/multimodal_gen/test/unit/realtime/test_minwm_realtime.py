@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+from contextlib import contextmanager
 from types import SimpleNamespace
 
 import pytest
@@ -83,6 +84,79 @@ from sglang.multimodal_gen.tools.convert_minwm_checkpoint import (
     TRANSFORMER_CONFIG,
     build_transformer_config,
 )
+
+
+def test_minwm_denoising_declares_transformer_residency_use(monkeypatch):
+    transformer = object()
+    calls = []
+
+    @contextmanager
+    def use_component(use, module=None):
+        calls.append((use.component_name, use.phase, module))
+        yield module
+
+    stage = MinWMCausalDMDDenoisingStage.__new__(MinWMCausalDMDDenoisingStage)
+    stage.transformer = transformer
+    stage.transformer_2 = None
+    stage.vae = None
+    stage.pipeline = None
+    stage._component_residency_manager = SimpleNamespace(
+        server_args=SimpleNamespace(),
+        state=SimpleNamespace(stage_name="denoising"),
+        use_component=use_component,
+    )
+    expected = SimpleNamespace(latents=torch.zeros(1))
+    monkeypatch.setattr(stage, "_forward_impl", lambda _batch, _args: expected)
+
+    result = stage.forward(SimpleNamespace(realtime_trace_id=None), SimpleNamespace())
+
+    assert result is expected
+    assert calls == [("transformer", "transformer", transformer)]
+
+
+def test_minwm_runtime_alignment_logs_once_after_cache_init(monkeypatch):
+    from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.minwm import (
+        minwm_causal_denoising,
+    )
+
+    log_calls = []
+    monkeypatch.setattr(
+        minwm_causal_denoising,
+        "logger",
+        SimpleNamespace(info=lambda *args: log_calls.append(args)),
+    )
+    stage = MinWMCausalDMDDenoisingStage.__new__(MinWMCausalDMDDenoisingStage)
+    stage.transformer = SimpleNamespace(
+        config=SimpleNamespace(
+            arch_config=SimpleNamespace(local_attn_size=32),
+        )
+    )
+    stage.sink_size = 8
+    stage.sliding_window_num_frames = 32
+    batch = SimpleNamespace(
+        realtime_causal_sink_size=8,
+        realtime_causal_kv_cache_num_frames=32,
+    )
+    cache_ctx = SimpleNamespace(
+        kv_cache=[
+            SimpleNamespace(
+                rope_position_mode="block_relative",
+                rope_max_frame_gap=12,
+                prompt_first_frame_pin_enabled=True,
+                allow_growth=False,
+                cache_size=32,
+                sink_tokens=8,
+                scene_cut_rope_offset=0,
+                scene_cut_sink_enabled=False,
+            )
+        ]
+    )
+
+    stage._log_runtime_alignment_once(batch, cache_ctx)
+    stage._log_runtime_alignment_once(batch, cache_ctx)
+
+    assert len(log_calls) == 1
+    assert log_calls[0][0].startswith("MINWM_RUNTIME_ALIGNMENT")
 
 
 @pytest.mark.parametrize(
