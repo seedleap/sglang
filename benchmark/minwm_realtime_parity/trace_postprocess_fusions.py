@@ -12,7 +12,6 @@ from collections.abc import Callable
 import torch
 import torch.nn.functional as F
 
-
 # Keep this golden repro Torch-only.  Importing ``sglang`` executes the package
 # initializer and pulls in unrelated serving dependencies, while the behavior
 # under test is fully defined by these source-shaped copies from minwm.py.  This
