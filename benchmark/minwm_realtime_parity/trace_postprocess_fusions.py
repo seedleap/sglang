@@ -42,6 +42,35 @@ class _MinWMSegmentCompile:
         return cls._compiled[function]
 
 
+class _MinWMNoDynamicScaleCompile:
+    """Compile a diagnostic segment without Inductor's dynamic R-block tuner.
+
+    This is intentionally benchmark-only.  It isolates the reduction-tree
+    cause; it is not a product candidate because disabling the tuner selects
+    the heuristic's initial configuration rather than following the current
+    two-segment baseline's runtime winner.
+    """
+
+    _compiled = {}
+
+    @classmethod
+    def get(cls, function, use_compile: bool):
+        if not use_compile or not _MINWM_SEGMENT_COMPILE or _MINWM_CUDA_GRAPH_ACTIVE:
+            return function
+        if function not in cls._compiled:
+            if "dynamic_scale_rblock" not in torch._inductor.list_options():
+                raise RuntimeError(
+                    "this diagnostic requires Inductor's dynamic_scale_rblock option"
+                )
+            kwargs = {"options": {"dynamic_scale_rblock": False}}
+            if "recompile_limit" in inspect.signature(torch.compile).parameters:
+                kwargs["recompile_limit"] = 64
+            cls._compiled[function] = torch.compile(
+                function, dynamic=True, mode=None, **kwargs
+            )
+        return cls._compiled[function]
+
+
 def _minwm_layer_norm(
     hidden_states: torch.Tensor,
     *,
@@ -228,6 +257,44 @@ def _bitquant_self_post(
     )
 
 
+def _bitquant_self_post_no_dynamic_scale(
+    hidden_states: torch.Tensor,
+    attn_output: torch.Tensor,
+    model_gate: torch.Tensor,
+    timestep_gate: torch.Tensor,
+    weight: torch.Tensor | None,
+    bias: torch.Tensor | None,
+    eps: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    weight = weight.to(hidden_states.dtype) if weight is not None else None
+    bias = bias.to(hidden_states.dtype) if bias is not None else None
+    return _MinWMNoDynamicScaleCompile.get(
+        _bitquant_self_post_op, hidden_states.is_cuda
+    )(
+        hidden_states,
+        attn_output,
+        model_gate,
+        timestep_gate,
+        weight,
+        bias,
+        eps,
+    )
+
+
+def _minwm_layer_norm_no_dynamic_scale(
+    hidden_states: torch.Tensor,
+    *,
+    eps: float,
+    weight: torch.Tensor | None = None,
+    bias: torch.Tensor | None = None,
+) -> torch.Tensor:
+    weight = weight.to(hidden_states.dtype) if weight is not None else None
+    bias = bias.to(hidden_states.dtype) if bias is not None else None
+    return _MinWMNoDynamicScaleCompile.get(_minwm_layer_norm_op, hidden_states.is_cuda)(
+        hidden_states, weight, bias, eps
+    )
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -237,6 +304,7 @@ def parse_args() -> argparse.Namespace:
             "self-baseline",
             "self-proposed",
             "self-bitquant",
+            "self-bitquant-no-dynamic-scale",
             "cross",
             "ffn",
         ),
@@ -388,7 +456,12 @@ def build_candidate(
     else:
         model_gate = randn(batch_size, 1, hidden_size)
 
-    if candidate in {"self-baseline", "self-proposed", "self-bitquant"}:
+    if candidate in {
+        "self-baseline",
+        "self-proposed",
+        "self-bitquant",
+        "self-bitquant-no-dynamic-scale",
+    }:
 
         def reference():
             residual = _minwm_adaln_op(
@@ -447,7 +520,7 @@ def build_candidate(
                 )
                 return residual, normalized
 
-        else:
+        elif candidate == "self-bitquant":
 
             def operation():
                 return _bitquant_self_post(
@@ -475,8 +548,43 @@ def build_candidate(
                 )
                 return residual, normalized
 
+        else:
+
+            def operation():
+                return _bitquant_self_post_no_dynamic_scale(
+                    hidden_states,
+                    update,
+                    model_gate,
+                    timestep_storage.select(2, 2),
+                    weight,
+                    bias,
+                    eps,
+                )
+
+            def reference():
+                residual = _minwm_adaln(
+                    hidden_states,
+                    y=update,
+                    m_gate=model_gate,
+                    e_gate=timestep_storage.select(2, 2),
+                )
+                normalized = _minwm_layer_norm(
+                    residual,
+                    eps=eps,
+                    weight=weight,
+                    bias=bias,
+                )
+                return residual, normalized
+
         def materialized_norm(actual):
             residual, _ = actual
+            if candidate == "self-bitquant-no-dynamic-scale":
+                return _minwm_layer_norm_no_dynamic_scale(
+                    residual,
+                    eps=eps,
+                    weight=weight,
+                    bias=bias,
+                )
             return _minwm_layer_norm(
                 residual,
                 eps=eps,
@@ -538,6 +646,7 @@ def main() -> None:
     global _MINWM_SEGMENT_COMPILE
     _MINWM_SEGMENT_COMPILE = not args.disable_segment_compile
     _MinWMSegmentCompile._compiled.clear()
+    _MinWMNoDynamicScaleCompile._compiled.clear()
     operation, reference, materialized_reference = build_candidate(
         args.candidate,
         args.batch_size,
@@ -564,7 +673,12 @@ def main() -> None:
             "comparison="
             + json.dumps(
                 {
-                    "output": "candidate_norm_vs_layer_norm_of_returned_residual",
+                    "output": (
+                        "candidate_norm_vs_no_dynamic_scale_layer_norm_of_"
+                        "returned_residual"
+                        if args.candidate == "self-bitquant-no-dynamic-scale"
+                        else "candidate_norm_vs_layer_norm_of_returned_residual"
+                    ),
                     **difference_metrics(actual[1], materialized_norm),
                 },
                 sort_keys=True,
@@ -574,7 +688,12 @@ def main() -> None:
             "comparison="
             + json.dumps(
                 {
-                    "output": "baseline_norm_vs_layer_norm_of_returned_residual",
+                    "output": (
+                        "baseline_norm_vs_no_dynamic_scale_layer_norm_of_"
+                        "returned_residual"
+                        if args.candidate == "self-bitquant-no-dynamic-scale"
+                        else "baseline_norm_vs_layer_norm_of_returned_residual"
+                    ),
                     **difference_metrics(expected[1], materialized_norm),
                 },
                 sort_keys=True,
