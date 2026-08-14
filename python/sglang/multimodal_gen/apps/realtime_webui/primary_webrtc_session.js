@@ -115,7 +115,6 @@
       mediaDisconnectGraceMs = 6000,
       mediaReconnectBaseMs = 500,
       mediaReconnectMaxAttempts = 8,
-      mediaCutoverReconnectDelayMs = 100,
       onState = () => {},
       onPlayable = () => {},
       onFrame = null,
@@ -144,10 +143,6 @@
         1,
         Math.trunc(Number(mediaReconnectMaxAttempts) || 8),
       );
-      const requestedCutoverDelayMs = Number(mediaCutoverReconnectDelayMs);
-      this.mediaCutoverReconnectDelayMs = Number.isFinite(requestedCutoverDelayMs)
-        ? Math.max(0, requestedCutoverDelayMs)
-        : 100;
       this.onState = onState;
       this.onPlayable = onPlayable;
       this.onFrame = onFrame;
@@ -169,10 +164,6 @@
       this.mediaReconnectTimer = 0;
       this.mediaReconnectAttempt = 0;
       this.mediaReconnectInFlight = false;
-      this.mediaCutoverReconnectTimer = 0;
-      this.mediaCutoverReconnectCount = 0;
-      this.lastMediaCutoverReconnectEventId = 0;
-      this.pendingMediaCutoverEventId = 0;
       this.lastProcessedMediaEventId = 0;
       this.lastRtcSample = null;
       this.receiver = null;
@@ -267,13 +258,6 @@
         if (this.controlSentEpochByEvent.size > 64) {
           this.controlSentEpochByEvent.delete(this.controlSentEpochByEvent.keys().next().value);
         }
-        this.pendingMediaCutoverEventId = Math.max(
-          this.pendingMediaCutoverEventId,
-          eventId,
-        );
-        this.onStats({
-          pendingMediaCutoverEventId: this.pendingMediaCutoverEventId,
-        });
       }
       this.control.send(JSON.stringify(envelope));
       return true;
@@ -301,10 +285,7 @@
       this.timestampFrameBase = 0;
       this.processedFrames = 0;
       this.controlSentEpochByEvent.clear();
-      this.pendingMediaCutoverEventId = 0;
       this.lastProcessedMediaEventId = 0;
-      this.lastMediaCutoverReconnectEventId = 0;
-      this.mediaCutoverReconnectCount = 0;
       this._stopStats();
       this._stopControlKeepalive();
       if (this.controlReconnectTimer) global.clearTimeout(this.controlReconnectTimer);
@@ -314,10 +295,6 @@
       this.mediaReconnectTimer = 0;
       this.mediaReconnectAttempt = 0;
       this.mediaReconnectInFlight = false;
-      if (this.mediaCutoverReconnectTimer) {
-        global.clearTimeout(this.mediaCutoverReconnectTimer);
-      }
-      this.mediaCutoverReconnectTimer = 0;
       this.playableReject?.(new Error(reason));
       this.playableResolve = null;
       this.playableReject = null;
@@ -605,7 +582,7 @@
       }, retryDelayMs);
     }
 
-    async _reconnectMedia(generation, reason, { cutoverEventId = 0 } = {}) {
+    async _reconnectMedia(generation, reason) {
       if (
         this.mediaReconnectInFlight
         || generation !== this.generation
@@ -617,34 +594,16 @@
       const attempt = this.mediaReconnectAttempt;
       const previousPeer = this.peer;
       const previousReader = this.trackReader;
-      const previousWhepResourceUrl = this.whepResourceUrl;
-      const targetCutoverEventId = Math.max(
-        Number(cutoverEventId || 0),
-        Number(this.pendingMediaCutoverEventId || 0),
-      );
       this.peer = null;
       this.receiver = null;
       this.trackReader = null;
       this.trackPump = null;
       this.whepResourceUrl = "";
       this.firstFrameTimestampUs = null;
-      const cutoverBatch = targetCutoverEventId > 0
-        ? this.mediaBatches.find((item) => item.eventId >= targetCutoverEventId)
-        : null;
-      if (cutoverBatch) {
-        this.mediaBatches = this.mediaBatches.filter(
-          (item) => item.lastFrameIndex >= cutoverBatch.firstFrameIndex,
-        );
-        this.timestampFrameBase = Math.max(
-          this.processedFrames,
-          cutoverBatch.firstFrameIndex,
-        );
-      } else {
-        this.timestampFrameBase = Math.max(
-          this.processedFrames,
-          Number(this.mediaBatches[0]?.firstFrameIndex || 0),
-        );
-      }
+      this.timestampFrameBase = Math.max(
+        this.processedFrames,
+        Number(this.mediaBatches[0]?.firstFrameIndex || 0),
+      );
       this.video.srcObject = null;
       try {
         void Promise.resolve(previousReader?.cancel?.("WebRTC media reconnect")).catch(() => {});
@@ -652,16 +611,6 @@
       try {
         previousPeer?.close?.();
       } catch {}
-      if (
-        previousWhepResourceUrl
-        && previousWhepResourceUrl !== this.whepUrl
-        && this.fetchImpl
-      ) {
-        void this.fetchImpl(previousWhepResourceUrl, {
-          method: "DELETE",
-          keepalive: true,
-        }).catch(() => {});
-      }
       try {
         await this._openWhep(this.whepUrl, generation);
         if (generation !== this.generation || this.expectedClose) return;
@@ -688,49 +637,6 @@
           error.message || reason || "media reconnect failed",
         );
       }
-    }
-
-    _scheduleEventCutoverReconnect(eventId) {
-      const targetEventId = Math.max(
-        Number(eventId || 0),
-        Number(this.pendingMediaCutoverEventId || 0),
-      );
-      if (
-        this.mediaCutoverReconnectDelayMs <= 0
-        || this.mediaCutoverReconnectTimer
-        || !targetEventId
-        || targetEventId <= this.lastProcessedMediaEventId
-        || targetEventId <= this.lastMediaCutoverReconnectEventId
-        || this.expectedClose
-        || !this.sessionId
-        || !this.whepUrl
-      ) return;
-      const generation = this.generation;
-      this.mediaCutoverReconnectTimer = global.setTimeout(() => {
-        this.mediaCutoverReconnectTimer = 0;
-        if (
-          generation !== this.generation
-          || this.expectedClose
-          || targetEventId <= this.lastProcessedMediaEventId
-          || targetEventId <= this.lastMediaCutoverReconnectEventId
-        ) return;
-        if (this.mediaReconnectInFlight) {
-          this._scheduleEventCutoverReconnect(targetEventId);
-          return;
-        }
-        this.lastMediaCutoverReconnectEventId = targetEventId;
-        this.mediaCutoverReconnectCount += 1;
-        this.onStats({
-          pendingMediaCutoverEventId: targetEventId,
-          mediaCutoverReconnectCount: this.mediaCutoverReconnectCount,
-          lastMediaCutoverReconnectEventId: targetEventId,
-        });
-        void this._reconnectMedia(
-          generation,
-          `interactive event cutover ${targetEventId}`,
-          { cutoverEventId: targetEventId },
-        );
-      }, this.mediaCutoverReconnectDelayMs);
     }
 
     _canManagePlayback() {
@@ -770,12 +676,6 @@
         lastMediaBatchBridgeEpochMs: Number(event.bridge_received_epoch_ms || 0),
         mediaControlToBatchMs: sentEpochMs ? Math.max(0, Date.now() - sentEpochMs) : 0,
       });
-      if (
-        batch.eventId >= this.pendingMediaCutoverEventId
-        && this.lastProcessedMediaEventId < this.pendingMediaCutoverEventId
-      ) {
-        this._scheduleEventCutoverReconnect(batch.eventId);
-      }
     }
 
     _finalizeMediaChunk(event) {
@@ -855,21 +755,6 @@
             this.lastProcessedMediaEventId = metadata.eventId;
             this.onStats({
               lastDecodedMediaEventId: metadata.eventId,
-            });
-          }
-          if (
-            this.pendingMediaCutoverEventId > 0
-            && metadata.eventId >= this.pendingMediaCutoverEventId
-          ) {
-            const completedEventId = this.pendingMediaCutoverEventId;
-            this.pendingMediaCutoverEventId = 0;
-            if (this.mediaCutoverReconnectTimer) {
-              global.clearTimeout(this.mediaCutoverReconnectTimer);
-              this.mediaCutoverReconnectTimer = 0;
-            }
-            this.onStats({
-              pendingMediaCutoverEventId: 0,
-              lastMediaCutoverCompletedEventId: completedEventId,
             });
           }
           const dimensions = frameDimensions(frame);
