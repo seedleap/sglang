@@ -123,6 +123,10 @@ class WebRTCBridgeSession:
     )
     media_fps: int = 24
     next_frame_deadline: float | None = None
+    minimum_event_id: int = 0
+    dropped_batches: int = 0
+    dropped_frames: int = 0
+    dropped_source_bytes: int = 0
 
     @property
     def media_path(self) -> str:
@@ -241,11 +245,26 @@ class WebRTCBridgeSession:
             raise ValueError(f"invalid frame dimensions {width}x{height}")
         self.width = width
         self.height = height
+        self.source_bytes += len(payload)
+        event_id = int(header.get("event_id") or 0)
+        if self.minimum_event_id and event_id < self.minimum_event_id:
+            dropped_frames = max(1, int(header.get("num_frames") or 1))
+            self.dropped_batches += 1
+            self.dropped_frames += dropped_frames
+            self.dropped_source_bytes += len(payload)
+            LOGGER.info(
+                "WebRTC bridge %s shed stale media chunk=%s event=%s before event=%s frames=%s",
+                self.session_id,
+                int(header.get("chunk_index") or 0),
+                event_id,
+                self.minimum_event_id,
+                dropped_frames,
+            )
+            return
         if self.ffmpeg is None:
             await self._start_ffmpeg(width, height)
 
         frames = _split_payload(header, payload)
-        self.source_bytes += len(payload)
         raw_num_frame_batches = int(header.get("num_frame_batches") or 0)
         is_final_frame_batch = bool(header.get("is_final_frame_batch"))
         media_batch = {
@@ -378,6 +397,9 @@ class WebRTCBridgeSession:
         upstream = self.upstream
         if upstream is None or upstream.closed:
             raise web.HTTPConflict(text="Zing upstream session is not connected")
+        event_id = int(envelope.get("event_id") or 0)
+        if envelope.get("kind") in {"camera_actions", "prompt", "scene_cut"}:
+            self.minimum_event_id = max(self.minimum_event_id, event_id)
         await upstream.send_bytes(msgspec.msgpack.encode(envelope))
 
     async def _broadcast(self, payload: dict[str, Any]) -> None:
@@ -442,6 +464,10 @@ class WebRTCBridgeSession:
             "frames": self.frames,
             "source_bytes": self.source_bytes,
             "average_source_mbps": round(self.source_bytes * 8 / elapsed / 1_000_000, 3),
+            "minimum_event_id": self.minimum_event_id,
+            "dropped_batches": self.dropped_batches,
+            "dropped_frames": self.dropped_frames,
+            "dropped_source_bytes": self.dropped_source_bytes,
             "width": self.width,
             "height": self.height,
             "created_at": self.created_at,
@@ -637,7 +663,22 @@ async def _control_session(request: web.Request) -> web.WebSocketResponse:
                 )
                 continue
             try:
+                received_epoch_ms = time.time() * 1000
+                forward_started = time.perf_counter()
                 await session.send_control(envelope)
+                await websocket.send_json(
+                    {
+                        "type": "control_ack",
+                        "kind": str(envelope.get("kind") or ""),
+                        "event_id": int(envelope.get("event_id") or 0),
+                        "client_sent_epoch_ms": envelope.get("client_sent_epoch_ms"),
+                        "bridge_received_epoch_ms": round(received_epoch_ms, 3),
+                        "bridge_forward_ms": round(
+                            (time.perf_counter() - forward_started) * 1000, 3
+                        ),
+                        "minimum_event_id": session.minimum_event_id,
+                    }
+                )
             except web.HTTPException as error:
                 await websocket.send_json({"type": "error", "message": error.text})
     finally:

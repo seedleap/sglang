@@ -319,6 +319,18 @@
           if (event.type === "error") {
             const error = new Error(event.message || "WebRTC upstream control error");
             this.onError(error);
+          } else if (event.type === "control_ack") {
+            const clientSentEpochMs = Number(event.client_sent_epoch_ms || 0);
+            this.onStats({
+              lastControlEventId: Number(event.event_id || 0),
+              lastControlKind: String(event.kind || ""),
+              controlBridgeRoundTripMs: clientSentEpochMs
+                ? Math.max(0, Date.now() - clientSentEpochMs)
+                : 0,
+              controlBridgeForwardMs: Number(event.bridge_forward_ms || 0),
+              controlBridgeReceivedEpochMs: Number(event.bridge_received_epoch_ms || 0),
+              controlMinimumEventId: Number(event.minimum_event_id || 0),
+            });
           } else if (event.type === "media_batch") {
             this._queueMediaBatch(event);
           } else if (event.type === "media_chunk_complete") {

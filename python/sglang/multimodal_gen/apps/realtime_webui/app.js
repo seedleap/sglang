@@ -100,7 +100,6 @@ const MAX_DECODE_QUEUE_BYTES = configuredNumber(
 );
 const RECENT_DROP_DISPLAY_MS = 1800;
 const CONTROL_TRANSITION_FLUSH_DELAY_MS = 50;
-const CONTROL_HELD_STATE_HEARTBEAT_MS = 100;
 const SESSION_HEARTBEAT_MS = 15000;
 const PLAYBACK_ACK_INTERVAL_MS = 50;
 // Keep ACK flow-control opt-in until every deployed realtime worker supports
@@ -6616,7 +6615,6 @@ class ControlStateController {
     this.activeActions = new Set();
     this.pendingTransitions = [];
     this.flushTimer = 0;
-    this.stateHeartbeatTimer = 0;
   }
 
   reset({ sendRelease = false } = {}) {
@@ -6624,7 +6622,6 @@ class ControlStateController {
     this.activeActions.clear();
     this.pendingTransitions = [];
     this.clearFlushTimer();
-    this.clearStateHeartbeatTimer();
     this.updateButtons();
     if (sendRelease && hadActions) {
       this.enqueueTransition();
@@ -6644,8 +6641,6 @@ class ControlStateController {
     }
     this.updateButtons();
     this.enqueueTransition();
-    if (this.activeActions.size) this.scheduleStateHeartbeat();
-    else this.clearStateHeartbeatTimer();
     return true;
   }
 
@@ -6671,19 +6666,6 @@ class ControlStateController {
       this.flushTimer = 0;
       this.flush();
     }, CONTROL_TRANSITION_FLUSH_DELAY_MS);
-  }
-
-  scheduleStateHeartbeat() {
-    if (this.stateHeartbeatTimer || !this.activeActions.size) return;
-    this.stateHeartbeatTimer = window.setTimeout(() => {
-      this.stateHeartbeatTimer = 0;
-      if (!this.activeActions.size) return;
-      sendCameraControlTransitions([{
-        actions: Array.from(this.activeActions).sort(),
-        clientTsMs: Math.round(performance.now()),
-      }]);
-      this.scheduleStateHeartbeat();
-    }, CONTROL_HELD_STATE_HEARTBEAT_MS);
   }
 
   flush() {
@@ -6728,11 +6710,6 @@ class ControlStateController {
     this.flushTimer = 0;
   }
 
-  clearStateHeartbeatTimer() {
-    if (!this.stateHeartbeatTimer) return;
-    window.clearTimeout(this.stateHeartbeatTimer);
-    this.stateHeartbeatTimer = 0;
-  }
 }
 
 const CONTROL_ACTION_META_KEYS = Object.keys(CONTROL_ACTION_META);

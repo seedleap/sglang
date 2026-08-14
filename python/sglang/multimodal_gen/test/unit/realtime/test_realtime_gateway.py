@@ -36,6 +36,7 @@ def _frame(
     *,
     generation: str = "g",
     num_frames: int = 1,
+    event_id: int | None = None,
 ) -> bytes:
     return encode_message(
         "frame_batch",
@@ -50,6 +51,7 @@ def _frame(
         width=8,
         height=8,
         num_frames=num_frames,
+        event_id=event_id,
     )
 
 
@@ -93,6 +95,36 @@ def test_gateway_playback_ack_window_bounds_chunk_lead_and_sheds_stale_media():
         )
         assert not await window.allow_output(_frame(2))
         assert await window.allow_output(_frame(3))
+
+    asyncio.run(run())
+
+
+def test_gateway_playback_ack_window_prioritizes_interactive_event_cutover():
+    async def run():
+        window = BrowserPlaybackAckWindow(
+            max_unacked_chunks=2,
+            wait_timeout_s=1,
+        )
+        await window.observe_browser_message(
+            encode_message("init", playback_ack_enabled=True)
+        )
+        assert await window.allow_output(_frame(10, event_id=3))
+        assert await window.allow_output(_frame(11, event_id=3))
+
+        await window.observe_browser_message(
+            encode_message(
+                "event",
+                kind="camera_actions",
+                event_id=7,
+                payload={"mode": "state", "transitions": []},
+            )
+        )
+
+        started = asyncio.get_running_loop().time()
+        assert not await window.allow_output(_frame(12, event_id=6))
+        assert asyncio.get_running_loop().time() - started < 0.1
+        assert await window.allow_output(_frame(13, event_id=7))
+        assert window.minimum_event_id == 7
 
     asyncio.run(run())
 

@@ -602,6 +602,7 @@ def create_app(
                         drop_reason="playback_ack_window",
                         last_received_chunk=playback_ack_window.last_received_chunk,
                         last_rendered_chunk=playback_ack_window.last_rendered_chunk,
+                        minimum_event_id=playback_ack_window.minimum_event_id,
                         **queue_fields,
                         **send_fields,
                     )

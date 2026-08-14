@@ -30,15 +30,15 @@ assert.match(
   /dualModelController\.close\("showcase session is occupied"\)/,
   "partial dual-model admission must be released when the showcase is occupied",
 );
-assert.match(
+assert.doesNotMatch(
   appJs,
-  /const CONTROL_HELD_STATE_HEARTBEAT_MS = 100;/,
-  "held actions should be refreshed every 100ms",
+  /CONTROL_HELD_STATE_HEARTBEAT_MS|scheduleStateHeartbeat/,
+  "state-mode held actions should persist without generating repeated semantic events",
 );
 assert.match(
   appJs,
-  /actions: Array\.from\(this\.activeActions\)\.sort\(\)/,
-  "each held-key refresh should send the complete key state",
+  /class ControlStateController[\s\S]*?this\.enqueueTransition\(\)/,
+  "control changes should still enqueue one complete state transition",
 );
 assert.match(
   appJs,

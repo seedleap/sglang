@@ -238,9 +238,23 @@ const { PrimaryWebRTCSession } = require("./primary_webrtc_session.js");
     type: "event",
     kind: "camera_actions",
   });
+  controlSockets[0].emit("message", { data: JSON.stringify({
+    type: "control_ack",
+    kind: "camera_actions",
+    event_id: 9,
+    client_sent_epoch_ms: Date.now() - 25,
+    bridge_received_epoch_ms: Date.now() - 5,
+    bridge_forward_ms: 0.4,
+    minimum_event_id: 9,
+  }) });
   await new Promise((resolve) => setTimeout(resolve, 0));
   assert.ok(stats.some((snapshot) => snapshot.framesDecoded === 32));
   assert.ok(stats.some((snapshot) => snapshot.jitterBufferTargetMs === 500));
+  assert.ok(stats.some((snapshot) => (
+    snapshot.lastControlEventId === 9
+    && snapshot.controlBridgeRoundTripMs >= 20
+    && snapshot.controlBridgeForwardMs === 0.4
+  )));
 
   controlSockets[0].close(1002);
   await new Promise((resolve) => setTimeout(resolve, 10));
