@@ -6,6 +6,59 @@ metadata:
     app.kubernetes.io/name: minwm-zing-webrtc-lab
     seedleap.ai/environment: development
 ---
+apiVersion: karpenter.k8s.aws/v1
+kind: EC2NodeClass
+metadata:
+  name: zing-webrtc-h100-nvme
+  labels:
+    app.kubernetes.io/part-of: minwm-zing-webrtc-lab
+spec:
+  amiFamily: AL2023
+  amiSelectorTerms:
+    - name: amazon-eks-node-al2023-x86_64-nvidia-*
+      owner: amazon
+  # p5.48xlarge exposes 8 x 3.8 TB NVMe instance-store disks. Karpenter
+  # assembles them as RAID0 and places kubelet/containerd on that filesystem,
+  # so pod emptyDir volumes (including /model-cache) never use the GP3 root.
+  instanceStorePolicy: RAID0
+  blockDeviceMappings:
+    - deviceName: /dev/xvda
+      ebs:
+        deleteOnTermination: true
+        encrypted: true
+        volumeSize: 400Gi
+        volumeType: gp3
+  metadataOptions:
+    httpEndpoint: enabled
+    httpProtocolIPv6: disabled
+    httpPutResponseHopLimit: 1
+    httpTokens: required
+  networkInterfaces:
+    - {deviceIndex: 0, interfaceType: interface, networkCardIndex: 0}
+    - {deviceIndex: 1, interfaceType: efa-only, networkCardIndex: 1}
+    - {deviceIndex: 1, interfaceType: efa-only, networkCardIndex: 2}
+    - {deviceIndex: 1, interfaceType: efa-only, networkCardIndex: 3}
+    - {deviceIndex: 1, interfaceType: efa-only, networkCardIndex: 4}
+    - {deviceIndex: 1, interfaceType: efa-only, networkCardIndex: 5}
+    - {deviceIndex: 1, interfaceType: efa-only, networkCardIndex: 6}
+    - {deviceIndex: 1, interfaceType: efa-only, networkCardIndex: 7}
+    - {deviceIndex: 1, interfaceType: efa-only, networkCardIndex: 8}
+    - {deviceIndex: 1, interfaceType: efa-only, networkCardIndex: 9}
+    - {deviceIndex: 1, interfaceType: efa-only, networkCardIndex: 10}
+    - {deviceIndex: 1, interfaceType: efa-only, networkCardIndex: 11}
+    - {deviceIndex: 1, interfaceType: efa-only, networkCardIndex: 12}
+    - {deviceIndex: 1, interfaceType: efa-only, networkCardIndex: 13}
+    - {deviceIndex: 1, interfaceType: efa-only, networkCardIndex: 14}
+    - {deviceIndex: 1, interfaceType: efa-only, networkCardIndex: 15}
+  role: KarpenterNodeRole-leap-world
+  securityGroupSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: leap-world
+  subnetSelectorTerms:
+    - id: subnet-0b3e75dab2f514ab3
+    - id: subnet-0bcfc20f6b0e5f29c
+    - id: subnet-0245e620ed4f40137
+---
 apiVersion: karpenter.sh/v1
 kind: NodePool
 metadata:
@@ -24,12 +77,13 @@ spec:
       labels:
         seedleap.ai/zing-webrtc-role: denoiser
         seedleap.ai/environment: development
+        seedleap.ai/model-cache: nvme-raid0
     spec:
       expireAfter: Never
       nodeClassRef:
         group: karpenter.k8s.aws
         kind: EC2NodeClass
-        name: minwm-test-h100-ec2
+        name: zing-webrtc-h100-nvme
       requirements:
         - key: karpenter.sh/capacity-type
           operator: In
