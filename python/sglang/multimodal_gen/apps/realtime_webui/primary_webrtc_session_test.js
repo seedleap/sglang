@@ -356,6 +356,15 @@ const { PrimaryWebRTCSession } = require("./primary_webrtc_session.js");
   assert.equal(partialFrame.eventId, 4);
   assert.equal(partialFrame.numFrameBatches, 1_000_000);
   assert.equal(partialFrame.isFinalFrameBatch, false);
+  managedSession._finalizeMediaChunk({
+    type: "media_chunk_complete",
+    chunk_index: 8,
+    event_id: 4,
+    num_frames: 3,
+  });
+  const completedFrame = managedSession._metadataForFrame({ timestamp: 83333 }, 2);
+  assert.equal(completedFrame.numFrameBatches, 3);
+  assert.equal(completedFrame.isFinalFrameBatch, true);
   const managedCreate = requests.filter(({ url, options }) => (
     url === "./api/webrtc/sessions" && options.method === "POST"
   )).at(-1);

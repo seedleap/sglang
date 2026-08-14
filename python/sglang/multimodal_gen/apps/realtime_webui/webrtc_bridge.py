@@ -215,6 +215,16 @@ class WebRTCBridgeSession:
                 or "upstream error"
             )
             raise RuntimeError(str(detail))
+        if message_type == "media_chunk_complete":
+            completion = {
+                "type": "media_chunk_complete",
+                "chunk_index": int(message.get("chunk_index") or 0),
+                "event_id": int(message.get("event_id") or 0),
+                "num_frames": int(message.get("num_frames") or 0),
+            }
+            self.media_batch_history.append(completion)
+            await self._broadcast(completion)
+            return
         if message_type not in {"frame_batch", "frame_batch_header"}:
             return
         payload = message.pop("payload", None)

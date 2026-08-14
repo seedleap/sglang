@@ -300,6 +300,8 @@
             this.onError(error);
           } else if (event.type === "media_batch") {
             this._queueMediaBatch(event);
+          } else if (event.type === "media_chunk_complete") {
+            this._finalizeMediaChunk(event);
           }
         } catch {}
       };
@@ -492,6 +494,18 @@
       if (this.mediaBatches.length > 1024) {
         this.mediaBatches.splice(0, this.mediaBatches.length - 1024);
       }
+    }
+
+    _finalizeMediaChunk(event) {
+      const chunkIndex = Number(event.chunk_index || 0);
+      const batches = this.mediaBatches.filter((item) => item.chunkIndex === chunkIndex);
+      const finalBatch = batches.at(-1);
+      if (!finalBatch) return;
+      finalBatch.isFinalFrameBatch = true;
+      finalBatch.numFrameBatches = Math.max(
+        finalBatch.frameBatchIndex + 1,
+        Number(finalBatch.numFrameBatches || 0),
+      );
     }
 
     _metadataForFrame(frame, fallbackIndex) {
