@@ -189,6 +189,44 @@ def test_rejects_manifest_not_authorized_by_ready_marker():
         )
 
 
+def test_accepts_an_arbitrary_model_file_layout():
+    objects = {
+        "acoustic/weights.bin": b"speech-weights",
+        "vocabulary.txt": b"hello\nworld\n",
+    }
+    manifest = {
+        "schema_version": 1,
+        "revision": "speech-revision-7",
+        "files": [
+            {
+                "path": path,
+                "size": len(payload),
+                "sha256": hashlib.sha256(payload).hexdigest(),
+            }
+            for path, payload in sorted(objects.items())
+        ],
+    }
+    manifest_body = json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()
+    ready_body = json.dumps(
+        {
+            "revision": "speech-revision-7",
+            "manifest_sha256": hashlib.sha256(manifest_body).hexdigest(),
+        },
+        sort_keys=True,
+    ).encode()
+
+    _, files = validate_control_files(
+        ready_body,
+        manifest_body,
+        "speech-revision-7",
+    )
+
+    assert [entry["path"] for entry in files] == [
+        "acoustic/weights.bin",
+        "vocabulary.txt",
+    ]
+
+
 def test_failed_hash_never_publishes_ready_marker(tmp_path):
     objects, info_body, manifest_body, ready_body = _artifact()
     corrupt_objects = {**objects, "transformer/model.safetensors": b"corrupt"}

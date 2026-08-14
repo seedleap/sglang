@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Stage an immutable MinWM model release from S3 with the AWS CRT client."""
+"""Stage an immutable, parameterized model release with the AWS CRT client."""
 
 from __future__ import annotations
 
@@ -198,10 +198,6 @@ def validate_control_files(
             raise ValueError(f"invalid SHA256 for artifact file {path_string}")
         files.append({"path": path_string, "size": size, "sha256": digest})
 
-    if "model_index.json" not in seen_paths:
-        raise ValueError("artifact manifest is missing model_index.json")
-    if not any(path.startswith("transformer/") for path in seen_paths):
-        raise ValueError("artifact manifest is missing transformer files")
     return manifest, files
 
 
