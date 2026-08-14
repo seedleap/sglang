@@ -9,6 +9,7 @@ from download_model_artifact import (
     resolve_model_source,
     stage_model,
     validate_control_files,
+    validate_release_controls,
 )
 
 MODEL_NAME = "minwm"
@@ -45,16 +46,21 @@ def _artifact() -> tuple[dict[str, bytes], bytes, bytes, bytes]:
             "source_revision": "gs3200-ema-student-v1",
             "source_uri": "s3://source-bucket/source/model/",
             "artifact_manifest_sha256": hashlib.sha256(manifest_body).hexdigest(),
+            "release_spec_sha256": "a" * 64,
+            "publisher_bundle_sha256": "b" * 64,
         },
         sort_keys=True,
         separators=(",", ":"),
     ).encode()
     ready_body = json.dumps(
         {
+            "schema_version": 1,
             "revision": manifest["revision"],
             "release_id": RELEASE_ID,
             "manifest_sha256": hashlib.sha256(manifest_body).hexdigest(),
             "info_sha256": hashlib.sha256(info_body).hexdigest(),
+            "release_spec_sha256": "a" * 64,
+            "publisher_bundle_sha256": "b" * 64,
         },
         sort_keys=True,
     ).encode()
@@ -156,6 +162,13 @@ def test_stages_all_objects_before_waiting_and_then_hits_cache(tmp_path):
     assert cached["cache_hit"] is True
     assert len(managers) == 1
 
+    # A same-size payload corruption must not be accepted as a cache hit.
+    (tmp_path / "model/model_index.json").write_bytes(b"[]")
+    repaired = stage_model(**kwargs)
+    assert repaired["cache_hit"] is False
+    assert len(managers) == 2
+    assert (tmp_path / "model/model_index.json").read_bytes() == b"{}"
+
 
 def test_rejects_manifest_path_traversal():
     objects, info_body, manifest_body, ready_body = _artifact()
@@ -186,6 +199,44 @@ def test_rejects_manifest_not_authorized_by_ready_marker():
             ready_body,
             tampered_body,
             "gs3200-ema-student-v1",
+        )
+
+
+def test_rejects_missing_wrong_or_noncanonical_destination_revision():
+    _, info_body, manifest_body, ready_body = _artifact()
+
+    missing_revision_manifest = json.loads(manifest_body)
+    del missing_revision_manifest["revision"]
+    missing_revision_body = json.dumps(
+        missing_revision_manifest, sort_keys=True, separators=(",", ":")
+    ).encode()
+    ready = json.loads(ready_body)
+    ready["manifest_sha256"] = hashlib.sha256(missing_revision_body).hexdigest()
+    with pytest.raises(ValueError, match="has no revision"):
+        validate_control_files(
+            json.dumps(ready, sort_keys=True).encode(),
+            missing_revision_body,
+            None,
+        )
+
+    wrong_ready = json.loads(ready_body)
+    wrong_ready["revision"] = "wrong-revision"
+    with pytest.raises(ValueError, match="revisions differ"):
+        validate_control_files(
+            json.dumps(wrong_ready, sort_keys=True).encode(), manifest_body, None
+        )
+
+    resolved_only_ready = json.loads(ready_body)
+    resolved_only_ready["resolved_revision"] = resolved_only_ready.pop("revision")
+    with pytest.raises(ValueError, match="canonical revision"):
+        validate_release_controls(
+            info_body,
+            json.dumps(resolved_only_ready, sort_keys=True).encode(),
+            manifest_body,
+            expected_model_name=MODEL_NAME,
+            expected_model_version=MODEL_VERSION,
+            expected_release_id=RELEASE_ID,
+            expected_revision=MODEL_VERSION,
         )
 
 
@@ -252,6 +303,40 @@ def test_failed_hash_never_publishes_ready_marker(tmp_path):
     assert not list(tmp_path.glob(".model.staging.*"))
 
 
+def test_insufficient_disk_fails_before_crt_download(tmp_path, monkeypatch):
+    objects, info_body, manifest_body, ready_body = _artifact()
+    client = FakeClient(info_body, manifest_body, ready_body)
+    manager_started = False
+
+    def factory(*_):
+        nonlocal manager_started
+        manager_started = True
+        raise AssertionError("CRT transfer manager must not start")
+
+    monkeypatch.setattr(
+        "download_model_artifact.shutil.disk_usage",
+        lambda _: type("Usage", (), {"free": sum(map(len, objects.values())) - 1})(),
+    )
+    with pytest.raises(ValueError, match="insufficient disk space"):
+        stage_model(
+            client=client,
+            bucket="model-bucket",
+            prefix=PREFIX,
+            destination=tmp_path / "model",
+            lock_path=tmp_path / "model.lock",
+            expected_model_name=MODEL_NAME,
+            expected_model_version=MODEL_VERSION,
+            expected_release_id=RELEASE_ID,
+            expected_revision=MODEL_VERSION,
+            concurrency=128,
+            part_size=16 * 1024 * 1024,
+            manager_factory=factory,
+        )
+
+    assert manager_started is False
+    assert not list(tmp_path.glob(".model.staging.*"))
+
+
 def test_resolves_versioned_default_and_explicit_rollback_uri():
     kwargs = {
         "bucket": "serving-bucket",
@@ -261,13 +346,29 @@ def test_resolves_versioned_default_and_explicit_rollback_uri():
         "model_version": MODEL_VERSION,
         "model_release_id": RELEASE_ID,
     }
-    assert resolve_model_source(**kwargs) == ("serving-bucket", PREFIX)
+    assert resolve_model_source(**kwargs) == ("serving-bucket", PREFIX, RELEASE_ID)
+    rollback_release_id = "20260801T010203Z-12345678"
     assert resolve_model_source(
         **{
             **kwargs,
-            "model_s3_uri": ("s3://rollback-bucket/models/minwm/v1/older-release/"),
+            "model_s3_uri": (
+                f"s3://rollback-bucket/models/{MODEL_NAME}/{MODEL_VERSION}/"
+                f"{rollback_release_id}/"
+            ),
         }
-    ) == ("rollback-bucket", "models/minwm/v1/older-release")
+    ) == (
+        "rollback-bucket",
+        f"models/{MODEL_NAME}/{MODEL_VERSION}/{rollback_release_id}",
+        rollback_release_id,
+    )
+
+    with pytest.raises(ValueError, match="must follow"):
+        resolve_model_source(
+            **{
+                **kwargs,
+                "model_s3_uri": "s3://rollback-bucket/models/other/v1/release",
+            }
+        )
 
 
 def test_rejects_wrong_info_before_starting_crt_download(tmp_path):
@@ -309,3 +410,41 @@ def test_rejects_wrong_info_before_starting_crt_download(tmp_path):
         )
 
     assert manager_started is False
+
+
+def test_accepts_unbound_migration_controls_and_rejects_mismatched_bindings():
+    _, info_body, manifest_body, ready_body = _artifact()
+    info = json.loads(info_body)
+    ready = json.loads(ready_body)
+
+    del info["release_spec_sha256"]
+    del info["publisher_bundle_sha256"]
+    del ready["release_spec_sha256"]
+    del ready["publisher_bundle_sha256"]
+    unbound_info_body = json.dumps(
+        info, sort_keys=True, separators=(",", ":")
+    ).encode()
+    ready["info_sha256"] = hashlib.sha256(unbound_info_body).hexdigest()
+    validate_release_controls(
+        unbound_info_body,
+        json.dumps(ready, sort_keys=True).encode(),
+        manifest_body,
+        expected_model_name=MODEL_NAME,
+        expected_model_version=MODEL_VERSION,
+        expected_release_id=RELEASE_ID,
+        expected_revision=MODEL_VERSION,
+    )
+
+    info = json.loads(info_body)
+    ready = json.loads(ready_body)
+    ready["publisher_bundle_sha256"] = "c" * 64
+    with pytest.raises(ValueError, match="publisher_bundle_sha256 differ"):
+        validate_release_controls(
+            info_body,
+            json.dumps(ready, sort_keys=True).encode(),
+            manifest_body,
+            expected_model_name=MODEL_NAME,
+            expected_model_version=MODEL_VERSION,
+            expected_release_id=RELEASE_ID,
+            expected_revision=MODEL_VERSION,
+        )

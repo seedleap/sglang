@@ -162,6 +162,9 @@ LINGBOT2_REVISION = "59cccf49f2d2dd27418ae7a04b82b10868d455c2"
 LINGBOT2_MODEL_NAME = "lingbot2-denoiser"
 LINGBOT2_MODEL_VERSION = "robbyant-lingbot-world-v2-14b-causal-fast-diffusers"
 LINGBOT2_RELEASE_ID = "20260814T054118Z-e0650875"
+S3_EXACT_BUNDLE_SHA256 = (
+    "944d828d3eb4c3db52f761847046c2910b8243a23579553fe6bee2defa8b29c7"
+)
 
 
 def _image_placeholder(service_name: str) -> str:
@@ -230,6 +233,23 @@ def required_inputs_document() -> dict[str, Any]:
                     "spec, CRT downloader compatibility, or publisher verifier"
                 ),
             },
+            "publisherExecutionBundle": {
+                "state": "missing",
+                "requiredApprovalFields": [
+                    "releaseSpecSha256",
+                    "publisherBundleSha256",
+                    "executionBundleSha256",
+                ],
+                "requiredExecuteArgs": [
+                    "--confirm-release-id",
+                    "--confirm-release-spec-sha256",
+                    "--confirm-execution-bundle-sha256",
+                ],
+                "reason": (
+                    "the checked-in 26-object LingBot2 release spec predates the "
+                    "23-object runtime allowlist and complete publisher bundle contract"
+                ),
+            },
             "clusterRegistration": {
                 "state": "missing",
                 "clusterName": "world-model",
@@ -242,13 +262,20 @@ def required_inputs_document() -> dict[str, Any]:
             "lingbot2Release": {
                 "releaseId": "20260814T054118Z-e0650875",
                 "manifestSha256": (
-                    "e065087570bde5ae45cac0f678239d6da5dafb7c1af3a2a1be0ddd6ea8929fdd"
+                    "6a790fd04daecfa66bede8cc71f18ed96dda617bc74cecda51e5ce72c4cf19af"
                 ),
-                "objectCount": 26,
-                "bytes": 86071995490,
-                "releaseSpec": (
-                    "model_releases/lingbot2/" f"{LINGBOT2_REVISION}/release-spec.json"
-                ),
+                "objectCount": 23,
+                "bytes": 86068529220,
+                "controlRevisionField": "revision",
+            },
+            "s3MigrationBundle": {
+                "sha256": S3_EXACT_BUNDLE_SHA256,
+                "payloadObjectCount": 41,
+                "controlObjectCount": 6,
+                "totalObjectCount": 47,
+                "payloadBytes": 110277729372,
+                "controlBytes": 8656,
+                "totalBytes": 110277738028,
             }
         },
     }
@@ -1127,16 +1154,7 @@ def artifact_publisher_task() -> dict[str, Any]:
                 {
                     "command": command,
                     "argsExact": ["--release", release_path, "--offline-plan"],
-                },
-                {
-                    "command": command,
-                    "argsPrefix": [
-                        "--release",
-                        release_path,
-                        "--execute",
-                        "--confirm-release-id",
-                    ],
-                },
+                }
             ],
         },
         "resources": {

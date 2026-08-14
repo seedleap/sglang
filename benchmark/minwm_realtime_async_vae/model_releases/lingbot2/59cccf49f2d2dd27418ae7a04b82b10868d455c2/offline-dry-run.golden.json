@@ -5,8 +5,13 @@
   "execute": false,
   "model_object_count": 26,
   "network": false,
+  "publisher_bundle_sha256": "3685a541f6d43c55794eeb2a9e955fe3cd4caba4da3f96f25329b5be6cfee033",
   "release_id": "20260814T054118Z-e0650875",
-  "release_spec_ready": true,
+  "release_spec_sha256": "4e46eb7f62a4b19a035051764f201ac3d0c5990c20b638e0cb76193fedb330c2",
+  "release_spec_ready": false,
   "source": "s3://leap-world-us-west-2/world-model/minwm/serving-artifacts/lingbot2/59cccf49f2d2dd27418ae7a04b82b10868d455c2/model/",
-  "unresolved": []
+  "unresolved": [
+    "publisher_bundle_sha256",
+    "publisher_scripts"
+  ]
 }

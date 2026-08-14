@@ -94,18 +94,6 @@
           "python3",
           "/opt/sglang/benchmark/minwm_realtime_async_vae/copy_model_release.py"
         ]
-      },
-      {
-        "argsPrefix": [
-          "--release",
-          "/opt/sglang/benchmark/minwm_realtime_async_vae/model_releases/lingbot2/59cccf49f2d2dd27418ae7a04b82b10868d455c2/release-spec.json",
-          "--execute",
-          "--confirm-release-id"
-        ],
-        "command": [
-          "python3",
-          "/opt/sglang/benchmark/minwm_realtime_async_vae/copy_model_release.py"
-        ]
       }
     ],
     "requireDigestImage": true

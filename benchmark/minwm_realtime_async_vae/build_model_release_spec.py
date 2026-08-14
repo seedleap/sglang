@@ -10,6 +10,10 @@ import re
 from datetime import datetime, timezone
 from typing import Any
 
+from copy_model_release import (
+    publisher_bundle_sha256,
+    publisher_script_inventory,
+)
 from download_model_artifact import validate_control_files
 
 MODEL_COMPONENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
@@ -81,7 +85,12 @@ def build_release_spec(
     manifest_body, manifest_version_id = _read_versioned_object(
         client, source_bucket, manifest_key
     )
-    manifest, files = validate_control_files(ready_body, manifest_body, revision)
+    manifest, files = validate_control_files(
+        ready_body,
+        manifest_body,
+        revision,
+        require_canonical_ready_revision=True,
+    )
 
     object_version_ids: dict[str, str] = {}
     for entry in files:
@@ -101,8 +110,10 @@ def build_release_spec(
     release_timestamp = created_at.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     release_id = f"{release_timestamp}-{manifest_sha256[:8]}"
     destination_prefix = f"models/{serving_model_name}/{model_version}/{release_id}"
-    return {
+    release = {
         "schema_version": 1,
+        "publisher_scripts": publisher_script_inventory(),
+        "publisher_bundle_sha256": publisher_bundle_sha256(),
         "release_id": release_id,
         "release_manifest_created_at": created_at.astimezone(timezone.utc)
         .isoformat(timespec="seconds")
@@ -143,6 +154,7 @@ def build_release_spec(
             "prefix": destination_prefix,
         },
     }
+    return release
 
 
 def parse_args() -> argparse.Namespace:

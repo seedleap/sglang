@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 
 import pytest
 from build_model_release_spec import build_release_spec, parse_created_at
+from copy_model_release import publisher_bundle_sha256
 
 
 class FakeClient:
@@ -22,6 +23,7 @@ class FakeClient:
         self.manifest_body = json.dumps(manifest, sort_keys=True).encode()
         self.ready_body = json.dumps(
             {
+                "schema_version": 1,
                 "revision": "revision-1",
                 "manifest_sha256": hashlib.sha256(self.manifest_body).hexdigest(),
             },
@@ -62,6 +64,7 @@ def test_builds_frozen_release_path_from_manifest_sha_and_utc_time():
     assert result["release_id"] == f"20260814T010203Z-{manifest_sha[:8]}"
     assert result["source"]["object_count"] == 2
     assert result["source"]["bytes"] == 5
+    assert result["publisher_bundle_sha256"] == publisher_bundle_sha256()
     assert result["source"]["ready"]["key"] == "legacy/model/_READY"
     assert result["source"]["artifact_manifest"]["key"] == (
         "legacy/model/artifact-manifest.json"
@@ -72,14 +75,15 @@ def test_builds_frozen_release_path_from_manifest_sha_and_utc_time():
     )
 
 
-def test_supports_legacy_manifest_key_and_resolved_revision():
+def test_supports_legacy_manifest_key_and_resolved_manifest_revision():
     client = FakeClient()
     manifest = json.loads(client.manifest_body)
     manifest["resolved_revision"] = manifest.pop("revision")
     client.manifest_body = json.dumps(manifest, sort_keys=True).encode()
     client.ready_body = json.dumps(
         {
-            "resolved_revision": "revision-1",
+            "schema_version": 1,
+            "revision": "revision-1",
             "manifest_sha256": hashlib.sha256(client.manifest_body).hexdigest(),
         },
         sort_keys=True,

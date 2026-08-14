@@ -254,6 +254,23 @@ def test_required_inputs_keep_unresolved_deployment_non_executable():
         ),
     }
     assert document["requiredInputs"]["clusterRegistration"]["state"] == "missing"
+    assert document["requiredInputs"]["publisherExecutionBundle"] == {
+        "state": "missing",
+        "requiredApprovalFields": [
+            "releaseSpecSha256",
+            "publisherBundleSha256",
+            "executionBundleSha256",
+        ],
+        "requiredExecuteArgs": [
+            "--confirm-release-id",
+            "--confirm-release-spec-sha256",
+            "--confirm-execution-bundle-sha256",
+        ],
+        "reason": (
+            "the checked-in 26-object LingBot2 release spec predates the "
+            "23-object runtime allowlist and complete publisher bundle contract"
+        ),
+    }
     assert len(document["requiredInputs"]["imageBuildCallbacks"]) == 8
     assert all(
         item["state"] == "missing"
@@ -262,27 +279,35 @@ def test_required_inputs_keep_unresolved_deployment_non_executable():
     assert document["resolvedInputs"]["lingbot2Release"] == {
         "releaseId": "20260814T054118Z-e0650875",
         "manifestSha256": (
-            "e065087570bde5ae45cac0f678239d6da5dafb7c1af3a2a1be0ddd6ea8929fdd"
+            "6a790fd04daecfa66bede8cc71f18ed96dda617bc74cecda51e5ce72c4cf19af"
         ),
-        "objectCount": 26,
-        "bytes": 86071995490,
-        "releaseSpec": (
-            "model_releases/lingbot2/"
-            "59cccf49f2d2dd27418ae7a04b82b10868d455c2/release-spec.json"
-        ),
+        "objectCount": 23,
+        "bytes": 86068529220,
+        "controlRevisionField": "revision",
+    }
+    assert document["resolvedInputs"]["s3MigrationBundle"] == {
+        "sha256": "944d828d3eb4c3db52f761847046c2910b8243a23579553fe6bee2defa8b29c7",
+        "payloadObjectCount": 41,
+        "controlObjectCount": 6,
+        "totalObjectCount": 47,
+        "payloadBytes": 110277729372,
+        "controlBytes": 8656,
+        "totalBytes": 110277738028,
     }
 
 
-def test_publisher_defaults_to_offline_plan_and_requires_explicit_execute_inputs():
+def test_publisher_defaults_to_offline_plan_and_blocks_execute_until_exact_bundle():
     task = _by_name("world-model-artifact-publisher")
 
     assert task["deployType"] == "job"
     assert task["args"][-1] == "--offline-plan"
     assert task["args"][-2].endswith("/release-spec.json")
     assert task["taskExecutionPolicy"]["requireDigestImage"] is True
-    assert task["taskExecutionPolicy"]["commandRules"][1]["argsPrefix"][-2:] == [
-        "--execute",
-        "--confirm-release-id",
+    assert task["taskExecutionPolicy"]["commandRules"] == [
+        {
+            "command": task["command"],
+            "argsExact": task["args"],
+        }
     ]
     assert task["image"] == "${WORLD_MODEL_ARTIFACT_PUBLISHER_IMAGE_DIGEST}"
     assert task["nodeSelector"] == {}

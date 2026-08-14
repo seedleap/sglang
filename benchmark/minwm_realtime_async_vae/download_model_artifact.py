@@ -100,7 +100,7 @@ def resolve_model_source(
     model_name: str,
     model_version: str,
     model_release_id: str,
-) -> tuple[str, str]:
+) -> tuple[str, str, str]:
     """Resolve an explicit rollback URI or the versioned serving convention."""
     _safe_model_component("model-name", model_name)
     _safe_model_component("model-version", model_version)
@@ -121,21 +121,40 @@ def resolve_model_source(
             )
         if not S3_BUCKET_RE.fullmatch(parsed.netloc):
             raise ValueError("model-s3-uri has an invalid S3 bucket name")
-        return parsed.netloc, _safe_s3_prefix(parsed.path)
+        resolved_prefix = _safe_s3_prefix(parsed.path)
+        prefix_parts = PurePosixPath(resolved_prefix).parts
+        if (
+            len(prefix_parts) != 4
+            or prefix_parts[:3] != ("models", model_name, model_version)
+        ):
+            raise ValueError(
+                "model-s3-uri must follow "
+                "models/<model-name>/<model-version>/<release-id>"
+            )
+        rollback_release_id = _safe_model_component(
+            "model-s3-uri release-id", prefix_parts[3]
+        )
+        return parsed.netloc, resolved_prefix, rollback_release_id
 
     if not bucket:
         raise ValueError("bucket is required when model-s3-uri is not set")
     if not S3_BUCKET_RE.fullmatch(bucket):
         raise ValueError("bucket is not a valid S3 bucket name")
     if prefix:
-        return bucket, _safe_s3_prefix(prefix)
-    return bucket, f"models/{model_name}/{model_version}/{model_release_id}"
+        return bucket, _safe_s3_prefix(prefix), model_release_id
+    return (
+        bucket,
+        f"models/{model_name}/{model_version}/{model_release_id}",
+        model_release_id,
+    )
 
 
 def validate_control_files(
     ready_body: bytes,
     manifest_body: bytes,
     expected_revision: str | None,
+    *,
+    require_canonical_ready_revision: bool = False,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     ready = _load_json(ready_body, "_READY")
     manifest = _load_json(manifest_body, "artifact manifest")
@@ -161,6 +180,11 @@ def validate_control_files(
         raise ValueError("artifact manifest has no revision")
     ready_revision = ready.get("revision")
     ready_resolved_revision = ready.get("resolved_revision")
+    if require_canonical_ready_revision:
+        if ready.get("schema_version") != 1:
+            raise ValueError("unsupported _READY schema_version")
+        if ready_revision != revision:
+            raise ValueError("_READY has no canonical revision")
     if (
         ready_revision is not None
         and ready_resolved_revision is not None
@@ -253,11 +277,34 @@ def validate_release_controls(
         raise ValueError("model info has no valid source_uri")
 
     manifest, files = validate_control_files(
-        ready_body, manifest_body, expected_revision
+        ready_body,
+        manifest_body,
+        expected_revision,
+        require_canonical_ready_revision=True,
     )
     revision = manifest.get("revision") or manifest.get("resolved_revision")
     if revision != source_revision:
         raise ValueError("artifact revision does not match model info source_revision")
+    artifact_object_count = info.get("artifact_object_count")
+    if artifact_object_count is not None and artifact_object_count != len(files):
+        raise ValueError("model info artifact_object_count differs from manifest")
+    artifact_bytes = info.get("artifact_bytes")
+    if artifact_bytes is not None and artifact_bytes != sum(
+        entry["size"] for entry in files
+    ):
+        raise ValueError("model info artifact_bytes differs from manifest")
+    for field in ("release_spec_sha256", "publisher_bundle_sha256"):
+        info_value = info.get(field)
+        ready_value = ready.get(field)
+        if info_value is None and ready_value is None:
+            continue
+        if (
+            not isinstance(info_value, str)
+            or not SHA256_RE.fullmatch(info_value)
+        ):
+            raise ValueError(f"model info has no valid {field}")
+        if ready_value != info_value:
+            raise ValueError(f"model info and _READY {field} differ")
     return info, manifest, files
 
 
@@ -278,9 +325,10 @@ def _cache_matches(
         return all(
             (destination / entry["path"]).is_file()
             and (destination / entry["path"]).stat().st_size == entry["size"]
+            and _sha256_file(destination / entry["path"]) == entry["sha256"]
             for entry in files
         )
-    except FileNotFoundError:
+    except OSError:
         return False
 
 
@@ -437,6 +485,13 @@ def stage_model(
                 "revision": info["source_revision"],
             }
 
+        available_bytes = shutil.disk_usage(destination.parent).free
+        if available_bytes < total_bytes:
+            raise ValueError(
+                "insufficient disk space for model staging: "
+                f"required {total_bytes} bytes, available {available_bytes} bytes"
+            )
+
         staging = destination.parent / f".{destination.name}.staging.{uuid.uuid4().hex}"
         staging.mkdir(parents=False)
         started = time.monotonic()
@@ -511,7 +566,7 @@ def main() -> None:
     from botocore.config import Config
 
     args = parse_args()
-    bucket, prefix = resolve_model_source(
+    bucket, prefix, expected_release_id = resolve_model_source(
         bucket=args.bucket,
         prefix=args.prefix,
         model_s3_uri=args.model_s3_uri,
@@ -532,7 +587,7 @@ def main() -> None:
         lock_path=args.lock_path,
         expected_model_name=args.model_name,
         expected_model_version=args.model_version,
-        expected_release_id=args.model_release_id,
+        expected_release_id=expected_release_id,
         expected_revision=args.expected_revision,
         concurrency=args.concurrency,
         part_size=args.part_size_mib * 1024 * 1024,
