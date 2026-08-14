@@ -115,7 +115,10 @@ class FakePeerConnection extends FakeEventTarget {
   async setRemoteDescription(answer) {
     this.remoteDescription = answer;
     this.connectionState = "connected";
-    queueMicrotask(() => this.ontrack?.({ streams: [{ id: "stream-a" }] }));
+    queueMicrotask(() => this.ontrack?.({
+      streams: [{ id: "stream-a" }],
+      track: { id: "track-a", kind: "video" },
+    }));
   }
 
   async getStats() {
@@ -256,6 +259,95 @@ const { PrimaryWebRTCSession } = require("./primary_webrtc_session.js");
   assert.ok(requests.some(({ url, options }) => (
     url === "./api/webrtc/sessions/session-a" && options.method === "DELETE"
   )));
+
+  let pendingReadResolve = null;
+  let delivered = false;
+  let readerCanceled = false;
+  const managedFrame = {
+    timestamp: 0,
+    displayWidth: 1280,
+    displayHeight: 704,
+    closed: false,
+    close() { this.closed = true; },
+  };
+  class FakeMediaStreamTrackProcessor {
+    constructor({ track }) {
+      assert.equal(track.id, "track-a");
+      this.readable = {
+        getReader: () => ({
+          read: async () => {
+            if (!delivered) {
+              delivered = true;
+              return { done: false, value: managedFrame };
+            }
+            return new Promise((resolve) => { pendingReadResolve = resolve; });
+          },
+          cancel: async () => {
+            readerCanceled = true;
+            pendingReadResolve?.({ done: true });
+          },
+        }),
+      };
+    }
+  }
+
+  const managedVideo = new FakeVideo();
+  const managedCanvas = { hidden: true };
+  const managedFrames = [];
+  let managedPlayable = null;
+  const managedSession = new PrimaryWebRTCSession({
+    video: managedVideo,
+    canvas: managedCanvas,
+    managedPlayback: true,
+    MediaStreamTrackProcessorImpl: FakeMediaStreamTrackProcessor,
+    fetchImpl: fakeFetch,
+    WebSocketImpl: FakeWebSocket,
+    RTCPeerConnectionImpl: FakePeerConnection,
+    mediaPollIntervalMs: 1,
+    startupTimeoutMs: 1000,
+    controlKeepaliveMs: 0,
+    playoutDelayMs: 750,
+    onFrame: (frame) => managedFrames.push(frame),
+    onPlayable: (details) => { managedPlayable = details; },
+  });
+  managedSession._queueMediaBatch({
+    type: "media_batch",
+    chunk_index: 7,
+    event_id: 3,
+    first_frame_index: 0,
+    num_frames: 16,
+  });
+  await managedSession.connect({ type: "init", fps: 24, first_frame: "data:image/png;base64,AA==" });
+  assert.equal(managedSession.connected, true);
+  assert.equal(managedVideo.hidden, true);
+  assert.equal(managedCanvas.hidden, false);
+  assert.equal(managedFrames.length, 1);
+  assert.equal(managedFrames[0].width, 1280);
+  assert.equal(managedFrames[0].height, 704);
+  assert.equal(managedPlayable.managedPlayback, true);
+  managedSession._queueMediaBatch({
+    type: "media_batch",
+    chunk_index: 7,
+    event_id: 3,
+    first_frame_index: 1,
+    num_frames: 1,
+    frame_batch_index: 15,
+    num_frame_batches: 16,
+    is_final_frame_batch: true,
+  });
+  const mappedFrame = managedSession._metadataForFrame({ timestamp: 41667 }, 1);
+  assert.equal(mappedFrame.chunkIndex, 7);
+  assert.equal(mappedFrame.eventId, 3);
+  assert.equal(mappedFrame.frameBatchIndex, 15);
+  assert.equal(mappedFrame.numFrameBatches, 16);
+  assert.equal(mappedFrame.isFinalFrameBatch, true);
+  const managedCreate = requests.filter(({ url, options }) => (
+    url === "./api/webrtc/sessions" && options.method === "POST"
+  )).at(-1);
+  assert.equal(JSON.parse(managedCreate.options.body).managed_playback, true);
+  managedFrame.close();
+  await managedSession.close("managed test complete");
+  assert.equal(readerCanceled, true);
   console.log("primary_webrtc_session_test: ok");
 })().catch((error) => {
   console.error(error);

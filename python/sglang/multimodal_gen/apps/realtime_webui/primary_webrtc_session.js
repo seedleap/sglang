@@ -88,6 +88,13 @@
     } catch {}
   }
 
+  function frameDimensions(frame) {
+    return {
+      width: Number(frame?.displayWidth || frame?.codedWidth || frame?.width || 0),
+      height: Number(frame?.displayHeight || frame?.codedHeight || frame?.height || 0),
+    };
+  }
+
   class PrimaryWebRTCSession {
     constructor({
       video,
@@ -96,15 +103,18 @@
       codec = "h264",
       bitrateKbps = 3500,
       playoutDelayMs = 0,
+      managedPlayback = false,
       fetchImpl = global.fetch?.bind(global),
       WebSocketImpl = global.WebSocket,
       RTCPeerConnectionImpl = global.RTCPeerConnection,
+      MediaStreamTrackProcessorImpl = global.MediaStreamTrackProcessor,
       mediaPollIntervalMs = 200,
       startupTimeoutMs = 30000,
       controlKeepaliveMs = 10000,
       controlReconnectBaseMs = 250,
       onState = () => {},
       onPlayable = () => {},
+      onFrame = null,
       onStats = () => {},
       onError = () => {},
     }) {
@@ -115,15 +125,18 @@
       this.codec = codec;
       this.bitrateKbps = bitrateKbps;
       this.playoutDelayMs = Math.min(4000, Math.max(0, Number(playoutDelayMs) || 0));
+      this.managedPlayback = Boolean(managedPlayback && onFrame);
       this.fetchImpl = fetchImpl;
       this.WebSocketImpl = WebSocketImpl;
       this.RTCPeerConnectionImpl = RTCPeerConnectionImpl;
+      this.MediaStreamTrackProcessorImpl = MediaStreamTrackProcessorImpl;
       this.mediaPollIntervalMs = mediaPollIntervalMs;
       this.startupTimeoutMs = startupTimeoutMs;
       this.controlKeepaliveMs = controlKeepaliveMs;
       this.controlReconnectBaseMs = controlReconnectBaseMs;
       this.onState = onState;
       this.onPlayable = onPlayable;
+      this.onFrame = onFrame;
       this.onStats = onStats;
       this.onError = onError;
       this.sessionId = "";
@@ -139,6 +152,13 @@
       this.controlReconnectTimer = 0;
       this.controlReconnectAttempt = 0;
       this.lastRtcSample = null;
+      this.receiver = null;
+      this.trackReader = null;
+      this.trackPump = null;
+      this.mediaBatches = [];
+      this.mediaFps = 24;
+      this.firstFrameTimestampUs = null;
+      this.processedFrames = 0;
       this.playableResolve = null;
       this.playableReject = null;
       this.handleVideoPlayable = () => this._markPlayable();
@@ -181,6 +201,7 @@
           body: JSON.stringify({
             codec: this.codec,
             bitrate_kbps: this.bitrateKbps,
+            managed_playback: this._canManagePlayback(),
             init,
           }),
         });
@@ -189,6 +210,7 @@
         if (generation !== this.generation) throw new Error("stale WebRTC session");
         this.sessionId = String(info.id || info.session_id || "");
         if (!this.sessionId) throw new Error("WebRTC bridge returned no session id");
+        this.mediaFps = Math.max(1, Number(init?.fps || 24));
         await this._openControl(generation);
         const status = await this._waitForPublisher(generation);
         await this._openWhep(status.whep_url || info.whep_url, generation);
@@ -221,8 +243,15 @@
       this.sessionId = "";
       this.control = null;
       this.peer = null;
+      this.receiver = null;
       this.whepResourceUrl = "";
       this.playable = false;
+      const trackReader = this.trackReader;
+      this.trackReader = null;
+      this.trackPump = null;
+      this.mediaBatches = [];
+      this.firstFrameTimestampUs = null;
+      this.processedFrames = 0;
       this._stopStats();
       this._stopControlKeepalive();
       if (this.controlReconnectTimer) global.clearTimeout(this.controlReconnectTimer);
@@ -236,6 +265,9 @@
       } catch {}
       try {
         peer?.close?.();
+      } catch {}
+      try {
+        await trackReader?.cancel?.(reason);
       } catch {}
       try {
         this.video.pause?.();
@@ -266,6 +298,8 @@
           if (event.type === "error") {
             const error = new Error(event.message || "WebRTC upstream control error");
             this.onError(error);
+          } else if (event.type === "media_batch") {
+            this._queueMediaBatch(event);
           }
         } catch {}
       };
@@ -375,8 +409,16 @@
         const transceiver = peer.addTransceiver("video", { direction: "recvonly" });
         preferH264(transceiver);
         configureReceiverPlayoutDelay(transceiver, this.playoutDelayMs);
+        this.receiver = transceiver.receiver || null;
         peer.ontrack = (event) => {
           if (generation !== this.generation) return;
+          if (this._canManagePlayback() && event.track) {
+            this.video.srcObject = null;
+            this.video.hidden = true;
+            if (this.canvas) this.canvas.hidden = false;
+            this._startManagedTrack(event.track, generation);
+            return;
+          }
           const stream = event.streams?.[0]
             || (global.MediaStream ? new global.MediaStream([event.track]) : null);
           if (!stream) return;
@@ -417,6 +459,114 @@
         }
       }
       throw lastError || new Error("WHEP negotiation timed out");
+    }
+
+    _canManagePlayback() {
+      return Boolean(
+        this.managedPlayback
+        && this.onFrame
+        && this.MediaStreamTrackProcessorImpl,
+      );
+    }
+
+    _queueMediaBatch(event) {
+      const firstFrameIndex = Number(event.first_frame_index);
+      const numFrames = Math.max(0, Number(event.num_frames || 0));
+      if (!Number.isFinite(firstFrameIndex) || !numFrames) return;
+      const batch = {
+        chunkIndex: Number(event.chunk_index || 0),
+        eventId: Number(event.event_id || 0),
+        firstFrameIndex,
+        lastFrameIndex: firstFrameIndex + numFrames - 1,
+        numFrames,
+        frameBatchIndex: Number(event.frame_batch_index || 0),
+        numFrameBatches: Math.max(1, Number(event.num_frame_batches || 1)),
+        isFinalFrameBatch: Boolean(event.is_final_frame_batch),
+      };
+      if (this.mediaBatches.some((item) => (
+        item.firstFrameIndex === batch.firstFrameIndex
+        && item.lastFrameIndex === batch.lastFrameIndex
+      ))) return;
+      this.mediaBatches.push(batch);
+      this.mediaBatches.sort((left, right) => left.firstFrameIndex - right.firstFrameIndex);
+      if (this.mediaBatches.length > 64) this.mediaBatches.splice(0, this.mediaBatches.length - 64);
+    }
+
+    _metadataForFrame(frame, fallbackIndex) {
+      const timestampUs = Number(frame?.timestamp);
+      if (this.firstFrameTimestampUs === null && Number.isFinite(timestampUs)) {
+        this.firstFrameTimestampUs = timestampUs;
+      }
+      const sourceFrameIndex = Number.isFinite(timestampUs) && this.firstFrameTimestampUs !== null
+        ? Math.max(0, Math.round(
+            (timestampUs - this.firstFrameTimestampUs) * this.mediaFps / 1_000_000,
+          ))
+        : fallbackIndex;
+      while (
+        this.mediaBatches.length
+        && this.mediaBatches[0].lastFrameIndex < sourceFrameIndex
+      ) {
+        this.mediaBatches.shift();
+      }
+      const batch = this.mediaBatches.find((item) => (
+        item.firstFrameIndex <= sourceFrameIndex
+        && item.lastFrameIndex >= sourceFrameIndex
+      ));
+      return {
+        sourceFrameIndex,
+        chunkIndex: batch?.chunkIndex ?? Math.floor(sourceFrameIndex / 16),
+        eventId: batch?.eventId ?? 0,
+        frameBatchIndex: batch?.frameBatchIndex ?? 0,
+        numFrameBatches: batch?.numFrameBatches ?? 1,
+        isFinalFrameBatch: batch
+          ? batch.isFinalFrameBatch && sourceFrameIndex >= batch.lastFrameIndex
+          : true,
+      };
+    }
+
+    _startManagedTrack(track, generation) {
+      let processor;
+      try {
+        processor = new this.MediaStreamTrackProcessorImpl({ track });
+      } catch (error) {
+        this.onError(error);
+        return;
+      }
+      const reader = processor.readable.getReader();
+      this.trackReader = reader;
+      this.trackPump = (async () => {
+        while (generation === this.generation && this.trackReader === reader) {
+          const result = await reader.read();
+          if (result.done) break;
+          const frame = result.value;
+          if (!frame) continue;
+          if (generation !== this.generation || this.trackReader !== reader) {
+            frame.close?.();
+            break;
+          }
+          const receivedAt = global.performance?.now?.() ?? Date.now();
+          const sequence = this.processedFrames++;
+          const metadata = this._metadataForFrame(frame, sequence);
+          const dimensions = frameDimensions(frame);
+          try {
+            this.onFrame({
+              frame,
+              receivedAt,
+              sequence,
+              ...dimensions,
+              ...metadata,
+            });
+          } catch (error) {
+            frame.close?.();
+            throw error;
+          }
+          this._markManagedPlayable(dimensions.width, dimensions.height);
+        }
+      })().catch((error) => {
+        if (generation !== this.generation || this.expectedClose) return;
+        this._setState("error", { message: error.message, protocol: "webrtc", codec: "h264" });
+        this.onError(error);
+      });
     }
 
     _waitForPlayable(generation) {
@@ -464,6 +614,30 @@
       this.playableReject = null;
     }
 
+    _markManagedPlayable(width, height) {
+      if (this.playable || !this.sessionId || width <= 0 || height <= 0) return;
+      this.playable = true;
+      this.video.hidden = true;
+      if (this.canvas) this.canvas.hidden = false;
+      this._setState("live", {
+        protocol: "webrtc",
+        codec: "h264",
+        width,
+        height,
+        managedPlayback: true,
+      });
+      this.onPlayable({
+        width,
+        height,
+        codec: "h264",
+        protocol: "webrtc",
+        managedPlayback: true,
+      });
+      this.playableResolve?.();
+      this.playableResolve = null;
+      this.playableReject = null;
+    }
+
     _startStats() {
       this._stopStats();
       const sample = async () => {
@@ -494,6 +668,20 @@
             const jitterBufferTargetMs = jitterBufferCount
               ? Number(report.jitterBufferTargetDelay || 0) * 1000 / jitterBufferCount
               : 0;
+            let roundTripTimeMs = 0;
+            let availableIncomingBitrate = 0;
+            for (const candidate of reports.values()) {
+              if (candidate.type !== "candidate-pair") continue;
+              if (candidate.state !== "succeeded" && !candidate.nominated && !candidate.selected) continue;
+              roundTripTimeMs = Math.max(
+                roundTripTimeMs,
+                Number(candidate.currentRoundTripTime || 0) * 1000,
+              );
+              availableIncomingBitrate = Math.max(
+                availableIncomingBitrate,
+                Number(candidate.availableIncomingBitrate || 0),
+              );
+            }
             this.onStats({
               framesDecoded,
               framesDropped: Number(report.framesDropped || 0),
@@ -504,6 +692,15 @@
               jitterBufferMs,
               jitterBufferTargetMs,
               configuredPlayoutDelayMs: this.playoutDelayMs,
+              packetsLost: Number(report.packetsLost || 0),
+              packetsReceived: Number(report.packetsReceived || 0),
+              nackCount: Number(report.nackCount || 0),
+              pliCount: Number(report.pliCount || 0),
+              freezeCount: Number(report.freezeCount || 0),
+              totalFreezesDurationMs: Number(report.totalFreezesDuration || 0) * 1000,
+              roundTripTimeMs,
+              availableIncomingMbps: availableIncomingBitrate / 1_000_000,
+              managedPlayback: this._canManagePlayback(),
               codec: "h264",
               protocol: "webrtc",
             });

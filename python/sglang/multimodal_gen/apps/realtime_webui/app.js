@@ -9,6 +9,8 @@ const UI_CONFIG = Object.freeze(globalThis.SGLANG_REALTIME_UI_CONFIG || {});
 const DUAL_MODEL_CONFIG = Object.freeze(UI_CONFIG.dualModels || {});
 const PRIMARY_WEBRTC_ENABLED = String(UI_CONFIG.primaryTransport || "").toLowerCase()
   === "webrtc-h264";
+const PRIMARY_WEBRTC_MANAGED_PLAYBACK = PRIMARY_WEBRTC_ENABLED
+  && UI_CONFIG.webrtcManagedPlayback === true;
 const PRIMARY_WEBRTC_BITRATE_KBPS = Math.max(
   250,
   Math.min(20000, Math.trunc(configuredNumber("webrtcBitrateKbps", 3500))),
@@ -778,6 +780,7 @@ if (PRIMARY_WEBRTC_ENABLED) {
     codec: "h264",
     bitrateKbps: PRIMARY_WEBRTC_BITRATE_KBPS,
     playoutDelayMs: PRIMARY_WEBRTC_PLAYOUT_DELAY_MS,
+    managedPlayback: PRIMARY_WEBRTC_MANAGED_PLAYBACK,
     onState: (state, details = {}) => {
       setModelConnectionState("minwm", state);
       if (state === "connecting") {
@@ -794,9 +797,11 @@ if (PRIMARY_WEBRTC_ENABLED) {
         if (!sessionLifetimeExpired) setStatus("Closed");
       }
     },
-    onPlayable: ({ width, height }) => {
-      primaryHasVisibleFrame = true;
-      renderedPreviewFrames = Math.max(1, renderedPreviewFrames);
+    onPlayable: ({ width, height, managedPlayback = false }) => {
+      if (!managedPlayback) {
+        primaryHasVisibleFrame = true;
+        renderedPreviewFrames = Math.max(1, renderedPreviewFrames);
+      }
       primaryWebRTCStats = { ...primaryWebRTCStats, width, height };
       markClientTrace("client.webrtc_first_frame", {
         codec: "h264",
@@ -804,9 +809,10 @@ if (PRIMARY_WEBRTC_ENABLED) {
         width,
         height,
       });
-      markSessionPlayable("minwm");
+      if (!managedPlayback) markSessionPlayable("minwm");
       updateStats();
     },
+    onFrame: (frame) => receiveManagedWebRTCFrame(frame),
     onStats: (stats) => {
       primaryWebRTCStats = { ...primaryWebRTCStats, ...stats };
       frames = Number(primaryWebRTCStats.framesDecoded || primaryWebRTCStats.sourceFrames || 0);
@@ -1115,22 +1121,24 @@ function markSessionPlayable(modelKey) {
 }
 
 function schedulePrimaryPlaybackAck() {
-  if (PRIMARY_WEBRTC_ENABLED) return;
-  if (!PLAYBACK_ACK_ENABLED || playbackAckTimer || !ws || ws.readyState !== WebSocket.OPEN) return;
+  if (!PLAYBACK_ACK_ENABLED || playbackAckTimer) return;
+  if (
+    PRIMARY_WEBRTC_ENABLED
+      ? !primaryWebRTCSession?.connected
+      : !ws || ws.readyState !== WebSocket.OPEN
+  ) return;
   playbackAckTimer = window.setTimeout(() => {
     playbackAckTimer = 0;
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    ws.send(pack({
+    sendPrimaryEventEnvelope({
       type: "event",
       kind: "playback_ack",
-      trace_id: currentTrace?.traceId,
       payload: {
         last_received_chunk: lastReceivedChunk,
         last_rendered_chunk: lastRenderedChunk,
         last_rendered_event_id: lastRenderedEventId,
         playable: primaryHasVisibleFrame,
       },
-    }));
+    });
   }, PLAYBACK_ACK_INTERVAL_MS);
 }
 
@@ -1807,21 +1815,30 @@ function isWorkerDecodableRawContentType(contentType) {
 function updateStats() {
   if (PRIMARY_WEBRTC_ENABLED) {
     const rtc = primaryWebRTCStats;
+    const playback = playbackController.snapshot();
+    const managed = PRIMARY_WEBRTC_MANAGED_PLAYBACK && rtc.managedPlayback !== false;
     renderModelTelemetry("minwm", {
       frames: Number(rtc.framesDecoded || rtc.sourceFrames || 0),
       bytes: Number(rtc.bytesReceived || 0),
-      sourceFps: previewPlaybackTargetFps("minwm"),
-      serverFps: previewPlaybackTargetFps("minwm"),
+      sourceFps: managed ? playback.sourceFps : previewPlaybackTargetFps("minwm"),
+      serverFps: managed ? playback.serverFps : previewPlaybackTargetFps("minwm"),
       deliveryFps: Number(rtc.receiveFps || 0),
-      renderFps: Number(rtc.receiveFps || 0).toFixed(1),
-      bufferMs: Number(rtc.jitterBufferMs || 0),
-      queueFrames: 0,
-      droppedFrames: Number(rtc.framesDropped || 0),
+      renderFps: managed ? fpsSamples.length : Number(rtc.receiveFps || 0).toFixed(1),
+      bufferMs: managed ? playback.bufferMs : Number(rtc.jitterBufferMs || 0),
+      networkBufferMs: managed ? Number(rtc.jitterBufferMs || 0) : 0,
+      queueFrames: managed ? playback.queueFrames : 0,
+      droppedFrames: Number(rtc.framesDropped || 0) + (managed ? playback.droppedFrames : 0),
+      lastChunk: managed ? lastRenderedChunk : null,
     });
-    $("minwmDecodeText").textContent = "native H.264";
-    $("minwmDisplayLagText").textContent = rtc.jitterMs > 0
-      ? `jitter ${Math.round(rtc.jitterMs)} ms`
-      : "WebRTC";
+    $("minwmDecodeText").textContent = managed
+      ? "native H.264 · managed"
+      : "native H.264";
+    const networkParts = [];
+    if (rtc.jitterMs > 0) networkParts.push(`jitter ${Math.round(rtc.jitterMs)}ms`);
+    if (rtc.roundTripTimeMs > 0) networkParts.push(`RTT ${Math.round(rtc.roundTripTimeMs)}ms`);
+    if (rtc.nackCount > 0) networkParts.push(`NACK ${Math.round(rtc.nackCount)}`);
+    if (rtc.freezeCount > 0) networkParts.push(`freeze ${Math.round(rtc.freezeCount)}`);
+    $("minwmDisplayLagText").textContent = networkParts.join(" · ") || "WebRTC";
     return;
   }
   const playback = playbackController.snapshot();
@@ -1861,12 +1878,14 @@ function renderModelTelemetry(key, stats = {}) {
   const serverFps = Number(stats.serverFps || sourceFps);
   const deliveryFps = Number(stats.deliveryFps || sourceFps);
   const bufferMs = Number(stats.bufferMs || 0);
+  const networkBufferMs = Number(stats.networkBufferMs || 0);
   const queueFrames = Number(stats.queueFrames ?? stats.queueLength ?? 0);
   const droppedFrames = Number(stats.droppedFrames || 0);
   const decodeQueueLength = Number(stats.decodeQueueLength || 0);
   const frameBatchGapCount = Number(stats.frameBatchGapCount || 0);
   const totalFrames = Number(stats.frames || 0);
   const bufferParts = [formatMs(bufferMs), `q ${queueFrames}`];
+  if (networkBufferMs > 0) bufferParts.push(`rtc ${formatMs(networkBufferMs)}`);
   if (decodeQueueLength) bufferParts.push(`decode ${decodeQueueLength}`);
   if (droppedFrames) bufferParts.push(`drop ${droppedFrames}`);
   if (frameBatchGapCount) bufferParts.push(`gap ${frameBatchGapCount}`);
@@ -4410,8 +4429,8 @@ async function payloadToArrayBuffer(data) {
 }
 
 function drawFrame(image, { close = true, markRendered = true } = {}) {
-  const sourceWidth = image.width;
-  const sourceHeight = image.height;
+  const sourceWidth = image.displayWidth || image.codedWidth || image.width;
+  const sourceHeight = image.displayHeight || image.codedHeight || image.height;
   let drawSource = image;
   if (image instanceof ImageData) {
     if (scratchCanvas.width !== sourceWidth || scratchCanvas.height !== sourceHeight) {
@@ -4434,6 +4453,63 @@ function drawFrame(image, { close = true, markRendered = true } = {}) {
   setPreviewState("live");
   markSessionPlayable("minwm");
   if (close && !(image instanceof ImageData)) image.close?.();
+}
+
+function receiveManagedWebRTCFrame({
+  frame,
+  receivedAt,
+  sourceFrameIndex,
+  chunkIndex,
+  eventId,
+  frameBatchIndex,
+  numFrameBatches,
+  isFinalFrameBatch,
+}) {
+  if (!frame || !PRIMARY_WEBRTC_MANAGED_PLAYBACK) {
+    frame?.close?.();
+    return;
+  }
+  const now = performance.now();
+  const header = {
+    chunk_index: Number(chunkIndex || 0),
+    event_id: Number(eventId || 0),
+    frame_batch_index: Number(frameBatchIndex || 0),
+    num_frame_batches: Math.max(1, Number(numFrameBatches || 1)),
+    is_final_frame_batch: Boolean(isFinalFrameBatch),
+    num_frames: 1,
+    __received_at: Number(receivedAt || now),
+  };
+  const item = {
+    image: frame,
+    chunk: header.chunk_index,
+    receivedAt: header.__received_at,
+    decodedAt: header.__received_at,
+    decodeMs: 0,
+  };
+  if (!renderedPreviewFrames && !primaryHasVisibleFrame) {
+    drawFrame(frame, { close: false, markRendered: false });
+  }
+  const enqueueResult = playbackController.enqueueDecodedFrames(header, [item], now);
+  closeFrames(enqueueResult.droppedFrames);
+  lastReceivedChunk = lastReceivedChunk === null
+    ? header.chunk_index
+    : Math.max(lastReceivedChunk, header.chunk_index);
+  lastReceivedFrameBatchIndex = header.frame_batch_index;
+  if (header.event_id > 0) {
+    lastSampledEventId = header.event_id;
+    markModelEventApplied("minwm", lastSampledEventId);
+  }
+  primaryWebRTCStats = {
+    ...primaryWebRTCStats,
+    managedPlayback: true,
+    managedFrames: Math.max(
+      Number(primaryWebRTCStats.managedFrames || 0),
+      Number(sourceFrameIndex || 0) + 1,
+    ),
+  };
+  updateControlDebugText();
+  updateStats();
+  schedulePrimaryPlaybackAck();
 }
 
 function renderLoop(now) {
@@ -6717,6 +6793,8 @@ window.__sglangRealtimeDebug = () => ({
   pendingDecodeBatches,
   pendingHeader: Boolean(pendingHeader),
   playback: playbackController.snapshot(),
+  primaryWebRTCManagedPlayback: PRIMARY_WEBRTC_MANAGED_PLAYBACK,
+  primaryWebRTCStats: { ...primaryWebRTCStats },
   renderedFps: fpsSamples.length,
   renderedPreviewFrames,
   renderLoopFps: renderLoopSamples.length,

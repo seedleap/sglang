@@ -18,6 +18,7 @@ import logging
 import os
 import time
 import uuid
+from collections import deque
 from dataclasses import dataclass, field
 from io import BytesIO
 from typing import Any
@@ -117,6 +118,9 @@ class WebRTCBridgeSession:
     stopped: asyncio.Event = field(default_factory=asyncio.Event)
     pending_header: dict[str, Any] | None = None
     control_clients: set[web.WebSocketResponse] = field(default_factory=set)
+    media_batch_history: deque[dict[str, Any]] = field(
+        default_factory=lambda: deque(maxlen=64)
+    )
 
     @property
     def media_path(self) -> str:
@@ -230,6 +234,22 @@ class WebRTCBridgeSession:
 
         frames = _split_payload(header, payload)
         self.source_bytes += len(payload)
+        media_batch = {
+            "type": "media_batch",
+            "chunk_index": int(header.get("chunk_index") or 0),
+            "event_id": int(header.get("event_id") or 0),
+            "first_frame_index": self.frames,
+            "num_frames": len(frames),
+            "frame_batch_index": int(header.get("frame_batch_index") or 0),
+            "num_frame_batches": int(header.get("num_frame_batches") or 1),
+            "is_final_frame_batch": bool(
+                header.get("is_final_frame_batch")
+                or int(header.get("frame_batch_index") or 0) + 1
+                >= int(header.get("num_frame_batches") or 1)
+            ),
+        }
+        self.media_batch_history.append(media_batch)
+        await self._broadcast(media_batch)
         for frame in frames:
             if content_type == RAW_RGB_CONTENT_TYPE:
                 rgb = frame
@@ -484,7 +504,9 @@ class WebRTCBridgeManager:
         init["realtime_output_format"] = "raw"
         init.pop("realtime_preview_max_width", None)
         init.pop("output_compression", None)
-        init["playback_ack_enabled"] = False
+        init["playback_ack_enabled"] = bool(
+            body.get("managed_playback") and init.get("playback_ack_enabled")
+        )
         init.setdefault("trace_id", f"webrtc-{uuid.uuid4()}")
         codec = str(body.get("codec") or "h264").lower()
         if codec != "h264":
@@ -567,6 +589,8 @@ async def _control_session(request: web.Request) -> web.WebSocketResponse:
     await websocket.prepare(request)
     session.control_clients.add(websocket)
     await websocket.send_json({"type": "status", **session.status()})
+    for media_batch in session.media_batch_history:
+        await websocket.send_json(media_batch)
     try:
         async for message in websocket:
             if message.type == WSMsgType.TEXT:
