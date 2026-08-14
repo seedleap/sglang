@@ -1,0 +1,103 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: minwm-qkv-ncu-h200-results-20260814
+  namespace: default
+  labels:
+    seedleap.ai/owner: chenshengdong
+    seedleap.ai/purpose: minwm-qkv-ncu-single-gpu
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: minwm-dmd-0724-p6-gp3
+  resources:
+    requests:
+      storage: 50Gi
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: minwm-qkv-ncu-single-gpu-h200-20260814-01
+  namespace: default
+  labels:
+    seedleap.ai/owner: chenshengdong
+    seedleap.ai/purpose: minwm-qkv-ncu-single-gpu
+    seedleap.ai/task: minwm-fusedops-s4
+  annotations:
+    seedleap.ai/capacity-type: spot
+    seedleap.ai/resource-isolation: full 8-GPU H200 node; GPU0/GPU1 independent single-GPU A/B pairs
+    seedleap.ai/sglang-git-ref: "19c66bbdb5427aae92b308e99e669e9dd322100c"
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 3600
+  template:
+    spec:
+      restartPolicy: Never
+      terminationGracePeriodSeconds: 30
+      tolerations:
+        - key: seedleap.ai/capacity-pool
+          operator: Equal
+          value: minwm-test-phx2-karpenter
+          effect: NoSchedule
+      nodeSelector:
+        karpenter.sh/capacity-type: spot
+        karpenter.sh/nodepool: minwm-test-phx2-p5e-spot
+        node.kubernetes.io/instance-type: p5e.48xlarge
+        topology.kubernetes.io/zone: us-west-2-phx-2a
+      containers:
+        - name: ncu
+          image: 829115578968.dkr.ecr.us-east-2.amazonaws.com/leap-world/minwm-training@sha256:bedc07ea3ba55059a8c1c569c3b177c4d00d41f37d4fa9105375531534ef5f2a
+          securityContext:
+            runAsUser: 0
+            capabilities:
+              add: [SYS_ADMIN]
+          env:
+            - name: GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: github-token
+                  key: token
+          command:
+            - /bin/bash
+            - -lc
+            - |
+              set -euo pipefail
+              run_dir="/results/attempts/${HOSTNAME}/minwm-qkv-ncu-single-gpu-h200-20260814-01"
+              mkdir -p "$run_dir"
+              trap 'nvidia-smi > "$run_dir/nvidia-smi.txt" || true' EXIT
+              git clone --depth=1 --branch codex/minwm-fusedops-ncu-single-gpu "https://x-access-token:${GITHUB_TOKEN}@github.com/seedleap/sglang.git" /workspace/sglang
+              cd /workspace/sglang
+              test "$(git rev-parse HEAD)" = 19c66bbdb5427aae92b308e99e669e9dd322100c
+              export PYTHONPATH="$PWD/python"
+              ncu --version | tee "$run_dir/ncu-version.txt"
+              nvidia-smi -q -d CLOCK,POWER,TEMPERATURE > "$run_dir/gpu-before.txt"
+              profile_pair() {
+                local gpu="$1" first="$2" second="$3"
+                for mode in "$first" "$second"; do
+                  CUDA_VISIBLE_DEVICES="$gpu" ncu --set full --target-processes all --force-overwrite \
+                    -o "$run_dir/gpu${gpu}-${mode}" \
+                    python benchmark/minwm_realtime_parity/profile_minwm_qkv_ncu.py --mode "$mode" --iterations 8 \
+                    > "$run_dir/gpu${gpu}-${mode}.stdout" 2> "$run_dir/gpu${gpu}-${mode}.stderr"
+                  ncu --import "$run_dir/gpu${gpu}-${mode}.ncu-rep" --csv --page raw \
+                    > "$run_dir/gpu${gpu}-${mode}.csv"
+                done
+              }
+              profile_pair 0 baseline fused &
+              profile_pair 1 fused baseline &
+              wait
+              sha256sum "$run_dir"/* > "$run_dir/SHA256SUMS"
+          resources:
+            requests:
+              cpu: "32"
+              memory: 128Gi
+              nvidia.com/gpu: "8"
+            limits:
+              cpu: "64"
+              memory: 256Gi
+              nvidia.com/gpu: "8"
+          volumeMounts:
+            - name: results
+              mountPath: /results
+      volumes:
+        - name: results
+          persistentVolumeClaim:
+            claimName: minwm-qkv-ncu-h200-results-20260814
