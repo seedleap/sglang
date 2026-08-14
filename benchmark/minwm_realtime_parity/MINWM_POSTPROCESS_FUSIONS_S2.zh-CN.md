@@ -1,6 +1,6 @@
-# MinWM 后处理小算子融合调查：负结论（S2）
+# MinWM 后处理小算子融合：正确性根因与负结论（S2）
 
-日期：2026-08-07
+首次调查：2026-08-07；根因复核：2026-08-14
 
 ## 范围与最终决策
 
@@ -12,15 +12,19 @@
 
 最终三项均不落地，产品代码、默认路径和环境变量相对 `main` 均无变化：
 
-- self 候选在 H200 上确实能把两个 Triton segment/launch 变成一个，但改变了
-  LayerNorm reduction 的舍入结果。微算子误差在 causal rolling rollout 中逐 chunk
-  放大，端到端视频质量灾难性越过已有 BF16 fast-lane 合同；因此删除 proposal、开关和
-  产品测试，不保留 opt-in fast lane。
+- self 候选在 H200 上确实能把两个 Triton segment/launch 变成一个。旧 proposal 的首个
+  错误是 Inductor 消除了 graph 内看似显式的 BF16 cast，使 LayerNorm 读取未舍入的 FP32
+  residual。用整数位操作强制 BF16 RNE 后修复了这层错误，但真实 `D=3072` 上 fused 与
+  baseline 会独立 autotune 到 `R0_BLOCK=1024/2048`，Welford combine tree 仍可能不同。
+  当前公开 compile API 不能让一个 graph 跟随另一个 graph 的动态 winner；固定任一配置
+  也都不能稳定满足现行两段 baseline 的 bitwise 合同。因此不发布单段实现。
 - cross residual/AdaLN 已是一个 reduction Triton kernel/launch，不再包装等价融合层。
 - FFN residual/gate 已是一个 pointwise Triton kernel/launch，不再包装等价融合层。
 
-PR 只保留本调查文档和一个 CUDA 取证脚本。脚本在 benchmark 侧局部重建已被否决的
-self proposal，既不修改也不暴露产品路径。
+PR 只保留本调查文档、一个 Torch-only CUDA golden repro 及其纯 CPU 位级回归。脚本在
+benchmark 侧局部重建已被否决的 proposal、显式 bit-RNE 候选和 reduction 配置因果实验，
+既不修改也不暴露产品路径。现有两段实现就是正确性优先的最小可行替代：保留
+residual/gate 的 pointwise 融合，保留独立 compiled LayerNorm 边界。
 
 ## 调用链与数值语义
 
@@ -37,23 +41,62 @@ self proposal，既不修改也不暴露产品路径。
 6. FFN；
 7. 一次 `_minwm_adaln(..., y=ff_output, gates=...)` 完成 FFN residual/gate。
 
-self proposal 保留了步骤 2 与 3 之间显式 BF16 materialization，却让 Inductor 在一个
-graph 内重新选择 LayerNorm Welford reduction schedule。表达式看似保留了 cast，CUDA
-reduction 的加法树仍不相同，所以旧双 compiled segment 与 proposal 单 segment 并非
-bitwise exact。Causal rollout 会将每个 chunk 的 latent 作为后续 chunk 的条件，局部
+旧 self proposal 在 Python 表达式中写了 `.type_as(hidden).float()`，但生成的单核直接把
+FP32 residual 寄存器送进 `welford_reduce`；真实 BF16 store/load 舍入没有发生。旧单核
+因此不是步骤 2 与 3 的等价合并。
+
+第二版 golden repro 用 FP32 位模式实现 BF16 round-to-nearest-even，再把舍入后的位模式
+解释回 FP32。生成核中的 integer mask、lower-half、tie-to-even 与 NaN canonicalization
+位于 `welford_reduce` 之前，因而编译器不能消掉物化语义。它在相同 reduction 配置下与
+“先返回 BF16 residual，再独立 LayerNorm”bitwise exact；但 Inductor 对两个 graph 分别
+运行 `dynamic_scale_rblock`。`R0_BLOCK=1024` 把 `D=3072` 合成三个 1024 tile，`2048`
+则合成 2048 + 1024(masked) 两个 tile，两种 FP32 Welford combine tree 的最终 BF16 affine
+结果可能不同。Causal rollout 会将每个 chunk 的 latent 作为后续 chunk 的条件，局部
 1 ULP 级差异不能按独立误差看待。
 
 ## 假设与预期
 
 | 候选 | 调查前假设 | CUDA 生成代码结论 | 最终决策 |
 | --- | --- | --- | --- |
-| self residual/gate → affine LN | 存在真实双 segment 边界，少一次 launch 可能有收益 | 2→1 kernel 成立；真实旧双 segment 与 proposal 非 bitwise | 端到端质量失败，删除实现 |
+| self residual/gate → affine LN | 存在真实双 segment 边界，少一次 launch 可能有收益 | 2→1 kernel 成立；旧 proposal 漏真实 BF16 舍入；bit-RNE 修复后仍受独立 reduction autotune 影响 | 无稳定 bitwise 单核，保留现有两段 |
 | cross residual/AdaLN | 可能仍有 residual 与 norm/modulation 边界 | 已是 `triton_red_fused__to_copy_add_mul_native_layer_norm_0` 单 kernel | 不重复实现 |
 | FFN residual/gate | 可能是多个 eager pointwise launch | 已是 `triton_poi_fused__to_copy_add_mul_0` 单 kernel | 不重复实现 |
 
-预期中“launch 变少可能带来小收益”只在 micro 层面成立；“保留 BF16 cast 就足以保留
-数值语义”不成立。端到端质量门是性能 A/B 的全局前置条件，因此质量失败后不再消费
-H200 时间测无资格发布的 fast lane。
+预期中“launch 变少可能带来小收益”只在 micro 层面成立；“Python 中写出 BF16 cast 就
+足以保留数值语义”不成立；“显式 bit-RNE 后自然与独立 LN 一致”也只在 reduction 配置
+相同时成立。端到端质量门是性能 A/B 的全局前置条件，因此旧候选质量失败后未消费
+H200 时间测无资格发布的 headline；根因复核也只做单卡 correctness，没有进入性能测量。
+
+## 最小 golden repro 与首差定位
+
+根因复核固定 Torch `2.12.1+cu130`、CUDA `13.0`、Triton `3.7.1`、H200 SM90，不安装
+MinWM/diffusion 依赖。输入生成器固定 seed `20260807`，真实维度 `D=3072`；覆盖
+`B1/S1`、`B2/S7`、真实 SP4 local row count `B1/S3432`、BF16 autocast on/off、
+contiguous/non-contiguous hidden/update、gate `[D]`/`[1,D]`/`[B,1,D]`，以及真实
+`[B,S,6,D].select(2,2)` 的非连续 timestep gate。每个 comparison 报 changed fraction、
+max absolute error、BF16 ULP 和首差坐标。
+
+| 步骤/候选 | 布局与 shape | residual | LayerNorm/首差 | 结论 |
+| --- | --- | --- | --- | --- |
+| 旧单核 proposal | B1/S7/D3072 contiguous | bitwise | 473/21,504 changed，首差 `[0,0,30]`，max_abs 0.03125，max_ulp 648 | LN 读取 pre-round FP32 residual |
+| bit-RNE，小 shape | S1、B2/S7；contig/noncontig；autocast on/off；三种 gate | bitwise | bitwise，max_ulp 0 | BF16 RNE 实现与广播/stride 正确 |
+| bit-RNE，真实 shape，默认 autotune | B1/S3432/D3072 | bitwise | 同 winner 时 0；winner 不同时 203/10,543,104 changed，首差 `[0,0,637]`，max_abs 0.03125，max_ulp 43 | 物化必要但不充分 |
+| bit-RNE 固定初始 R-block | 同上，contiguous，6 个冷进程 | bitwise | baseline 选 R2048 的 2 次为 0；选 R1024 的 4 次均精确复现 203 个差异 | 差异由 reduction tree 唯一解释 |
+| 同上，non-contiguous，2 个冷进程 | B1/S3432/D3072 | bitwise | 一次 0；一次 170 changed，首差 `[0,24,601]`，max_abs 0.015625，max_ulp 8 | 非连续布局也会独立选 winner |
+| fixed fused vs fixed 独立 LN | 上述全部 8 个真实 shape 冷进程 | bitwise | 全部 bitwise，max_ulp 0 | 排除 eps、affine、promotion、RNE 本身 |
+
+生成代码的静态元数据对照为：二者均
+`size_hints={x:4096,r0_:4096}`、`ReductionHint.INNER`，初始配置均为
+`XBLOCK=1,R0_BLOCK=2048,num_warps=16,num_stages=1`。baseline 有 4 loads、2
+reductions；bit-RNE fused 有 7 loads、2 reductions，均未触发 `load+reduction>=10` 的
+静态降块阈值。实际分叉来自 `dynamic_scale_rblock` 按各自寄存器占用加入 R1024 候选，
+再独立 benchmark/cache。`TORCHINDUCTOR_DUMP_LAUNCH_PARAMS=1` 直接确认同一输入的
+baseline 可跨冷进程选择 R1024 或 R2048；fused 关闭动态缩放后恒为 R2048。
+
+这也回答了几个容易混淆的点：`eps=1e-6`、BF16 affine 参数转 FP32、LayerNorm 输入 FP32
+promotion、输出 BF16 舍入在 fixed-vs-fixed 中完全相同；同一 graph 中普通 BF16 cast 会被
+折叠，而整数 bit-RNE 确实在 reduction 前发生。剩余差异不是“数值容差”，而是 Welford
+combine 顺序。
 
 ## CUDA 取证与探索性测试
 
@@ -69,7 +112,7 @@ local sequence）。该节点同时有其他微任务，时间只解释 kernel �
 
 真实旧双 compiled segment 对 proposal 单 segment 的小形状 CUDA 对照中，self residual
 仍 bitwise，LayerNorm 在 autocast off/on 分别有 8.7%/9.7% 元素改变，max_abs=0.03125；
-每个改变不超过该位置一个 BF16 ULP。这里没有把 trace 相对 eager 的 `max_abs=0.125`
+首差为 1 BF16 ULP，但近零位置的 ordered-bit 最大距离更大。这里没有把 trace 相对 eager 的 `max_abs=0.125`
 反向写成“刚好通过”的 tolerance，也没有用 12.5% changed-fraction guard 代替质量合同。
 
 探索性测试曾覆盖：
@@ -159,46 +202,84 @@ headline。若未来是已验证 profiler-off 后才发生 Nsight/另一 lane �
 
 任何失败、旧契约或 partial 产物都不得物理删除。聚合器应沿当前 JSON 的 parent 向上到
 最近 measurement root 检查 marker，sibling lane marker 不得互相影响。只允许精确删除
-自己创建的 Job/Pod 控制对象止损；本次只删除了临时只读 evidence-reader Pod，失败 Job
-和 PVC 证据均保留。
+自己创建的 Job/Pod 控制对象止损。旧质量 Job/Pod 控制对象在根因复核收尾时按完整名称
+精确删除，PVC、root marker、470 个文件及其 SHA 证据仍保留。
 
-## 与预期不符处及四次 micro Job
+## 与预期不符处、失败 attempt 与审计
 
-- 源码和 CUDA 生成代码共同推翻了“需要实现三项融合”的预期：cross/FFN 已是单
-  segment，只有 self 有真实边界。
-- self 保留显式 BF16 materialization 仍不能保住 reduction 加法树；一个 BF16 ULP 的
-  局部偏差经 causal feedback 放大成明显视频差异。
-- `minwm-s2-postproc-trace-h200-phx2-20260807-01` 使用了不存在的完整 checkout SHA，未
-  进入 CUDA 测试。
+源码和 CUDA 生成代码共同推翻了“需要实现三项融合”的预期：cross/FFN 已是单 segment，
+只有 self 有真实边界。self 的错误也不是最初概括的单一“reduction schedule 改变”：旧
+proposal 先漏了真正的 BF16 store/load 舍入；修复该层后，才显露独立动态 reduction
+winner 的第二层问题。
+
+2026-08-07 的四次 micro Job 均保留原结论：
+
+- `minwm-s2-postproc-trace-h200-phx2-20260807-01` 使用不存在的完整 checkout SHA，未进入
+  CUDA 测试。
 - `...-02` 正确 checkout 后在 pytest 收集阶段发现镜像缺 `orjson`，未进入 candidate。
 - `...-03` 如实暴露 `B1/S1` singleton transpose 可能仍 contiguous，以及 proposal
   LayerNorm 相对 eager 非 bitwise；`set -e` 在 trace 前停止。
 - `...-04` 改为真实旧双 compiled segment 对 proposal 单 segment。pytest 正确报告
   non-bitwise，runner 保存测试状态后仍完成 self baseline/proposal、cross、FFN 四项
   BEGIN/END、结果和 `cuLaunchKernel` 证据，最后按 `test_status=1` 退出。它是正确性
-  暴露，不是基础设施或上传失败；证据完整，因此没有第五次 micro trace。
-- 桌面默认 kube context 曾漂移到 `codex-seed-leap-use1`；误投对象始终 Pending、未启动，
-  随后只按完整名称精确删除。此后所有命令固定 `--context codex-minwm-test-phx2`。
-- Pod 内运行仓库 registered/unit tests 时，`PYTHONPATH` 必须包含
-  `/workspace/sglang/python`，并先执行
-  `python -c 'import sglang.test.ci.ci_register'`。S2 micro runner 已设置路径但当时未单列
-  preflight；以后收集失败应在模型/client 前止损。
+  暴露，不是基础设施或上传失败。
+
+2026-08-14 根因复核的 attempt 如下；全部使用显式 kube context、`backoffLimit=0`、
+单卡 H200、无 SP。每次结束后只精确删除自己的 Job/Pod 控制对象，PVC 证据保留：
+
+| attempt | 状态 | 结果与审计 |
+| --- | --- | --- |
+| `minwm-s2-self-rounding-h200-phx2-20260814-01` | failed | source-tree import 缺 `orjson`，exit=1；root marker 含 3 个文件和 SHA，未进 candidate |
+| `...-02` | 强制止损/invalid | 完整 diffusion 安装开始把原生 Torch 2.12.1+cu130、cuDNN/NCCL/cuBLAS/Triton 替换为另一套版本；立即删除 Job，`runner.log` 70,845 bytes，SHA `0e34ab20…`；任何输出不得用于正确性 |
+| `...-03` | correctness failure | 原生 runtime 契约通过；定位旧 proposal 漏 BF16 物化；bit-RNE 小 shape 全 exact，但 S3432 有 203 differences；exit=1 marker 完整，12 文件均有 SHA |
+| `...-04` | diagnostic success | 保存 baseline 与 bit-RNE 生成源码；静态 decorator 相同，但 bit-RNE 当次 exact，暴露动态 winner 假设 |
+| `...-05` | diagnostic success | 6 contig + 2 noncontig 冷进程，baseline/fused 当次都选 X1/R1024/W16/S1，8/8 exact；说明配置相同时可 exact，但不能证明稳定 |
+| `...-06` | causal success | fused 禁用动态缩放固定 R2048；baseline 冷进程在 R1024/R2048 间变化，输出严格随 winner 在“固定差异指纹/0 差异”间切换；完成后 exit=0，控制对象删除，PVC 保留 |
+
+`-06` 的关键证据 SHA：`all-launch-params.txt` 为
+`040b429cbb373ed150937949540bdd15aab0fc5da9ea4003f5c1afc4efdc61cc`；首个 203-diff
+log 为 `6d6b554df9caced795ec7964c6dd973a54250760d9afee36cc6974c9373a259a`；runtime
+contract 为 `41a1a10f8f72817077be98bc4584042445db8e9c9d128df2c971693331465df3`。
+
+桌面默认 kube context 曾漂移到 `codex-seed-leap-use1`；误投对象始终 Pending、未启动，
+随后只按完整名称精确删除。此后所有命令固定
+`--context codex-minwm-test-phx2`。Pod 内若运行仓库 registered/unit tests，
+`PYTHONPATH` 必须包含 `/workspace/sglang/python`，并在模型或 client 前先跑
+`python -c 'import sglang.test.ci.ci_register'`；本轮 golden repro 刻意保持 Torch-only，
+不导入 `sglang`，从而无需改变镜像依赖。
 
 ## 证据与决策过程
 
 1. 源码定位 self 的两个相邻 `_MinWMSegmentCompile.get`，确认真实优化边界。
 2. 源码和 H200 生成代码确认 cross/FFN 各自已是单 segment，排除重复实现。
-3. 在 benchmark 侧构造最小 self proposal，保留 residual 后 BF16 cast，确认 2→1 launch。
-4. 用真实旧双 compiled segment 比较，发现 LayerNorm 非 bitwise；不允许进入 parity lane。
-5. 沿用已有视频 fast-lane 合同运行 rolling quality A/B，观察三项 normative 指标同时
-   严重失败，并由逐 chunk latent 证明误差累积。
-6. 在全局质量门停止，保留 470 文件及哈希，不启动 profiler-off/Nsight。
-7. 删除产品实现、开关和测试。当前数值语义下，5.3 的这三个点均不落地。
+3. 在 benchmark 侧重建旧 self proposal，确认 graph 内普通 BF16 cast 被折叠；LayerNorm
+   读取 pre-round residual，这是第一个首差边界。
+4. 用整数位操作显式实现 BF16 RNE；小 shape、autocast、gate 广播和非连续布局均 exact，
+   真实 shape 仍偶发 203 differences。
+5. 比较生成代码与实际 launch winner；固定 fused 为 R2048，并用 fixed 独立 LN 做交叉
+   对照，严格复现“winner 不同就固定指纹、相同就 0 差异”。
+6. 审计 PyTorch 2.12.1 的公开 compile options：没有稳定的 per-segment R-block API，也
+   没有让 fused graph 跟随 standalone graph autotune winner 的合同。
+7. 沿用已有视频 fast-lane 合同复核旧 proposal 的 rolling A/B，三项 normative 指标同时
+   严重失败，并由逐 chunk latent 证明误差累积；保留 470 文件及哈希，未启动
+   profiler-off/Nsight。
+8. 删除产品实现、开关和测试。当前数值语义下，5.3 的这三个点均不落地；最小正确替代
+   是 main 已有的 pointwise segment + 独立 LayerNorm segment。
 
 ## 尝试后放弃的方案
 
 - 不复用通用 `ScaleResidualLayerNormScaleShift` CUDA kernel：它包含额外 scale/shift
   接口并可能 materialize contiguous 输入，扩大数值与布局审计面。
+- 不发布显式 bit-RNE 的 Inductor 单 graph：它解决真实 BF16 materialization，却不能让
+  reduction autotune 与 standalone baseline 同步。
+- 不用 `dynamic_scale_rblock=False` 作为产品修复：它只固定初始 R2048；现行 baseline
+  可选 R1024，`-06` 已证明会稳定产生 203/170 个差异。
+- 不使用 `autotune_lookup_table`、`fixed_config` 或 `strict_reduction_rblock`：前者按
+  Triton source hash/version/layout 绑定且 miss 时静默回退，后两者是 Inductor 内部
+  codegen/IR 接口，不是产品合同。
+- 不复制 fixed-R1024/R2048 custom Triton：任一个都只能匹配 baseline 的一种动态 winner；
+  要在运行时先执行/探测 standalone LN 再分派会恢复额外 kernel、依赖私有状态并失去本次
+  优化边界。未来只有先把 baseline reduction 另立为公开 canonical contract 后才可重开。
 - 不为 cross/FFN 增加“新融合”开关：它们已经是单编译段，任何对照只会关闭 main 的
   既有优化后再冒充收益。
 - 不把 self proposal 作为默认关闭的隐藏 fast lane：质量失败不是默认值能消除的风险，
@@ -211,21 +292,28 @@ headline。若未来是已验证 profiler-off 后才发生 Nsight/另一 lane �
 ## 风险、回滚与复现
 
 最终产品 diff 没有运行时改动，因此回滚面为零；默认 parity 路径保持 main 的双 segment。
-调查脚本依赖 MinWM 私有 benchmark 接口，只用于同一 checkout 的 CUDA 诊断，不定义
-headline schema。
+调查脚本是 Torch-only 的 source-shaped copy，只用于同一 checkout 的 CUDA 诊断，不导入
+`sglang`、不安装 diffusion 依赖，也不定义 headline schema。
 
 复现单项生成代码/launch：
 
 ```bash
 export PYTHONPATH="$PWD/python"
-TORCH_LOGS=output_code,kernel_code python \
+TORCH_LOGS=output_code,kernel_code \
+TORCHINDUCTOR_DUMP_LAUNCH_PARAMS=1 python3 \
   benchmark/minwm_realtime_parity/trace_postprocess_fusions.py \
-  --candidate self-proposed --sequence-length 6864 --profile-kernels
+  --candidate self-bitquant-no-dynamic-scale \
+  --batch-size 1 --sequence-length 3432 --hidden-size 3072 \
+  --gate-shape row --input-layout contiguous --detailed-correctness
 ```
 
-`self-baseline`、`self-proposed`、`cross`、`ffn` 应分别启动进程，避免
+`self-baseline`、`self-proposed`、`self-bitquant`、
+`self-bitquant-no-dynamic-scale`、`cross`、`ffn` 应分别启动冷进程，避免
 `_minwm_adaln_op` specialization 的编译日志混合。`self-proposed` 在脚本内局部定义，
-比较对象是产品真实旧双 compiled segment；脚本输出只解释 kernel 边界和数值漂移。
+比较对象是产品真实旧双 compiled segment；`self-bitquant-no-dynamic-scale` 纯为因果
+实验，不能复制到产品路径。检查同目录生成的 `.launch_params`：fused 应为 R2048；
+baseline 若为 R1024 则应精确出现对应 difference 指纹，若为 R2048 则应为 0。脚本输出
+只解释 kernel 边界和数值漂移。
 
 S0 canonical 在本调查期间经历 `59aa68a382` 的 stage-trace 修复、`b9240233b2` 的 latency
 count 强约束与 `b178572f84` 的 invalid-attempt 审计。正式 S2 Job 使用后两者；由于质量
@@ -235,22 +323,26 @@ count 强约束与 `b178572f84` 的 invalid-attempt 审计。正式 S2 Job 使�
 
 1. **self 的真实边界在哪里？** 参考：`MinWMCausalTransformerBlock.forward` 先调用
    `_minwm_adaln` 更新 residual，再调用 `_minwm_layer_norm`。
-2. **为什么保留中间 BF16 cast 仍不 bitwise？** 参考：单 graph 让 Inductor 重新选择
-   LayerNorm Welford reduction schedule；cast 保留值域，不能固定 FP32 reduction 加法树。
-3. **1248×704 的 SP2/SP4 local sequence 为什么是 6864/3432？** 参考：每帧
-   `78×44=3432` tokens，4 latent frames 共 13728，再按 sequence shard 除以 2/4。
-4. **真实 timestep gate 为什么非连续？** 参考：它来自
+2. **旧 proposal 的首差具体在哪里？** 参考：graph 内 `.to(BF16).float()` 被折叠，生成核
+   将 residual 的 FP32 寄存器直接送入 `welford_reduce`；首差在 LayerNorm，而返回
+   residual 本身仍 bitwise。
+3. **为什么整数 bit-RNE 修复后仍不能发布？** 参考：它保证 LN 输入值与 BF16
+   materialization 相同，却不能固定 Welford combine tree；baseline 与 fused 独立
+   autotune R1024/R2048。
+4. **R1024 与 R2048 为什么会改变结果？** 参考：D3072 分别是 3×1024 与
+   2048+1024(masked) 的 Welford tile/combine 顺序；`-06` 在 winner 不同时精确复现
+   203/170 differences，相同时为 0。
+5. **真实 timestep gate 为什么非连续？** 参考：它来自
    `[B,S,6,D].select(-2,index)`，token stride 是 `6*D`；只测 contiguous 会漏布局风险。
-5. **cross 为什么不实现？** 参考：`r=cross_output`、LayerNorm、shift/scale 已在一次
+6. **cross 为什么不实现？** 参考：`r=cross_output`、LayerNorm、shift/scale 已在一次
    `_minwm_adaln_op` specialization，H200 是单 reduction kernel/launch。
-6. **FFN gate accumulation 的 dtype 和边界是什么？** 参考：hidden、FFN output 和两个
+7. **FFN gate accumulation 的 dtype 和边界是什么？** 参考：hidden、FFN output 和两个
    gate 提升到 FP32 乘加，随后 `type_as(hidden_states)`；现状已是单 pointwise kernel。
-7. **micro 2→1 launch 为什么不能证明可发布？** 参考：它不覆盖 30 blocks、4 DMD +
+8. **micro 2→1 launch 为什么不能证明可发布？** 参考：它不覆盖 30 blocks、4 DMD +
    1 clean-cache 和 causal feedback；本次 frame SSIM 只有 0.859，latent relative-L2 随
    chunk 增至 0.555。
-8. **为什么本次 root invalid marker 合理？** 参考：质量是全局前置条件且没有任何
+9. **为什么旧质量 Job 的 root invalid marker 合理？** 参考：质量是全局前置条件且没有任何
    profiler-off 合格 lane；若只坏 Nsight，应改用 lane marker，不能误伤 sibling headline。
-9. **为什么没有 SP2/SP4 headline A/B？** 参考：quality gate 先失败，继续性能测量不能
-   改变 fast lane 的发布资格；Job 在任何 profiler-off/on client 前 exit 1。
-10. **最终代码如何保证 parity？** 参考：proposal、环境开关和产品测试都已删除，运行时
-    文件与 `origin/main` 完全一致；PR 只留下调查文档和 benchmark 取证脚本。
+10. **最终代码如何保证 parity，何时可重开？** 参考：proposal、环境开关和产品测试都已
+    删除，运行时文件与 `origin/main` 一致；只有 baseline reduction 先获得公开、稳定、
+    可复用的 canonical config 合同，才值得重开单核实现和后续 SP2/SP4 性能 A/B。
