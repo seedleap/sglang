@@ -390,7 +390,27 @@ def test_optimized_webui_uses_an_isolated_ack_aware_gateway():
     }
     assert env["REALTIME_UPSTREAM_HTTP"] == "http://minwm-webui-opt-gateway-20260813"
     assert env["REALTIME_UPSTREAM_WS"] == "ws://minwm-webui-opt-gateway-20260813"
+    assert env["HAPPYOYSTER_PUBLIC_IMAGE_BASE_URL"] == (
+        "https://zing-world-studio.loopit.me"
+    )
     assert '"sessionMaxLifetimeSeconds":70' in env["REALTIME_UI_CONFIG_JSON"]
+    assert (
+        '"secureBaseUrl":"https://zing-world-studio.loopit.me"'
+        in env["REALTIME_UI_CONFIG_JSON"]
+    )
+
+    service = find(
+        load_documents(("webui-opt-isolated.yaml",)),
+        "Service",
+        "minwm-dual-webui-opt-public",
+    )
+    certificate_arns = service["metadata"]["annotations"][
+        "service.beta.kubernetes.io/aws-load-balancer-ssl-cert"
+    ].split(",")
+    assert certificate_arns == [
+        "arn:aws:acm:us-east-2:829115578968:certificate/7fe96909-ace5-42a8-bdc6-1d08429185db",
+        "arn:aws:acm:us-east-2:829115578968:certificate/68db2049-72b6-4a0d-9843-8add8c729146",
+    ]
 
 
 def test_public_gateway_uses_the_new_zing_lingbot_domain_service():
