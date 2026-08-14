@@ -91,6 +91,9 @@ const CONTROL_TRANSITION_FLUSH_DELAY_MS = 50;
 const CONTROL_HELD_STATE_HEARTBEAT_MS = 100;
 const SESSION_HEARTBEAT_MS = 15000;
 const PLAYBACK_ACK_INTERVAL_MS = 50;
+// Keep ACK flow-control opt-in until every deployed realtime worker supports
+// the playback_ack protocol extension. Older workers return `invalid event`.
+const PLAYBACK_ACK_ENABLED = UI_CONFIG.playbackAckEnabled === true;
 const SESSION_MAX_LIFETIME_SECONDS = Math.max(
   1,
   Math.trunc(configuredNumber("sessionMaxLifetimeSeconds", 60)),
@@ -993,7 +996,7 @@ function markSessionPlayable(modelKey) {
 }
 
 function schedulePrimaryPlaybackAck() {
-  if (playbackAckTimer || !ws || ws.readyState !== WebSocket.OPEN) return;
+  if (!PLAYBACK_ACK_ENABLED || playbackAckTimer || !ws || ws.readyState !== WebSocket.OPEN) return;
   playbackAckTimer = window.setTimeout(() => {
     playbackAckTimer = 0;
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
@@ -4885,7 +4888,7 @@ async function connect() {
       type: "init",
       model: $("model").value,
       trace_id: currentTrace.traceId,
-      playback_ack_enabled: true,
+      playback_ack_enabled: PLAYBACK_ACK_ENABLED,
       ...readModelRequestParams("minwm", {
         generationMode,
         firstFrame,
@@ -5076,6 +5079,12 @@ function receive(data, epoch) {
         payload_bytes: data.byteLength || data.size || 0,
       });
       socketServerError = message.content || "unknown";
+      // The protocol defines invalid events as non-fatal. Do not convert one
+      // rejected control extension into a complete dual-model disconnect.
+      if (socketServerError === "invalid event") {
+        addHistory("server rejected one event · session kept alive");
+        return;
+      }
       if (isExperienceBusyError(message)) {
         handleExperienceBusy();
         return;

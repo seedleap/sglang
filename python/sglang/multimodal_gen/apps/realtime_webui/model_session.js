@@ -95,6 +95,7 @@
       this.decodeRequests = new Map();
       this.decodeRequestId = 1;
       this.playbackAckTimer = null;
+      this.playbackAckEnabled = false;
       this.stats = {
         frames: 0,
         bytes: 0,
@@ -126,6 +127,7 @@
       this.epoch += 1;
       const epoch = this.epoch;
       this.traceId = init.trace_id || "";
+      this.playbackAckEnabled = init.playback_ack_enabled === true;
       this.pendingHeader = null;
       this.decodeQueue = [];
       this.decodeInProgress = false;
@@ -159,7 +161,10 @@
         socket.onopen = () => {
           if (epoch !== this.epoch) return;
           opened = true;
-          socket.send(this.pack({ ...init, playback_ack_enabled: true }));
+          socket.send(this.pack({
+            ...init,
+            playback_ack_enabled: this.playbackAckEnabled,
+          }));
           this.armMediaWatchdog(epoch, "startup");
           if (!this.awaitingStableFrame) this.setState("live");
           this.scheduleRender();
@@ -258,6 +263,7 @@
       const message = this.unpack(packed);
       message.__received_at = this.now();
       if (message.type === "error") {
+        if ((message.content || "") === "invalid event") return;
         const error = new Error(message.content || `${this.key} server error`);
         error.reason = message.reason || "";
         error.retryAfterS = Number(message.retry_after_s || 0);
@@ -481,7 +487,12 @@
     }
 
     schedulePlaybackAck() {
-      if (this.playbackAckTimer || !this.socket || this.socket.readyState !== this.WebSocketCtor.OPEN) {
+      if (
+        !this.playbackAckEnabled
+        || this.playbackAckTimer
+        || !this.socket
+        || this.socket.readyState !== this.WebSocketCtor.OPEN
+      ) {
         return;
       }
       this.playbackAckTimer = this.setTimer(() => {

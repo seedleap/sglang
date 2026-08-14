@@ -52,8 +52,10 @@ metadata:
     seedleap.ai/ttl-after-test: required
 spec:
   limits:
-    cpu: "192"
-    nvidia.com/gpu: "8"
+    # Keep room for a second Spot p5 as a warm, model-cached failover node.
+    # Production workers still request only eight GPUs in total.
+    cpu: "384"
+    nvidia.com/gpu: "16"
   disruption:
     consolidationPolicy: WhenEmpty
     consolidateAfter: 1m

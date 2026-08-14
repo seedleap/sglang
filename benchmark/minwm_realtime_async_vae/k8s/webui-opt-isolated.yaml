@@ -11,7 +11,10 @@ spec:
   replicas: 1
   revisionHistoryLimit: 2
   strategy:
-    type: Recreate
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
   selector:
     matchLabels:
       app.kubernetes.io/name: minwm-dual-webui-opt-20260812
@@ -23,6 +26,7 @@ spec:
         seedleap.ai/environment: production
       annotations:
         seedleap.ai/code-git-ref: 2b82f8910d1dce9d3e43c7a6012c9d8a810b2066
+        seedleap.ai/webui-build: webui-playback-ack-compat-v2
         seedleap.ai/webui-profile: happyoyster-sbs-smooth-timeline
     spec:
       automountServiceAccountToken: false
@@ -42,7 +46,7 @@ spec:
         fsGroupChangePolicy: OnRootMismatch
       containers:
         - name: webui
-          image: 829115578968.dkr.ecr.us-east-2.amazonaws.com/leap-world/minwm-realtime@sha256:f99dfb4b93505c0e5bc78308f1ed62e4ef766b86f333a750a6479268e4d4aae4
+          image: 829115578968.dkr.ecr.us-east-2.amazonaws.com/leap-world/minwm-realtime@sha256:16e94fc659012dea56730845f233f066ec158faeb6c82d5d3470ae820c97317b
           imagePullPolicy: IfNotPresent
           env:
             - name: HAPPYOYSTER_API_KEY
@@ -69,7 +73,7 @@ spec:
             - name: LINGBOT2_UPSTREAM_WS
               value: ws://minwm-webui-opt-gateway-20260813/backends/lingbot2
             - name: REALTIME_UI_CONFIG_JSON
-              value: '{"generationModes":["i2v","t2v"],"defaultGenerationMode":"i2v","t2vFrameStep":4,"t2vDefaultNumFrames":121,"sessionMaxLifetimeSeconds":60,"singleExperience":true,"singleExperienceUserIds":{"minwm":"showcase:webui-opt-20260812:zing","lingbot2":"showcase:webui-opt-20260812:lingbot2"},"smoothCatchupRateMax":1.1,"dualModels":{"minwm":{"label":"Zing"},"lingbot2":{"label":"LingBot2","targetFps":16,"sinkSize":9,"windowFrames":18}}}'
+              value: '{"generationModes":["i2v","t2v"],"defaultGenerationMode":"i2v","t2vFrameStep":4,"t2vDefaultNumFrames":121,"sessionMaxLifetimeSeconds":60,"playbackAckEnabled":false,"singleExperience":true,"singleExperienceUserIds":{"minwm":"showcase:webui-opt-20260812:zing","lingbot2":"showcase:webui-opt-20260812:lingbot2"},"smoothCatchupRateMax":1.1,"dualModels":{"minwm":{"label":"Zing"},"lingbot2":{"label":"LingBot2","targetFps":16,"sinkSize":9,"windowFrames":18}}}'
             - name: VIDEO_PROMPT_REWRITE_CREDENTIALS
               value: /run/secrets/realtime-webui/prompt-rewriter-vertex.json
             - name: CREATE_WORLD_IMAGE_CONFIG

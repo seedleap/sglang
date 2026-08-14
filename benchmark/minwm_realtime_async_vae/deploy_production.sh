@@ -21,11 +21,11 @@ GPU_SCALE_TIME_ZONE="${GPU_SCALE_TIME_ZONE:-Asia/Shanghai}"
 GPU_SCALE_UP_SUSPEND="${GPU_SCALE_UP_SUSPEND:-false}"
 GPU_SCALE_DOWN_SUSPEND="${GPU_SCALE_DOWN_SUSPEND:-false}"
 GPU_EVENT_SCALER_SUSPEND="${GPU_EVENT_SCALER_SUSPEND:-false}"
-DENOISER_BASE_REPLICAS="${DENOISER_BASE_REPLICAS:-1}"
+DENOISER_BASE_REPLICAS="${DENOISER_BASE_REPLICAS:-2}"
 VAE_BASE_REPLICAS="${VAE_BASE_REPLICAS:-1}"
-DENOISER_PEAK_REPLICAS="${DENOISER_PEAK_REPLICAS:-1}"
+DENOISER_PEAK_REPLICAS="${DENOISER_PEAK_REPLICAS:-2}"
 VAE_PEAK_REPLICAS="${VAE_PEAK_REPLICAS:-1}"
-DENOISER_RESTART_BATCH_SIZE="${DENOISER_RESTART_BATCH_SIZE:-2}"
+DENOISER_RESTART_BATCH_SIZE="${DENOISER_RESTART_BATCH_SIZE:-1}"
 DENOISER_NODEPOOL="${DENOISER_NODEPOOL:-}"
 NAMESPACE="minwm-realtime"
 ROLLOUT_TIMEOUT="${ROLLOUT_TIMEOUT:-45m}"
@@ -37,6 +37,11 @@ if ! [[ "${MODEL_ARTIFACT_REVISION}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]; t
 fi
 if ! [[ "${MODEL_ID}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]; then
   echo "MODEL_ID is not immutable-path safe" >&2
+  exit 1
+fi
+if [[ "${MODEL_ID}" != "wan22-5b-stage3-dmd-47-0808-2fb2cfec2a2" || \
+      "${MODEL_ARTIFACT_REVISION}" != "gs3200-ema-student-v1" ]]; then
+  echo "production Zing must use the approved Haoze SP=2 checkpoint" >&2
   exit 1
 fi
 
@@ -107,23 +112,17 @@ KUSTOMIZED="${RELEASE_STATE_DIR}/kustomized.yaml"
 TABLE_STATE="${RELEASE_STATE_DIR}/coordinator-table.json"
 TTL_STATE="${RELEASE_STATE_DIR}/coordinator-ttl.json"
 RELEASE_APPLIED=0
-LEGACY_DENOISER_REPLICAS=""
-LEGACY_DENOISER_SCALED_DOWN=0
-DENOISER_CONTROLLER_RECREATED=0
 DENOISER_TEMPLATE_CHANGED=0
 DENOISER_PROTECTED_NODES=""
 SNAPSHOT_WORKLOADS=(
   deployment/minwm-realtime-adot
   deployment/minwm-realtime-coordinator
   deployment/minwm-realtime-gateway
-  deployment/tianpeng-direct-realtime-gateway
   deployment/minwm-realtime-gpu-capacity-scaler
   statefulset/minwm-async-denoiser
   statefulset/lingbot2-async-denoiser
-  statefulset/tianpeng-direct-async-denoiser
   deployment/minwm-async-vae
   deployment/lingbot2-async-vae
-  deployment/tianpeng-direct-async-vae
 )
 
 cleanup() {
@@ -352,12 +351,6 @@ restore_release_snapshot() {
   echo "production rollout failed; restoring the exact pre-release workload specs" >&2
 
   if (( RELEASE_APPLIED == 1 )); then
-    if (( DENOISER_CONTROLLER_RECREATED == 1 )) && \
-       [[ -s "$(snapshot_path statefulset/minwm-async-denoiser)" ]]; then
-      kubectl delete statefulset/minwm-async-denoiser \
-        --namespace "${NAMESPACE}" --cascade=orphan --wait=true >/dev/null \
-        || rollback_failed=1
-    fi
     for workload in "${SNAPSHOT_WORKLOADS[@]}"; do
       snapshot="$(snapshot_path "${workload}")"
       if [[ -s "${snapshot}" ]]; then
@@ -485,12 +478,13 @@ CURRENT_DENOISER_POLICY="$(kubectl get statefulset/minwm-async-denoiser \
   --output jsonpath='{.spec.podManagementPolicy}')"
 if [[ -n "${CURRENT_DENOISER_POLICY}" && \
       "${CURRENT_DENOISER_POLICY}" != "Parallel" ]]; then
-  # podManagementPolicy is immutable. Preflight the remaining release against
-  # the live policy, then recreate only this controller after snapshots exist.
-  sed -i.bak \
-    "s/podManagementPolicy: Parallel/podManagementPolicy: ${CURRENT_DENOISER_POLICY}/" \
-    "${DRY_RUN_RENDERED}"
-  rm -f "${DRY_RUN_RENDERED}.bak"
+  echo "Refusing an in-place StatefulSet controller recreation; migrate podManagementPolicy with a separately provisioned canary." >&2
+  exit 1
+fi
+if kubectl get deployment/minwm-async-denoiser \
+  --namespace "${NAMESPACE}" >/dev/null 2>&1; then
+  echo "Refusing to scale a legacy GPU Deployment to zero; migrate it with a separately provisioned canary." >&2
+  exit 1
 fi
 
 kubectl apply --server-side --force-conflicts --dry-run=server \
@@ -514,27 +508,6 @@ else
 fi
 RELEASE_APPLIED=1
 
-# Kubernetes cannot change a workload's kind in place. Keep the legacy
-# Deployment as a rollback target, but scale it to zero before creating the
-# StatefulSet so both controllers never compete for the same H100s.
-if [[ -s "$(snapshot_path deployment/minwm-async-denoiser)" ]]; then
-  LEGACY_DENOISER_REPLICAS="$(python3 -c \
-    'import json,sys; print(json.load(open(sys.argv[1]))["spec"].get("replicas", 0))' \
-    "$(snapshot_path deployment/minwm-async-denoiser)")"
-  LEGACY_DENOISER_REPLICAS="${LEGACY_DENOISER_REPLICAS:-0}"
-  kubectl scale deployment/minwm-async-denoiser \
-    --namespace "${NAMESPACE}" --replicas 0
-  LEGACY_DENOISER_SCALED_DOWN=1
-  wait_for_rollout "deployment/minwm-async-denoiser"
-fi
-
-if [[ -n "${CURRENT_DENOISER_POLICY}" && \
-      "${CURRENT_DENOISER_POLICY}" != "Parallel" ]]; then
-  kubectl delete statefulset/minwm-async-denoiser \
-    --namespace "${NAMESPACE}" --cascade=orphan --wait=true
-  DENOISER_CONTROLLER_RECREATED=1
-fi
-
 kubectl apply --server-side --force-conflicts \
   --field-manager=minwm-production -f "${RENDERED}"
 
@@ -546,7 +519,7 @@ if [[ -n "${OLD_DENOISER_TEMPLATE_HASH}" && \
       "${OLD_DENOISER_TEMPLATE_HASH}" != "${NEW_DENOISER_TEMPLATE_HASH}" ]]; then
   DENOISER_TEMPLATE_CHANGED=1
 fi
-if (( DENOISER_CONTROLLER_RECREATED == 1 || DENOISER_TEMPLATE_CHANGED == 1 )); then
+if (( DENOISER_TEMPLATE_CHANGED == 1 )); then
   protect_denoiser_nodes
   restart_statefulset_in_batches minwm-async-denoiser \
     app.kubernetes.io/name=minwm-async-denoiser
@@ -555,20 +528,12 @@ fi
 wait_for_rollout "deployment/minwm-realtime-adot"
 wait_for_rollout "deployment/minwm-realtime-coordinator"
 wait_for_rollout "deployment/minwm-realtime-gateway"
-wait_for_rollout "deployment/tianpeng-direct-realtime-gateway"
 wait_for_rollout "deployment/minwm-realtime-gpu-capacity-scaler"
 wait_for_rollout "statefulset/minwm-async-denoiser"
 wait_for_rollout "statefulset/lingbot2-async-denoiser"
-wait_for_rollout "statefulset/tianpeng-direct-async-denoiser"
 unprotect_denoiser_nodes
 wait_for_rollout "deployment/minwm-async-vae"
 wait_for_rollout "deployment/lingbot2-async-vae"
-wait_for_rollout "deployment/tianpeng-direct-async-vae"
-
-if (( LEGACY_DENOISER_SCALED_DOWN == 1 )); then
-  kubectl delete deployment/minwm-async-denoiser \
-    --namespace "${NAMESPACE}" --cascade=foreground --wait=true
-fi
 
 RELEASE_APPLIED=0
 trap - ERR

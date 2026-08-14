@@ -19,9 +19,9 @@ BASE_MANIFESTS = (
     "autoscaling.yaml",
     "h100-denoiser.yaml",
     "lingbot2-h100-denoiser.yaml",
-    "tianpeng-direct.yaml",
     "l4-vae.yaml",
     "network-policy.yaml",
+    "gpu-replica-safety.yaml",
     "gateway-service.yaml",
 )
 
@@ -58,12 +58,12 @@ def validate(documents: list[dict]) -> None:
     denoiser = find(documents, "NodePool", "minwm-async-denoiser-h100")
     denoiser_8x = find(documents, "NodePool", "minwm-async-denoiser-h100-8x")
     vae = find(documents, "NodePool", "minwm-async-vae-l4")
+    vae_spot = find(documents, "NodePool", "minwm-async-vae-l4-spot")
     assert requirement_values(denoiser, "karpenter.sh/capacity-type") == ["spot"]
     assert requirement_values(denoiser_8x, "karpenter.sh/capacity-type") == ["spot"]
-    assert requirement_values(vae, "karpenter.sh/capacity-type") == [
-        "spot",
-        "on-demand",
-    ]
+    assert requirement_values(vae, "karpenter.sh/capacity-type") == ["on-demand"]
+    assert requirement_values(vae_spot, "karpenter.sh/capacity-type") == ["spot"]
+    assert vae["spec"]["weight"] > vae_spot["spec"]["weight"]
     assert requirement_values(denoiser, "node.kubernetes.io/instance-type") == [
         "p5.48xlarge"
     ]
@@ -79,16 +79,14 @@ def validate(documents: list[dict]) -> None:
         vae, "node.kubernetes.io/instance-type"
     ))
     assert 1 <= int(denoiser["spec"]["limits"]["nvidia.com/gpu"]) <= 8
-    assert int(denoiser_8x["spec"]["limits"]["nvidia.com/gpu"]) == 8
+    assert int(denoiser_8x["spec"]["limits"]["nvidia.com/gpu"]) == 16
     assert 1 <= int(vae["spec"]["limits"]["nvidia.com/gpu"]) <= 8
 
     workloads = (
         (find(documents, "StatefulSet", "minwm-async-denoiser"), "2"),
         (find(documents, "StatefulSet", "lingbot2-async-denoiser"), 4),
-        (find(documents, "StatefulSet", "tianpeng-direct-async-denoiser"), "2"),
         (find(documents, "Deployment", "minwm-async-vae"), "1"),
         (find(documents, "Deployment", "lingbot2-async-vae"), "1"),
-        (find(documents, "Deployment", "tianpeng-direct-async-vae"), "1"),
     )
     for workload, expected_gpus in workloads:
         labels = workload["metadata"]["labels"]
@@ -100,9 +98,6 @@ def validate(documents: list[dict]) -> None:
         assert resources.get("limits")
         assert resources["requests"]["nvidia.com/gpu"] == expected_gpus
         assert resources["limits"]["nvidia.com/gpu"] == expected_gpus
-
-    tianpeng = find(documents, "StatefulSet", "tianpeng-direct-async-denoiser")
-    assert tianpeng["spec"]["replicas"] == 1
 
     denoiser = find(documents, "StatefulSet", "minwm-async-denoiser")
     containers = denoiser["spec"]["template"]["spec"]["containers"]
@@ -122,17 +117,12 @@ def validate(documents: list[dict]) -> None:
     assert gateway_service["spec"]["selector"] == {
         "app.kubernetes.io/name": "minwm-realtime-gateway"
     }
-    direct_service = find(documents, "Service", "tianpeng-direct-public")
-    assert direct_service["spec"]["selector"] == {
-        "app.kubernetes.io/name": "tianpeng-direct-realtime-gateway"
-    }
-
     assert find(documents, "Namespace", "minwm-realtime")
 
 
 def main() -> None:
     validate(load_documents())
-    print("MinWM async-VAE manifests satisfy Spot, quota, and cleanup policies.")
+    print("MinWM async-VAE manifests satisfy capacity, availability, and safety policies.")
 
 
 if __name__ == "__main__":

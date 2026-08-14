@@ -38,6 +38,7 @@ def test_gpu_nodepools_are_capacity_bounded():
         "minwm-async-denoiser-h100",
         "minwm-async-denoiser-h100-8x",
         "minwm-async-vae-l4",
+        "minwm-async-vae-l4-spot",
     ):
         node_pool = find(documents, "NodePool", pool_name)
         assert node_pool["spec"]["template"]["spec"]["taints"] == [
@@ -47,6 +48,36 @@ def test_gpu_nodepools_are_capacity_bounded():
                 "effect": "NoSchedule",
             }
         ]
+
+
+def test_production_gpu_workloads_cannot_be_scaled_to_zero_or_deleted():
+    documents = load_documents(("gpu-replica-safety.yaml",))
+    policy = find(
+        documents,
+        "ValidatingAdmissionPolicy",
+        "minwm-production-gpu-min-replicas",
+    )
+    binding = find(
+        documents,
+        "ValidatingAdmissionPolicyBinding",
+        "minwm-production-gpu-min-replicas",
+    )
+    expressions = " ".join(
+        validation["expression"] for validation in policy["spec"]["validations"]
+    )
+    for workload in (
+        "minwm-async-denoiser",
+        "lingbot2-async-denoiser",
+        "minwm-async-vae",
+        "lingbot2-async-vae",
+    ):
+        assert workload in expressions
+        assert find(documents, "PodDisruptionBudget", workload)["spec"][
+            "minAvailable"
+        ] == 1
+    assert "has(object.spec.replicas) && object.spec.replicas >= 1" in expressions
+    assert "request.operation != 'DELETE'" in expressions
+    assert binding["spec"]["validationActions"] == ["Deny"]
 
 
 def test_kustomize_does_not_namespace_cluster_scoped_resources():
@@ -78,7 +109,8 @@ def test_h100_pool_uses_one_fully_utilized_eight_gpu_node():
         "us-east-2c",
     ]
     assert int(single["spec"]["limits"]["cpu"]) >= 192
-    assert int(packed["spec"]["limits"]["cpu"]) >= 192
+    assert int(packed["spec"]["limits"]["cpu"]) >= 384
+    assert int(packed["spec"]["limits"]["nvidia.com/gpu"]) >= 16
     assert deployment["spec"]["replicas"] == "REPLACE_WITH_DENOISER_BASE_REPLICAS"
     selector = deployment["spec"]["template"]["spec"]["nodeSelector"]
     assert selector == {
@@ -129,13 +161,18 @@ def test_vae_deployment_can_land_on_either_l4_or_l40s_pool():
     assert "karpenter.sh/capacity-type" not in selector
 
     l4_pool = find(base_documents, "NodePool", "minwm-async-vae-l4")
+    l4_spot_pool = find(base_documents, "NodePool", "minwm-async-vae-l4-spot")
     assert requirement_values(l4_pool, "karpenter.sh/capacity-type") == [
-        "spot",
-        "on-demand",
+        "on-demand"
     ]
+    assert requirement_values(l4_spot_pool, "karpenter.sh/capacity-type") == [
+        "spot"
+    ]
+    assert l4_pool["spec"]["weight"] > l4_spot_pool["spec"]["weight"]
 
     for documents, name in (
         (base_documents, "minwm-async-vae-l4"),
+        (base_documents, "minwm-async-vae-l4-spot"),
         (l40s_documents, "minwm-async-vae-l40s"),
     ):
         nodepool = find(documents, "NodePool", name)
@@ -152,17 +189,16 @@ def test_vae_pipeline_keeps_one_waiting_latent_and_sends_low_latency_batches():
     assert "--encoded-frames-per-batch=1" in args
 
 
-def test_each_model_has_a_dedicated_l4_vae_worker():
+def test_each_production_model_has_a_dedicated_l4_vae_worker():
     documents = load_documents(("l4-vae.yaml",))
     minwm = find(documents, "Deployment", "minwm-async-vae")
     lingbot2 = find(documents, "Deployment", "lingbot2-async-vae")
-    direct = find(documents, "Deployment", "tianpeng-direct-async-vae")
     nodepool = find(documents, "NodePool", "minwm-async-vae-l4")
 
     assert sum(
         int(workload["spec"]["replicas"])
-        for workload in (minwm, lingbot2, direct)
-    ) == 3
+        for workload in (minwm, lingbot2)
+    ) == 2
     assert requirement_values(nodepool, "node.kubernetes.io/instance-type") == [
         "g6.2xlarge"
     ]
@@ -170,10 +206,6 @@ def test_each_model_has_a_dedicated_l4_vae_worker():
     assert "taew2_1.pth" in " ".join(_container(lingbot2, "vae")["args"])
     assert "--vae-fingerprint=taew2_1-d26151e7" in " ".join(
         _init_container(lingbot2, "vae-heartbeat")["args"]
-    )
-    assert "taew2_2.pth" in " ".join(_container(direct, "vae")["args"])
-    assert "--vae-fingerprint=taew2_2-product-direct-d053e216" in " ".join(
-        _init_container(direct, "vae-heartbeat")["args"]
     )
 
 
@@ -271,13 +303,6 @@ def test_gpu_workers_publish_epoch_state_and_drain_before_termination():
             "denoiser",
             "denoiser-heartbeat",
             30000,
-        ),
-        (
-            "l4-vae.yaml",
-            "tianpeng-direct-async-vae",
-            "vae",
-            "vae-heartbeat",
-            18081,
         ),
     ):
         workload = _gpu_workload(load_documents((filename,)), workload_name)
@@ -511,9 +536,11 @@ def test_production_resources_are_isolated_in_a_dedicated_namespace():
         "Namespace",
         "PersistentVolume",
         "ClusterRole",
-        "ClusterRoleBinding",
-        "NodePool",
-    }
+            "ClusterRoleBinding",
+            "NodePool",
+            "ValidatingAdmissionPolicy",
+            "ValidatingAdmissionPolicyBinding",
+        }
     for document in documents:
         if document["kind"] not in cluster_scoped:
             assert document["metadata"].get("namespace") == "minwm-realtime"
@@ -725,8 +752,8 @@ def test_gpu_pools_have_independent_bounded_scheduled_elasticity():
     )
     assert "--denoiser-replicas=REPLACE_WITH_DENOISER_PEAK_REPLICAS" in up_command
     assert "--vae-replicas=REPLACE_WITH_VAE_PEAK_REPLICAS" in up_command
-    assert "--denoiser-replicas=0" in down_command
-    assert "--vae-replicas=0" in down_command
+    assert "--denoiser-replicas=REPLACE_WITH_DENOISER_BASE_REPLICAS" in down_command
+    assert "--vae-replicas=REPLACE_WITH_VAE_BASE_REPLICAS" in down_command
 
     deploy_script = (ROOT.parent / "deploy_production.sh").read_text()
     for variable in (
@@ -981,7 +1008,16 @@ def test_internal_worker_ports_are_restricted_by_network_policy():
 
     denoiser = find(documents, "NetworkPolicy", "minwm-async-denoiser")
     assert denoiser["spec"]["ingress"][0]["from"][0]["podSelector"] == {
-        "matchLabels": {"app.kubernetes.io/name": "minwm-realtime-gateway"}
+        "matchExpressions": [
+            {
+                "key": "app.kubernetes.io/name",
+                "operator": "In",
+                "values": [
+                    "minwm-realtime-gateway",
+                    "minwm-webui-opt-gateway-20260813",
+                ],
+            }
+        ]
     }
     vae = find(documents, "NetworkPolicy", "minwm-async-vae")
     assert vae["spec"]["ingress"][0]["from"][0]["podSelector"] == {
@@ -1044,7 +1080,7 @@ def test_production_deploy_waits_for_every_rollout_and_restores_exact_snapshot()
     deploy_script = (ROOT.parent / "deploy_production.sh").read_text()
 
     assert "restart_statefulset_in_batches" in deploy_script
-    assert 'DENOISER_RESTART_BATCH_SIZE="${DENOISER_RESTART_BATCH_SIZE:-2}"' in deploy_script
+    assert 'DENOISER_RESTART_BATCH_SIZE="${DENOISER_RESTART_BATCH_SIZE:-1}"' in deploy_script
     assert "kubectl delete --namespace" in deploy_script
     assert "--wait=true" in deploy_script
     assert "--wait=false" not in deploy_script
@@ -1062,9 +1098,10 @@ def test_production_deploy_waits_for_every_rollout_and_restores_exact_snapshot()
         "deployment/minwm-async-vae",
     ):
         assert f'wait_for_rollout "{workload}"' in deploy_script
-    assert "LEGACY_DENOISER_REPLICAS" in deploy_script
-    assert "kubectl scale deployment/minwm-async-denoiser" in deploy_script
-    assert "kubectl delete deployment/minwm-async-denoiser" in deploy_script
+    assert "Refusing to scale a legacy GPU Deployment to zero" in deploy_script
+    assert "Refusing an in-place StatefulSet controller recreation" in deploy_script
+    assert "kubectl scale deployment/minwm-async-denoiser" not in deploy_script
+    assert "kubectl delete deployment/minwm-async-denoiser" not in deploy_script
     assert "prepare_kubernetes_snapshot.py" in deploy_script
     assert "kubectl apply --server-side --force-conflicts" in deploy_script
     assert "kubectl replace --force" not in deploy_script

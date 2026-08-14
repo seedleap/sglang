@@ -101,11 +101,11 @@ assert.match(
   "fullscreen must hide model parameters and notices while preserving both videos",
 );
 assert.match(html, /playback_controller\.js\?v=realtime-playback-v34/);
-assert.match(html, /model_session\.js\?v=dual-model-v9/);
+assert.match(html, /model_session\.js\?v=dual-model-v10/);
 assert.match(html, /dual_model_controller\.js\?v=dual-model-v6/);
 assert.match(html, /prompt_rewrite_controller\.js\?v=prompt-rewrite-v2/);
 assert.match(html, /styles\.css\?v=world-studio-v7/);
-assert.match(html, /app\.js\?v=world-studio-v25/);
+assert.match(html, /app\.js\?v=world-studio-v26/);
 assert.doesNotMatch(
   app,
   /window\.location\.hostname === "localhost"/,
