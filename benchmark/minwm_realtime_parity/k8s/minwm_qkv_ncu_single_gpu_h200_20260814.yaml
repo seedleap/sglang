@@ -16,7 +16,7 @@ spec:
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: minwm-qkv-ncu-single-gpu-h200-20260814-01
+  name: minwm-qkv-ncu-single-gpu-h200-20260814-02
   namespace: default
   labels:
     seedleap.ai/owner: chenshengdong
@@ -25,7 +25,7 @@ metadata:
   annotations:
     seedleap.ai/capacity-type: spot
     seedleap.ai/resource-isolation: full 8-GPU H200 node; GPU0/GPU1 independent single-GPU A/B pairs
-    seedleap.ai/sglang-git-ref: "19c66bbdb5427aae92b308e99e669e9dd322100c"
+    seedleap.ai/sglang-git-ref: "b39b23c65314a3cf5f4c93370e79801154eaf79b"
 spec:
   backoffLimit: 0
   activeDeadlineSeconds: 3600
@@ -61,12 +61,18 @@ spec:
             - -lc
             - |
               set -euo pipefail
-              run_dir="/results/attempts/${HOSTNAME}/minwm-qkv-ncu-single-gpu-h200-20260814-01"
+              run_dir="/results/attempts/${HOSTNAME}/minwm-qkv-ncu-single-gpu-h200-20260814-02"
               mkdir -p "$run_dir"
-              trap 'nvidia-smi > "$run_dir/nvidia-smi.txt" || true' EXIT
+              record_exit() {
+                local status=$?
+                printf 'exit_status=%s\nfinished_utc=%s\n' "$status" "$(date --utc +%Y-%m-%dT%H:%M:%SZ)" > "$run_dir/pod-exit-diagnostic.txt"
+                nvidia-smi > "$run_dir/nvidia-smi.txt" || true
+              }
+              trap record_exit EXIT
+              find /results/attempts -maxdepth 5 -type f -printf '%p\t%s bytes\n' | sort | tee "$run_dir/prior-pvc-files.txt"
               git clone --depth=1 --branch codex/minwm-fusedops-ncu-single-gpu "https://x-access-token:${GITHUB_TOKEN}@github.com/seedleap/sglang.git" /workspace/sglang
               cd /workspace/sglang
-              test "$(git rev-parse HEAD)" = 19c66bbdb5427aae92b308e99e669e9dd322100c
+              test "$(git rev-parse HEAD)" = b39b23c65314a3cf5f4c93370e79801154eaf79b
               export PYTHONPATH="$PWD/python"
               ncu --version | tee "$run_dir/ncu-version.txt"
               nvidia-smi -q -d CLOCK,POWER,TEMPERATURE > "$run_dir/gpu-before.txt"
@@ -74,10 +80,11 @@ spec:
                 local gpu="$1" first="$2" second="$3"
                 for mode in "$first" "$second"; do
                   CUDA_VISIBLE_DEVICES="$gpu" ncu --set full --target-processes all --force-overwrite \
+                    --nvtx --nvtx-include "minwm_qkv_${mode}/" \
                     -o "$run_dir/gpu${gpu}-${mode}" \
-                    python benchmark/minwm_realtime_parity/profile_minwm_qkv_ncu.py --mode "$mode" --iterations 8 \
+                    python benchmark/minwm_realtime_parity/profile_minwm_qkv_ncu.py --mode "$mode" --iterations 1 \
                     > "$run_dir/gpu${gpu}-${mode}.stdout" 2> "$run_dir/gpu${gpu}-${mode}.stderr"
-                  ncu --import "$run_dir/gpu${gpu}-${mode}.ncu-rep" --csv --page raw \
+                  ncu --import "$run_dir/gpu${gpu}-${mode}.ncu-rep" --csv --page details \
                     > "$run_dir/gpu${gpu}-${mode}.csv"
                 done
               }
