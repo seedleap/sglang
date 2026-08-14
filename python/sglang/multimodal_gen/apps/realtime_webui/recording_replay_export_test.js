@@ -51,6 +51,11 @@ assert.match(
 );
 assert.match(
   appJs,
+  /function drawRecordingPromptComposer\(\)[\s\S]{0,180}?const x = 450;[\s\S]{0,100}?const width = 700;/,
+  "the recorded prompt composer should stay compact and leave the world visible",
+);
+assert.match(
+  appJs,
   /runtime_prompt_input/,
   "recording should retain the user's real prompt input timeline",
 );

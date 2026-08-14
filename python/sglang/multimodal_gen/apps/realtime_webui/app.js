@@ -2722,9 +2722,9 @@ function drawRecordingBottomGradient() {
 
 function drawRecordingPromptComposer() {
   const snapshot = recordingPromptOverlaySnapshot();
-  const x = 360;
+  const x = 450;
   const y = RECORDING_STAGE_HEIGHT - 88;
-  const width = RECORDING_STAGE_WIDTH - x - 26;
+  const width = 700;
   const height = 56;
   const sendSize = 42;
   const sendX = x + width - sendSize - 7;
