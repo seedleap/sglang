@@ -37,7 +37,7 @@ spec:
         app.kubernetes.io/part-of: minwm-realtime
         seedleap.ai/environment: production
       annotations:
-        seedleap.ai/code-git-ref: REPLACE_WITH_CODE_GIT_REF
+        seedleap.ai/code-git-ref: d20915b43a2cb31f66bf7ccc8c4ad34ab3560502
         seedleap.ai/webui-profile: isolated-interactive-ack
     spec:
       serviceAccountName: minwm-realtime-gateway
@@ -58,7 +58,7 @@ spec:
               app.kubernetes.io/name: minwm-webui-opt-gateway-20260813
       containers:
         - name: gateway
-          image: REPLACE_WITH_GATEWAY_IMAGE_DIGEST
+          image: 829115578968.dkr.ecr.us-east-2.amazonaws.com/leap-world/minwm-realtime@sha256:b14d3a3583ce35810730c0973554aaef0beb337753552e5248ef5de5d927ff52
           imagePullPolicy: IfNotPresent
           command: [/bin/sh, -ec]
           args:

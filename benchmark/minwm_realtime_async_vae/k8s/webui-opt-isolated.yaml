@@ -22,7 +22,7 @@ spec:
         app.kubernetes.io/part-of: minwm-realtime
         seedleap.ai/environment: production
       annotations:
-        seedleap.ai/code-git-ref: 5304c3fba453e8bd5e8c33c29a05d19eec5c8470
+        seedleap.ai/code-git-ref: 2b82f8910d1dce9d3e43c7a6012c9d8a810b2066
         seedleap.ai/webui-profile: happyoyster-sbs-smooth-timeline
     spec:
       automountServiceAccountToken: false
@@ -42,7 +42,7 @@ spec:
         fsGroupChangePolicy: OnRootMismatch
       containers:
         - name: webui
-          image: 829115578968.dkr.ecr.us-east-2.amazonaws.com/leap-world/minwm-realtime@sha256:38bfc1802736805d98f43aed08c43bf239da010d64d7605b5a96a7f0cb2335cc
+          image: 829115578968.dkr.ecr.us-east-2.amazonaws.com/leap-world/minwm-realtime@sha256:f99dfb4b93505c0e5bc78308f1ed62e4ef766b86f333a750a6479268e4d4aae4
           imagePullPolicy: IfNotPresent
           env:
             - name: HAPPYOYSTER_API_KEY
