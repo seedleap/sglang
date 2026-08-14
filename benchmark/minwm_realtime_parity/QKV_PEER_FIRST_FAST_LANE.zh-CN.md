@@ -1,10 +1,44 @@
 # MinWM QKV projection 与 peer-first A2A fast lane
 
-日期：2026-08-07
+日期：2026-08-07；续跑：2026-08-14
 
 任务：S4 / 点子 6
 
-状态：**6a 已完成实现和本地 CPU 语义回归，H200 兼容性、质量与性能验收待执行；6b 尚未实现。**
+状态：**6a 的 H200 质量、确定性、v11 profiler-off ABBA 与 v12/v13 Nsight 已完成：SP2
+Client −0.771%，SP4 +5.099%，因此 6a 单独启用为 NO-GO。2026-08-14 按用户要求继续推进
+6b：让 peer-first Triton pack 直接读取 fused projection 的 strided V，消除每 chunk 300 个
+V materialization kernel；新候选仍保持独立开关默认关闭，H200/Nsight Compute/20+200
+复验进行中。**
+
+## 2026-08-14 续跑：预估、证据与当前候选
+
+已审计的 v12/v13 exact-window Nsight（H200、BF16、1248×704、KV45）给出以下每 rank、
+每 stable chunk 结果：
+
+| SP | lane | projection GEMM | projection CUDA / trace wall | V layout CUDA / wall | peer pack CUDA | A2A wall |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: |
+| 2 | control | 450 | 19.303 / 33.317 ms | 0 / 0 | 3.221 ms | 11.849 ms |
+| 2 | 6a | 150 | 19.305 / 19.305 ms | 2.802 / 3.541 ms | 3.099 ms | 11.765 ms |
+| 4 | control | 450 | 11.363 / 30.063 ms | 0 / 0 | 1.660 ms | 12.469 ms |
+| 4 | 6a | 150 | 10.359 / 10.359 ms | 1.713 / 2.675 ms | 1.435 ms | 12.255 ms |
+
+这证明 6a 少掉的 300 个 GEMM launch 被 300 个 V materialization kernel 完全补回；SP2
+projection CUDA 本身没有下降，收益只来自约 14 ms 的 launch span。若 6b 只消除 V copy，
+理论上限约为 SP2 DiT 0.50% / SP4 0.36%。提交前先验预估为 SP2 Client +0.2%～+0.6%；
+若 strided pack 同时减少同步/launch gap，目标区间为 DiT +1%～2%、Client +0.5%～+1.2%。
+这些是预估，不是实测。
+
+当前 6b 候选只做三件事：Triton pack 接受 Q/K/V 的四维 stride；USP CUDA 路径在
+`MINWM_STRIDED_QKV_PACK=1` 时允许 non-contiguous 输入；fused QKV 不再执行
+`value.contiguous()`。6b 开关独立且默认 `0`；只有同时启用 6a/6b 才进入目标路径。
+它不修改 GEMM backend、collective、wire layout、Q/K norm、RoPE 或 cache。CPU 逻辑测试已覆盖真实 strided QKV
+view，15 passed、1 CUDA skipped；CUDA kernel、质量和性能仍必须在 H200 上验证。
+
+基础设施失败也保留：第一次 reader 复用旧固定 hostname `i-06888dc1ca88547e1`，但该节点
+已被回收，Pod 90 秒 Ready wait 超时后被精确删除。随后提交的 Phoenix Local Zone Spot
+2-GPU Pod `minwm-s4-qkv-ncu-h200-20260814-01` 被 Karpenter nominate 后因当时无 Spot
+capacity 保持 Pending；未删除或提高其他任务优先级。新结果 PVC 为
+`minwm-s4-qkv-ncu-results-20260814-v01`，旧 v12/v13 PVC 未改动。
 
 ## 结论与开关
 
@@ -29,7 +63,7 @@ norm hidden states
   -> [6a] one to_qkv GEMM
   -> q/k/v views
   -> existing Q/K norm and RoPE/cache logic
-  -> V contiguous only for uniform SP>1 peer-first fast path
+  -> V contiguous for 6a；6b opt-in 直接保留 strided view
   -> existing peer-first Triton pack
   -> existing input A2A / attention / output A2A
 ```
@@ -250,7 +284,8 @@ peer-first Triton kernel 和 NCCL A2A 按 kernel/API 名归因。NVTX 只用于 
 
 ## 6b go/no-go
 
-6b 当前为 **NO IMPLEMENTATION / PENDING DATA**。至少同时满足以下条件才进入实现：
+6b 当前为 **MINIMAL IMPLEMENTATION / H200 PENDING**。用户在 2026-08-14 明确要求继续推进；
+实现仍必须满足以下条件才允许保留并进入 PR：
 
 1. 6a 已通过兼容性和质量门槛；
 2. SP2 主验收中 V copy + peer-first pack 仍占可重复的显著 DiT CUDA 或 wall；
@@ -273,7 +308,7 @@ dict 都有反向加载路径。若 fast lane 启动日志没有出现 `single-g
 - H200 BF16、TP/SP、compile、量化 fallback：待执行；
 - layer/latent/video/determinism：待执行；
 - profiler-off / Nsight A/B：待执行；
-- 6b：等待 6a 证据；
+- 6b：独立默认关闭的 strided pack 已实现，本地逻辑通过，H200/收益待执行；
 - 默认开关：保持关闭。
 
 ## 给负责人掌握代码的检查题

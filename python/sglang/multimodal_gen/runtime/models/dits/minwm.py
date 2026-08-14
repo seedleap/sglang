@@ -40,6 +40,7 @@ from sglang.multimodal_gen.runtime.layers.linear import (
 )
 from sglang.multimodal_gen.runtime.layers.rotary_embedding import NDRotaryEmbedding
 from sglang.multimodal_gen.runtime.layers.usp import (
+    _MINWM_STRIDED_QKV_PACK,
     _usp_input_all_to_all_qkv,
     _usp_input_all_to_all_varlen_qkv,
     _usp_output_all_to_all,
@@ -1026,15 +1027,13 @@ class MinWMCausalTransformerBlock(CausalWanTransformerBlock):
         forward_batch = get_forward_context().forward_batch
         if (
             self.use_fused_qkv_projection
+            and not _MINWM_STRIDED_QKV_PACK
             and forward_batch is not None
             and getattr(forward_batch, "enable_sequence_shard", False)
             and get_ulysses_parallel_world_size() > 1
         ):
-            # A QKV GEMM produces three last-dimension views. Q/K normalization
-            # materializes contiguous outputs, while V needs this one explicit
-            # copy to keep the existing peer-first Triton pack on its fast path.
-            # Removing this copy is deliberately left to the separately measured
-            # 6b output-layout experiment.
+            # Preserve the measured 6a path unless the independent 6b strided
+            # peer-first pack experiment is explicitly enabled.
             value = value.contiguous()
         attn_output = self.attn1(
             query,
@@ -1124,7 +1123,7 @@ class MinWMCausalTransformer3DModel(CausalWanTransformer3DModel):
             "MinWM execution profile: attention_impl=%s "
             "packed_deterministic=%s segment_compile=%s cache_rotated_k=%s "
             "precompute_cache_rope=%s cache_packed_metadata=%s "
-            "fused_qkv_requested=%s",
+            "fused_qkv_requested=%s strided_qkv_pack=%s",
             _MINWM_ATTENTION_IMPL,
             _MINWM_PACKED_ATTENTION_DETERMINISTIC,
             _MINWM_SEGMENT_COMPILE,
@@ -1132,6 +1131,7 @@ class MinWMCausalTransformer3DModel(CausalWanTransformer3DModel):
             _MINWM_PRECOMPUTE_CACHE_ROPE,
             _MINWM_CACHE_PACKED_METADATA,
             _MINWM_FUSED_QKV_PROJECTION,
+            _MINWM_STRIDED_QKV_PACK,
         )
         deterministic = os.environ.get("MINWM_PARITY_DETERMINISTIC", "0")
         if deterministic.strip().lower() not in {"", "0", "false", "no", "off"}:

@@ -1,6 +1,7 @@
 # Copied and adapted from: https://github.com/hao-ai-lab/FastVideo
 
 import logging
+import os
 from typing import TYPE_CHECKING
 
 import torch
@@ -23,6 +24,10 @@ if TYPE_CHECKING:
     )
 
 logger = logging.getLogger(__name__)
+
+_MINWM_STRIDED_QKV_PACK = os.environ.get(
+    "MINWM_STRIDED_QKV_PACK", "0"
+).strip().lower() not in {"", "0", "false", "no", "off"}
 
 
 def _maybe_wait(tensor: torch.Tensor) -> torch.Tensor:
@@ -73,12 +78,13 @@ def _usp_pack_peer_first_qkv(
         h_local,
         3 * query.shape[3],
     )
+    inputs_contiguous = (
+        query.is_contiguous() and key.is_contiguous() and value.is_contiguous()
+    )
     if (
         query.is_cuda
         and torch.version.hip is None
-        and query.is_contiguous()
-        and key.is_contiguous()
-        and value.is_contiguous()
+        and (inputs_contiguous or _MINWM_STRIDED_QKV_PACK)
     ):
         try:
             from sglang.jit_kernel.diffusion.triton.ulysses_qkv_pack import (

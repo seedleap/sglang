@@ -161,9 +161,10 @@ def test_minwm_fused_qkv_views_feed_peer_first_layout(
     with torch.inference_mode():
         projected = block._project_qkv(torch.randn(1, sequence_length, dim))
         query, key, value = (
-            tensor.unflatten(-1, (num_heads, head_dim)).contiguous()
+            tensor.unflatten(-1, (num_heads, head_dim))
             for tensor in projected
         )
+        assert not value.is_contiguous()
         output_buffer = torch.empty(3 * query.numel())
         packed = _usp_pack_peer_first_qkv(query, key, value, sp_degree, output_buffer)
     local_heads = num_heads // sp_degree
