@@ -7,6 +7,12 @@ const JPEG_FRAME_CONTENT_TYPE = "image/jpeg";
 const DECODER_WORKER_URL = "./decoder_worker.js?v=rgb-worker-v10";
 const UI_CONFIG = Object.freeze(globalThis.SGLANG_REALTIME_UI_CONFIG || {});
 const DUAL_MODEL_CONFIG = Object.freeze(UI_CONFIG.dualModels || {});
+const PRIMARY_WEBRTC_ENABLED = String(UI_CONFIG.primaryTransport || "").toLowerCase()
+  === "webrtc-h264";
+const PRIMARY_WEBRTC_BITRATE_KBPS = Math.max(
+  250,
+  Math.min(20000, Math.trunc(configuredNumber("webrtcBitrateKbps", 3500))),
+);
 const DEFAULT_LINGBOT2_MODEL = "robbyant/lingbot-world-v2-14b-causal-fast-diffusers";
 const SESSION_ARTIFACT_SCHEMA_VERSION = 1;
 const SESSION_ARTIFACT_EVENT_LIMIT = 20000;
@@ -174,6 +180,10 @@ function applyRuntimeUiConfig() {
     Object.values(CONTROL_ACTION_META).forEach((meta) => {
       meta.amount = String(UI_CONFIG.actionAmountLabel);
     });
+  }
+  if (PRIMARY_WEBRTC_ENABLED) {
+    const chip = document.querySelector('[data-model-key="minwm"] .stream-chip');
+    if (chip) chip.textContent = "H.264 · WebRTC";
   }
   configureGenerationModeSelect();
 }
@@ -509,6 +519,8 @@ function allWorldPresets() {
 }
 
 let ws = null;
+let primaryWebRTCSession = null;
+let primaryWebRTCStats = {};
 let selectedPreset = null;
 let selectedReferenceBytes = null;
 let selectedReferenceUrl = "";
@@ -616,6 +628,7 @@ const fullscreenController = window.SGLangFullscreen?.createFullscreenController
 });
 const canvas = $("minwmViewport");
 const ctx = canvas.getContext("2d", { alpha: false });
+const minwmWebrtcVideo = $("minwmWebrtcViewport");
 const lingbot2Canvas = $("lingbot2Viewport");
 const scratchCanvas = document.createElement("canvas");
 const scratchCtx = scratchCanvas.getContext("2d", { alpha: false });
@@ -660,7 +673,7 @@ function canReconnectLingbot2() {
   return (
     !sessionLifetimeExpired &&
     selectedGenerationMode() === "i2v" &&
-    ws?.readyState === WebSocket.OPEN
+    primarySessionIsConnected()
   );
 }
 
@@ -754,6 +767,59 @@ const happyOysterSession = new HappyOysterSession({
   },
 });
 
+if (PRIMARY_WEBRTC_ENABLED) {
+  primaryWebRTCSession = new PrimaryWebRTCSession({
+    video: minwmWebrtcVideo,
+    canvas,
+    codec: "h264",
+    bitrateKbps: PRIMARY_WEBRTC_BITRATE_KBPS,
+    onState: (state, details = {}) => {
+      setModelConnectionState("minwm", state);
+      if (state === "connecting") {
+        setStatus("Connecting WebRTC", "live");
+        setPreviewState("waiting");
+      } else if (state === "live") {
+        setStatus("Live", "live");
+        setPreviewState("live");
+        addHistory(
+          `Zing media live · H.264 WebRTC · ${details.width || "-"}x${details.height || "-"}`,
+        );
+      } else if (state === "closed") {
+        $("connectBtn").disabled = false;
+        if (!sessionLifetimeExpired) setStatus("Closed");
+      }
+    },
+    onPlayable: ({ width, height }) => {
+      primaryHasVisibleFrame = true;
+      renderedPreviewFrames = Math.max(1, renderedPreviewFrames);
+      primaryWebRTCStats = { ...primaryWebRTCStats, width, height };
+      markClientTrace("client.webrtc_first_frame", {
+        codec: "h264",
+        protocol: "webrtc",
+        width,
+        height,
+      });
+      markSessionPlayable("minwm");
+      updateStats();
+    },
+    onStats: (stats) => {
+      primaryWebRTCStats = { ...primaryWebRTCStats, ...stats };
+      frames = Number(primaryWebRTCStats.framesDecoded || primaryWebRTCStats.sourceFrames || 0);
+      bytes = Number(primaryWebRTCStats.bytesReceived || 0);
+      updateStats();
+    },
+    onError: (error) => {
+      setModelConnectionState("minwm", "error");
+      setStatus("WebRTC failed", "error");
+      $("connectBtn").disabled = false;
+      addHistory(`Zing WebRTC error · ${error.message || error}`);
+    },
+  });
+  minwmWebrtcVideo.addEventListener("pointerdown", () => {
+    minwmWebrtcVideo.focus({ preventScroll: true });
+  });
+}
+
 function buildHappyOysterInit(init) {
   const unchangedPresetKey = selectedWorldIsUnchanged(init.prompt)
     ? presetKey(selectedPreset)
@@ -769,10 +835,32 @@ function buildHappyOysterInit(init) {
 }
 
 const primarySessionAdapter = {
-  connect: (init, url) => openPrimarySession(init, url),
+  connect: (init, url) => PRIMARY_WEBRTC_ENABLED
+    ? openPrimaryWebRTCSession(init)
+    : openPrimarySession(init, url),
   sendEvent: (envelope) => sendPrimaryEventEnvelope(envelope),
-  close: (reason) => abortCurrentSession(reason, { expectedClose: true }),
+  close: (reason) => PRIMARY_WEBRTC_ENABLED
+    ? closePrimaryWebRTCSession(reason)
+    : abortCurrentSession(reason, { expectedClose: true }),
 };
+
+function primarySessionIsActive() {
+  return PRIMARY_WEBRTC_ENABLED
+    ? Boolean(primaryWebRTCSession?.active)
+    : Boolean(ws && ws.readyState !== WebSocket.CLOSED);
+}
+
+function primarySessionIsConnected() {
+  return PRIMARY_WEBRTC_ENABLED
+    ? Boolean(primaryWebRTCSession?.connected)
+    : Boolean(ws && ws.readyState === WebSocket.OPEN);
+}
+
+function primaryTransportBufferedAmount() {
+  return PRIMARY_WEBRTC_ENABLED
+    ? Number(primaryWebRTCSession?.bufferedAmount || 0)
+    : Number(ws?.bufferedAmount || 0);
+}
 const dualModelController = new DualModelController({
   sessions: {
     minwm: primarySessionAdapter,
@@ -1022,6 +1110,7 @@ function markSessionPlayable(modelKey) {
 }
 
 function schedulePrimaryPlaybackAck() {
+  if (PRIMARY_WEBRTC_ENABLED) return;
   if (!PLAYBACK_ACK_ENABLED || playbackAckTimer || !ws || ws.readyState !== WebSocket.OPEN) return;
   playbackAckTimer = window.setTimeout(() => {
     playbackAckTimer = 0;
@@ -1541,6 +1630,7 @@ function drawIdle() {
 
 function resetStreamStats() {
   pendingHeader = null;
+  primaryWebRTCStats = {};
   clearFrameQueue();
   playbackController.reset({
     mode: selectedPlaybackMode(),
@@ -1710,6 +1800,25 @@ function isWorkerDecodableRawContentType(contentType) {
 }
 
 function updateStats() {
+  if (PRIMARY_WEBRTC_ENABLED) {
+    const rtc = primaryWebRTCStats;
+    renderModelTelemetry("minwm", {
+      frames: Number(rtc.framesDecoded || rtc.sourceFrames || 0),
+      bytes: Number(rtc.bytesReceived || 0),
+      sourceFps: previewPlaybackTargetFps("minwm"),
+      serverFps: previewPlaybackTargetFps("minwm"),
+      deliveryFps: Number(rtc.receiveFps || 0),
+      renderFps: Number(rtc.receiveFps || 0).toFixed(1),
+      bufferMs: Number(rtc.jitterBufferMs || 0),
+      queueFrames: 0,
+      droppedFrames: Number(rtc.framesDropped || 0),
+    });
+    $("minwmDecodeText").textContent = "native H.264";
+    $("minwmDisplayLagText").textContent = rtc.jitterMs > 0
+      ? `jitter ${Math.round(rtc.jitterMs)} ms`
+      : "WebRTC";
+    return;
+  }
   const playback = playbackController.snapshot();
   const totalDroppedFrames = playback.droppedFrames + droppedDecodeFrames;
   renderModelTelemetry("minwm", {
@@ -2785,6 +2894,14 @@ function ensureRecordingStageCanvas(targetCanvas = recordingCanvas) {
 }
 
 function recordingDrawableSource(image) {
+  if (
+    PRIMARY_WEBRTC_ENABLED
+    && minwmWebrtcVideo
+    && minwmWebrtcVideo.readyState >= 2
+    && minwmWebrtcVideo.videoWidth > 0
+  ) {
+    return minwmWebrtcVideo;
+  }
   if (image instanceof ImageData) {
     if (scratchCanvas.width !== image.width || scratchCanvas.height !== image.height) {
       scratchCanvas.width = image.width;
@@ -3956,7 +4073,7 @@ function hasPendingPlaybackInput() {
     pendingDecodeBatches > 0 ||
     decodeInProgress ||
     decodeQueue.length > 0 ||
-    Boolean(ws && ws.readyState === WebSocket.OPEN)
+    primarySessionIsConnected()
   );
 }
 
@@ -4555,7 +4672,7 @@ function updateWorldDraftState() {
 }
 
 function clearWorldDraft() {
-  if (ws && ws.readyState === WebSocket.OPEN) closeSession("world draft cleared");
+  if (primarySessionIsActive()) closeSession("world draft cleared");
   selectedPreset = null;
   selectedReferenceBytes = null;
   selectedReferenceUrl = "";
@@ -4853,7 +4970,10 @@ async function connect() {
   setPreviewState("waiting");
   addHistory("preparing session");
   try {
-    if (ws && ws.readyState !== WebSocket.CLOSED) {
+    if (PRIMARY_WEBRTC_ENABLED && primaryWebRTCSession?.active) {
+      setStatus("Replacing");
+      await primaryWebRTCSession.close("replacing WebRTC session", { emitState: false });
+    } else if (ws && ws.readyState !== WebSocket.CLOSED) {
       setStatus("Replacing");
       const oldSocket = abortCurrentSession("closing previous socket before reconnect", {
         keepConnectDisabled: true,
@@ -4867,7 +4987,9 @@ async function connect() {
     resetTraceTopology(currentTrace.traceId);
     markClientTrace("client.generate_clicked", {
       generation_mode: selectedGenerationMode(),
-      transport: $("transportFormat").value || "raw",
+      transport: PRIMARY_WEBRTC_ENABLED
+        ? "h264-webrtc"
+        : $("transportFormat").value || "raw",
       fps: Number($("fps").value || DEFAULT_TARGET_FPS),
     });
     const generationMode = selectedGenerationMode();
@@ -4967,6 +5089,71 @@ async function connect() {
     if (!renderedPreviewFrames) setPreviewState("idle");
     addHistory(error.message || "init failed");
   }
+}
+
+async function openPrimaryWebRTCSession(init) {
+  if (!primaryWebRTCSession) throw new Error("Zing WebRTC session is unavailable");
+  const epoch = streamEpoch;
+  const generationMode = init.generation_mode;
+  const webrtcInit = { ...init };
+  const firstFrame = init.first_frame;
+  if (firstFrame instanceof Uint8Array) {
+    webrtcInit.first_frame = await bytesToDataUrl(
+      firstFrame,
+      selectedReferenceMimeType || "image/png",
+    );
+  } else if (firstFrame instanceof ArrayBuffer) {
+    webrtcInit.first_frame = await bytesToDataUrl(
+      new Uint8Array(firstFrame),
+      selectedReferenceMimeType || "image/png",
+    );
+  }
+  markClientTrace("client.webrtc_session_start", {
+    codec: "h264",
+    protocol: "webrtc",
+    bitrate_kbps: PRIMARY_WEBRTC_BITRATE_KBPS,
+    generation_mode: generationMode,
+  });
+  const info = await primaryWebRTCSession.connect(webrtcInit);
+  if (epoch !== streamEpoch) {
+    await primaryWebRTCSession.close("stale WebRTC session", { emitState: false });
+    throw new Error("stale WebRTC session");
+  }
+  markClientTrace("client.webrtc_open", {
+    codec: "h264",
+    protocol: "webrtc",
+    session_id: info.id || info.session_id || "",
+  });
+  recordTrajectoryEvent("webrtc_open", {
+    backend: "minwm",
+    codec: "h264",
+    protocol: "webrtc",
+    bitrate_kbps: PRIMARY_WEBRTC_BITRATE_KBPS,
+  });
+  addHistory(
+    `${generationMode.toUpperCase()} Zing session started · H.264 WebRTC · ${PRIMARY_WEBRTC_BITRATE_KBPS} kbps`,
+  );
+}
+
+function closePrimaryWebRTCSession(reason = "WebRTC session closed", clearFrames = true) {
+  streamEpoch += 1;
+  controlStateController?.reset({ sendRelease: false });
+  primaryHasVisibleFrame = false;
+  primaryWebRTCStats = {};
+  if (clearFrames) {
+    clearFrameQueue();
+    renderedPreviewFrames = 0;
+    updateStats();
+  }
+  setModelConnectionState("minwm", "closed");
+  setPreviewState("idle");
+  $("connectBtn").disabled = false;
+  setStatus("Closing");
+  addHistory(reason);
+  void primaryWebRTCSession?.close(reason).finally(() => {
+    if (!sessionLifetimeExpired) setStatus("Closed");
+  });
+  return null;
 }
 
 function openPrimarySession(init, url) {
@@ -5079,6 +5266,12 @@ function openPrimarySession(init, url) {
 }
 
 function sendPrimaryEventEnvelope(envelope) {
+  if (PRIMARY_WEBRTC_ENABLED) {
+    return Boolean(primaryWebRTCSession?.sendEvent({
+      ...envelope,
+      trace_id: currentTrace?.traceId,
+    }));
+  }
   if (!ws || ws.readyState !== WebSocket.OPEN) return false;
   ws.send(pack({ ...envelope, trace_id: currentTrace?.traceId }));
   return true;
@@ -5299,7 +5492,7 @@ function sendEvent(kind, payload, historyText = null) {
     kind,
     event_id: eventId,
     delivered_models: deliveredModels,
-    ws_buffered_amount: ws?.bufferedAmount || 0,
+    ws_buffered_amount: primaryTransportBufferedAmount(),
   });
   lastSentEventId = eventId;
   updateControlDebugText();
@@ -5403,7 +5596,7 @@ function sendCameraControlTransitions(transitions) {
 
 async function applyPreset(preset, options = {}) {
   const sendRuntimeEvents = options.sendRuntimeEvents
-    ?? Boolean(ws && ws.readyState === WebSocket.OPEN);
+    ?? primarySessionIsConnected();
   selectedPreset = preset;
   document.querySelectorAll(".preset").forEach((button) => {
     const selected = button.dataset.presetName === preset.name;
@@ -5988,7 +6181,7 @@ updateRecordButton();
 updateRecordFolderButton();
 $("connectBtn").onclick = connect;
 function closeForModelSlotChange() {
-  if (!ws && dualModelController.activeKeys.size === 0 && !happyOysterSession.connected) return;
+  if (!primarySessionIsActive() && dualModelController.activeKeys.size === 0 && !happyOysterSession.connected) return;
   closeSession("model comparison selection changed");
   setStatus("Selection changed");
 }
@@ -6000,7 +6193,7 @@ for (let slotIndex = 0; slotIndex < MODEL_SLOT_DEFAULTS.length; slotIndex += 1) 
 }
 $("addModelSlotBtn").onclick = () => {
   const sessionActive = Boolean(
-    ws
+    primarySessionIsActive()
     || dualModelController.activeKeys.size > 0
     || happyOysterSession.connected
   );
@@ -6534,10 +6727,12 @@ window.__sglangRealtimeDebug = () => ({
     promptHistory: currentSessionArtifact.prompt_history.length,
     traceId: currentSessionArtifact.trace_id,
   } : null,
-  socketBufferedAmount: ws ? ws.bufferedAmount : 0,
+  socketBufferedAmount: primaryTransportBufferedAmount(),
   socketCloseExpected,
   socketHadError,
-  socketReadyState: ws ? ws.readyState : null,
+  socketReadyState: PRIMARY_WEBRTC_ENABLED
+    ? primaryWebRTCSession?.state || null
+    : ws?.readyState ?? null,
   socketServerError,
   status: $("statusText").textContent,
   streamEpoch,

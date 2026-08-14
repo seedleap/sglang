@@ -144,6 +144,7 @@
                 </header>
                 <div class="preview-frame">
                   <canvas id="minwmViewport" width="1280" height="720" tabindex="0"></canvas>
+                  <video id="minwmWebrtcViewport" autoplay playsinline muted tabindex="0" hidden></video>
                   <div id="minwmPreviewOverlay" class="preview-overlay" aria-hidden="true">
                     <span class="preview-loader"></span>
                     <span class="preview-unavailable-text">暂不可用</span>
@@ -323,6 +324,7 @@
     <script src="./playback_controller.js?v=realtime-playback-v34"></script>
     <script src="./model_session.js?v=dual-model-v10"></script>
     <script src="./dual_model_controller.js?v=dual-model-v6"></script>
+    <script src="./primary_webrtc_session.js?v=primary-webrtc-v1"></script>
     <script src="./happy_oyster_sdk.js?v=happyoyster-sdk-0.1.0-ticket-only"></script>
     <script src="./happy_oyster_session.js?v=happyoyster-session-v5"></script>
     <script src="./session_lifetime.js?v=session-lifetime-v1"></script>

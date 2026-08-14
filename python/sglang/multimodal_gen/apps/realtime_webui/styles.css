@@ -1710,8 +1710,10 @@ body.world-studio {
 .world-studio .preview-frame { position: relative; display: grid; width: 100%; aspect-ratio: 16 / 9; place-items: center; overflow: hidden; background: #090d0d; contain: paint; isolation: isolate; }
 .world-studio .preview-frame::before { content: ""; position: absolute; inset: 0; z-index: 2; pointer-events: none; background: linear-gradient(180deg, rgba(255,255,255,0.025), transparent 28%, rgba(0,0,0,0.08)); }
 .world-studio #minwmViewport,
+.world-studio #minwmWebrtcViewport,
 .world-studio #lingbot2Viewport,
 .world-studio #happyoysterViewport { position: relative; z-index: 1; display: block; width: 100%; height: 100%; max-height: none; object-fit: contain; transform: translateZ(0); }
+.world-studio #minwmWebrtcViewport { position: absolute; inset: 0; z-index: 2; background: #090d0d; }
 
 .world-studio .stage-controls {
   display: grid;
