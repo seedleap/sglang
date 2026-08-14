@@ -87,6 +87,8 @@
       RTCPeerConnectionImpl = global.RTCPeerConnection,
       mediaPollIntervalMs = 200,
       startupTimeoutMs = 30000,
+      controlKeepaliveMs = 10000,
+      controlReconnectBaseMs = 250,
       onState = () => {},
       onPlayable = () => {},
       onStats = () => {},
@@ -103,6 +105,8 @@
       this.RTCPeerConnectionImpl = RTCPeerConnectionImpl;
       this.mediaPollIntervalMs = mediaPollIntervalMs;
       this.startupTimeoutMs = startupTimeoutMs;
+      this.controlKeepaliveMs = controlKeepaliveMs;
+      this.controlReconnectBaseMs = controlReconnectBaseMs;
       this.onState = onState;
       this.onPlayable = onPlayable;
       this.onStats = onStats;
@@ -116,6 +120,9 @@
       this.expectedClose = false;
       this.playable = false;
       this.statsTimer = 0;
+      this.controlKeepaliveTimer = 0;
+      this.controlReconnectTimer = 0;
+      this.controlReconnectAttempt = 0;
       this.lastRtcSample = null;
       this.playableResolve = null;
       this.playableReject = null;
@@ -202,6 +209,10 @@
       this.whepResourceUrl = "";
       this.playable = false;
       this._stopStats();
+      this._stopControlKeepalive();
+      if (this.controlReconnectTimer) global.clearTimeout(this.controlReconnectTimer);
+      this.controlReconnectTimer = 0;
+      this.controlReconnectAttempt = 0;
       this.playableReject?.(new Error(reason));
       this.playableResolve = null;
       this.playableReject = null;
@@ -244,12 +255,68 @@
         } catch {}
       };
       control.onclose = (event) => {
-        if (generation !== this.generation || this.expectedClose) return;
-        const error = new Error(`WebRTC control socket closed (${event.code || 0})`);
-        this._setState("error", { message: error.message });
-        this.onError(error);
+        if (generation !== this.generation || this.expectedClose || this.control !== control) return;
+        this.control = null;
+        this._stopControlKeepalive();
+        this._scheduleControlReconnect(generation, event.code || 0);
       };
       await waitForControlOpen(control, this.startupTimeoutMs);
+      if (generation !== this.generation) throw new Error("WebRTC control startup canceled");
+      this.controlReconnectAttempt = 0;
+      this._startControlKeepalive();
+    }
+
+    _startControlKeepalive() {
+      this._stopControlKeepalive();
+      if (this.controlKeepaliveMs <= 0) return;
+      this.controlKeepaliveTimer = global.setInterval(() => {
+        if (!this.control || this.control.readyState !== CONTROL_OPEN) return;
+        try {
+          this.control.send(JSON.stringify({
+            type: "event",
+            kind: "heartbeat",
+            payload: { transport: "webrtc-control" },
+          }));
+        } catch {}
+      }, this.controlKeepaliveMs);
+    }
+
+    _stopControlKeepalive() {
+      if (this.controlKeepaliveTimer) global.clearInterval(this.controlKeepaliveTimer);
+      this.controlKeepaliveTimer = 0;
+    }
+
+    _scheduleControlReconnect(generation, closeCode) {
+      if (this.controlReconnectTimer || generation !== this.generation || !this.sessionId) return;
+      const attempt = this.controlReconnectAttempt++;
+      const delayMs = Math.min(4000, this.controlReconnectBaseMs * (2 ** Math.min(attempt, 4)));
+      if (!this.playable) {
+        this._setState("connecting", {
+          protocol: "webrtc",
+          codec: "h264",
+          reason: `control socket closed (${closeCode})`,
+        });
+      }
+      this.controlReconnectTimer = global.setTimeout(async () => {
+        this.controlReconnectTimer = 0;
+        if (generation !== this.generation || !this.sessionId) return;
+        try {
+          await this._openControl(generation);
+          if (this.playable) {
+            this._setState("live", {
+              protocol: "webrtc",
+              codec: "h264",
+              reconnected: true,
+              width: this.video.videoWidth,
+              height: this.video.videoHeight,
+            });
+          }
+        } catch (error) {
+          if (generation !== this.generation || !this.sessionId) return;
+          if (this.controlReconnectAttempt >= 8) this.onError(error);
+          this._scheduleControlReconnect(generation, closeCode);
+        }
+      }, delayMs);
     }
 
     async _waitForPublisher(generation) {

@@ -199,6 +199,8 @@ const { PrimaryWebRTCSession } = require("./primary_webrtc_session.js");
     RTCPeerConnectionImpl: FakePeerConnection,
     mediaPollIntervalMs: 1,
     startupTimeoutMs: 1000,
+    controlKeepaliveMs: 5,
+    controlReconnectBaseMs: 1,
     onState: (state) => states.push(state),
     onPlayable: (details) => { playable = details; },
     onStats: (snapshot) => stats.push(snapshot),
@@ -224,6 +226,17 @@ const { PrimaryWebRTCSession } = require("./primary_webrtc_session.js");
   });
   await new Promise((resolve) => setTimeout(resolve, 0));
   assert.ok(stats.some((snapshot) => snapshot.framesDecoded === 32));
+
+  controlSockets[0].close(1002);
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(controlSockets.length, 2);
+  assert.equal(session.connected, true);
+  assert.equal(session.sendEvent({ type: "event", kind: "camera_actions", event_id: 2 }), true);
+  assert.deepEqual(JSON.parse(controlSockets[1].sent.at(-1)), {
+    type: "event",
+    kind: "camera_actions",
+    event_id: 2,
+  });
 
   await session.close("test complete");
   assert.equal(video.srcObject, null);

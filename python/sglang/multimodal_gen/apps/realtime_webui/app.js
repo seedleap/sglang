@@ -781,9 +781,9 @@ if (PRIMARY_WEBRTC_ENABLED) {
       } else if (state === "live") {
         setStatus("Live", "live");
         setPreviewState("live");
-        addHistory(
-          `Zing media live · H.264 WebRTC · ${details.width || "-"}x${details.height || "-"}`,
-        );
+        addHistory(details.reconnected
+          ? "Zing control channel reconnected"
+          : `Zing media live · H.264 WebRTC · ${details.width || "-"}x${details.height || "-"}`);
       } else if (state === "closed") {
         $("connectBtn").disabled = false;
         if (!sessionLifetimeExpired) setStatus("Closed");
