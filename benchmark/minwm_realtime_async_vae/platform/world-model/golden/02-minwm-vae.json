@@ -1,0 +1,218 @@
+{
+  "affinity": {
+    "podAntiAffinity": {
+      "requiredDuringSchedulingIgnoredDuringExecution": [
+        {
+          "labelSelector": {
+            "matchLabels": {
+              "loopit.me/gpu-role": "vae"
+            }
+          },
+          "topologyKey": "kubernetes.io/hostname"
+        }
+      ]
+    }
+  },
+  "annotations": {
+    "logs.loopit.me/bucket": "world-model",
+    "logs.loopit.me/enabled": "true"
+  },
+  "appGroup": "world-studio",
+  "appName": "minWM VAE",
+  "args": [
+    "--checkpoint-path=/opt/taehv/taew2_2.pth",
+    "--device=cuda",
+    "--dtype=bfloat16",
+    "--max-sessions=16",
+    "--queue-depth-per-session=1",
+    "--encoded-frames-per-batch=1",
+    "--encode-workers=4",
+    "--max-message-mb=64",
+    "--host=0.0.0.0",
+    "--port=18081"
+  ],
+  "businessLineId": "world-model",
+  "clusterName": "world-model",
+  "command": [],
+  "deployType": "deployment",
+  "env": [
+    {
+      "name": "WORKER_EPOCH_FILE",
+      "value": "/var/run/minwm-worker/epoch"
+    },
+    {
+      "name": "OTEL_SERVICE_NAME",
+      "value": "minwm-vae"
+    },
+    {
+      "name": "OTEL_EXPORTER_OTLP_ENDPOINT",
+      "value": "http://adot-collector.monitoring:4317"
+    },
+    {
+      "name": "OTEL_RESOURCE_ATTRIBUTES",
+      "value": "service.namespace=world-model,worker.role=vae,model.name=minwm"
+    }
+  ],
+  "image": "${WORLD_REALTIME_VAE_IMAGE_DIGEST}",
+  "imagePullPolicy": "IfNotPresent",
+  "initContainers": [
+    {
+      "args": [
+        "exec python3 -m sglang.multimodal_gen.runtime.entrypoints.realtime_worker_heartbeat --coordinator-url=http://world-realtime-coordinator:18081 --health-url=http://127.0.0.1:18081/health --state-url=http://127.0.0.1:18081/v1/realtime_worker/state --worker-id=${POD_UID} --worker-epoch-file=/var/run/minwm-worker/epoch --role=vae --endpoint=ws://${POD_IP}:18081/v1/realtime_vae/decode --reservation-endpoint=http://${POD_IP}:18081/v1/realtime_worker --node-name=${NODE_NAME} --capacity=16 --model-revision=all --vae-fingerprint=taew2_2-d053e216 --interval-s=5"
+      ],
+      "command": [
+        "/bin/sh",
+        "-ec"
+      ],
+      "env": [
+        {
+          "name": "SGLANG_LIGHTWEIGHT_RUNTIME",
+          "value": "1"
+        },
+        {
+          "name": "POD_UID",
+          "valueFrom": {
+            "fieldRef": {
+              "fieldPath": "metadata.uid"
+            }
+          }
+        },
+        {
+          "name": "POD_IP",
+          "valueFrom": {
+            "fieldRef": {
+              "fieldPath": "status.podIP"
+            }
+          }
+        },
+        {
+          "name": "NODE_NAME",
+          "valueFrom": {
+            "fieldRef": {
+              "fieldPath": "spec.nodeName"
+            }
+          }
+        }
+      ],
+      "image": "${WORLD_REALTIME_VAE_IMAGE_DIGEST}",
+      "imagePullPolicy": "IfNotPresent",
+      "name": "vae-heartbeat",
+      "resources": {
+        "limits": {
+          "cpu": "200m",
+          "memory": "256Mi"
+        },
+        "requests": {
+          "cpu": "25m",
+          "memory": "64Mi"
+        }
+      },
+      "restartPolicy": "Always",
+      "volumeMounts": [
+        {
+          "mountPath": "/var/run/minwm-worker",
+          "name": "worker-epoch"
+        }
+      ]
+    }
+  ],
+  "kind": "application",
+  "labels": {
+    "app.kubernetes.io/part-of": "world-studio",
+    "loopit.me/business-line": "world-model",
+    "loopit.me/gpu-role": "vae",
+    "loopit.me/lane": "default",
+    "loopit.me/managed-by": "platform",
+    "loopit.me/service-id": "minwm-vae"
+  },
+  "lane": "default",
+  "livenessProbe": {
+    "failureThreshold": 6,
+    "initialDelaySeconds": 30,
+    "path": "/health",
+    "periodSeconds": 30,
+    "port": 18081,
+    "timeoutSeconds": 5,
+    "type": "httpGet"
+  },
+  "name": "minwm-vae",
+  "namespace": "world-model",
+  "networkPolicy": {
+    "defaultDeny": true,
+    "egressToServiceIds": [
+      "world-realtime-coordinator"
+    ],
+    "enabled": true,
+    "externalEgress": [
+      "adot-collector.monitoring"
+    ],
+    "ingressFromServiceIds": [
+      "minwm-denoiser"
+    ]
+  },
+  "nodeSelector": {
+    "loopit.me/gpu-pool": "l4"
+  },
+  "podDisruptionBudget": {
+    "maxUnavailable": 1
+  },
+  "readinessProbe": {
+    "failureThreshold": 6,
+    "path": "/health",
+    "periodSeconds": 5,
+    "port": 18081,
+    "timeoutSeconds": 5,
+    "type": "httpGet"
+  },
+  "replicas": 1,
+  "resources": {
+    "limits": {
+      "cpu": "7",
+      "ephemeral-storage": "40Gi",
+      "memory": "28Gi",
+      "nvidia.com/gpu": "1"
+    },
+    "requests": {
+      "cpu": "6",
+      "ephemeral-storage": "20Gi",
+      "memory": "24Gi",
+      "nvidia.com/gpu": "1"
+    }
+  },
+  "schemaVersion": 1,
+  "serviceAccountName": "wm-worker-discovery",
+  "startupProbe": {
+    "failureThreshold": 180,
+    "path": "/health",
+    "periodSeconds": 10,
+    "port": 18081,
+    "timeoutSeconds": 5,
+    "type": "httpGet"
+  },
+  "strategy": {
+    "type": "Recreate"
+  },
+  "terminationGracePeriodSeconds": 60,
+  "tolerations": [
+    {
+      "effect": "NoSchedule",
+      "key": "nvidia.com/gpu",
+      "operator": "Equal",
+      "value": "true"
+    }
+  ],
+  "topologySpreadConstraints": [],
+  "volumeMounts": [
+    {
+      "mountPath": "/var/run/minwm-worker",
+      "name": "worker-epoch"
+    }
+  ],
+  "volumes": [
+    {
+      "emptyDir": {},
+      "name": "worker-epoch",
+      "type": "emptyDir"
+    }
+  ]
+}

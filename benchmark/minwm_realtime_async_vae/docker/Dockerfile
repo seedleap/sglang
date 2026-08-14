@@ -61,7 +61,7 @@ RUN python3 -m pip install \
       --no-deps \
       --no-cache-dir \
       -r /tmp/requirements-aws.lock && \
-    python3 -c 'import boto3, botocore, jmespath, s3transfer'
+    python3 -c 'import awscrt, boto3, botocore, jmespath, s3transfer; assert awscrt.__version__ == "0.36.0"'
 RUN install -d -m 0755 /opt/taehv
 ADD --checksum=sha256:d053e216ca50e2bb837bbcd79b85f0366bea00e5938025572382a773b74c559a \
     https://raw.githubusercontent.com/madebyollin/taehv/093b918971d59001a0bad6dfd6e0409b5e1752cf/taew2_2.pth \

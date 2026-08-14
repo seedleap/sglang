@@ -1,0 +1,217 @@
+{
+  "affinity": {},
+  "annotations": {
+    "logs.loopit.me/bucket": "world-model",
+    "logs.loopit.me/enabled": "true"
+  },
+  "appGroup": "world-studio",
+  "appName": "World Studio WebUI",
+  "args": [],
+  "businessLineId": "world-model",
+  "clusterName": "world-model",
+  "command": [
+    "python",
+    "server.py"
+  ],
+  "deployType": "deployment",
+  "env": [
+    {
+      "name": "HAPPYOYSTER_API_KEY",
+      "valueFrom": {
+        "secretKeyRef": {
+          "key": "happyoyster-api-key",
+          "name": "world-studio-runtime"
+        }
+      }
+    },
+    {
+      "name": "HAPPYOYSTER_API_BASE_URL",
+      "value": "https://llm-0jcmcer24vyvd7rr.cn-beijing.maas.aliyuncs.com/api/v2/apps/happyoyster-1.0/"
+    },
+    {
+      "name": "HAPPYOYSTER_TOKEN_BASE_URL",
+      "value": "https://llm-0jcmcer24vyvd7rr.cn-beijing.maas.aliyuncs.com"
+    },
+    {
+      "name": "HAPPYOYSTER_PUBLIC_IMAGE_BASE_URL",
+      "value": "https://seedleap-world.loopit.me"
+    },
+    {
+      "name": "REALTIME_UPSTREAM_HTTP",
+      "value": "http://world-realtime-gateway:18080"
+    },
+    {
+      "name": "REALTIME_UPSTREAM_WS",
+      "value": "ws://world-realtime-gateway:18080"
+    },
+    {
+      "name": "MINWM_UPSTREAM_HTTP",
+      "value": "http://world-realtime-gateway:18080/backends/minwm"
+    },
+    {
+      "name": "MINWM_UPSTREAM_WS",
+      "value": "ws://world-realtime-gateway:18080/backends/minwm"
+    },
+    {
+      "name": "LINGBOT2_UPSTREAM_HTTP",
+      "value": "http://world-realtime-gateway:18080/backends/lingbot2"
+    },
+    {
+      "name": "LINGBOT2_UPSTREAM_WS",
+      "value": "ws://world-realtime-gateway:18080/backends/lingbot2"
+    },
+    {
+      "name": "REALTIME_UI_CONFIG_JSON",
+      "value": "{\"generationModes\":[\"i2v\",\"t2v\"],\"defaultGenerationMode\":\"i2v\",\"t2vFrameStep\":4,\"t2vDefaultNumFrames\":121,\"sessionMaxLifetimeSeconds\":90,\"singleExperience\":true,\"singleExperienceUserIds\":{\"minwm\":\"showcase:world-model:zing\",\"lingbot2\":\"showcase:world-model:lingbot2\"},\"smoothCatchupRateMax\":1.1,\"dualModels\":{\"minwm\":{\"label\":\"Zing\"},\"lingbot2\":{\"label\":\"LingBot2\",\"targetFps\":16,\"sinkSize\":9,\"windowFrames\":18}}}"
+    },
+    {
+      "name": "VIDEO_PROMPT_REWRITE_CREDENTIALS",
+      "value": "/run/secrets/realtime-webui/prompt-rewriter-vertex.json"
+    },
+    {
+      "name": "CREATE_WORLD_IMAGE_CONFIG",
+      "value": "/run/secrets/realtime-webui/world-image-model-config.json"
+    }
+  ],
+  "image": "829115578968.dkr.ecr.us-east-2.amazonaws.com/leap-world/minwm-realtime@sha256:38bfc1802736805d98f43aed08c43bf239da010d64d7605b5a96a7f0cb2335cc",
+  "imagePullPolicy": "IfNotPresent",
+  "initContainers": [],
+  "kind": "application",
+  "labels": {
+    "app.kubernetes.io/part-of": "world-studio",
+    "loopit.me/business-line": "world-model",
+    "loopit.me/lane": "default",
+    "loopit.me/managed-by": "platform",
+    "loopit.me/service-id": "world-studio-webui"
+  },
+  "lane": "default",
+  "livenessProbe": {
+    "failureThreshold": 6,
+    "path": "/",
+    "periodSeconds": 15,
+    "port": 18080,
+    "timeoutSeconds": 5,
+    "type": "httpGet"
+  },
+  "name": "world-studio-webui",
+  "namespace": "world-model",
+  "networkPolicy": {
+    "defaultDeny": true,
+    "egressToServiceIds": [
+      "world-realtime-gateway"
+    ],
+    "enabled": true,
+    "externalEgress": [
+      "llm-0jcmcer24vyvd7rr.cn-beijing.maas.aliyuncs.com",
+      "aiplatform.googleapis.com"
+    ],
+    "ingressFromServiceIds": [
+      "istio-ingressgateway"
+    ]
+  },
+  "nodeSelector": {},
+  "podDisruptionBudget": {
+    "minAvailable": 1
+  },
+  "readinessProbe": {
+    "failureThreshold": 6,
+    "path": "/runtime-config.js",
+    "periodSeconds": 5,
+    "port": 18080,
+    "timeoutSeconds": 5,
+    "type": "httpGet"
+  },
+  "replicas": 2,
+  "resources": {
+    "limits": {
+      "cpu": "1",
+      "memory": "1Gi"
+    },
+    "requests": {
+      "cpu": "250m",
+      "memory": "384Mi"
+    }
+  },
+  "schemaVersion": 1,
+  "serviceAccountName": "wm-webui",
+  "serviceSpec": {
+    "headless": false,
+    "ports": [
+      {
+        "name": "http",
+        "port": 18080,
+        "targetPort": 18080
+      }
+    ]
+  },
+  "startupProbe": {
+    "failureThreshold": 30,
+    "path": "/runtime-config.js",
+    "periodSeconds": 2,
+    "port": 18080,
+    "timeoutSeconds": 5,
+    "type": "httpGet"
+  },
+  "terminationGracePeriodSeconds": 30,
+  "tolerations": [],
+  "topologySpreadConstraints": [
+    {
+      "labelSelector": {
+        "matchLabels": {
+          "loopit.me/service-id": "world-studio-webui"
+        }
+      },
+      "maxSkew": 1,
+      "topologyKey": "topology.kubernetes.io/zone",
+      "whenUnsatisfiable": "ScheduleAnyway"
+    }
+  ],
+  "volumeMounts": [
+    {
+      "mountPath": "/run/secrets/realtime-webui",
+      "name": "runtime-secret",
+      "readOnly": true
+    },
+    {
+      "mountPath": "/opt/sglang/python/sglang/multimodal_gen/apps/realtime_webui_generated",
+      "name": "generated-images"
+    },
+    {
+      "mountPath": "/tmp",
+      "name": "tmp"
+    }
+  ],
+  "volumes": [
+    {
+      "name": "runtime-secret",
+      "secret": {
+        "items": [
+          {
+            "key": "prompt-rewriter-vertex.json",
+            "path": "prompt-rewriter-vertex.json"
+          },
+          {
+            "key": "world-image-model-config.json",
+            "path": "world-image-model-config.json"
+          }
+        ],
+        "secretName": "world-studio-runtime"
+      },
+      "type": "secret"
+    },
+    {
+      "emptyDir": {
+        "sizeLimit": "1Gi"
+      },
+      "name": "generated-images",
+      "type": "emptyDir"
+    },
+    {
+      "emptyDir": {
+        "sizeLimit": "256Mi"
+      },
+      "name": "tmp",
+      "type": "emptyDir"
+    }
+  ]
+}
