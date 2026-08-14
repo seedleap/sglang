@@ -119,8 +119,10 @@ class WebRTCBridgeSession:
     pending_header: dict[str, Any] | None = None
     control_clients: set[web.WebSocketResponse] = field(default_factory=set)
     media_batch_history: deque[dict[str, Any]] = field(
-        default_factory=lambda: deque(maxlen=64)
+        default_factory=lambda: deque(maxlen=1024)
     )
+    media_fps: int = 24
+    next_frame_deadline: float | None = None
 
     @property
     def media_path(self) -> str:
@@ -234,6 +236,8 @@ class WebRTCBridgeSession:
 
         frames = _split_payload(header, payload)
         self.source_bytes += len(payload)
+        raw_num_frame_batches = int(header.get("num_frame_batches") or 0)
+        is_final_frame_batch = bool(header.get("is_final_frame_batch"))
         media_batch = {
             "type": "media_batch",
             "chunk_index": int(header.get("chunk_index") or 0),
@@ -241,12 +245,8 @@ class WebRTCBridgeSession:
             "first_frame_index": self.frames,
             "num_frames": len(frames),
             "frame_batch_index": int(header.get("frame_batch_index") or 0),
-            "num_frame_batches": int(header.get("num_frame_batches") or 1),
-            "is_final_frame_batch": bool(
-                header.get("is_final_frame_batch")
-                or int(header.get("frame_batch_index") or 0) + 1
-                >= int(header.get("num_frame_batches") or 1)
-            ),
+            "num_frame_batches": raw_num_frame_batches,
+            "is_final_frame_batch": is_final_frame_batch,
         }
         self.media_batch_history.append(media_batch)
         await self._broadcast(media_batch)
@@ -264,13 +264,26 @@ class WebRTCBridgeSession:
                 raise ValueError(f"unsupported realtime frame content type: {content_type}")
             if self.ffmpeg is None or self.ffmpeg.stdin is None:
                 raise RuntimeError("H.264 encoder is unavailable")
+            await self._pace_frame()
             self.ffmpeg.stdin.write(rgb)
             await self.ffmpeg.stdin.drain()
             self.frames += 1
         self.state = "streaming"
 
+    async def _pace_frame(self) -> None:
+        interval = 1 / max(1, self.media_fps)
+        now = asyncio.get_running_loop().time()
+        if self.next_frame_deadline is None or now - self.next_frame_deadline > interval * 4:
+            self.next_frame_deadline = now
+        delay_s = self.next_frame_deadline - now
+        if delay_s > 0:
+            await asyncio.sleep(delay_s)
+        self.next_frame_deadline += interval
+
     async def _start_ffmpeg(self, width: int, height: int) -> None:
         fps = _bounded_int(self.init.get("fps"), default=16, minimum=1, maximum=60)
+        self.media_fps = fps
+        self.next_frame_deadline = None
         gop = max(8, fps)
         rtsp_url = f"{self.manager.media_rtsp_base.rstrip('/')}/{self.media_path}"
         command = [
@@ -279,7 +292,6 @@ class WebRTCBridgeSession:
             "-loglevel",
             "warning",
             "-nostdin",
-            "-re",
             "-f",
             "rawvideo",
             "-pixel_format",

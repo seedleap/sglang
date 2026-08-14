@@ -480,7 +480,7 @@
         lastFrameIndex: firstFrameIndex + numFrames - 1,
         numFrames,
         frameBatchIndex: Number(event.frame_batch_index || 0),
-        numFrameBatches: Math.max(1, Number(event.num_frame_batches || 1)),
+        numFrameBatches: Number(event.num_frame_batches || 0),
         isFinalFrameBatch: Boolean(event.is_final_frame_batch),
       };
       if (this.mediaBatches.some((item) => (
@@ -489,7 +489,9 @@
       ))) return;
       this.mediaBatches.push(batch);
       this.mediaBatches.sort((left, right) => left.firstFrameIndex - right.firstFrameIndex);
-      if (this.mediaBatches.length > 64) this.mediaBatches.splice(0, this.mediaBatches.length - 64);
+      if (this.mediaBatches.length > 1024) {
+        this.mediaBatches.splice(0, this.mediaBatches.length - 1024);
+      }
     }
 
     _metadataForFrame(frame, fallbackIndex) {
@@ -517,7 +519,13 @@
         chunkIndex: batch?.chunkIndex ?? Math.floor(sourceFrameIndex / 16),
         eventId: batch?.eventId ?? 0,
         frameBatchIndex: batch?.frameBatchIndex ?? 0,
-        numFrameBatches: batch?.numFrameBatches ?? 1,
+        numFrameBatches: batch
+          ? batch.numFrameBatches > 0
+            ? batch.numFrameBatches
+            : batch.isFinalFrameBatch
+              ? batch.frameBatchIndex + 1
+              : 1_000_000
+          : 1,
         isFinalFrameBatch: batch
           ? batch.isFinalFrameBatch && sourceFrameIndex >= batch.lastFrameIndex
           : true,
