@@ -20,9 +20,8 @@ set -euo pipefail
   || "${MINWM_BENCHMARK_MODE}" == "long720p" \
   || "${MINWM_BENCHMARK_MODE}" == "triptych720p" \
   || "${MINWM_BENCHMARK_MODE}" == "spmatrix720p" \
+  || "${MINWM_BENCHMARK_MODE}" == "cudagraphmatrix" \
   || "${MINWM_BENCHMARK_MODE}" == "bounded5s" \
-  || "${MINWM_BENCHMARK_MODE}" == "calibratedfp8" \
-  || "${MINWM_BENCHMARK_MODE}" == "nvfp4" \
   || "${MINWM_BENCHMARK_MODE}" == "dragon60s" ]] || {
   echo "unsupported MINWM_BENCHMARK_MODE=${MINWM_BENCHMARK_MODE}" >&2
   exit 2
@@ -146,9 +145,8 @@ find "${PRETRAINED}" -type f -printf '%s\n' \
       '{bytes += $1; files += 1} END {printf "files=%d bytes=%.0f stage_seconds=%d\n", files, bytes, elapsed}' \
   | tee "${RESULTS}/staging-summary.txt"
 
-if [[ "${MINWM_SKIP_INSTALL:-0}" != "1" ]]; then
-  if [[ "${MINWM_SKIP_UNUSED_GRPC_RUST:-1}" == "1" ]] && ! command -v cargo >/dev/null; then
-    python3 - /workspace/sglang/python/pyproject.toml <<'PY'
+if [[ "${MINWM_SKIP_UNUSED_GRPC_RUST:-1}" == "1" ]] && ! command -v cargo >/dev/null; then
+  python3 - /workspace/sglang/python/pyproject.toml <<'PY'
 import sys
 from pathlib import Path
 
@@ -164,111 +162,19 @@ if text.count(block) != 1:
 path.write_text(text.replace(block, ""))
 print("Skipped unused sglang.srt.grpc Rust extension for diffusion-only benchmark")
 PY
-  fi
-  if [[ "${MINWM_PRESERVE_IMAGE_GPU_STACK:-0}" == "1" ]]; then
-    # SM120 images carry a matched Torch/FA4/CUTLASS stack. Resolving the full
-    # diffusion extra can downgrade that stack to packages without a usable
-    # varlen FA4 kernel, so install SGLang and only its Python runtime deps.
-    python3 -m pip install -e /workspace/sglang/python \
-      --no-deps --root-user-action=ignore
-    python3 -m pip install \
-      'fastapi==0.141.1' \
-      'IPython==9.16.0' \
-      'pyzmq==27.1.0' \
-      --root-user-action=ignore
-    python3 -m pip install \
-      'compressed-tensors' \
-      'diffusers==0.37.0' \
-      'gguf' \
-      'partial-json-parser' \
-      'transformers==5.12.1' \
-      --root-user-action=ignore
-    python3 -m pip install --no-deps \
-      'addict==2.4.0' \
-      'msgspec==0.21.1' \
-      'orjson==3.11.9' \
-      'prometheus-client==0.26.0' \
-      'pybase64==1.4.3' \
-      'python-multipart==0.0.32' \
-      'sgl-deep-gemm==0.1.4' \
-      'setproctitle==1.3.7' \
-      'uvicorn==0.52.0' \
-      'uvloop==0.22.1' \
-      'watchfiles==1.2.0' \
-      'websockets==17.0.1' \
-      'zstandard==0.25.0' \
-      --root-user-action=ignore
-    if [[ -n "${MINWM_SGLANG_KERNEL_WHEEL_PATH:-}" ]]; then
-      [[ -f "${MINWM_SGLANG_KERNEL_WHEEL_PATH}" ]]
-      kernel_wheel_install_dir="$(mktemp -d)"
-      kernel_wheel_install_path="${kernel_wheel_install_dir}/sglang_kernel-0.4.4-cp310-abi3-linux_x86_64.whl"
-      cp "${MINWM_SGLANG_KERNEL_WHEEL_PATH}" "${kernel_wheel_install_path}"
-      python3 -m pip install --no-deps \
-        "${kernel_wheel_install_path}" \
-        --root-user-action=ignore
-    elif [[ "${MINWM_BUILD_SGLANG_KERNEL_FROM_SOURCE:-1}" == "1" ]]; then
-      # The SM120 image carries a newer Torch ABI than the released
-      # sglang-kernel wheel. Build the exact checkout against the image's
-      # Torch/CUDA stack so the FP8 ops are both SM120-capable and ABI-safe.
-      python3 -m pip install \
-        'cmake>=3.31' \
-        ninja \
-        'nvidia-cuda-cccl==13.0.85' \
-        'nvidia-cuda-crt==13.0.88' \
-        'nvidia-cuda-nvcc==13.0.88' \
-        'nvidia-nvvm==13.0.88' \
-        scikit-build-core \
-        uv \
-        --root-user-action=ignore
-      export CUDA_HOME=/opt/minwm/venv/lib/python3.12/site-packages/nvidia/cu13
-      export CUDACXX="${CUDA_HOME}/bin/nvcc"
-      export PATH="${CUDA_HOME}/bin:${PATH}"
-      if [[ ! -e "${CUDA_HOME}/lib64" ]]; then
-        ln -s lib "${CUDA_HOME}/lib64"
-      fi
-      if [[ ! -e "${CUDA_HOME}/lib/libcudart.so" ]]; then
-        ln -s libcudart.so.13 "${CUDA_HOME}/lib/libcudart.so"
-      fi
-      nvcc --version
-      kernel_wheel_dir="$(mktemp -d)"
-      CMAKE_ARGS="-DCMAKE_CUDA_COMPILER=${CUDACXX} -DCUDA_VERSION=13.0 -DCUDA_nvrtc_LIBRARY=${CUDA_HOME}/lib/libnvrtc.so.13 -DENABLE_BELOW_SM90=OFF -DSGL_KERNEL_ENABLE_FA3=OFF -DSGL_KERNEL_COMPILE_THREADS=2" \
-        CMAKE_BUILD_PARALLEL_LEVEL=8 \
-        MAX_JOBS=8 \
-        python3 -m pip wheel /workspace/sglang/sgl-kernel \
-          --no-build-isolation --no-deps --wheel-dir "${kernel_wheel_dir}"
-      kernel_wheel_path="$(find "${kernel_wheel_dir}" -maxdepth 1 -type f -name '*.whl' -print -quit)"
-      [[ -n "${kernel_wheel_path}" ]]
-      python3 -m pip install --no-deps \
-        "${kernel_wheel_path}" \
-        --root-user-action=ignore
-      if [[ -n "${MINWM_SGLANG_KERNEL_WHEEL_OUTPUT_PATH:-}" ]]; then
-        mkdir -p "${MINWM_SGLANG_KERNEL_WHEEL_OUTPUT_PATH%/*}"
-        cp "${kernel_wheel_path}" "${MINWM_SGLANG_KERNEL_WHEEL_OUTPUT_PATH}"
-      fi
-    else
-      python3 -m pip install --no-deps \
-        'sglang-kernel==0.4.4' \
-        --root-user-action=ignore
-    fi
-  else
-    python3 -m pip install -e "/workspace/sglang/python[diffusion]" \
-      --root-user-action=ignore
-  fi
-  # The minWM training image pins peft==0.17.0, while this SGLang checkout pins
-  # transformers==5.12.1.  Merely leaving the old PEFT package installed makes
-  # diffusers detect and import it, which then fails on the removed HybridCache
-  # symbol before any model code runs.  Realtime inference does not load LoRA
-  # adapters, so remove that stale optional package instead of changing either
-  # side's model/runtime dependency set.
-  python3 -m pip uninstall -y peft
-  if [[ "${MINWM_PRESERVE_IMAGE_GPU_STACK:-0}" != "1" ]]; then
-    python3 -m pip install --force-reinstall --no-deps \
-      --index-url https://flashinfer.ai/whl/cu130 \
-      'flashinfer-jit-cache==0.6.12+cu130'
-  fi
-else
-  echo "Skipped dependency installation for reused in-Pod benchmark environment"
 fi
+python3 -m pip install -e "/workspace/sglang/python[diffusion]" \
+  --root-user-action=ignore
+# The minWM training image pins peft==0.17.0, while this SGLang checkout pins
+# transformers==5.12.1.  Merely leaving the old PEFT package installed makes
+# diffusers detect and import it, which then fails on the removed HybridCache
+# symbol before any model code runs.  Realtime inference does not load LoRA
+# adapters, so remove that stale optional package instead of changing either
+# side's model/runtime dependency set.
+python3 -m pip uninstall -y peft
+python3 -m pip install --force-reinstall --no-deps \
+  --index-url https://flashinfer.ai/whl/cu130 \
+  'flashinfer-jit-cache==0.6.12+cu130'
 python3 - <<'PY' | tee "${RESULTS}/runtime.json"
 import importlib.util, json
 import diffusers, torch, transformers
@@ -299,6 +205,8 @@ else
     --local-attn-size "${MINWM_CONVERT_LOCAL_ATTN_SIZE:--1}" \
     --sink-size "${MINWM_CONVERT_SINK_SIZE:-0}" \
     --sliding-window-num-frames "${MINWM_CONVERT_WINDOW_SIZE:-128}" \
+    --rope-position-mode "${MINWM_CONVERT_ROPE_POSITION_MODE:-absolute}" \
+    --rope-max-frame-gap "${MINWM_CONVERT_ROPE_MAX_FRAME_GAP:-1}" \
     | tee "${RESULTS}/conversion.log"
 fi
 cp "${MODEL_DIR}/minwm_conversion_manifest.json" "${RESULTS}/"
@@ -638,75 +546,249 @@ PY
   exit 0
 fi
 
-if [[ "${MINWM_BENCHMARK_MODE}" == "calibratedfp8" ]]; then
-  python3 -m pytest -q \
-    /workspace/sglang/python/sglang/multimodal_gen/test/unit/test_minwm_static_fp8_transformer.py
-  if [[ -n "${MINWM_REUSE_STATIC_FP8_RUN_ID:-}" ]]; then
-    [[ "${MINWM_REUSE_STATIC_FP8_RUN_ID}" =~ ^[A-Za-z0-9._-]+$ ]]
-    STATIC_FP8_TRANSFORMER="/work/minwm-realtime/${MINWM_REUSE_STATIC_FP8_RUN_ID}/static-fp8-transformer"
-    [[ -f "${STATIC_FP8_TRANSFORMER}/minwm_static_fp8_manifest.json" ]]
-    echo "reused-static-fp8:${MINWM_REUSE_STATIC_FP8_RUN_ID}" \
-      | tee "${RESULTS}/static-fp8-calibration.log"
-  else
-    CALIBRATION_CASES="${MINWM_CASES_PATH:-${SCRIPT_DIR}/cases_720p_compile_smoke.json}"
-    CALIBRATION_RESULTS="${LOCAL_RESULTS}/static-fp8-calibration"
-    CALIBRATION_PATH="${CALIBRATION_RESULTS}/static-fp8-calibration.json"
-    STATIC_FP8_TRANSFORMER="${WORK_ROOT}/static-fp8-transformer"
-    mkdir -p "${CALIBRATION_RESULTS}"
-    python3 "${SCRIPT_DIR}/run_minwm_baseline.py" \
-      --cases "${CALIBRATION_CASES}" \
-      --minwm-root /workspace/minWM \
-      --checkpoint "${CHECKPOINT}" \
-      --pretrained-dir "${PRETRAINED}" \
-      --config "${MINWM_CONFIG}" \
-      --results "${CALIBRATION_RESULTS}" \
-      --fp8-calibration-output "${CALIBRATION_PATH}" \
-      | tee "${RESULTS}/static-fp8-calibration.log"
-    python3 -m sglang.multimodal_gen.tools.build_minwm_static_fp8_transformer \
-      --input-dir "${MODEL_DIR}/transformer" \
-      --calibration "${CALIBRATION_PATH}" \
-      --output-dir "${STATIC_FP8_TRANSFORMER}" \
-      --activation-margin "${MINWM_STATIC_FP8_MARGIN:-1.0}" \
-      --module-scope "${MINWM_STATIC_FP8_SCOPE:-all}" \
-      | tee "${RESULTS}/static-fp8-conversion.log"
-    cp "${CALIBRATION_PATH}" "${RESULTS}/"
-    cp "${CALIBRATION_RESULTS}/baseline_run.json" "${RESULTS}/static-fp8-calibration-baseline.json"
-  fi
-  cp "${STATIC_FP8_TRANSFORMER}/minwm_static_fp8_manifest.json" "${RESULTS}/"
-  export MINWM_PROFILE_TRANSFORMER_PATH="${STATIC_FP8_TRANSFORMER}"
-  export MINWM_PROFILE_QUANTIZATION_LABEL="${MINWM_PROFILE_QUANTIZATION_LABEL:-static_fp8}"
-fi
+if [[ "${MINWM_BENCHMARK_MODE}" == "cudagraphmatrix" ]]; then
+  CG_CASES="${MINWM_CASES_PATH:-${SCRIPT_DIR}/cases_720p_compile_smoke.json}"
+  CG_CASE="${MINWM_CUDA_GRAPH_CASE:-00_forward_080_pottery_720p}"
+  CG_RESULTS="${RESULTS}/cuda-graph-matrix"
+  CG_DEGREES="${MINWM_CUDA_GRAPH_SP_DEGREES:-1 2}"
+  CG_WARMUP_CHUNKS="${MINWM_CUDA_GRAPH_WARMUP_CHUNKS:-10}"
+  CG_MEASURED_CHUNKS="${MINWM_CUDA_GRAPH_MEASURED_CHUNKS:-30}"
+  CG_WINDOW="${MINWM_CUDA_GRAPH_KV_FRAMES:-20}"
+  mkdir -p "${CG_RESULTS}"
+  nvidia-smi -L | tee "${CG_RESULTS}/gpus.txt"
+  nvidia-smi topo -m | tee "${CG_RESULTS}/topology.txt"
 
-if [[ "${MINWM_BENCHMARK_MODE}" == "nvfp4" ]]; then
   python3 -m pytest -q \
-    /workspace/sglang/python/sglang/multimodal_gen/test/unit/test_minwm_nvfp4_transformer.py
-  NVFP4_CASES="${MINWM_CASES_PATH:-${SCRIPT_DIR}/cases_720p_compile_smoke.json}"
-  NVFP4_RESULTS="${LOCAL_RESULTS}/nvfp4-calibration"
-  NVFP4_DUMP_DIR="${NVFP4_RESULTS}/parity-dumps"
-  NVFP4_TRANSFORMER="${WORK_ROOT}/nvfp4-transformer"
-  mkdir -p "${NVFP4_RESULTS}"
-  MINWM_PARITY_DUMP_DIR="${NVFP4_DUMP_DIR}" \
-    python3 "${SCRIPT_DIR}/run_minwm_baseline.py" \
-      --cases "${NVFP4_CASES}" \
-      --minwm-root /workspace/minWM \
-      --checkpoint "${CHECKPOINT}" \
-      --pretrained-dir "${PRETRAINED}" \
-      --config "${MINWM_CONFIG}" \
-      --results "${NVFP4_RESULTS}" \
-      | tee "${RESULTS}/nvfp4-calibration.log"
-  python3 -m sglang.multimodal_gen.tools.build_minwm_nvfp4_transformer \
-    --input-dir "${MODEL_DIR}/transformer" \
-    --output-dir "${NVFP4_TRANSFORMER}" \
-    --minwm-root /workspace/minWM \
-    --checkpoint "${CHECKPOINT}" \
-    --pretrained-dir "${PRETRAINED}" \
-    --config "${MINWM_CONFIG}" \
-    --calibration-forward "${NVFP4_DUMP_DIR}/baseline/forward_000.pt" \
-    | tee "${RESULTS}/nvfp4-conversion.log"
-  cp "${NVFP4_RESULTS}/baseline_run.json" "${RESULTS}/nvfp4-calibration-baseline.json"
-  cp "${NVFP4_TRANSFORMER}/minwm_nvfp4_manifest.json" "${RESULTS}/"
-  export MINWM_PROFILE_TRANSFORMER_PATH="${NVFP4_TRANSFORMER}"
-  export MINWM_PROFILE_QUANTIZATION_LABEL="${MINWM_PROFILE_QUANTIZATION_LABEL:-nvfp4}"
+    /workspace/sglang/python/sglang/multimodal_gen/test/unit/realtime/test_minwm_realtime.py \
+    -k 'cuda_graph or cache_plan_is_shared_across_layers_and_reused_for_recompute or accepts_supported_ulysses_sequence_parallelism'
+  python3 -m pytest -q \
+    /workspace/sglang/python/sglang/multimodal_gen/test/unit/test_server_args.py \
+    -k speed_mode_cuda_graph_does_not_enable_torch_compile
+
+  python3 - "${MODEL_DIR}/transformer/config.json" "${CG_WINDOW}" <<'PY'
+import json
+import sys
+
+config = json.load(open(sys.argv[1]))
+assert config["rope_position_mode"] == "block_relative", config
+assert int(config["local_attn_size"]) == int(sys.argv[2]), config
+assert int(config["sliding_window_num_frames"]) == int(sys.argv[2]), config
+print(json.dumps({
+    key: config[key]
+    for key in (
+        "local_attn_size",
+        "sink_size",
+        "sliding_window_num_frames",
+        "rope_position_mode",
+        "rope_max_frame_gap",
+    )
+}, sort_keys=True))
+PY
+
+  run_cuda_graph_lane() {
+    local degree="$1" enabled="$2"
+    local suffix="eager"
+    if [[ "${enabled}" == "true" ]]; then
+      suffix="cuda-graph"
+    fi
+    local profile="sp${degree}-${suffix}"
+    local profile_dir="${CG_RESULTS}/${profile}"
+    mkdir -p "${profile_dir}"
+    MINWM_ATTENTION_IMPL="${MINWM_ATTENTION_IMPL:-packed}" \
+    MINWM_PACKED_ATTENTION_DETERMINISTIC=true \
+    MINWM_NATIVE_COMPONENTS=text_encoder,vae \
+    MINWM_VAE_LANE=parity \
+    sglang serve \
+      --model-path "${MODEL_DIR}" \
+      --pipeline-class-name MinWMCausalDMDPipeline \
+      --vae-config.use-parallel-decode true \
+      --vae-config.parallel-decode-mode auto \
+      --attention-backend "${MINWM_SERVER_ATTENTION_BACKEND:-fa}" \
+      --performance-mode speed \
+      --num-gpus "${degree}" \
+      --tp-size 1 \
+      --sp-degree "${degree}" \
+      --ulysses-degree "${degree}" \
+      --ring-degree 1 \
+      --enable-cfg-parallel false \
+      --enable-torch-compile false \
+      --enable-cuda-graph "${enabled}" \
+      --warmup-mode off \
+      --realtime-session-idle-timeout-s 1800 \
+      --port 30000 \
+      > "${profile_dir}/server.log" 2>&1 &
+    local server_pid=$!
+    if ! wait_for_server "${server_pid}" "${profile_dir}/server.log"; then
+      kill "${server_pid}" 2>/dev/null || true
+      wait "${server_pid}" 2>/dev/null || true
+      return 1
+    fi
+    (
+      while kill -0 "${server_pid}" 2>/dev/null; do
+        nvidia-smi \
+          --query-gpu=timestamp,index,memory.used,utilization.gpu,power.draw \
+          --format=csv,noheader,nounits || true
+        sleep 1
+      done
+    ) > "${profile_dir}/gpu.csv" &
+    local monitor_pid=$!
+    set +e
+    python3 "${SCRIPT_DIR}/benchmark_realtime_throughput.py" \
+      --cases "${CG_CASES}" \
+      --case "${CG_CASE}" \
+      --output "${profile_dir}/throughput.json" \
+      --profile-name "${profile}" \
+      --warmup-chunks "${CG_WARMUP_CHUNKS}" \
+      --measured-chunks "${CG_MEASURED_CHUNKS}" \
+      --kv-cache-num-frames "${CG_WINDOW}" \
+      > >(tee "${profile_dir}/client.log") 2>&1
+    local lane_status=$?
+    set -e
+    kill "${server_pid}" 2>/dev/null || true
+    wait "${server_pid}" 2>/dev/null || true
+    kill "${monitor_pid}" 2>/dev/null || true
+    wait "${monitor_pid}" 2>/dev/null || true
+    if (( lane_status != 0 )); then
+      tail -300 "${profile_dir}/server.log" >&2
+    fi
+    return "${lane_status}"
+  }
+
+  read -r -a cg_degrees <<< "${CG_DEGREES}"
+  for degree in "${cg_degrees[@]}"; do
+    if ! [[ "${degree}" =~ ^(1|2)$ ]]; then
+      echo "unsupported CUDA graph SP degree: ${degree}" >&2
+      exit 2
+    fi
+    run_cuda_graph_lane "${degree}" false
+    run_cuda_graph_lane "${degree}" true
+  done
+
+  python3 - "${CG_RESULTS}" <<'PY' | tee "${CG_RESULTS}/summary.log"
+import base64
+import json
+import math
+import statistics
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+profiles = {
+    path.parent.name: json.load(open(path))
+    for path in sorted(root.glob("*/throughput.json"))
+}
+summary = {"profiles": profiles, "comparisons": {}}
+
+
+def denoise_metrics(profile_name, warmup_chunks):
+    values = []
+    log_path = root / profile_name / "server.log"
+    for line in log_path.read_text().splitlines():
+        if "realtime_trace {" not in line:
+            continue
+        try:
+            event = json.loads(line[line.index("{"):])
+        except (ValueError, json.JSONDecodeError):
+            continue
+        if (
+            event.get("event") == "server.model_denoise_complete"
+            and event.get("component") == "minwm_denoising"
+            and "source" not in event
+            and "error" not in event
+            and int(event.get("chunk_index", -1)) >= warmup_chunks
+        ):
+            values.append(float(event["duration_ms"]))
+    if not values:
+        return None
+    return {
+        "count": len(values),
+        "mean_ms": statistics.fmean(values),
+        "p50_ms": statistics.median(values),
+        "latent_fps_ratio_of_sums": 4 * len(values) / (sum(values) / 1000.0),
+        "pixel_fps_ratio_of_sums": 16 * len(values) / (sum(values) / 1000.0),
+    }
+
+
+def sampled_pixel_error(eager, graph):
+    eager_samples = eager["measured_payload_samples_base64"]
+    graph_samples = graph["measured_payload_samples_base64"]
+    if eager_samples.keys() != graph_samples.keys():
+        raise AssertionError("eager/CUDA graph sampled payload keys differ")
+    absolute_error_sum = 0
+    squared_error_sum = 0
+    equal_count = 0
+    max_error = 0
+    count = 0
+    for key in eager_samples:
+        eager_bytes = base64.b64decode(eager_samples[key])
+        graph_bytes = base64.b64decode(graph_samples[key])
+        if len(eager_bytes) != len(graph_bytes):
+            raise AssertionError(f"sampled payload length differs for {key}")
+        for eager_value, graph_value in zip(eager_bytes, graph_bytes):
+            error = abs(eager_value - graph_value)
+            absolute_error_sum += error
+            squared_error_sum += error * error
+            equal_count += int(error == 0)
+            max_error = max(max_error, error)
+            count += 1
+    mse = squared_error_sum / count
+    return {
+        "sample_count": count,
+        "mae_u8": absolute_error_sum / count,
+        "rmse_u8": math.sqrt(mse),
+        "psnr_db": None if mse == 0 else 20 * math.log10(255 / math.sqrt(mse)),
+        "max_abs_u8": max_error,
+        "exact_fraction": equal_count / count,
+    }
+
+
+for profile_name, profile in profiles.items():
+    profile["dit_denoise"] = denoise_metrics(
+        profile_name, int(profile["warmup_chunks"])
+    )
+for degree in (1, 2):
+    eager_name = f"sp{degree}-eager"
+    graph_name = f"sp{degree}-cuda-graph"
+    if eager_name not in profiles or graph_name not in profiles:
+        continue
+    eager = profiles[eager_name]
+    graph = profiles[graph_name]
+    comparison = {}
+    comparison["measured_payload_sha256"] = {
+        "eager": eager["measured_payload_sha256"],
+        "cuda_graph": graph["measured_payload_sha256"],
+        "equal": eager["measured_payload_sha256"]
+        == graph["measured_payload_sha256"],
+    }
+    comparison["sampled_pixel_error"] = sampled_pixel_error(eager, graph)
+    for name, getter in {
+        "client_fps": lambda item: item["client"]["steady_received_fps_ratio_of_sums"],
+        "dit_denoise_pixel_fps": lambda item: item["dit_denoise"]["pixel_fps_ratio_of_sums"],
+        "dit_denoise_p50_ms": lambda item: item["dit_denoise"]["p50_ms"],
+    }.items():
+        baseline = getter(eager)
+        candidate = getter(graph)
+        comparison[name] = {
+            "eager": baseline,
+            "cuda_graph": candidate,
+            "speedup": baseline / candidate if name.endswith("_ms") else candidate / baseline,
+        }
+    summary["comparisons"][f"sp{degree}"] = comparison
+(root / "summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
+print(json.dumps(summary["comparisons"], indent=2, sort_keys=True))
+parity_failures = {
+    degree: comparison["sampled_pixel_error"]
+    for degree, comparison in summary["comparisons"].items()
+    if not comparison["measured_payload_sha256"]["equal"]
+    or comparison["sampled_pixel_error"]["max_abs_u8"] != 0
+}
+if parity_failures:
+    raise AssertionError(
+        f"MinWM CUDA graph payload parity failed: {parity_failures}"
+    )
+PY
+  echo "MINWM_CUDA_GRAPH_MATRIX_COMPLETE results=${CG_RESULTS}"
+  exit 0
 fi
 
 if [[ "${MINWM_BENCHMARK_MODE}" == "spmatrix720p" ]]; then
@@ -1159,9 +1241,7 @@ PY
   exit 0
 fi
 
-if [[ "${MINWM_BENCHMARK_MODE}" != "profiles" \
-  && "${MINWM_BENCHMARK_MODE}" != "calibratedfp8" \
-  && "${MINWM_BENCHMARK_MODE}" != "nvfp4" ]]; then
+if [[ "${MINWM_BENCHMARK_MODE}" != "profiles" ]]; then
 SMOKE_RESULTS="${LOCAL_RESULTS}/smoke"
 mkdir -p "${SMOKE_RESULTS}"
 python3 "${SCRIPT_DIR}/run_minwm_baseline.py" \
@@ -1267,31 +1347,17 @@ run_throughput_profile() {
   local native_components="$4" torch_compile="$5" kv_frames="$6"
   local profile_dir="${LOCAL_RESULTS}/throughput/${profile}"
   local profile_results="${RESULTS}/throughput/${profile}"
-  local quantization_args=()
-  local transformer_args=()
-  local client_args=(
-    --output "${profile_dir}/throughput.json"
-    --profile-name "${profile}"
-    --kv-cache-num-frames "${kv_frames}"
-  )
-  if [[ -n "${MINWM_PROFILE_QUANTIZATION:-}" ]]; then
-    quantization_args=(--quantization "${MINWM_PROFILE_QUANTIZATION}")
-  fi
-  if [[ -n "${MINWM_PROFILE_TRANSFORMER_PATH:-}" ]]; then
-    transformer_args=(--transformer-path "${MINWM_PROFILE_TRANSFORMER_PATH}")
-  fi
-  if [[ -n "${MINWM_THROUGHPUT_CASES_PATH:-}" ]]; then
-    [[ -f "${MINWM_THROUGHPUT_CASES_PATH}" ]]
-    client_args+=(--cases "${MINWM_THROUGHPUT_CASES_PATH}")
-  fi
-  if [[ -n "${MINWM_THROUGHPUT_CASE:-}" ]]; then
-    client_args+=(--case "${MINWM_THROUGHPUT_CASE}")
-  fi
-  if [[ -n "${MINWM_THROUGHPUT_WARMUP_CHUNKS:-}" ]]; then
-    client_args+=(--warmup-chunks "${MINWM_THROUGHPUT_WARMUP_CHUNKS}")
-  fi
-  if [[ -n "${MINWM_THROUGHPUT_MEASURED_CHUNKS:-}" ]]; then
-    client_args+=(--measured-chunks "${MINWM_THROUGHPUT_MEASURED_CHUNKS}")
+  local realtime_vae_args=()
+  if [[ -n "${MINWM_REALTIME_VAE_BACKEND:-}" ]]; then
+    if [[ -z "${MINWM_REALTIME_VAE_WORKER_URL:-}" ]]; then
+      echo "MINWM_REALTIME_VAE_WORKER_URL is required with MINWM_REALTIME_VAE_BACKEND" >&2
+      return 2
+    fi
+    realtime_vae_args+=(
+      --realtime-vae-backend "${MINWM_REALTIME_VAE_BACKEND}"
+      --realtime-vae-worker-url "${MINWM_REALTIME_VAE_WORKER_URL}"
+      --realtime-vae-transport "${MINWM_REALTIME_VAE_TRANSPORT:-auto}"
+    )
   fi
   mkdir -p "${profile_dir}" "${profile_results}"
   MINWM_ATTENTION_IMPL="${attention_impl}" \
@@ -1302,39 +1368,27 @@ run_throughput_profile() {
     --pipeline-class-name MinWMCausalDMDPipeline \
     --attention-backend fa \
     --performance-mode speed \
-    "${quantization_args[@]}" \
-    "${transformer_args[@]}" \
     --enable-torch-compile "${torch_compile}" \
     --warmup-mode off \
+    "${realtime_vae_args[@]}" \
     --port 30000 \
     > "${profile_results}/server.log" 2>&1 &
   local profile_server_pid=$!
-  (
-    while kill -0 "${profile_server_pid}" 2>/dev/null; do
-      nvidia-smi \
-        --query-gpu=timestamp,index,memory.used,utilization.gpu,power.draw \
-        --format=csv,noheader,nounits || true
-      sleep 1
-    done
-  ) > "${profile_results}/gpu-memory.csv" &
-  local profile_gpu_monitor_pid=$!
   if ! wait_for_server "${profile_server_pid}" "${profile_results}/server.log"; then
     kill "${profile_server_pid}" 2>/dev/null || true
     wait "${profile_server_pid}" 2>/dev/null || true
-    kill "${profile_gpu_monitor_pid}" 2>/dev/null || true
-    wait "${profile_gpu_monitor_pid}" 2>/dev/null || true
     return 1
   fi
   set +e
   python3 "${SCRIPT_DIR}/benchmark_realtime_throughput.py" \
-    "${client_args[@]}" \
+    --output "${profile_dir}/throughput.json" \
+    --profile-name "${profile}" \
+    --kv-cache-num-frames "${kv_frames}" \
     > >(tee "${profile_results}/client.log") 2>&1
   local profile_status=$?
   set -e
   kill "${profile_server_pid}" 2>/dev/null || true
   wait "${profile_server_pid}" 2>/dev/null || true
-  kill "${profile_gpu_monitor_pid}" 2>/dev/null || true
-  wait "${profile_gpu_monitor_pid}" 2>/dev/null || true
   if [[ -f "${profile_dir}/throughput.json" ]]; then
     cp "${profile_dir}/throughput.json" "${profile_results}/"
   fi
@@ -1347,24 +1401,8 @@ profiles=(
   "packed-nondeterministic-kv45 packed false text_encoder,vae false 45"
   "lingbot-style-dense-native-kv45 dense false text_encoder,vae false 45"
   "dense-optimized-components-kv45 dense false '' false 45"
+  "dense-optimized-compile-kv45 dense false '' true 45"
 )
-if [[ "${MINWM_INCLUDE_COMPILE_PROFILE:-true}" == "true" ]]; then
-  profiles+=("dense-optimized-compile-kv45 dense false '' true 45")
-fi
-if [[ -n "${MINWM_THROUGHPUT_PROFILES:-}" ]]; then
-  selected_profiles=()
-  for spec in "${profiles[@]}"; do
-    read -r profile _ <<< "${spec}"
-    if [[ ",${MINWM_THROUGHPUT_PROFILES}," == *",${profile},"* ]]; then
-      selected_profiles+=("${spec}")
-    fi
-  done
-  if (( ${#selected_profiles[@]} == 0 )); then
-    echo "No throughput profiles matched MINWM_THROUGHPUT_PROFILES=${MINWM_THROUGHPUT_PROFILES}" >&2
-    exit 1
-  fi
-  profiles=("${selected_profiles[@]}")
-fi
 profile_failures=()
 for spec in "${profiles[@]}"; do
   read -r profile attention_impl packed_deterministic native_components torch_compile kv_frames <<< "${spec}"
@@ -1379,9 +1417,7 @@ for spec in "${profiles[@]}"; do
 done
 
 python3 - "${RESULTS}/throughput" "${RESULTS}/throughput-summary.json" \
-  "${profile_failures[*]}" \
-  "${MINWM_PROFILE_QUANTIZATION_LABEL:-${MINWM_PROFILE_QUANTIZATION:-}}" \
-  "${SGLANG_DIFFUSION_FLASHINFER_FP4_GEMM_BACKEND:-}" <<'PY'
+  "${profile_failures[*]}" <<'PY'
 import json, sys
 from pathlib import Path
 
@@ -1393,8 +1429,6 @@ for path in sorted(root.glob("*/throughput.json")):
 summary = {
     "profiles": profiles,
     "failed_profiles": sys.argv[3].split() if sys.argv[3] else [],
-    "quantization": sys.argv[4] or None,
-    "nvfp4_backend": sys.argv[5] or None,
 }
 exact_name = "exact-packed-det-kv45"
 comparisons = {}

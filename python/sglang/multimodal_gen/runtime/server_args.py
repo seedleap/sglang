@@ -42,6 +42,12 @@ from sglang.multimodal_gen.runtime.platforms import (
     AttentionBackendEnum,
     current_platform,
 )
+from sglang.multimodal_gen.runtime.realtime_vae_config import (
+    LOCAL_VAE_BACKEND,
+    REALTIME_VAE_BACKENDS,
+    REALTIME_VAE_TRANSPORTS,
+    uses_remote_vae,
+)
 from sglang.multimodal_gen.runtime.server_args_auto_tune import (
     PERFORMANCE_MODES,
     ServerArgsAutoTuner,
@@ -229,6 +235,7 @@ class ServerArgs(DisaggServerArgsMixin):
 
     # Compilation
     enable_torch_compile: bool = False
+    enable_cuda_graph: bool = False
 
     # NVTX profiling
     enable_layerwise_nvtx_marker: bool = False
@@ -279,6 +286,22 @@ class ServerArgs(DisaggServerArgsMixin):
     batching_delay_ms: float = 0.0
     batching_config: str | None = None
     enable_batching_metrics: bool = False
+
+    # Realtime admission and worker-local state limits
+    realtime_max_sessions: int = 8
+    realtime_max_sessions_per_worker: int = 8
+    realtime_session_lease_ttl_s: float = 60.0
+    realtime_session_idle_timeout_s: float = 60.0
+    realtime_session_max_lifetime_s: float = 600.0
+    realtime_admission_wait_s: float = 10.0
+    realtime_session_lease_table: str | None = None
+    realtime_require_authenticated_user: bool = False
+    realtime_vae_backend: str = LOCAL_VAE_BACKEND
+    realtime_vae_worker_url: str | None = None
+    realtime_vae_transport: str = "auto"
+    realtime_vae_shared_memory_dir: str | None = None
+    realtime_vae_timeout_s: float = 10.0
+    realtime_vae_max_message_mb: int = 64
 
     # Strict port mode: fail if requested port is unavailable instead of auto-selecting
     strict_ports: bool = False
@@ -1338,6 +1361,16 @@ class ServerArgs(DisaggServerArgsMixin):
             + "However, will likely cause precision drifts. See (https://github.com/pytorch/pytorch/issues/145213)",
         )
         parser.add_argument(
+            "--enable-cuda-graph",
+            action=StoreBoolean,
+            default=ServerArgs.enable_cuda_graph,
+            help=(
+                "Capture stable diffusion hot paths with CUDA Graph. Currently "
+                "implemented for bounded, block-relative MinWM realtime DiT "
+                "recompute forwards."
+            ),
+        )
+        parser.add_argument(
             "--offload-during-compile",
             action=StoreBoolean,
             default=ServerArgs.offload_during_compile,
@@ -1570,6 +1603,103 @@ class ServerArgs(DisaggServerArgsMixin):
             action="store_true",
             default=ServerArgs.enable_batching_metrics,
             help="Log periodic batch efficiency metrics such as realized batch size and queue wait time.",
+        )
+        parser.add_argument(
+            "--realtime-max-sessions",
+            type=int,
+            default=ServerArgs.realtime_max_sessions,
+            help="Maximum active realtime sessions admitted by this Gateway.",
+        )
+        parser.add_argument(
+            "--realtime-max-sessions-per-worker",
+            type=int,
+            default=ServerArgs.realtime_max_sessions_per_worker,
+            help="Maximum persistent realtime session states on each GPU worker.",
+        )
+        parser.add_argument(
+            "--realtime-session-lease-ttl-s",
+            type=float,
+            default=ServerArgs.realtime_session_lease_ttl_s,
+            help="Lease TTL renewed by valid realtime client activity.",
+        )
+        parser.add_argument(
+            "--realtime-session-idle-timeout-s",
+            type=float,
+            default=ServerArgs.realtime_session_idle_timeout_s,
+            help="Close a realtime session after this many seconds without valid client activity.",
+        )
+        parser.add_argument(
+            "--realtime-session-max-lifetime-s",
+            type=float,
+            default=ServerArgs.realtime_session_max_lifetime_s,
+            help="Hard maximum lifetime of one realtime generation session.",
+        )
+        parser.add_argument(
+            "--realtime-admission-wait-s",
+            type=float,
+            default=ServerArgs.realtime_admission_wait_s,
+            help="Maximum time to wait for a bounded realtime session slot.",
+        )
+        parser.add_argument(
+            "--realtime-session-lease-table",
+            type=str,
+            default=ServerArgs.realtime_session_lease_table,
+            help="Optional DynamoDB lease table for multiple Gateway replicas.",
+        )
+        parser.add_argument(
+            "--realtime-require-authenticated-user",
+            action="store_true",
+            default=ServerArgs.realtime_require_authenticated_user,
+            help=(
+                "Require an authenticated ASGI principal for realtime admission; "
+                "query/header user IDs are ignored in this mode."
+            ),
+        )
+        parser.add_argument(
+            "--realtime-vae-backend",
+            choices=REALTIME_VAE_BACKENDS,
+            default=ServerArgs.realtime_vae_backend,
+            help=(
+                "Realtime VAE deployment mode. local keeps the native decoder in "
+                "the denoiser process; exact_remote and taehv_remote use the "
+                "persistent remote worker protocol."
+            ),
+        )
+        parser.add_argument(
+            "--realtime-vae-worker-url",
+            type=str,
+            default=ServerArgs.realtime_vae_worker_url,
+            help="Persistent WebSocket endpoint for remote realtime VAE decoding.",
+        )
+        parser.add_argument(
+            "--realtime-vae-transport",
+            choices=REALTIME_VAE_TRANSPORTS,
+            default=ServerArgs.realtime_vae_transport,
+            help=(
+                "Remote VAE payload transport. auto selects shared memory for a "
+                "loopback worker and WebSocket payloads otherwise."
+            ),
+        )
+        parser.add_argument(
+            "--realtime-vae-shared-memory-dir",
+            type=str,
+            default=ServerArgs.realtime_vae_shared_memory_dir,
+            help=(
+                "Shared directory visible to both loopback realtime VAE "
+                "processes. Defaults to /dev/shm/sglang-realtime-vae."
+            ),
+        )
+        parser.add_argument(
+            "--realtime-vae-timeout-s",
+            type=float,
+            default=ServerArgs.realtime_vae_timeout_s,
+            help="Per-chunk remote VAE timeout in seconds.",
+        )
+        parser.add_argument(
+            "--realtime-vae-max-message-mb",
+            type=int,
+            default=ServerArgs.realtime_vae_max_message_mb,
+            help="Maximum encoded remote VAE protocol message size in MiB.",
         )
         parser.add_argument(
             "--host",
@@ -2157,6 +2287,47 @@ class ServerArgs(DisaggServerArgsMixin):
             raise ValueError("batching_max_size must be >= 1")
         if self.batching_delay_ms < 0:
             raise ValueError("batching_delay_ms must be >= 0")
+        if self.realtime_max_sessions < 1:
+            raise ValueError("realtime_max_sessions must be >= 1")
+        if self.realtime_max_sessions_per_worker < 1:
+            raise ValueError("realtime_max_sessions_per_worker must be >= 1")
+        if self.realtime_session_lease_ttl_s <= 0:
+            raise ValueError("realtime_session_lease_ttl_s must be > 0")
+        if self.realtime_session_idle_timeout_s <= 0:
+            raise ValueError("realtime_session_idle_timeout_s must be > 0")
+        if self.realtime_session_max_lifetime_s <= 0:
+            raise ValueError("realtime_session_max_lifetime_s must be > 0")
+        if self.realtime_admission_wait_s < 0:
+            raise ValueError("realtime_admission_wait_s must be >= 0")
+        if self.realtime_vae_backend not in REALTIME_VAE_BACKENDS:
+            raise ValueError(
+                "realtime_vae_backend must be one of: "
+                + ", ".join(REALTIME_VAE_BACKENDS)
+            )
+        if self.realtime_vae_transport not in REALTIME_VAE_TRANSPORTS:
+            raise ValueError(
+                "realtime_vae_transport must be one of: "
+                + ", ".join(REALTIME_VAE_TRANSPORTS)
+            )
+        if self.realtime_vae_worker_url and not uses_remote_vae(
+            self.realtime_vae_backend
+        ):
+            raise ValueError(
+                "realtime_vae_worker_url requires realtime_vae_backend="
+                "exact_remote or taehv_remote"
+            )
+        if not uses_remote_vae(self.realtime_vae_backend) and (
+            self.realtime_vae_transport != "auto"
+            or self.realtime_vae_shared_memory_dir is not None
+        ):
+            raise ValueError(
+                "realtime_vae_transport and realtime_vae_shared_memory_dir "
+                "require realtime_vae_backend=exact_remote or taehv_remote"
+            )
+        if self.realtime_vae_timeout_s <= 0:
+            raise ValueError("realtime_vae_timeout_s must be > 0")
+        if self.realtime_vae_max_message_mb < 1:
+            raise ValueError("realtime_vae_max_message_mb must be >= 1")
 
     def _set_default_attention_backend(self) -> None:
         """Configure ROCm defaults when users do not specify an attention backend."""

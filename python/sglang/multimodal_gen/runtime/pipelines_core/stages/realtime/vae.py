@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import time
+from dataclasses import replace
 
 import torch
 
@@ -19,16 +20,6 @@ from sglang.multimodal_gen.runtime.pipelines_core.stages.image_encoding import (
 from sglang.multimodal_gen.runtime.platforms import current_platform
 from sglang.multimodal_gen.runtime.realtime.session import (
     BaseRealtimeState,
-)
-from sglang.multimodal_gen.runtime.remote.vae_decode_client import (
-    get_remote_vae_response_transport,
-    get_remote_vae_url,
-)
-from sglang.multimodal_gen.runtime.remote.vae_decode_protocol import (
-    SCHEMA_VERSION as REMOTE_VAE_SCHEMA_VERSION,
-)
-from sglang.multimodal_gen.runtime.remote.vae_decode_protocol import (
-    tensor_to_payload,
 )
 from sglang.multimodal_gen.runtime.server_args import ServerArgs
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
@@ -78,6 +69,21 @@ class RealtimeVAEDecodeState(BaseRealtimeState):
 
 class RealtimeImageVAEEncodingStage(ImageVAEEncodingStage):
     """Reuse the first chunk's conditioning image latent across a realtime session."""
+
+    def component_uses(self, server_args: ServerArgs, stage_name: str | None = None):
+        uses = super().component_uses(server_args, stage_name)
+        vae_config = getattr(server_args.pipeline_config, "vae_config", None)
+        if CausalVaeDecodingStage._taehv_checkpoint_path(
+            vae_config
+        ) is not None and getattr(server_args, "vae_cpu_offload", False):
+            # TAEHV only needs the native VAE for the first conditioning-image
+            # encode. Avoid prefetching it beside another large component, and
+            # make the residency manager clear released allocator storage.
+            return [
+                replace(use, allow_prefetch=False, memory_intensive=True)
+                for use in uses
+            ]
+        return uses
 
     def forward(
         self,
@@ -160,6 +166,14 @@ class CausalVaeDecodingStage(DecodingStage):
         if isinstance(path, str):
             path = path.strip()
         return path or None
+
+    def component_uses(self, server_args: ServerArgs, stage_name: str | None = None):
+        vae_config = getattr(server_args.pipeline_config, "vae_config", None)
+        if self._taehv_checkpoint_path(vae_config) is not None:
+            # The native VAE remains an encoder-only dependency for I2V. TAEHV
+            # owns decoding and must not keep the exact decoder GPU-resident.
+            return []
+        return super().component_uses(server_args, stage_name)
 
     def _load_taehv_model(
         self,
@@ -256,31 +270,6 @@ class CausalVaeDecodingStage(DecodingStage):
             return self.vae.clear_cache
         return None
 
-    @staticmethod
-    def _remote_vae_request(batch: Req) -> dict | None:
-        remote_url = get_remote_vae_url()
-        if remote_url is None:
-            return None
-        return {
-            "schema_version": REMOTE_VAE_SCHEMA_VERSION,
-            "session_id": batch.realtime_session_id
-            or getattr(batch, "request_id", None)
-            or "default",
-            "request_id": getattr(batch, "request_id", None) or "",
-            "block_idx": int(batch.block_idx),
-            "output_block_idx": int(batch.block_idx),
-            "event_id": batch.realtime_event_id,
-            "first_chunk": batch.block_idx == 0,
-            "is_final_chunk": bool(batch.extra.get("realtime_is_final_chunk", False)),
-            "width": batch.width,
-            "height": batch.height,
-            "fps": batch.fps,
-            "realtime_output_format": getattr(batch, "realtime_output_format", None),
-            "response_transport": get_remote_vae_response_transport(remote_url),
-            "trim_leading_frames": 0,
-            "latents": tensor_to_payload(batch.latents),
-        }
-
     def _decode_wan_with_persistent_cache(
         self,
         latents: torch.Tensor,
@@ -356,12 +345,33 @@ class CausalVaeDecodingStage(DecodingStage):
         decode_state: RealtimeVAEDecodeState | None = None,
     ) -> torch.Tensor:
         vae_dtype = PRECISION_TO_TYPE[server_args.pipeline_config.vae_precision]
-        self.vae = self.vae.to(device=get_local_torch_device(), dtype=vae_dtype)
         latents = latents.to(get_local_torch_device())
         vae_autocast_enabled = (
             vae_dtype != torch.float32
         ) and not server_args.disable_autocast
 
+        taehv_checkpoint_path = self._taehv_checkpoint_path(
+            getattr(server_args.pipeline_config, "vae_config", None)
+        )
+        if taehv_checkpoint_path is not None:
+            if not vae_autocast_enabled:
+                latents = latents.to(vae_dtype)
+            if decode_state is None:
+                decode_state = RealtimeVAEDecodeState()
+            with torch.autocast(
+                device_type=current_platform.device_type,
+                dtype=vae_dtype,
+                enabled=vae_autocast_enabled,
+            ):
+                return self._decode_with_streaming_taehv(
+                    latents,
+                    decode_state,
+                    taehv_checkpoint_path,
+                    vae_dtype,
+                    first_chunk=first_chunk,
+                )
+
+        self.vae = self.vae.to(device=get_local_torch_device(), dtype=vae_dtype)
         latents = self.scale_and_shift(latents, server_args)
         latents = server_args.pipeline_config.preprocess_decoding(
             latents, server_args, vae=self.vae
@@ -380,20 +390,6 @@ class CausalVaeDecodingStage(DecodingStage):
 
             if not vae_autocast_enabled:
                 latents = latents.to(vae_dtype)
-
-            taehv_checkpoint_path = self._taehv_checkpoint_path(
-                getattr(server_args.pipeline_config, "vae_config", None)
-            )
-            if taehv_checkpoint_path is not None:
-                if decode_state is None:
-                    decode_state = RealtimeVAEDecodeState()
-                return self._decode_with_streaming_taehv(
-                    latents,
-                    decode_state,
-                    taehv_checkpoint_path,
-                    vae_dtype,
-                    first_chunk=first_chunk,
-                )
 
             decode_fn = getattr(self.vae, "causal_decode", None)
             if callable(decode_fn):
@@ -420,21 +416,6 @@ class CausalVaeDecodingStage(DecodingStage):
             return super().forward(batch, server_args)
 
         decode_state = batch.session.get_or_create_state(RealtimeVAEDecodeState)
-        remote_request = self._remote_vae_request(batch)
-        if remote_request is not None:
-            return OutputBatch(
-                output=None,
-                remote_vae_request=remote_request,
-                realtime_output_chunk_index_start=batch.block_idx,
-                realtime_output_event_id=batch.realtime_event_id,
-                trajectory_timesteps=batch.trajectory_timesteps,
-                trajectory_latents=batch.trajectory_latents,
-                rollout_trajectory_data=batch.rollout_trajectory_data,
-                trajectory_decoded=None,
-                metrics=batch.metrics,
-                noise_pred=None,
-            )
-
         vae_config = getattr(server_args.pipeline_config, "vae_config", None)
         taehv_checkpoint_path = self._taehv_checkpoint_path(vae_config)
         with realtime_trace_span(
@@ -446,7 +427,6 @@ class CausalVaeDecodingStage(DecodingStage):
             chunk_index=batch.block_idx,
             first_chunk=batch.block_idx == 0,
         ):
-            self.load_model()
             if taehv_checkpoint_path is not None:
                 vae_dtype = PRECISION_TO_TYPE[server_args.pipeline_config.vae_precision]
                 self._get_or_create_streaming_taehv_decoder(
@@ -454,8 +434,14 @@ class CausalVaeDecodingStage(DecodingStage):
                     taehv_checkpoint_path,
                     vae_dtype,
                 )
+            else:
+                self.load_model()
 
-        reset_causal_state = self._get_causal_decode_reset_fn()
+        reset_causal_state = (
+            None
+            if taehv_checkpoint_path is not None
+            else self._get_causal_decode_reset_fn()
+        )
         decode_state.reset_causal_decode_state = reset_causal_state
         if batch.block_idx == 0 and callable(reset_causal_state):
             reset_causal_state()
@@ -468,9 +454,9 @@ class CausalVaeDecodingStage(DecodingStage):
             input_tensor=batch.latents,
             chunk_index=batch.block_idx,
             first_chunk=batch.block_idx == 0,
-            decoder_backend=(
-                "taehv" if taehv_checkpoint_path is not None else "causal_vae"
-            ),
+            decoder_backend="taehv"
+            if taehv_checkpoint_path is not None
+            else "causal_vae",
             taehv_checkpoint_path=taehv_checkpoint_path,
             vae_precision=server_args.pipeline_config.vae_precision,
             vae_tiling=server_args.pipeline_config.vae_tiling,
