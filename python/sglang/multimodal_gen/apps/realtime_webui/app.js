@@ -7,6 +7,7 @@ const JPEG_FRAME_CONTENT_TYPE = "image/jpeg";
 const DECODER_WORKER_URL = "./decoder_worker.js?v=rgb-worker-v10";
 const UI_CONFIG = Object.freeze(globalThis.SGLANG_REALTIME_UI_CONFIG || {});
 const DUAL_MODEL_CONFIG = Object.freeze(UI_CONFIG.dualModels || {});
+const PROTOCOL_COMPARISON_ENABLED = UI_CONFIG.protocolComparison === true;
 const PRIMARY_WEBRTC_ENABLED = String(UI_CONFIG.primaryTransport || "").toLowerCase()
   === "webrtc-h264";
 const PRIMARY_WEBRTC_MANAGED_PLAYBACK = PRIMARY_WEBRTC_ENABLED
@@ -163,21 +164,60 @@ function applyRuntimeUiConfig() {
   for (const key of ["minwm", "lingbot2"]) {
     const isLingBot2 = key === "lingbot2";
     modelControl(key, "fps").value = String(
-      isLingBot2 ? DEFAULT_LINGBOT2_TARGET_FPS : DEFAULT_TARGET_FPS,
+      configuredModelNumber(
+        key,
+        "targetFps",
+        isLingBot2 ? DEFAULT_LINGBOT2_TARGET_FPS : DEFAULT_TARGET_FPS,
+      ),
     );
     modelControl(key, "guidance").value = String(
-      configuredNumber("guidanceScale", Number(modelControl(key, "guidance").value)),
+      configuredModelNumber(
+        key,
+        "guidanceScale",
+        configuredNumber("guidanceScale", Number(modelControl(key, "guidance").value)),
+      ),
     );
     modelControl(key, "sinkSize").value = String(
-      isLingBot2
-        ? DEFAULT_LINGBOT2_SINK_SIZE
-        : configuredNumber("sinkSize", Number(modelControl(key, "sinkSize").value)),
+      configuredModelNumber(
+        key,
+        "sinkSize",
+        isLingBot2
+          ? DEFAULT_LINGBOT2_SINK_SIZE
+          : configuredNumber("sinkSize", Number(modelControl(key, "sinkSize").value)),
+      ),
     );
     modelControl(key, "windowFrames").value = String(
-      isLingBot2
-        ? DEFAULT_LINGBOT2_WINDOW_FRAMES
-        : configuredNumber("windowFrames", Number(modelControl(key, "windowFrames").value)),
+      configuredModelNumber(
+        key,
+        "windowFrames",
+        isLingBot2
+          ? DEFAULT_LINGBOT2_WINDOW_FRAMES
+          : configuredNumber("windowFrames", Number(modelControl(key, "windowFrames").value)),
+      ),
     );
+    for (const [configName, controlName] of [
+      ["size", "size"],
+      ["transportFormat", "transportFormat"],
+      ["transportQuality", "transportQuality"],
+      ["playbackMode", "playbackMode"],
+    ]) {
+      const configuredValue = DUAL_MODEL_CONFIG[key]?.[configName];
+      if (configuredValue !== undefined && configuredValue !== null) {
+        modelControl(key, controlName).value = String(configuredValue);
+      }
+    }
+    const label = String(DUAL_MODEL_CONFIG[key]?.label || modelLabel(key));
+    const player = document.querySelector(`[data-model-key="${key}"]`);
+    const title = player?.querySelector(".model-player-title > strong");
+    const chip = player?.querySelector(".stream-chip");
+    if (title) title.textContent = label;
+    if (chip && DUAL_MODEL_CONFIG[key]?.transportLabel) {
+      chip.textContent = String(DUAL_MODEL_CONFIG[key].transportLabel);
+    }
+    for (const select of document.querySelectorAll(".model-slot-config select")) {
+      const option = Array.from(select.options).find((item) => item.value === key);
+      if (option) option.textContent = label;
+    }
   }
   if (UI_CONFIG.titleSuffix) {
     const suffix = String(UI_CONFIG.titleSuffix);
@@ -498,7 +538,9 @@ function syncModelSlotUi() {
     if (player && grid) grid.appendChild(player);
   }
   grid?.classList.toggle("is-three-up", selected.length === 3);
-  document.querySelector(".model-slot-config").hidden = MODEL_SLOT_DEFAULTS.length < 2;
+  document.querySelector(".model-slot-config").hidden = (
+    UI_CONFIG.lockModelSlots === true || MODEL_SLOT_DEFAULTS.length < 2
+  );
   $("modelSlot2Wrap").hidden = activeModelSlotCount < 3 || MODEL_SLOT_DEFAULTS.length < 3;
   $("addModelSlotBtn").hidden = activeModelSlotCount >= Math.min(3, MODEL_SLOT_DEFAULTS.length);
   $("removeModelSlotBtn").hidden = activeModelSlotCount < 3 || MODEL_SLOT_DEFAULTS.length < 3;
@@ -909,10 +951,12 @@ const dualModelController = new DualModelController({
       wsUrl: (init) => backendWebSocketUrl("minwm", init.trace_id),
     },
     lingbot2: {
-      model: String(
-        DUAL_MODEL_CONFIG.lingbot2?.model
-        || UI_CONFIG.lingbot2Model
-        || DEFAULT_LINGBOT2_MODEL
+      model: (init) => String(
+        PROTOCOL_COMPARISON_ENABLED
+          ? init.model
+          : DUAL_MODEL_CONFIG.lingbot2?.model
+            || UI_CONFIG.lingbot2Model
+            || DEFAULT_LINGBOT2_MODEL
       ),
       transformInit: (init) => {
         const modelParams = readModelRequestParams("lingbot2", {
@@ -924,6 +968,9 @@ const dualModelController = new DualModelController({
           ...modelParams,
           realtime_interactive_event_grace_ms: 1800,
         };
+        if (PROTOCOL_COMPARISON_ENABLED) {
+          return { ...interactiveInit, realtime_interactive_event_grace_ms: 0 };
+        }
         const is720p = interactiveInit.size === "1280x704" || interactiveInit.size === "1280x720";
         if (!is720p) return interactiveInit;
         return {
@@ -5700,6 +5747,8 @@ function sendEvent(kind, payload, historyText = null) {
 }
 
 function modelLabel(key) {
+  const configuredLabel = DUAL_MODEL_CONFIG[key]?.label;
+  if (configuredLabel) return String(configuredLabel);
   if (key === "lingbot2") return "LingBot2";
   if (key === "happyoyster") return "快乐生蚝";
   return "Zing";

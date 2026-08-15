@@ -20,7 +20,7 @@ metadata:
     app.kubernetes.io/name: zing-webrtc-worker
     app.kubernetes.io/part-of: minwm-zing-webrtc-lab
 spec:
-  replicas: 1
+  replicas: 2
   serviceName: zing-webrtc-worker-headless
   selector:
     matchLabels:
