@@ -148,6 +148,34 @@ async function main() {
   assert.equal(t2vMinwm.events.length, 1, "active T2V backend should receive shared input");
   assert.equal(t2vLingbot.events.length, 0, "disabled T2V backend should not receive input");
 
+  const serialOrder = [];
+  const serialLeft = new FakeSession("serial-left");
+  const serialRight = new FakeSession("serial-right");
+  serialLeft.connect = async function connect(init, url) {
+    serialOrder.push("left:start");
+    this.connectCalls.push({ init, url });
+    await new Promise((resolve) => setImmediate(resolve));
+    serialOrder.push("left:ready");
+  };
+  serialRight.connect = async function connect(init, url) {
+    serialOrder.push("right:start");
+    this.connectCalls.push({ init, url });
+  };
+  const serialController = new DualModelController({
+    sessions: { left: serialLeft, right: serialRight },
+    backends: {
+      left: { model: "zing", wsUrl: "/webrtc" },
+      right: { model: "zing", wsUrl: "/websocket" },
+    },
+    serialConnections: true,
+  });
+  await serialController.connect({ trace_id: "serial" });
+  assert.deepEqual(
+    serialOrder,
+    ["left:start", "left:ready", "right:start"],
+    "serial comparison must wait for the primary transport before admitting the peer",
+  );
+
   let releaseBackground;
   const backgroundReady = new Promise((resolve) => { releaseBackground = resolve; });
   const fastModel = new FakeSession("fast");

@@ -934,6 +934,7 @@ function primaryTransportBufferedAmount() {
     : Number(ws?.bufferedAmount || 0);
 }
 const dualModelController = new DualModelController({
+  serialConnections: PROTOCOL_COMPARISON_ENABLED,
   sessions: {
     minwm: primarySessionAdapter,
     lingbot2: lingbot2Session,
@@ -951,9 +952,6 @@ const dualModelController = new DualModelController({
       wsUrl: (init) => backendWebSocketUrl("minwm", init.trace_id),
     },
     lingbot2: {
-      connectDelayMs: PROTOCOL_COMPARISON_ENABLED
-        ? configuredNumber("protocolComparisonSecondaryConnectDelayMs", 2500)
-        : 0,
       model: (init) => String(
         PROTOCOL_COMPARISON_ENABLED
           ? init.model

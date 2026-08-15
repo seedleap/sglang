@@ -3,11 +3,13 @@
     constructor({
       sessions,
       backends,
+      serialConnections = false,
       now = () => performance.now(),
       onBackgroundState = () => {},
     }) {
       this.sessions = sessions;
       this.backends = backends;
+      this.serialConnections = Boolean(serialConnections);
       this.now = now;
       this.nextEventId = 1;
       this.activeKeys = new Set();
@@ -49,11 +51,6 @@
         }
       }
       const connectOne = async (key, { replayLatest = false } = {}) => {
-        const delayMs = Math.max(0, Number(this.backends[key]?.connectDelayMs) || 0);
-        if (delayMs) {
-          await new Promise((resolve) => global.setTimeout(resolve, delayMs));
-          if (generation !== this.connectionGeneration) return false;
-        }
         await this.connectKey(key, baseInit, { reconnect: false });
         if (generation !== this.connectionGeneration) {
           this.sessions[key]?.close("stale connection");
@@ -68,7 +65,19 @@
         }
         return true;
       };
-      const results = await Promise.allSettled(entries.map(([key]) => connectOne(key)));
+      let results;
+      if (this.serialConnections) {
+        results = [];
+        for (const [key] of entries) {
+          try {
+            results.push({ status: "fulfilled", value: await connectOne(key) });
+          } catch (reason) {
+            results.push({ status: "rejected", reason });
+          }
+        }
+      } else {
+        results = await Promise.allSettled(entries.map(([key]) => connectOne(key)));
+      }
       const report = {
         connected: [],
         failed: [],
