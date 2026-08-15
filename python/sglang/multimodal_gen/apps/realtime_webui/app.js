@@ -2209,7 +2209,7 @@ function previewPlaybackTargetFps(key = "minwm") {
 
 function syncPlaybackTargetFps() {
   playbackController.setTargetFps(previewPlaybackTargetFps("minwm"));
-  lingbot2Session.configure({ targetFps: previewPlaybackTargetFps("lingbot2") });
+  lingbot2RealtimeSession.configure({ targetFps: previewPlaybackTargetFps("lingbot2") });
   updateStats();
 }
 
@@ -2218,7 +2218,7 @@ function syncSmoothCatchupRate() {
   $("smoothCatchupRate").value = String(rate);
   $("smoothCatchupRateText").textContent = `${rate.toFixed(2)}x`;
   playbackController.setSmoothTimelinePlaybackRateMax(rate);
-  lingbot2Session.configure({ smoothTimelinePlaybackRateMax: rate });
+  lingbot2RealtimeSession.configure({ smoothTimelinePlaybackRateMax: rate });
 }
 
 function syncZingFrameInterpolation({ fromTopbar = true } = {}) {
@@ -2240,7 +2240,7 @@ function syncPlaybackMode({ addToHistory = true } = {}) {
   const mode = selectedPlaybackMode("minwm");
   const lingbot2Mode = selectedPlaybackMode("lingbot2");
   playbackController.setMode(mode);
-  lingbot2Session.configure({ mode: lingbot2Mode });
+  lingbot2RealtimeSession.configure({ mode: lingbot2Mode });
   if (addToHistory) {
     const historyText =
       mode === "timeline"
