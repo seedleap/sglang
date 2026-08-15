@@ -651,6 +651,12 @@ async def _complete_remote_chunk(
     vae_started: float,
 ) -> None:
     remote_result = await handle.wait()
+    send_stats["pace_wait_ms"] += await _wait_for_realtime_output_slot(
+        session,
+        batch,
+        None,
+        frame_count=remote_result.num_frames,
+    )
     vae_completed = remote_result.completed_at
     session.vae_intervals[chunk.index] = (vae_started, vae_completed)
     next_denoise = session.denoise_intervals.get(chunk.index + 1)
@@ -979,8 +985,8 @@ async def _generate_loop_local(ws: WebSocket, session: GenerateSession):
             adapter.on_chunk_complete(session, result)
             if pending_send_task is not None:
                 await pending_send_task
-            pending_send_task = asyncio.create_task(
-                _send_output_and_log(
+            if getattr(batch, "realtime_output_pacing", False):
+                await _send_output_and_log(
                     ws,
                     session,
                     chunk,
@@ -990,7 +996,20 @@ async def _generate_loop_local(ws: WebSocket, session: GenerateSession):
                     scheduler_forward_ms,
                     chunk_started,
                 )
-            )
+                pending_send_task = None
+            else:
+                pending_send_task = asyncio.create_task(
+                    _send_output_and_log(
+                        ws,
+                        session,
+                        chunk,
+                        batch,
+                        result,
+                        request_prepare_ms,
+                        scheduler_forward_ms,
+                        chunk_started,
+                    )
+                )
             pending_event_version = scheduled_event_version
 
         except asyncio.CancelledError:
@@ -1117,16 +1136,55 @@ async def _wait_for_realtime_interactive_event_window(
     return None
 
 
+def _result_num_frames(result) -> int:
+    if result.raw_frame_batches is None:
+        return 0
+    return sum(len(frames) for frames in result.raw_frame_batches)
+
+
+def _output_pacing_fps(batch: "Req") -> float:
+    fps = float(batch.fps or 0)
+    if batch.enable_frame_interpolation:
+        fps *= 2 ** int(batch.frame_interpolation_exp or 1)
+    return fps
+
+
 async def _wait_for_realtime_output_slot(
     session: GenerateSession,
     batch: "Req",
     result,
+    *,
+    frame_count: int | None = None,
 ) -> float:
-    # Realtime output pacing used to sleep here based on request FPS. That made
-    # the backend generation loop run at the UI playback rate. Keep the field
-    # accepted for old clients, but leave smoothing and playback pacing to the
-    # browser/Gateway layers.
-    return 0.0
+    if not getattr(batch, "realtime_output_pacing", False):
+        return 0.0
+
+    if frame_count is None:
+        frame_count = _result_num_frames(result)
+    output_fps = _output_pacing_fps(batch)
+    if frame_count <= 0 or output_fps <= 0:
+        return 0.0
+
+    now = time.perf_counter()
+    next_send_at = session.output_pace_next_send_at
+    if next_send_at is None:
+        next_send_at = now
+    if (
+        batch.realtime_event_id is not None
+        and batch.realtime_event_id != session.output_pace_last_event_id
+    ):
+        next_send_at = min(next_send_at, now)
+        session.output_pace_last_event_id = batch.realtime_event_id
+
+    wait_s = max(0.0, next_send_at - now)
+    if wait_s > 0:
+        await asyncio.sleep(wait_s)
+
+    send_started_at = time.perf_counter()
+    session.output_pace_next_send_at = (
+        max(next_send_at, send_started_at) + frame_count / output_fps
+    )
+    return wait_s * 1000
 
 
 async def _await_realtime_task(task: asyncio.Task | None) -> None:

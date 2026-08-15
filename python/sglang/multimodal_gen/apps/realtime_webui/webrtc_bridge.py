@@ -157,6 +157,8 @@ class WebRTCBridgeSession:
     media_fps: int = 24
     next_frame_deadline: float | None = None
     minimum_event_id: int = 0
+    pending_cutover_event_id: int = 0
+    transition_cutovers: int = 0
     dropped_batches: int = 0
     dropped_frames: int = 0
     dropped_source_bytes: int = 0
@@ -293,6 +295,18 @@ class WebRTCBridgeSession:
         self.height = height
         self.source_bytes += len(payload)
         event_id = int(header.get("event_id") or 0)
+        if self.pending_cutover_event_id and event_id >= self.pending_cutover_event_id:
+            self.minimum_event_id = max(self.minimum_event_id, event_id)
+            self.pending_cutover_event_id = 0
+            dropped = self._discard_queued_before(self.minimum_event_id)
+            self.transition_cutovers += 1
+            LOGGER.info(
+                "WebRTC bridge %s cut over on first media for event=%s "
+                "and discarded %s stale queued frames",
+                self.session_id,
+                self.minimum_event_id,
+                dropped,
+            )
         if self.minimum_event_id and event_id < self.minimum_event_id:
             dropped_frames = max(1, int(header.get("num_frames") or 1))
             self.dropped_batches += 1
@@ -427,9 +441,10 @@ class WebRTCBridgeSession:
         fps = _bounded_int(self.init.get("fps"), default=16, minimum=1, maximum=60)
         self.media_fps = fps
         self.next_frame_deadline = None
-        # A short GOP bounds decoder recovery after the bridge sheds stale
-        # pre-control frames.  One second was visibly too long on WAN links.
-        gop = max(4, fps // 2)
+        # A one-second GOP retains fast decoder recovery while avoiding the
+        # excessive IDR overhead of the previous half-second GOP on detailed
+        # 720p scenes.
+        gop = max(4, fps * self.manager.h264_gop_seconds)
         rtsp_url = f"{self.manager.media_rtsp_base.rstrip('/')}/{self.media_path}"
         command = [
             self.manager.ffmpeg_bin,
@@ -533,15 +548,16 @@ class WebRTCBridgeSession:
             raise web.HTTPConflict(text="Zing upstream session is not connected")
         event_id = int(envelope.get("event_id") or 0)
         if envelope.get("kind") in {"camera_actions", "prompt", "scene_cut"}:
-            self.minimum_event_id = max(self.minimum_event_id, event_id)
-            dropped = self._discard_queued_before(self.minimum_event_id)
-            if dropped:
-                LOGGER.info(
-                    "WebRTC bridge %s discarded %s queued frames before event=%s",
-                    self.session_id,
-                    dropped,
-                    self.minimum_event_id,
-                )
+            # Keep presenting already-generated media until the first frame for
+            # the new control state actually arrives. Purging here creates an
+            # avoidable one-chunk underflow: the old queue is empty while the
+            # model is still generating the new latent chunk. The receive path
+            # performs an atomic stale-frame cutover when new-event media is
+            # available, preserving responsiveness without a visible freeze.
+            self.pending_cutover_event_id = max(
+                self.pending_cutover_event_id,
+                event_id,
+            )
         await upstream.send_bytes(msgspec.msgpack.encode(envelope))
 
     async def _broadcast(self, payload: dict[str, Any]) -> None:
@@ -615,11 +631,14 @@ class WebRTCBridgeSession:
             "h264_profile": self.manager.h264_profile,
             "h264_crf": self.manager.h264_crf,
             "h264_vbv_buffer_ms": self.manager.h264_vbv_buffer_ms,
+            "h264_gop_seconds": self.manager.h264_gop_seconds,
             "raw_channel_order": self.manager.raw_channel_order,
             "frames": self.frames,
             "source_bytes": self.source_bytes,
             "average_source_mbps": round(self.source_bytes * 8 / elapsed / 1_000_000, 3),
             "minimum_event_id": self.minimum_event_id,
+            "pending_cutover_event_id": self.pending_cutover_event_id,
+            "transition_cutovers": self.transition_cutovers,
             "dropped_batches": self.dropped_batches,
             "dropped_frames": self.dropped_frames,
             "dropped_source_bytes": self.dropped_source_bytes,
@@ -680,6 +699,12 @@ class WebRTCBridgeManager:
             default=250,
             minimum=100,
             maximum=2000,
+        )
+        self.h264_gop_seconds = _bounded_int(
+            os.environ.get("WEBRTC_H264_GOP_SECONDS"),
+            default=1,
+            minimum=1,
+            maximum=5,
         )
         requested_raw_channel_order = os.environ.get(
             "WEBRTC_RAW_CHANNEL_ORDER", "rgb"
@@ -865,6 +890,7 @@ async def _control_session(request: web.Request) -> web.WebSocketResponse:
                             (time.perf_counter() - forward_started) * 1000, 3
                         ),
                         "minimum_event_id": session.minimum_event_id,
+                        "pending_cutover_event_id": session.pending_cutover_event_id,
                     }
                 )
             except web.HTTPException as error:

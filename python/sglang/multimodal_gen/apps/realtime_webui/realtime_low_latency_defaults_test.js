@@ -231,10 +231,10 @@ assert.match(
   /requestAnimationFrame\(renderLoop\)/,
   "visible playback should render on the browser refresh clock",
 );
-assert.doesNotMatch(
+assert.match(
   appJs,
-  /realtime_output_pacing:\s*true/,
-  "webui should not ask the backend to pace output at the playback fps",
+  /realtime_output_pacing:\s*configuredModelBoolean\(/,
+  "webui should support opt-in per-model output pacing without changing the default",
 );
 assert.match(
   indexHtml,

@@ -155,13 +155,14 @@ spec:
             - {name: WEBRTC_BRIDGE_MAX_SESSIONS, value: "8"}
             - {name: WEBRTC_BRIDGE_MAX_QUEUED_FRAMES, value: "24"}
             - {name: WEBRTC_BRIDGE_SESSION_TTL_S, value: "600"}
-            - {name: WEBRTC_H264_PRESET, value: faster}
+            - {name: WEBRTC_H264_PRESET, value: medium}
             - {name: WEBRTC_H264_PROFILE, value: main}
             - {name: WEBRTC_H264_CRF, value: "18"}
-            - {name: WEBRTC_H264_VBV_BUFFER_MS, value: "125"}
+            - {name: WEBRTC_H264_VBV_BUFFER_MS, value: "500"}
+            - {name: WEBRTC_H264_GOP_SECONDS, value: "1"}
             - {name: WEBRTC_RAW_CHANNEL_ORDER, value: gbr}
             - name: REALTIME_UI_CONFIG_JSON
-              value: '{"generationModes":["i2v"],"defaultGenerationMode":"i2v","availableModels":["minwm","lingbot2"],"modelSlotCount":2,"lockModelSlots":true,"singleExperience":true,"sessionMaxLifetimeSeconds":600,"protocolComparison":true,"primaryTransport":"webrtc-h264","webrtcManagedPlayback":false,"playbackAckEnabled":true,"webrtcBitrateKbps":3200,"webrtcPlayoutDelayMs":0,"controlTransitionFlushDelayMs":0,"targetFps":24,"sinkSize":9,"windowFrames":18,"dualModels":{"minwm":{"label":"Zing · WebRTC","transportLabel":"H.264 · WebRTC","size":"1280x704","targetFps":24,"sinkSize":9,"windowFrames":18,"playbackMode":"smooth_timeline"},"lingbot2":{"label":"Zing · WebSocket","transportLabel":"WebP · WebSocket","size":"1280x704","targetFps":24,"sinkSize":9,"windowFrames":18,"transportFormat":"webp","transportQuality":55,"playbackMode":"smooth_timeline"}}}'
+              value: '{"generationModes":["i2v"],"defaultGenerationMode":"i2v","availableModels":["minwm","lingbot2"],"modelSlotCount":2,"lockModelSlots":true,"singleExperience":true,"sessionMaxLifetimeSeconds":600,"protocolComparison":true,"primaryTransport":"webrtc-h264","webrtcManagedPlayback":false,"playbackAckEnabled":true,"realtimeOutputPacing":true,"webrtcBitrateKbps":6000,"webrtcPlayoutDelayMs":80,"controlTransitionFlushDelayMs":0,"targetFps":24,"sinkSize":9,"windowFrames":18,"dualModels":{"minwm":{"label":"Zing · WebRTC","transportLabel":"H.264 · WebRTC · 6 Mbps","size":"1280x704","targetFps":24,"sinkSize":9,"windowFrames":18,"playbackMode":"smooth_timeline"},"lingbot2":{"label":"Zing · WebSocket","transportLabel":"WebP · WebSocket","size":"1280x704","targetFps":24,"sinkSize":9,"windowFrames":18,"transportFormat":"webp","transportQuality":55,"playbackMode":"smooth_timeline"}}}'
           ports:
             - {name: http, containerPort: 18080}
           startupProbe:

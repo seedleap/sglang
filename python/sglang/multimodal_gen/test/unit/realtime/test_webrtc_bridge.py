@@ -38,7 +38,7 @@ def _session() -> WebRTCBridgeSession:
     )
 
 
-def test_bridge_control_event_cuts_over_stale_media_before_encoding():
+def test_bridge_control_event_waits_for_new_media_before_cutover():
     async def run():
         session = _session()
         upstream = _FakeUpstream()
@@ -51,7 +51,8 @@ def test_bridge_control_event_cuts_over_stale_media_before_encoding():
         }
         await session.send_control(envelope)
 
-        assert session.minimum_event_id == 7
+        assert session.minimum_event_id == 0
+        assert session.pending_cutover_event_id == 7
         assert msgspec.msgpack.decode(upstream.messages[0]) == envelope
 
         await session._handle_frame_payload(
@@ -68,11 +69,33 @@ def test_bridge_control_event_cuts_over_stale_media_before_encoding():
             b"x" * 12,
         )
 
-        assert session.ffmpeg is None
-        assert session.frames == 0
-        assert session.dropped_batches == 1
+        assert session.frame_queue.qsize() == 1
+        assert session.dropped_batches == 0
+
+        await session._handle_frame_payload(
+            {
+                "type": "frame_batch",
+                "chunk_index": 13,
+                "event_id": 7,
+                "content_type": RAW_RGB_CONTENT_TYPE,
+                "width": 2,
+                "height": 2,
+                "channels": 3,
+                "num_frames": 1,
+            },
+            b"y" * 12,
+        )
+
+        assert session.minimum_event_id == 7
+        assert session.pending_cutover_event_id == 0
+        assert session.transition_cutovers == 1
+        assert session.control_dropped_frames == 1
         assert session.dropped_frames == 1
         assert session.dropped_source_bytes == 12
+        assert session.frame_queue.qsize() == 1
+        queued = session.frame_queue.get_nowait()
+        session.frame_queue.task_done()
+        assert queued.event_id == 7
 
     asyncio.run(run())
 
@@ -88,7 +111,7 @@ def test_raw_channel_filter_normalizes_lab_gbr_transport():
     )
 
 
-def test_bridge_control_event_discards_already_queued_stale_frames():
+def test_bridge_control_event_discards_stale_queue_when_new_media_arrives():
     async def run():
         session = _session()
         upstream = _FakeUpstream()
@@ -117,7 +140,25 @@ def test_bridge_control_event_discards_already_queued_stale_frames():
             }
         )
 
-        assert session.frame_queue.empty()
+        assert session.frame_queue.qsize() == 2
+        assert session.pending_cutover_event_id == 7
+        assert session.control_dropped_frames == 0
+
+        await session._handle_frame_payload(
+            {
+                "type": "frame_batch",
+                "chunk_index": 13,
+                "event_id": 7,
+                "content_type": RAW_RGB_CONTENT_TYPE,
+                "width": 2,
+                "height": 2,
+                "channels": 3,
+                "num_frames": 1,
+            },
+            b"y" * 12,
+        )
+
+        assert session.frame_queue.qsize() == 1
         assert session.control_dropped_frames == 2
         assert session.dropped_frames == 2
 

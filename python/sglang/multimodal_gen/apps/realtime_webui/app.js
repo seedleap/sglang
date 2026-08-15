@@ -35,6 +35,11 @@ function configuredModelNumber(key, name, fallback) {
   return Number.isFinite(value) ? value : fallback;
 }
 
+function configuredModelBoolean(key, name, fallback = false) {
+  const value = DUAL_MODEL_CONFIG[key]?.[name];
+  return typeof value === "boolean" ? value : Boolean(fallback);
+}
+
 function configuredGenerationModes() {
   const requestedModes = Array.isArray(UI_CONFIG.generationModes)
     ? UI_CONFIG.generationModes
@@ -6038,6 +6043,11 @@ function readModelRequestParams(key, { generationMode, firstFrame, numFrames } =
     guidance_scale: Number(modelControl(key, "guidance").value),
     realtime_causal_sink_size: readOptionalInteger(modelControlId(key, "sinkSize")),
     realtime_causal_kv_cache_num_frames: readOptionalInteger(modelControlId(key, "windowFrames")),
+    realtime_output_pacing: configuredModelBoolean(
+      key,
+      "realtimeOutputPacing",
+      UI_CONFIG.realtimeOutputPacing === true,
+    ),
     max_chunks: generationMode === "t2v" || continuous ? undefined : 1,
     first_frame: firstFrame,
     ...readPreviewTransportParams(key),

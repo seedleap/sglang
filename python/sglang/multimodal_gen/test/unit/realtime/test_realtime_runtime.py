@@ -113,23 +113,45 @@ def test_realtime_session_cleanup_precedes_server_close(monkeypatch):
     assert events == ["cleanup", "close"]
 
 
-def test_realtime_output_pacing_compat_field_is_non_blocking():
-    session = SimpleNamespace(output_pace_next_send_at=time.perf_counter() + 60)
+def test_realtime_output_pacing_is_opt_in(monkeypatch):
+    clock = iter([100.0, 100.0, 100.0, 100.0])
+    monkeypatch.setattr(time, "perf_counter", lambda: next(clock))
+    sleeps = []
+
+    async def fake_sleep(delay):
+        sleeps.append(delay)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    session = SimpleNamespace(
+        output_pace_next_send_at=None,
+        output_pace_last_event_id=None,
+    )
     batch = SimpleNamespace(
         realtime_output_pacing=True,
-        fps=1,
+        fps=24,
         enable_frame_interpolation=False,
         realtime_event_id=1,
     )
-    result = SimpleNamespace(raw_frame_batches=[[object()] * 8])
+    result = SimpleNamespace(raw_frame_batches=[[object()] * 16])
 
-    start = time.perf_counter()
-    waited_ms = asyncio.run(
+    first_waited_ms = asyncio.run(
+        realtime_video_api._wait_for_realtime_output_slot(session, batch, result)
+    )
+    second_waited_ms = asyncio.run(
         realtime_video_api._wait_for_realtime_output_slot(session, batch, result)
     )
 
-    assert waited_ms == 0.0
-    assert time.perf_counter() - start < 0.05
+    assert first_waited_ms == 0.0
+    assert second_waited_ms == pytest.approx(2000 / 3)
+    assert sleeps == [pytest.approx(2 / 3)]
+
+    batch.realtime_output_pacing = False
+    assert (
+        asyncio.run(
+            realtime_video_api._wait_for_realtime_output_slot(session, batch, result)
+        )
+        == 0.0
+    )
 
 
 def test_interactive_event_grace_waits_for_prior_output_before_next_chunk(monkeypatch):
