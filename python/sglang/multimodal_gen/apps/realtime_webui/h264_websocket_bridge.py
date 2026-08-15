@@ -44,6 +44,8 @@ H264_WS_MANAGER = web.AppKey("h264_websocket_bridge_manager", object)
 @dataclass(frozen=True)
 class _QueuedFrame:
     rgb: bytes
+    width: int
+    height: int
     chunk_index: int
     event_id: int
     frame_batch_index: int
@@ -336,6 +338,8 @@ class H264WebSocketSession:
                 raise ValueError(f"unsupported realtime frame content type: {content_type}")
             queued = _QueuedFrame(
                 rgb=rgb,
+                width=width,
+                height=height,
                 chunk_index=int(header.get("chunk_index") or 0),
                 event_id=event_id,
                 frame_batch_index=int(header.get("frame_batch_index") or 0),
@@ -372,7 +376,14 @@ class H264WebSocketSession:
                     self.dropped_frames += 1
                     continue
                 if self.ffmpeg is None:
-                    await self._start_ffmpeg(self.width, self.height)
+                    self.width = frame.width
+                    self.height = frame.height
+                    await self._start_ffmpeg(frame.width, frame.height)
+                elif (frame.width, frame.height) != (self.width, self.height):
+                    raise RuntimeError(
+                        "H.264 source dimensions changed from "
+                        f"{self.width}x{self.height} to {frame.width}x{frame.height}"
+                    )
                 if self.ffmpeg is None or self.ffmpeg.stdin is None:
                     raise RuntimeError("H.264 encoder is unavailable")
                 encode_started_epoch_ms = time.time() * 1000
@@ -647,7 +658,12 @@ async def _h264_websocket(request: web.Request) -> web.WebSocketResponse:
         await session.run()
     except (json.JSONDecodeError, ValueError, TimeoutError) as error:
         if not websocket.closed:
-            await websocket.send_json({"type": "error", "message": str(error)})
+            await websocket.send_json(
+                {
+                    "type": "error",
+                    "message": f"{type(error).__name__}: {error!r}",
+                }
+            )
     finally:
         if not websocket.closed:
             await websocket.close()

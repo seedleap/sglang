@@ -120,6 +120,8 @@ def _encoded_image_to_rgb(frame: bytes, *, width: int, height: int) -> bytes:
 @dataclass(frozen=True)
 class _QueuedFrame:
     rgb: bytes
+    width: int
+    height: int
     chunk_index: int
     event_id: int
     frame_batch_index: int
@@ -355,6 +357,8 @@ class WebRTCBridgeSession:
                 raise ValueError(f"unsupported realtime frame content type: {content_type}")
             queued = _QueuedFrame(
                 rgb=rgb,
+                width=width,
+                height=height,
                 chunk_index=chunk_index,
                 event_id=event_id,
                 frame_batch_index=frame_batch_index,
