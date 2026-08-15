@@ -8,6 +8,7 @@ const DECODER_WORKER_URL = "./decoder_worker.js?v=rgb-worker-v10";
 const UI_CONFIG = Object.freeze(globalThis.SGLANG_REALTIME_UI_CONFIG || {});
 const DUAL_MODEL_CONFIG = Object.freeze(UI_CONFIG.dualModels || {});
 const PROTOCOL_COMPARISON_ENABLED = UI_CONFIG.protocolComparison === true;
+const H264_WEBSOCKET_COMPARISON_ENABLED = UI_CONFIG.h264WebSocketComparison === true;
 const PRIMARY_WEBRTC_ENABLED = String(UI_CONFIG.primaryTransport || "").toLowerCase()
   === "webrtc-h264";
 const PRIMARY_WEBRTC_MANAGED_PLAYBACK = PRIMARY_WEBRTC_ENABLED
@@ -237,6 +238,24 @@ function applyRuntimeUiConfig() {
   if (PRIMARY_WEBRTC_ENABLED) {
     const chip = document.querySelector('[data-model-key="minwm"] .stream-chip');
     if (chip) chip.textContent = "H.264 · WebRTC";
+  }
+  if (H264_WEBSOCKET_COMPARISON_ENABLED) {
+    const player = document.querySelector('[data-model-key="happyoyster"]');
+    const title = player?.querySelector(".model-player-title > strong");
+    const chip = player?.querySelector(".stream-chip");
+    const label = String(DUAL_MODEL_CONFIG.happyoyster?.label || "Zing · H.264 WebSocket");
+    if (title) title.textContent = label;
+    if (chip) chip.textContent = String(
+      DUAL_MODEL_CONFIG.happyoyster?.transportLabel || "H.264 · WebSocket",
+    );
+    for (const select of document.querySelectorAll(".model-slot-config select")) {
+      const option = Array.from(select.options).find((item) => item.value === "happyoyster");
+      if (option) option.textContent = label;
+    }
+    $("h264wsRateWrap").hidden = false;
+    $("h264wsPerformance").hidden = false;
+    $("happyoysterReferenceImage").hidden = true;
+    $("happyoysterProgress").hidden = true;
   }
   configureGenerationModeSelect();
 }
@@ -576,6 +595,7 @@ function allWorldPresets() {
 let ws = null;
 let primaryWebRTCSession = null;
 let primaryWebRTCStats = {};
+let h264WebSocketStats = {};
 let selectedPreset = null;
 let selectedReferenceBytes = null;
 let selectedReferenceUrl = "";
@@ -795,7 +815,44 @@ const lingbot2Session = new RealtimeModelSession({
     scheduleLingbot2Reconnect(error.message || "stream failed");
   },
 });
-const happyOysterSession = new HappyOysterSession({
+const happyOysterSession = H264_WEBSOCKET_COMPARISON_ENABLED
+  ? new H264WebSocketSession({
+    video: $("happyoysterViewport"),
+    overlay: $("happyoysterPreviewOverlay"),
+    root: document.querySelector('[data-model-key="happyoyster"]'),
+    liveEdgeTargetMs: configuredNumber("h264WebSocketLiveEdgeTargetMs", 80),
+    liveEdgeSeekThresholdMs: configuredNumber("h264WebSocketSeekThresholdMs", 420),
+    onState: (state, details = {}) => {
+      setModelConnectionState("happyoyster", state);
+      setHappyOysterStageText(
+        state === "connecting"
+          ? "正在连接 H.264 WebSocket…"
+          : details.message || "H.264 WebSocket",
+        state,
+      );
+      if (state === "live") markSessionPlayable("happyoyster");
+    },
+    onPlayable: ({ width, height }) => {
+      addHistory(`Zing H.264 WebSocket live · ${width}x${height}`);
+      markSessionPlayable("happyoyster");
+    },
+    onPresentedFrame: ({ eventId }) => {
+      markModelEventApplied("happyoyster", eventId);
+    },
+    onStats: (stats) => {
+      h264WebSocketStats = { ...h264WebSocketStats, ...stats };
+      renderH264WebSocketTelemetry(h264WebSocketStats);
+      renderProtocolPerformance("h264ws", h264WebSocketStats);
+      markModelEventApplied(
+        "happyoyster",
+        h264WebSocketStats.lastPresentedMediaEventId,
+      );
+    },
+    onError: (error) => {
+      addHistory(`Zing H.264 WebSocket failed · ${error.message || error}`);
+    },
+  })
+  : new HappyOysterSession({
   video: $("happyoysterViewport"),
   overlay: $("happyoysterPreviewOverlay"),
   root: document.querySelector('[data-model-key="happyoyster"]'),
@@ -821,7 +878,7 @@ const happyOysterSession = new HappyOysterSession({
   onError: (error) => {
     addHistory(`快乐生蚝 session failed · ${error.message || "unknown"}`);
   },
-});
+  });
 
 if (PRIMARY_WEBRTC_ENABLED) {
   primaryWebRTCSession = new PrimaryWebRTCSession({
@@ -996,15 +1053,22 @@ const dualModelController = new DualModelController({
       wsUrl: (init) => backendWebSocketUrl("lingbot2", init.trace_id),
     },
     happyoyster: {
-      model: "happyoyster-adventure",
-      nonBlocking: true,
+      model: H264_WEBSOCKET_COMPARISON_ENABLED
+        ? (init) => init.model
+        : "happyoyster-adventure",
+      nonBlocking: !H264_WEBSOCKET_COMPARISON_ENABLED,
       enabled: (init) => modelSelected("happyoyster") && init.generation_mode === "i2v",
-      unavailableReason: "仅支持 I2V Adventure",
-      transformInit: buildHappyOysterInit,
+      unavailableReason: H264_WEBSOCKET_COMPARISON_ENABLED
+        ? "H.264 WebSocket 仅支持 I2V"
+        : "仅支持 I2V Adventure",
+      transformInit: H264_WEBSOCKET_COMPARISON_ENABLED
+        ? (init) => ({ ...init })
+        : buildHappyOysterInit,
       wsUrl: "",
     },
   },
   onBackgroundState: ({ key, state, error }) => {
+    if (H264_WEBSOCKET_COMPARISON_ENABLED) return;
     if (key !== "happyoyster") return;
     if (state === "connected") {
       addHistory("快乐生蚝 RTC 已连接并加入同步控制");
@@ -1361,6 +1425,10 @@ function setHappyOysterProgress(progress, state = "") {
   const root = $("happyoysterProgress");
   const bar = $("happyoysterProgressBar");
   if (!root || !bar) return;
+  if (H264_WEBSOCKET_COMPARISON_ENABLED) {
+    root.hidden = true;
+    return;
+  }
   const value = Math.max(0, Math.min(100, Number(progress) || 0));
   root.setAttribute("aria-valuenow", String(Math.round(value)));
   root.hidden = state === "live" || state === "idle" || state === "closed";
@@ -1370,6 +1438,11 @@ function setHappyOysterProgress(progress, state = "") {
 function setHappyOysterReferencePreview(dataUrl = "") {
   const image = $("happyoysterReferenceImage");
   if (!image) return;
+  if (H264_WEBSOCKET_COMPARISON_ENABLED) {
+    image.hidden = true;
+    image.removeAttribute("src");
+    return;
+  }
   image.src = dataUrl;
   image.hidden = !dataUrl;
 }
@@ -1723,6 +1796,7 @@ function drawIdle() {
 function resetStreamStats() {
   pendingHeader = null;
   primaryWebRTCStats = {};
+  h264WebSocketStats = {};
   clearFrameQueue();
   playbackController.reset({
     mode: selectedPlaybackMode(),
@@ -1758,6 +1832,7 @@ function resetStreamStats() {
   resetDecoderState();
   resetModelTelemetry("minwm");
   resetModelTelemetry("lingbot2");
+  if (H264_WEBSOCKET_COMPARISON_ENABLED) renderProtocolPerformance("h264ws", {});
   updateStats();
   $("actionStateText").textContent = "-";
   updateOutputSizeText();
@@ -1957,20 +2032,20 @@ function performanceMs(value) {
 }
 
 function renderProtocolPerformance(key, stats = {}) {
-  const prefix = key === "lingbot2" ? "lingbot2" : "minwm";
+  const prefix = key === "lingbot2" ? "lingbot2" : key === "h264ws" ? "h264ws" : "minwm";
   const telemetry = stats.chunkTelemetry || {};
   const vaeMs = Number(telemetry.vae_queue_wait_ms || 0)
     + Number(telemetry.vae_decode_ms || 0);
   const encodeMs = Number(telemetry.vae_encode_ms || 0)
     + Number(telemetry.transport_encode_ms || 0)
-    + (prefix === "minwm" ? Number(stats.lastBridgeEncoderFeedMs || 0) : 0);
-  const downlinkMs = prefix === "minwm"
+    + (prefix !== "lingbot2" ? Number(stats.lastBridgeEncoderFeedMs || 0) : 0);
+  const downlinkMs = prefix !== "lingbot2"
     ? Math.max(
         Number(stats.lastPresentedTransportMs || 0),
         Number(stats.lastPresentedAfterMetadataMs || 0),
       )
     : Number(stats.lastDownlinkMs || 0) + Number(stats.lastDisplayLagMs || 0);
-  const e2eMs = prefix === "minwm"
+  const e2eMs = prefix !== "lingbot2"
     ? Number(stats.lastPresentedControlToVideoMs || 0)
     : Number(stats.lastControlToVideoMs || 0);
   const bytesReceived = Number(stats.bytesReceived ?? stats.bytes ?? 0);
@@ -1988,6 +2063,16 @@ function renderProtocolPerformance(key, stats = {}) {
   $(`${prefix}PerfEncode`).textContent = performanceMs(encodeMs);
   $(`${prefix}PerfDownlink`).textContent = performanceMs(downlinkMs);
   $(`${prefix}PerfE2E`).textContent = performanceMs(e2eMs);
+}
+
+function renderH264WebSocketTelemetry(stats = {}) {
+  const receiveMbps = Number(stats.receiveMbps || 0);
+  const frames = Number(stats.frames || stats.framesDecoded || 0);
+  const bufferMs = Number(stats.bufferMs || stats.mseBufferMs || 0);
+  const queued = Number(stats.queueFrames || 0);
+  $("h264wsRateText").textContent = frames > 0
+    ? `${receiveMbps.toFixed(1)} Mb/s · ${Math.round(bufferMs)}ms · q ${queued}`
+    : "-";
 }
 
 function renderModelTelemetry(key, stats = {}) {
@@ -5342,7 +5427,7 @@ async function connect() {
         scheduleLingbot2Reconnect("initial connection failed");
       }
     }
-    if (connectionReport.pending?.includes("happyoyster")) {
+    if (!H264_WEBSOCKET_COMPARISON_ENABLED && connectionReport.pending?.includes("happyoyster")) {
       setHappyOysterStageText("正在创建快乐生蚝 World…", "preparing");
       addHistory("快乐生蚝 World 正在独立构建 · Zing/LingBot2 已先行启动");
     }

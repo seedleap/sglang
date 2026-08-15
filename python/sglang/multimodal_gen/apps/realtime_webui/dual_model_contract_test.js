@@ -101,12 +101,13 @@ assert.match(
   "fullscreen must hide model parameters and notices while preserving both videos",
 );
 assert.match(html, /playback_controller\.js\?v=realtime-playback-v34/);
-assert.match(html, /model_session\.js\?v=dual-model-v10/);
+assert.match(html, /model_session\.js\?v=protocol-telemetry-v1/);
 assert.match(html, /dual_model_controller\.js\?v=dual-model-v7/);
 assert.match(html, /prompt_rewrite_controller\.js\?v=prompt-rewrite-v2/);
-assert.match(html, /styles\.css\?v=world-studio-v8/);
-assert.match(html, /primary_webrtc_session\.js\?v=primary-webrtc-v7/);
-assert.match(html, /app\.js\?v=world-studio-v33/);
+assert.match(html, /styles\.css\?v=protocol-telemetry-v1/);
+assert.match(html, /primary_webrtc_session\.js\?v=webrtc-live-edge-v2/);
+assert.match(html, /h264_websocket_session\.js\?v=h264ws-ab-v2/);
+assert.match(html, /app\.js\?v=h264ws-ab-v2/);
 assert.match(
   css,
   /#minwmWebrtcViewport\[hidden\]\s*\{\s*display:\s*none\s*!important;/,

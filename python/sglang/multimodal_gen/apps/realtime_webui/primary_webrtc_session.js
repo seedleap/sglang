@@ -77,7 +77,7 @@
 
   function configureReceiverPlayoutDelay(transceiver, playoutDelayMs) {
     const receiver = transceiver?.receiver;
-    if (!receiver || !Number.isFinite(playoutDelayMs) || playoutDelayMs <= 0) return;
+    if (!receiver || !Number.isFinite(playoutDelayMs) || playoutDelayMs < 0) return;
     const boundedDelayMs = Math.min(4000, Math.max(0, playoutDelayMs));
     try {
       if ("jitterBufferTarget" in receiver) {

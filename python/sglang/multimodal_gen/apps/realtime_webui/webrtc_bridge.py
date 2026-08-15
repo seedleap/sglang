@@ -167,6 +167,7 @@ class WebRTCBridgeSession:
     last_media_event_epoch_ms: float = 0.0
     queue_overflow_dropped_frames: int = 0
     control_dropped_frames: int = 0
+    latency_dropped_frames: int = 0
     frame_queue: asyncio.Queue[_QueuedFrame] = field(init=False)
 
     def __post_init__(self) -> None:
@@ -378,6 +379,25 @@ class WebRTCBridgeSession:
         while True:
             frame = await self.frame_queue.get()
             try:
+                # Raw model output arrives a latent chunk at a time while RTP
+                # must be presented at frame cadence.  If the encoder falls
+                # behind, retaining the whole burst only converts transient
+                # congestion into seconds of interaction latency.  Shed old
+                # same-timeline frames until the queue is close to the live
+                # edge; the next IDR and the remaining frames keep playback
+                # decodable and smooth.
+                queue_age_ms = max(
+                    0.0,
+                    time.time() * 1000 - frame.bridge_received_epoch_ms,
+                )
+                if (
+                    queue_age_ms > self.manager.bridge_max_frame_age_ms
+                    and self.frame_queue.qsize() > self.manager.bridge_live_edge_frames
+                ):
+                    self.dropped_frames += 1
+                    self.dropped_source_bytes += len(frame.rgb)
+                    self.latency_dropped_frames += 1
+                    continue
                 # Check after pacing as well as at enqueue time. A control event
                 # can arrive while this frame is waiting for its presentation
                 # deadline, and that stale frame must not enter the encoder.
@@ -661,6 +681,9 @@ class WebRTCBridgeSession:
             "max_queued_frames": self.frame_queue.maxsize,
             "queue_overflow_dropped_frames": self.queue_overflow_dropped_frames,
             "control_dropped_frames": self.control_dropped_frames,
+            "latency_dropped_frames": self.latency_dropped_frames,
+            "max_frame_age_ms": self.manager.bridge_max_frame_age_ms,
+            "live_edge_frames": self.manager.bridge_live_edge_frames,
             "last_media_event_id": self.last_media_event_id,
             "last_media_event_epoch_ms": self.last_media_event_epoch_ms,
             "width": self.width,
@@ -740,6 +763,18 @@ class WebRTCBridgeManager:
             default=24,
             minimum=4,
             maximum=120,
+        )
+        self.bridge_max_frame_age_ms = _bounded_int(
+            os.environ.get("WEBRTC_BRIDGE_MAX_FRAME_AGE_MS"),
+            default=250,
+            minimum=40,
+            maximum=2000,
+        )
+        self.bridge_live_edge_frames = _bounded_int(
+            os.environ.get("WEBRTC_BRIDGE_LIVE_EDGE_FRAMES"),
+            default=6,
+            minimum=1,
+            maximum=self.bridge_max_queued_frames,
         )
         self.ttl_s = _bounded_int(
             os.environ.get("WEBRTC_BRIDGE_SESSION_TTL_S"),

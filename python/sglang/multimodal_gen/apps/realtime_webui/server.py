@@ -16,6 +16,7 @@ from aiohttp import ClientError, ClientSession, ClientTimeout, WSMsgType, web
 from prompt_rewriter import PromptRewriter
 from world_creator import WorldCreator
 from webrtc_bridge import install_webrtc_bridge
+from h264_websocket_bridge import install_h264_websocket_bridge
 
 
 ROOT = Path(__file__).resolve().parent
@@ -808,6 +809,7 @@ def create_app():
     app.router.add_get("/v1/realtime_video/generate", _proxy_websocket)
     app.router.add_route("*", "/v1/{path:.*}", _proxy_http)
     install_webrtc_bridge(app, upstream_session_key=SESSION)
+    install_h264_websocket_bridge(app, upstream_session_key=SESSION)
     app.router.add_static("/", ROOT)
     return app
 
