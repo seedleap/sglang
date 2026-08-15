@@ -206,6 +206,16 @@ def test_minwm_realtime_state_preserves_single_key_direction(key, expected_label
     assert state.latest_sampled_event_id == 17
 
 
+def test_minwm_realtime_state_makes_short_tap_visible():
+    state = MinWMRealtimeState()
+    state.receive_camera_state(["w"], event_id=17, timestamp_ms=100)
+    state.receive_camera_state([], event_id=18, timestamp_ms=135)
+
+    assert state.sample_action_labels(4) == [9, 9, 0, 0]
+    assert state.latest_sampled_event_id == 18
+    assert state.sample_action_labels(4) == [0, 0, 0, 0]
+
+
 def test_minwm_realtime_action_switch_reaches_next_chunk():
     state = MinWMRealtimeState()
     session = SimpleNamespace(

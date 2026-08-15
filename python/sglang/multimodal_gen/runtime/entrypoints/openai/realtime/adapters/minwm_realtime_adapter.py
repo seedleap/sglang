@@ -48,11 +48,21 @@ if TYPE_CHECKING:
     from sglang.multimodal_gen.runtime.server_args import ServerArgs
 
 MINWM_DEFAULT_DMD_STEPS = 4
+MINWM_MIN_CAMERA_PULSE_LATENTS = 2
 
 
 class MinWMRealtimeState(RealtimeCameraControlState):
     def __init__(self) -> None:
-        super().__init__(min_pulse_items=1, script_maxlen=4096, max_transitions=512)
+        # A quick key tap can arrive as press + release before the next causal
+        # chunk is sampled. One MinWM action item represents one latent frame
+        # (four decoded video frames), which is too brief to produce a reliably
+        # visible camera response. Preserve two latent items for a short tap;
+        # held controls still occupy the full chunk until release.
+        super().__init__(
+            min_pulse_items=MINWM_MIN_CAMERA_PULSE_LATENTS,
+            script_maxlen=4096,
+            max_transitions=512,
+        )
         self.action_label_queue = ControlScriptQueue(
             "action_labels", max_events=4096, default_item=0
         )
