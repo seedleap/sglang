@@ -138,6 +138,7 @@ class WebRTCBridgeSession:
     init: dict[str, Any]
     codec: str
     bitrate_kbps: int
+    source_only: bool = False
     created_at: float = field(default_factory=time.time)
     state: str = "connecting"
     error: str = ""
@@ -230,12 +231,13 @@ class WebRTCBridgeSession:
                 await upstream.send_bytes(msgspec.msgpack.encode(self.init))
                 self.state = "generating"
                 self.connected.set()
-                self.encoder_task = asyncio.create_task(
-                    self._encode_frames(),
-                    name=f"webrtc-encoder-{self.session_id}",
-                )
+                if not self.source_only:
+                    self.encoder_task = asyncio.create_task(
+                        self._encode_frames(),
+                        name=f"webrtc-encoder-{self.session_id}",
+                    )
                 async for message in upstream:
-                    if self.encoder_task.done():
+                    if self.encoder_task is not None and self.encoder_task.done():
                         await self.encoder_task
                     if message.type == WSMsgType.BINARY:
                         await self._receive_binary(bytes(message.data))
@@ -389,6 +391,15 @@ class WebRTCBridgeSession:
                 closed_subscribers.append(subscriber)
         for subscriber in closed_subscribers:
             self.comparison_frame_subscribers.discard(subscriber)
+        if self.source_only:
+            # The bitrate A/B lab needs one authoritative model/control
+            # session, but its raw frames are encoded only by the two H.264
+            # WebSocket subscribers. Avoid starting a third, invisible
+            # H.264/RTP publisher that would consume CPU and browser bandwidth
+            # and make the transport measurements impossible to interpret.
+            self.frames += 1
+            self.state = "streaming"
+            return
         if self.frame_queue.full():
             dropped = self.frame_queue.get_nowait()
             self.frame_queue.task_done()
@@ -720,6 +731,7 @@ class WebRTCBridgeSession:
             "error": self.error,
             "codec": self.codec,
             "bitrate_kbps": self.bitrate_kbps,
+            "source_only": self.source_only,
             "h264_preset": self.manager.h264_preset,
             "h264_profile": self.manager.h264_profile,
             "h264_crf": self.manager.h264_crf,
@@ -748,8 +760,8 @@ class WebRTCBridgeSession:
             "width": self.width,
             "height": self.height,
             "created_at": self.created_at,
-            "stream_page_url": self.stream_page_url,
-            "whep_url": self.whep_url,
+            "stream_page_url": "" if self.source_only else self.stream_page_url,
+            "whep_url": "" if self.source_only else self.whep_url,
         }
 
 
@@ -891,6 +903,7 @@ class WebRTCBridgeManager:
             init=init,
             codec=codec,
             bitrate_kbps=bitrate_kbps,
+            source_only=bool(body.get("source_only")),
         )
         self.sessions[session_id] = session
         try:

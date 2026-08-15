@@ -9,6 +9,7 @@ const UI_CONFIG = Object.freeze(globalThis.SGLANG_REALTIME_UI_CONFIG || {});
 const DUAL_MODEL_CONFIG = Object.freeze(UI_CONFIG.dualModels || {});
 const PROTOCOL_COMPARISON_ENABLED = UI_CONFIG.protocolComparison === true;
 const H264_WEBSOCKET_COMPARISON_ENABLED = UI_CONFIG.h264WebSocketComparison === true;
+const H264_BITRATE_COMPARISON_ENABLED = UI_CONFIG.h264BitrateComparison === true;
 const PRIMARY_WEBRTC_ENABLED = String(UI_CONFIG.primaryTransport || "").toLowerCase()
   === "webrtc-h264";
 const PRIMARY_WEBRTC_MANAGED_PLAYBACK = PRIMARY_WEBRTC_ENABLED
@@ -20,6 +21,14 @@ const PRIMARY_WEBRTC_BITRATE_KBPS = Math.max(
 const PRIMARY_WEBRTC_PLAYOUT_DELAY_MS = Math.max(
   0,
   Math.min(4000, configuredNumber("webrtcPlayoutDelayMs", 0)),
+);
+const H264_CURRENT_BITRATE_KBPS = Math.max(
+  250,
+  Math.min(20000, Math.trunc(configuredNumber("h264CurrentBitrateKbps", 6000))),
+);
+const H264_COMPRESSED_BITRATE_KBPS = Math.max(
+  250,
+  Math.min(20000, Math.trunc(configuredNumber("h264CompressedBitrateKbps", 3000))),
 );
 const DEFAULT_LINGBOT2_MODEL = "robbyant/lingbot-world-v2-14b-causal-fast-diffusers";
 const SESSION_ARTIFACT_SCHEMA_VERSION = 1;
@@ -256,6 +265,13 @@ function applyRuntimeUiConfig() {
     $("h264wsPerformance").hidden = false;
     $("happyoysterReferenceImage").hidden = true;
     $("happyoysterProgress").hidden = true;
+  }
+  if (H264_BITRATE_COMPARISON_ENABLED) {
+    $("modelSlot0").value = "lingbot2";
+    $("modelSlot1").value = "happyoyster";
+    $("lingbot2Viewport").hidden = true;
+    $("lingbot2H264Viewport").hidden = false;
+    document.body.dataset.comparisonMode = "h264-bitrate";
   }
   configureGenerationModeSelect();
 }
@@ -596,6 +612,7 @@ let ws = null;
 let primaryWebRTCSession = null;
 let primaryWebRTCStats = {};
 let h264WebSocketStats = {};
+let h264CurrentStats = {};
 let selectedPreset = null;
 let selectedReferenceBytes = null;
 let selectedReferenceUrl = "";
@@ -778,7 +795,7 @@ function scheduleLingbot2Reconnect(reason = "media stream unavailable") {
   }, delayMs);
 }
 
-const lingbot2Session = new RealtimeModelSession({
+const lingbot2RealtimeSession = new RealtimeModelSession({
   key: "lingbot2",
   canvas: lingbot2Canvas,
   overlay: $("lingbot2PreviewOverlay"),
@@ -815,6 +832,41 @@ const lingbot2Session = new RealtimeModelSession({
     scheduleLingbot2Reconnect(error.message || "stream failed");
   },
 });
+const lingbot2Session = H264_BITRATE_COMPARISON_ENABLED
+  ? new H264WebSocketSession({
+    video: $("lingbot2H264Viewport"),
+    overlay: $("lingbot2PreviewOverlay"),
+    root: document.querySelector('[data-model-key="lingbot2"]'),
+    liveEdgeTargetMs: configuredNumber("h264WebSocketLiveEdgeTargetMs", 80),
+    liveEdgeSeekThresholdMs: configuredNumber("h264WebSocketSeekThresholdMs", 420),
+    onState: (state, details = {}) => {
+      setModelConnectionState("lingbot2", state);
+      if (state === "live") markSessionPlayable("lingbot2");
+      if (state === "error") {
+        addHistory(`Zing H.264 6 Mbps failed · ${details.message || "unknown"}`);
+      }
+    },
+    onPlayable: ({ width, height }) => {
+      addHistory(`Zing H.264 6 Mbps live · ${width}x${height}`);
+      markSessionPlayable("lingbot2");
+    },
+    onPresentedFrame: ({ eventId }) => {
+      markModelEventApplied("lingbot2", eventId);
+    },
+    onStats: (stats) => {
+      h264CurrentStats = { ...h264CurrentStats, ...stats };
+      renderH264WebSocketTelemetry(h264CurrentStats, "lingbot2");
+      renderProtocolPerformance("lingbot2", h264CurrentStats);
+      markModelEventApplied(
+        "lingbot2",
+        h264CurrentStats.lastPresentedMediaEventId,
+      );
+    },
+    onError: (error) => {
+      addHistory(`Zing H.264 6 Mbps session failed · ${error.message || error}`);
+    },
+  })
+  : lingbot2RealtimeSession;
 const happyOysterSession = H264_WEBSOCKET_COMPARISON_ENABLED
   ? new H264WebSocketSession({
     video: $("happyoysterViewport"),
@@ -886,6 +938,7 @@ if (PRIMARY_WEBRTC_ENABLED) {
     canvas,
     codec: "h264",
     bitrateKbps: PRIMARY_WEBRTC_BITRATE_KBPS,
+    sourceOnly: H264_BITRATE_COMPARISON_ENABLED,
     playoutDelayMs: PRIMARY_WEBRTC_PLAYOUT_DELAY_MS,
     managedPlayback: PRIMARY_WEBRTC_MANAGED_PLAYBACK,
     onState: (state, details = {}) => {
@@ -1011,7 +1064,7 @@ const dualModelController = new DualModelController({
   },
   backends: {
     minwm: {
-      enabled: () => modelSelected("minwm"),
+      enabled: () => modelSelected("minwm") || H264_BITRATE_COMPARISON_ENABLED,
       model: () => String(
         DUAL_MODEL_CONFIG.minwm?.model
         || UI_CONFIG.minwmModel
@@ -1022,13 +1075,26 @@ const dualModelController = new DualModelController({
     },
     lingbot2: {
       model: (init) => String(
-        PROTOCOL_COMPARISON_ENABLED
+        H264_BITRATE_COMPARISON_ENABLED
+          ? init.model
+          : PROTOCOL_COMPARISON_ENABLED
           ? init.model
           : DUAL_MODEL_CONFIG.lingbot2?.model
             || UI_CONFIG.lingbot2Model
             || DEFAULT_LINGBOT2_MODEL
       ),
       transformInit: (init) => {
+        if (H264_BITRATE_COMPARISON_ENABLED) {
+          return {
+            ...init,
+            shared_webrtc_session_id: primaryWebRTCSession?.sessionId || "",
+            h264_bitrate_kbps: H264_CURRENT_BITRATE_KBPS,
+            h264_crf: configuredNumber("h264CurrentCrf", 16),
+            h264_preset: String(UI_CONFIG.h264CurrentPreset || "veryfast"),
+            h264_gop_seconds: configuredNumber("h264CurrentGopSeconds", 1),
+            h264_vbv_buffer_ms: configuredNumber("h264CurrentVbvBufferMs", 125),
+          };
+        }
         const modelParams = readModelRequestParams("lingbot2", {
           generationMode: init.generation_mode,
           firstFrame: init.first_frame,
@@ -1050,7 +1116,9 @@ const dualModelController = new DualModelController({
       },
       enabled: (init) => modelSelected("lingbot2") && init.generation_mode !== "t2v",
       unavailableReason: "T2V unavailable",
-      wsUrl: (init) => backendWebSocketUrl("lingbot2", init.trace_id),
+      wsUrl: (init) => H264_BITRATE_COMPARISON_ENABLED
+        ? ""
+        : backendWebSocketUrl("lingbot2", init.trace_id),
     },
     happyoyster: {
       model: H264_WEBSOCKET_COMPARISON_ENABLED
@@ -1065,6 +1133,15 @@ const dualModelController = new DualModelController({
         ? (init) => ({
             ...init,
             shared_webrtc_session_id: primaryWebRTCSession?.sessionId || "",
+            ...(H264_BITRATE_COMPARISON_ENABLED
+              ? {
+                  h264_bitrate_kbps: H264_COMPRESSED_BITRATE_KBPS,
+                  h264_crf: configuredNumber("h264CompressedCrf", 20),
+                  h264_preset: String(UI_CONFIG.h264CompressedPreset || "fast"),
+                  h264_gop_seconds: configuredNumber("h264CompressedGopSeconds", 2),
+                  h264_vbv_buffer_ms: configuredNumber("h264CompressedVbvBufferMs", 250),
+                }
+              : {}),
           })
         : buildHappyOysterInit,
       wsUrl: "",
@@ -1800,6 +1877,7 @@ function resetStreamStats() {
   pendingHeader = null;
   primaryWebRTCStats = {};
   h264WebSocketStats = {};
+  h264CurrentStats = {};
   clearFrameQueue();
   playbackController.reset({
     mode: selectedPlaybackMode(),
@@ -1835,6 +1913,9 @@ function resetStreamStats() {
   resetDecoderState();
   resetModelTelemetry("minwm");
   resetModelTelemetry("lingbot2");
+  if (H264_BITRATE_COMPARISON_ENABLED) {
+    renderH264WebSocketTelemetry({}, "lingbot2");
+  }
   if (H264_WEBSOCKET_COMPARISON_ENABLED) renderProtocolPerformance("h264ws", {});
   updateStats();
   $("actionStateText").textContent = "-";
@@ -2036,19 +2117,21 @@ function performanceMs(value) {
 
 function renderProtocolPerformance(key, stats = {}) {
   const prefix = key === "lingbot2" ? "lingbot2" : key === "h264ws" ? "h264ws" : "minwm";
+  const h264Mse = prefix === "h264ws"
+    || (H264_BITRATE_COMPARISON_ENABLED && prefix === "lingbot2");
   const telemetry = stats.chunkTelemetry || {};
   const vaeMs = Number(telemetry.vae_queue_wait_ms || 0)
     + Number(telemetry.vae_decode_ms || 0);
   const encodeMs = Number(telemetry.vae_encode_ms || 0)
     + Number(telemetry.transport_encode_ms || 0)
-    + (prefix !== "lingbot2" ? Number(stats.lastBridgeEncoderFeedMs || 0) : 0);
-  const downlinkMs = prefix !== "lingbot2"
+    + (h264Mse || prefix !== "lingbot2" ? Number(stats.lastBridgeEncoderFeedMs || 0) : 0);
+  const downlinkMs = h264Mse || prefix !== "lingbot2"
     ? Math.max(
         Number(stats.lastPresentedTransportMs || 0),
         Number(stats.lastPresentedAfterMetadataMs || 0),
       )
     : Number(stats.lastDownlinkMs || 0) + Number(stats.lastDisplayLagMs || 0);
-  const e2eMs = prefix !== "lingbot2"
+  const e2eMs = h264Mse || prefix !== "lingbot2"
     ? Number(stats.lastPresentedControlToVideoMs || 0)
     : Number(stats.lastControlToVideoMs || 0);
   const bytesReceived = Number(stats.bytesReceived ?? stats.bytes ?? 0);
@@ -2068,12 +2151,12 @@ function renderProtocolPerformance(key, stats = {}) {
   $(`${prefix}PerfE2E`).textContent = performanceMs(e2eMs);
 }
 
-function renderH264WebSocketTelemetry(stats = {}) {
+function renderH264WebSocketTelemetry(stats = {}, prefix = "h264ws") {
   const receiveMbps = Number(stats.receiveMbps || 0);
   const frames = Number(stats.frames || stats.framesDecoded || 0);
   const bufferMs = Number(stats.bufferMs || stats.mseBufferMs || 0);
   const queued = Number(stats.queueFrames || 0);
-  $("h264wsRateText").textContent = frames > 0
+  $(`${prefix}RateText`).textContent = frames > 0
     ? `${receiveMbps.toFixed(1)} Mb/s · ${Math.round(bufferMs)}ms · q ${queued}`
     : "-";
 }
@@ -7090,11 +7173,17 @@ window.__sglangProtocolComparisonDebug = () => ({
     ...primaryWebRTCStats,
   },
   websocket: {
-    protocol: "WebP/WebSocket",
-    ...lingbot2Session.snapshot(),
+    protocol: H264_BITRATE_COMPARISON_ENABLED
+      ? `H.264/WebSocket/${H264_CURRENT_BITRATE_KBPS}kbps`
+      : "WebP/WebSocket",
+    ...(H264_BITRATE_COMPARISON_ENABLED
+      ? h264CurrentStats
+      : lingbot2Session.snapshot()),
   },
   h264WebSocket: {
-    protocol: "H.264/WebSocket",
+    protocol: H264_BITRATE_COMPARISON_ENABLED
+      ? `H.264/WebSocket/${H264_COMPRESSED_BITRATE_KBPS}kbps`
+      : "H.264/WebSocket",
     ...h264WebSocketStats,
   },
 });

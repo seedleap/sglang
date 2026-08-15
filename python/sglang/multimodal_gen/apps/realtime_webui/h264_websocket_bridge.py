@@ -79,6 +79,12 @@ class H264WebSocketSession:
     dropped_frames: int = 0
     latency_dropped_frames: int = 0
     repeated_frames: int = 0
+    encoder_preset: str = field(init=False)
+    encoder_profile: str = field(init=False)
+    encoder_crf: int = field(init=False)
+    encoder_bitrate_kbps: int = field(init=False)
+    encoder_vbv_buffer_ms: int = field(init=False)
+    encoder_gop_seconds: int = field(init=False)
     shared_metadata_queue: asyncio.Queue[dict[str, Any]] = field(
         default_factory=lambda: asyncio.Queue(maxsize=128)
     )
@@ -86,6 +92,47 @@ class H264WebSocketSession:
 
     def __post_init__(self) -> None:
         self.frame_queue = asyncio.Queue(maxsize=self.manager.max_queued_frames)
+        requested_preset = str(
+            self.init.get("h264_preset") or self.manager.preset
+        ).lower()
+        self.encoder_preset = (
+            requested_preset
+            if requested_preset
+            in {"ultrafast", "superfast", "veryfast", "faster", "fast", "medium"}
+            else self.manager.preset
+        )
+        requested_profile = str(
+            self.init.get("h264_profile") or self.manager.profile
+        ).lower()
+        self.encoder_profile = (
+            requested_profile
+            if requested_profile in {"baseline", "main", "high"}
+            else self.manager.profile
+        )
+        self.encoder_crf = _bounded_int(
+            self.init.get("h264_crf"),
+            default=self.manager.crf,
+            minimum=12,
+            maximum=35,
+        )
+        self.encoder_bitrate_kbps = _bounded_int(
+            self.init.get("h264_bitrate_kbps"),
+            default=self.manager.bitrate_kbps,
+            minimum=250,
+            maximum=20000,
+        )
+        self.encoder_vbv_buffer_ms = _bounded_int(
+            self.init.get("h264_vbv_buffer_ms"),
+            default=self.manager.vbv_buffer_ms,
+            minimum=40,
+            maximum=2000,
+        )
+        self.encoder_gop_seconds = _bounded_int(
+            self.init.get("h264_gop_seconds"),
+            default=self.manager.gop_seconds,
+            minimum=1,
+            maximum=5,
+        )
 
     @property
     def upstream_url(self) -> str:
@@ -119,6 +166,10 @@ class H264WebSocketSession:
                     "shared_webrtc_session_id": shared_session.session_id,
                     "codec": "h264",
                     "protocol": "websocket",
+                    "bitrate_kbps": self.encoder_bitrate_kbps,
+                    "crf": self.encoder_crf,
+                    "preset": self.encoder_preset,
+                    "gop_seconds": self.encoder_gop_seconds,
                 }
             )
             self.encoder_task = asyncio.create_task(
@@ -177,6 +228,10 @@ class H264WebSocketSession:
                         "session_id": self.session_id,
                         "codec": "h264",
                         "protocol": "websocket",
+                        "bitrate_kbps": self.encoder_bitrate_kbps,
+                        "crf": self.encoder_crf,
+                        "preset": self.encoder_preset,
+                        "gop_seconds": self.encoder_gop_seconds,
                     }
                 )
                 self.encoder_task = asyncio.create_task(
@@ -470,7 +525,7 @@ class H264WebSocketSession:
         fps = _bounded_int(self.init.get("fps"), default=24, minimum=1, maximum=60)
         self.media_fps = fps
         self.next_frame_deadline = None
-        gop = max(4, fps * self.manager.gop_seconds)
+        gop = max(4, fps * self.encoder_gop_seconds)
         command = [
             self.manager.ffmpeg_bin,
             "-hide_banner",
@@ -495,11 +550,11 @@ class H264WebSocketSession:
             "-c:v",
             "libx264",
             "-preset",
-            self.manager.preset,
+            self.encoder_preset,
             "-tune",
             "zerolatency",
             "-profile:v",
-            self.manager.profile,
+            self.encoder_profile,
             "-level:v",
             "3.1",
             "-vf",
@@ -525,11 +580,11 @@ class H264WebSocketSession:
             "-bf",
             "0",
             "-crf",
-            str(self.manager.crf),
+            str(self.encoder_crf),
             "-maxrate",
-            f"{self.manager.bitrate_kbps}k",
+            f"{self.encoder_bitrate_kbps}k",
             "-bufsize",
-            f"{max(128, self.manager.bitrate_kbps * self.manager.vbv_buffer_ms // 1000)}k",
+            f"{max(128, self.encoder_bitrate_kbps * self.encoder_vbv_buffer_ms // 1000)}k",
             "-movflags",
             "empty_moov+default_base_moof+frag_every_frame+omit_tfhd_offset",
             "-video_track_timescale",

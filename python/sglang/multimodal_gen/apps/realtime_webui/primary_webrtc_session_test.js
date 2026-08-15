@@ -516,6 +516,35 @@ const { PrimaryWebRTCSession } = require("./primary_webrtc_session.js");
   managedFrame.close();
   await managedSession.close("managed test complete");
   assert.equal(readerCanceled, true);
+
+  const peersBeforeSourceOnly = peers.length;
+  const sourceOnlyStates = [];
+  const sourceOnlyVideo = new FakeVideo();
+  const sourceOnlySession = new PrimaryWebRTCSession({
+    video: sourceOnlyVideo,
+    sourceOnly: true,
+    fetchImpl: fakeFetch,
+    WebSocketImpl: FakeWebSocket,
+    RTCPeerConnectionImpl: null,
+    mediaPollIntervalMs: 1,
+    startupTimeoutMs: 1000,
+    controlKeepaliveMs: 0,
+    onState: (state) => sourceOnlyStates.push(state),
+  });
+  await sourceOnlySession.connect({
+    type: "init",
+    fps: 24,
+    first_frame: "data:image/png;base64,AA==",
+  });
+  assert.equal(sourceOnlySession.connected, true);
+  assert.equal(sourceOnlyVideo.hidden, true);
+  assert.equal(peers.length, peersBeforeSourceOnly);
+  assert.deepEqual(sourceOnlyStates.slice(0, 2), ["connecting", "live"]);
+  const sourceOnlyCreate = requests.filter(({ url, options }) => (
+    url === "./api/webrtc/sessions" && options.method === "POST"
+  )).at(-1);
+  assert.equal(JSON.parse(sourceOnlyCreate.options.body).source_only, true);
+  await sourceOnlySession.close("source-only test complete");
   console.log("primary_webrtc_session_test: ok");
 })().catch((error) => {
   console.error(error);

@@ -196,6 +196,38 @@ def test_bridge_queue_is_bounded_and_keeps_newest_frames():
     asyncio.run(run())
 
 
+def test_source_only_bridge_fans_out_without_local_encoder_queue():
+    async def run():
+        session = _session()
+        session.source_only = True
+        subscriber = asyncio.Queue(maxsize=2)
+        session.comparison_frame_subscribers.add(subscriber)
+
+        await session._handle_frame_payload(
+            {
+                "type": "frame_batch",
+                "chunk_index": 4,
+                "event_id": 3,
+                "content_type": RAW_RGB_CONTENT_TYPE,
+                "width": 2,
+                "height": 2,
+                "channels": 3,
+                "num_frames": 1,
+            },
+            b"z" * 12,
+        )
+
+        assert session.frames == 1
+        assert session.state == "streaming"
+        assert session.frame_queue.empty()
+        shared_frame = subscriber.get_nowait()
+        subscriber.task_done()
+        assert shared_frame.event_id == 3
+        assert shared_frame.rgb == b"z" * 12
+
+    asyncio.run(run())
+
+
 def test_native_webrtc_session_preserves_playback_ack_opt_in():
     assert _playback_ack_enabled({"playback_ack_enabled": True}) is True
     assert _playback_ack_enabled({"playback_ack_enabled": False}) is False

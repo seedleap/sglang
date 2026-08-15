@@ -102,6 +102,7 @@
       endpoint = "./api/webrtc/sessions",
       codec = "h264",
       bitrateKbps = 3500,
+      sourceOnly = false,
       playoutDelayMs = 0,
       managedPlayback = false,
       fetchImpl = global.fetch?.bind(global),
@@ -128,6 +129,7 @@
       this.endpoint = endpoint.replace(/\/$/, "");
       this.codec = codec;
       this.bitrateKbps = bitrateKbps;
+      this.sourceOnly = Boolean(sourceOnly);
       this.playoutDelayMs = Math.min(4000, Math.max(0, Number(playoutDelayMs) || 0));
       this.managedPlayback = Boolean(managedPlayback && onFrame);
       this.fetchImpl = fetchImpl;
@@ -194,6 +196,13 @@
     }
 
     get connected() {
+      if (this.sourceOnly) {
+        return Boolean(
+          this.playable
+          && this.control
+          && this.control.readyState === CONTROL_OPEN,
+        );
+      }
       return Boolean(
         this.playable
         && this.control
@@ -209,7 +218,11 @@
 
     async connect(init) {
       await this.close("replacing WebRTC session", { emitState: false });
-      if (!this.fetchImpl || !this.WebSocketImpl || !this.RTCPeerConnectionImpl) {
+      if (
+        !this.fetchImpl
+        || !this.WebSocketImpl
+        || (!this.sourceOnly && !this.RTCPeerConnectionImpl)
+      ) {
         throw new Error("This browser does not support the required WebRTC APIs");
       }
       const generation = ++this.generation;
@@ -223,6 +236,7 @@
           body: JSON.stringify({
             codec: this.codec,
             bitrate_kbps: this.bitrateKbps,
+            source_only: this.sourceOnly,
             managed_playback: this._canManagePlayback(),
             init,
           }),
@@ -235,6 +249,17 @@
         this.mediaFps = Math.max(1, Number(init?.fps || 24));
         await this._openControl(generation);
         const status = await this._waitForPublisher(generation);
+        if (this.sourceOnly) {
+          this.playable = true;
+          this._setState("live", {
+            protocol: "source",
+            codec: "raw",
+            sourceOnly: true,
+            width: Number(status.width || 0),
+            height: Number(status.height || 0),
+          });
+          return info;
+        }
         this.whepUrl = String(status.whep_url || info.whep_url || "");
         await this._openWhep(this.whepUrl, generation);
         await this._waitForPlayable(generation);
@@ -484,7 +509,10 @@
         if (lastStatus.error || lastStatus.state === "error") {
           throw new Error(lastStatus.error || "WebRTC bridge failed");
         }
-        if (Number(lastStatus.frames || 0) > 0 && lastStatus.whep_url) return lastStatus;
+        if (
+          Number(lastStatus.frames || 0) > 0
+          && (this.sourceOnly || lastStatus.whep_url)
+        ) return lastStatus;
         await delay(this.mediaPollIntervalMs);
       }
       throw new Error(
