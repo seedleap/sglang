@@ -116,6 +116,9 @@
         lastDownlinkMs: 0,
         receiveMbps: 0,
         chunkTelemetry: null,
+        lastInputUplinkMs: 0,
+        controlRoundTripMs: 0,
+        serverClockOffsetMs: 0,
       };
       this.setState("idle");
     }
@@ -159,6 +162,9 @@
         lastDownlinkMs: 0,
         receiveMbps: 0,
         chunkTelemetry: null,
+        lastInputUplinkMs: 0,
+        controlRoundTripMs: 0,
+        serverClockOffsetMs: 0,
       };
       for (const frame of this.playback.clear?.() || []) closeFrame(frame);
       this.playback.reset?.({ targetFps: init.fps || 24 });
@@ -293,7 +299,23 @@
         error.retryAfterS = Number(message.retry_after_s || 0);
         throw error;
       }
-      if (message.type === "chunk_telemetry") {
+      if (message.type === "control_ack" && message.stage === "worker") {
+        const clientSentEpochMs = Number(message.client_sent_epoch_ms || 0);
+        const serverReceivedEpochMs = Number(message.server_received_epoch_ms || 0);
+        const serverSentEpochMs = Number(message.server_sent_epoch_ms || 0);
+        const clientReceivedEpochMs = Date.now();
+        if (clientSentEpochMs && serverReceivedEpochMs && serverSentEpochMs) {
+          const serverProcessingMs = Math.max(0, serverSentEpochMs - serverReceivedEpochMs);
+          const roundTripMs = Math.max(0, clientReceivedEpochMs - clientSentEpochMs);
+          this.stats.controlRoundTripMs = roundTripMs;
+          this.stats.lastInputUplinkMs = Math.max(0, (roundTripMs - serverProcessingMs) / 2);
+          this.stats.serverClockOffsetMs = (
+            (serverReceivedEpochMs - clientSentEpochMs)
+            + (serverSentEpochMs - clientReceivedEpochMs)
+          ) / 2;
+          this.emitStats();
+        }
+      } else if (message.type === "chunk_telemetry") {
         this.stats.chunkTelemetry = { ...message };
         this.emitStats();
       } else if (message.type === "frame_batch") {
@@ -348,7 +370,10 @@
       this.stats.lastReceivedFrameBatchIndex = frameBatchIndex;
       const serverSentEpochMs = Number(header.server_sent_epoch_ms || 0);
       if (serverSentEpochMs > 0) {
-        this.stats.lastDownlinkMs = Math.max(0, Date.now() - serverSentEpochMs);
+        this.stats.lastDownlinkMs = Math.max(
+          0,
+          Date.now() - serverSentEpochMs + Number(this.stats.serverClockOffsetMs || 0),
+        );
       }
       this.schedulePlaybackAck();
     }

@@ -882,6 +882,11 @@ if (PRIMARY_WEBRTC_ENABLED) {
     onPresentedFrame: (frame) => receiveNativeWebRTCFrame(frame),
     onStats: (stats) => {
       primaryWebRTCStats = { ...primaryWebRTCStats, ...stats };
+      if (Number.isFinite(Number(primaryWebRTCStats.bridgeClockOffsetMs))) {
+        primaryWebRTCSession.lastBridgeClockOffsetMs = Number(
+          primaryWebRTCStats.bridgeClockOffsetMs || 0,
+        );
+      }
       frames = Number(primaryWebRTCStats.framesDecoded || primaryWebRTCStats.sourceFrames || 0);
       bytes = Number(primaryWebRTCStats.bytesReceived || 0);
       updateStats();
@@ -1973,7 +1978,9 @@ function renderProtocolPerformance(key, stats = {}) {
   $(`${prefix}PerfData`).textContent = bytesReceived > 0
     ? `${(bytesReceived / 1048576).toFixed(1)} MB · ${receiveMbps.toFixed(1)} Mb/s`
     : "-";
-  $(`${prefix}PerfUplink`).textContent = performanceMs(telemetry.input_uplink_ms);
+  $(`${prefix}PerfUplink`).textContent = performanceMs(
+    stats.lastInputUplinkMs || telemetry.input_uplink_ms,
+  );
   $(`${prefix}PerfChunk`).textContent = performanceMs(
     telemetry.model_denoise_ms || telemetry.scheduler_forward_ms,
   );

@@ -278,7 +278,7 @@ class WebRTCBridgeSession:
             # independently paced encoder and could falsely mark an early
             # frame as the end of the chunk in the browser.
             return
-        if message_type == "chunk_telemetry":
+        if message_type in {"chunk_telemetry", "control_ack"}:
             await self._broadcast(message)
             return
         if message_type not in {"frame_batch", "frame_batch_header"}:
@@ -897,10 +897,13 @@ async def _control_session(request: web.Request) -> web.WebSocketResponse:
                 await websocket.send_json(
                     {
                         "type": "control_ack",
+                        "stage": "bridge",
                         "kind": str(envelope.get("kind") or ""),
                         "event_id": int(envelope.get("event_id") or 0),
                         "client_sent_epoch_ms": envelope.get("client_sent_epoch_ms"),
                         "bridge_received_epoch_ms": round(received_epoch_ms, 3),
+                        "server_received_epoch_ms": round(received_epoch_ms, 3),
+                        "server_sent_epoch_ms": round(time.time() * 1000, 3),
                         "bridge_forward_ms": round(
                             (time.perf_counter() - forward_started) * 1000, 3
                         ),

@@ -1407,6 +1407,7 @@ async def _listen_events(ws: WebSocket, session: GenerateSession):
                 continue
             if session.adapter is None:
                 raise ValueError("realtime adapter is not initialized")
+            server_received_epoch_ms = time.time() * 1000
             log_realtime_trace(
                 logger,
                 session,
@@ -1421,11 +1422,30 @@ async def _listen_events(ws: WebSocket, session: GenerateSession):
                 session.record_input_event(
                     realtime_event.event_id,
                     realtime_event.client_sent_epoch_ms,
-                    time.time() * 1000,
+                    server_received_epoch_ms,
                 )
             event_log = session.adapter.ingest_event(session, realtime_event)
             session.mark_event_version(realtime_event.kind)
             session.mark_client_activity()
+            if realtime_event.kind in {"camera_actions", "prompt", "scene_cut"}:
+                server_sent_epoch_ms = time.time() * 1000
+                send_bytes = getattr(ws, "send_bytes", None)
+                if send_bytes is not None:
+                    await send_bytes(
+                        msgspec.msgpack.encode(
+                            {
+                                "type": "control_ack",
+                                "stage": "worker",
+                                "kind": realtime_event.kind,
+                                "event_id": realtime_event.event_id,
+                                "client_sent_epoch_ms": (
+                                    realtime_event.client_sent_epoch_ms
+                                ),
+                                "server_received_epoch_ms": server_received_epoch_ms,
+                                "server_sent_epoch_ms": server_sent_epoch_ms,
+                            }
+                        )
+                    )
             _schedule_queued_control_refresh(
                 session, realtime_event.kind, realtime_event.event_id
             )

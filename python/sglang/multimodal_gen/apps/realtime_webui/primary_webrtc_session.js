@@ -169,6 +169,7 @@
       this.lastQueuedMediaEventId = 0;
       this.lastProcessedMediaEventId = 0;
       this.lastRtcSample = null;
+      this.lastBridgeClockOffsetMs = 0;
       this.receiver = null;
       this.trackReader = null;
       this.trackPump = null;
@@ -292,6 +293,7 @@
       this.mediaEpochOffsetMs = null;
       this.processedFrames = 0;
       this.controlSentEpochByEvent.clear();
+      this.lastBridgeClockOffsetMs = 0;
       this.lastQueuedMediaEventId = 0;
       this.lastProcessedMediaEventId = 0;
       this._stopStats();
@@ -346,15 +348,35 @@
             this.onError(error);
           } else if (event.type === "control_ack") {
             const clientSentEpochMs = Number(event.client_sent_epoch_ms || 0);
+            const serverReceivedEpochMs = Number(
+              event.server_received_epoch_ms || event.bridge_received_epoch_ms || 0,
+            );
+            const serverSentEpochMs = Number(event.server_sent_epoch_ms || 0);
+            const clientReceivedEpochMs = Date.now();
+            const serverProcessingMs = serverReceivedEpochMs && serverSentEpochMs
+              ? Math.max(0, serverSentEpochMs - serverReceivedEpochMs)
+              : 0;
+            const roundTripMs = clientSentEpochMs
+              ? Math.max(0, clientReceivedEpochMs - clientSentEpochMs)
+              : 0;
+            const timing = clientSentEpochMs && serverReceivedEpochMs && serverSentEpochMs
+              ? {
+                  lastInputUplinkMs: Math.max(0, (roundTripMs - serverProcessingMs) / 2),
+                  bridgeClockOffsetMs: (
+                    (serverReceivedEpochMs - clientSentEpochMs)
+                    + (serverSentEpochMs - clientReceivedEpochMs)
+                  ) / 2,
+                }
+              : {};
             this.onStats({
               lastControlEventId: Number(event.event_id || 0),
               lastControlKind: String(event.kind || ""),
-              controlBridgeRoundTripMs: clientSentEpochMs
-                ? Math.max(0, Date.now() - clientSentEpochMs)
-                : 0,
+              controlBridgeRoundTripMs: roundTripMs,
               controlBridgeForwardMs: Number(event.bridge_forward_ms || 0),
               controlBridgeReceivedEpochMs: Number(event.bridge_received_epoch_ms || 0),
               controlMinimumEventId: Number(event.minimum_event_id || 0),
+              controlAckStage: String(event.stage || "bridge"),
+              ...timing,
             });
           } else if (event.type === "media_batch") {
             this._queueMediaBatch(event);
@@ -910,7 +932,8 @@
           this.onStats({
             lastPresentedTransportMs: Math.max(
               0,
-              Date.now() - metadata.bridgeEncodedEpochMs,
+              Date.now() - metadata.bridgeEncodedEpochMs
+                + Number(this.lastBridgeClockOffsetMs || 0),
             ),
             lastPresentedAfterMetadataMs: metadata.metadataReceivedAtMs > 0
               ? Math.max(0, presentedAtMs - metadata.metadataReceivedAtMs)
