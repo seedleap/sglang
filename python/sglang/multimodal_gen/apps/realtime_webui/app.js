@@ -7093,4 +7093,8 @@ window.__sglangProtocolComparisonDebug = () => ({
     protocol: "WebP/WebSocket",
     ...lingbot2Session.snapshot(),
   },
+  h264WebSocket: {
+    protocol: "H.264/WebSocket",
+    ...h264WebSocketStats,
+  },
 });

@@ -78,6 +78,7 @@ class H264WebSocketSession:
     pending_cutover_event_id: int = 0
     dropped_frames: int = 0
     latency_dropped_frames: int = 0
+    repeated_frames: int = 0
     shared_metadata_queue: asyncio.Queue[dict[str, Any]] = field(
         default_factory=lambda: asyncio.Queue(maxsize=128)
     )
@@ -358,9 +359,22 @@ class H264WebSocketSession:
             self.frame_queue.put_nowait(queued)
 
     async def _encode_frames(self) -> None:
+        last_frame: _QueuedFrame | None = None
         while True:
-            frame = await self.frame_queue.get()
-            try:
+            await self._pace_frame()
+            from_queue = False
+            while True:
+                try:
+                    frame = self.frame_queue.get_nowait()
+                    from_queue = True
+                except asyncio.QueueEmpty:
+                    if last_frame is None:
+                        frame = await self.frame_queue.get()
+                        from_queue = True
+                    else:
+                        frame = last_frame
+                        self.repeated_frames += 1
+                    break
                 queue_age_ms = max(
                     0.0, time.time() * 1000 - frame.bridge_received_epoch_ms
                 )
@@ -370,8 +384,11 @@ class H264WebSocketSession:
                 ):
                     self.dropped_frames += 1
                     self.latency_dropped_frames += 1
+                    self.frame_queue.task_done()
+                    from_queue = False
                     continue
-                await self._pace_frame()
+                break
+            try:
                 if self.minimum_event_id and frame.event_id < self.minimum_event_id:
                     self.dropped_frames += 1
                     continue
@@ -387,38 +404,57 @@ class H264WebSocketSession:
                 if self.ffmpeg is None or self.ffmpeg.stdin is None:
                     raise RuntimeError("H.264 encoder is unavailable")
                 encode_started_epoch_ms = time.time() * 1000
-                # Publish metadata before making the frame available to FFmpeg.
-                # The stdout pump may otherwise win the scheduling race and the
-                # browser can present a frame before its event/chunk identity is
-                # known, shifting every latency sample by one frame.
-                await self._send_json(
-                    {
-                        "type": "media_batch",
-                        "chunk_index": frame.chunk_index,
-                        "event_id": frame.event_id,
-                        "first_frame_index": self.frames,
-                        "num_frames": 1,
-                        "frame_batch_index": frame.frame_batch_index,
-                        "num_frame_batches": frame.num_frame_batches,
-                        "is_final_frame_batch": frame.is_final_frame_batch,
-                        "server_sent_epoch_ms": frame.server_sent_epoch_ms,
-                        "bridge_received_epoch_ms": frame.bridge_received_epoch_ms,
-                        "bridge_encode_started_epoch_ms": encode_started_epoch_ms,
-                        "bridge_encoded_epoch_ms": encode_started_epoch_ms,
-                        "bridge_queue_ms": max(
-                            0.0,
-                            encode_started_epoch_ms - frame.bridge_received_epoch_ms,
-                        ),
-                        "bridge_encoder_feed_ms": 0.0,
-                        "dropped_frames": self.dropped_frames,
-                        "latency_dropped_frames": self.latency_dropped_frames,
-                    }
-                )
-                self.ffmpeg.stdin.write(frame.rgb)
-                await self.ffmpeg.stdin.drain()
+                repeated_frame = not from_queue
+                async with self.send_lock:
+                    self.ffmpeg.stdin.write(frame.rgb)
+                    await self.ffmpeg.stdin.drain()
+                    encoded_epoch_ms = time.time() * 1000
+                    # The stdout pump uses the same lock, so metadata is always
+                    # delivered before the matching fMP4 fragment while the
+                    # measured encoder-feed duration remains real.
+                    await self.websocket.send_json(
+                        {
+                            "type": "media_batch",
+                            "chunk_index": frame.chunk_index,
+                            "event_id": frame.event_id,
+                            "first_frame_index": self.frames,
+                            "num_frames": 1,
+                            "frame_batch_index": frame.frame_batch_index,
+                            "num_frame_batches": frame.num_frame_batches,
+                            "is_final_frame_batch": frame.is_final_frame_batch,
+                            "server_sent_epoch_ms": (
+                                encode_started_epoch_ms
+                                if repeated_frame
+                                else frame.server_sent_epoch_ms
+                            ),
+                            "bridge_received_epoch_ms": (
+                                encode_started_epoch_ms
+                                if repeated_frame
+                                else frame.bridge_received_epoch_ms
+                            ),
+                            "bridge_encode_started_epoch_ms": encode_started_epoch_ms,
+                            "bridge_encoded_epoch_ms": encoded_epoch_ms,
+                            "bridge_queue_ms": max(
+                                0.0,
+                                0.0
+                                if repeated_frame
+                                else encode_started_epoch_ms
+                                - frame.bridge_received_epoch_ms,
+                            ),
+                            "bridge_encoder_feed_ms": max(
+                                0.0, encoded_epoch_ms - encode_started_epoch_ms
+                            ),
+                            "dropped_frames": self.dropped_frames,
+                            "latency_dropped_frames": self.latency_dropped_frames,
+                            "repeated_frame": repeated_frame,
+                            "repeated_frames": self.repeated_frames,
+                        }
+                    )
                 self.frames += 1
+                last_frame = frame
             finally:
-                self.frame_queue.task_done()
+                if from_queue:
+                    self.frame_queue.task_done()
 
     async def _pace_frame(self) -> None:
         interval = 1 / max(1, self.media_fps)

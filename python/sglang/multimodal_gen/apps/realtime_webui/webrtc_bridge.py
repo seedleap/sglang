@@ -170,6 +170,7 @@ class WebRTCBridgeSession:
     queue_overflow_dropped_frames: int = 0
     control_dropped_frames: int = 0
     latency_dropped_frames: int = 0
+    repeated_frames: int = 0
     comparison_frame_subscribers: set[asyncio.Queue[_QueuedFrame]] = field(
         default_factory=set
     )
@@ -397,16 +398,22 @@ class WebRTCBridgeSession:
         self.frame_queue.put_nowait(frame)
 
     async def _encode_frames(self) -> None:
+        last_frame: _QueuedFrame | None = None
         while True:
-            frame = await self.frame_queue.get()
-            try:
-                # Raw model output arrives a latent chunk at a time while RTP
-                # must be presented at frame cadence.  If the encoder falls
-                # behind, retaining the whole burst only converts transient
-                # congestion into seconds of interaction latency.  Shed old
-                # same-timeline frames until the queue is close to the live
-                # edge; the next IDR and the remaining frames keep playback
-                # decodable and smooth.
+            await self._pace_frame()
+            from_queue = False
+            while True:
+                try:
+                    frame = self.frame_queue.get_nowait()
+                    from_queue = True
+                except asyncio.QueueEmpty:
+                    if last_frame is None:
+                        frame = await self.frame_queue.get()
+                        from_queue = True
+                    else:
+                        frame = last_frame
+                        self.repeated_frames += 1
+                    break
                 queue_age_ms = max(
                     0.0,
                     time.time() * 1000 - frame.bridge_received_epoch_ms,
@@ -418,11 +425,11 @@ class WebRTCBridgeSession:
                     self.dropped_frames += 1
                     self.dropped_source_bytes += len(frame.rgb)
                     self.latency_dropped_frames += 1
+                    self.frame_queue.task_done()
+                    from_queue = False
                     continue
-                # Check after pacing as well as at enqueue time. A control event
-                # can arrive while this frame is waiting for its presentation
-                # deadline, and that stale frame must not enter the encoder.
-                await self._pace_frame()
+                break
+            try:
                 if self.minimum_event_id and frame.event_id < self.minimum_event_id:
                     self.dropped_frames += 1
                     self.dropped_source_bytes += len(frame.rgb)
@@ -436,6 +443,7 @@ class WebRTCBridgeSession:
                 self.ffmpeg.stdin.write(frame.rgb)
                 await self.ffmpeg.stdin.drain()
                 encoded_epoch_ms = time.time() * 1000
+                repeated_frame = not from_queue
                 media_batch = {
                     "type": "media_batch",
                     "chunk_index": frame.chunk_index,
@@ -445,23 +453,38 @@ class WebRTCBridgeSession:
                     "frame_batch_index": frame.frame_batch_index,
                     "num_frame_batches": frame.num_frame_batches,
                     "is_final_frame_batch": frame.is_final_frame_batch,
-                    "server_sent_epoch_ms": frame.server_sent_epoch_ms,
-                    "bridge_received_epoch_ms": frame.bridge_received_epoch_ms,
+                    "server_sent_epoch_ms": (
+                        encode_started_epoch_ms
+                        if repeated_frame
+                        else frame.server_sent_epoch_ms
+                    ),
+                    "bridge_received_epoch_ms": (
+                        encode_started_epoch_ms
+                        if repeated_frame
+                        else frame.bridge_received_epoch_ms
+                    ),
                     "bridge_encode_started_epoch_ms": encode_started_epoch_ms,
                     "bridge_encoded_epoch_ms": encoded_epoch_ms,
                     "bridge_queue_ms": max(
-                        0.0, encode_started_epoch_ms - frame.bridge_received_epoch_ms
+                        0.0,
+                        0.0
+                        if repeated_frame
+                        else encode_started_epoch_ms
+                        - frame.bridge_received_epoch_ms,
                     ),
                     "bridge_encoder_feed_ms": max(
                         0.0, encoded_epoch_ms - encode_started_epoch_ms
                     ),
+                    "repeated_frame": repeated_frame,
                 }
                 self.media_batch_history.append(media_batch)
                 await self._broadcast(media_batch)
                 self.frames += 1
                 self.state = "streaming"
+                last_frame = frame
             finally:
-                self.frame_queue.task_done()
+                if from_queue:
+                    self.frame_queue.task_done()
 
     def _discard_queued_before(self, event_id: int) -> int:
         retained: list[_QueuedFrame] = []
@@ -717,6 +740,7 @@ class WebRTCBridgeSession:
             "queue_overflow_dropped_frames": self.queue_overflow_dropped_frames,
             "control_dropped_frames": self.control_dropped_frames,
             "latency_dropped_frames": self.latency_dropped_frames,
+            "repeated_frames": self.repeated_frames,
             "max_frame_age_ms": self.manager.bridge_max_frame_age_ms,
             "live_edge_frames": self.manager.bridge_live_edge_frames,
             "last_media_event_id": self.last_media_event_id,
