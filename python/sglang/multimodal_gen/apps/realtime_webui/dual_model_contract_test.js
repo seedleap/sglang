@@ -102,11 +102,11 @@ assert.match(
 );
 assert.match(html, /playback_controller\.js\?v=realtime-playback-v34/);
 assert.match(html, /model_session\.js\?v=dual-model-v10/);
-assert.match(html, /dual_model_controller\.js\?v=dual-model-v6/);
+assert.match(html, /dual_model_controller\.js\?v=dual-model-v7/);
 assert.match(html, /prompt_rewrite_controller\.js\?v=prompt-rewrite-v2/);
 assert.match(html, /styles\.css\?v=world-studio-v8/);
 assert.match(html, /primary_webrtc_session\.js\?v=primary-webrtc-v7/);
-assert.match(html, /app\.js\?v=world-studio-v31/);
+assert.match(html, /app\.js\?v=world-studio-v32/);
 assert.match(
   css,
   /#minwmWebrtcViewport\[hidden\]\s*\{\s*display:\s*none\s*!important;/,
