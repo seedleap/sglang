@@ -163,7 +163,7 @@ spec:
             - {name: WEBRTC_H264_VBV_BUFFER_MS, value: "125"}
             - {name: WEBRTC_H264_GOP_SECONDS, value: "1"}
             - {name: WEBRTC_RAW_CHANNEL_ORDER, value: gbr}
-            - {name: H264_WS_BITRATE_KBPS, value: "10000"}
+            - {name: H264_WS_BITRATE_KBPS, value: "8000"}
             - {name: H264_WS_MAX_QUEUED_FRAMES, value: "24"}
             - {name: H264_WS_MAX_FRAME_AGE_MS, value: "250"}
             - {name: H264_WS_LIVE_EDGE_FRAMES, value: "6"}
@@ -172,7 +172,7 @@ spec:
             # wire correction a second time in the fMP4 encoder.
             - {name: H264_WS_RAW_CHANNEL_ORDER, value: rgb}
             - name: REALTIME_UI_CONFIG_JSON
-              value: '{"generationModes":["i2v"],"defaultGenerationMode":"i2v","availableModels":["minwm","lingbot2","happyoyster"],"modelSlotCount":3,"lockModelSlots":true,"singleExperience":true,"sessionMaxLifetimeSeconds":600,"protocolComparison":true,"h264WebSocketComparison":true,"primaryTransport":"webrtc-h264","webrtcManagedPlayback":false,"playbackAckEnabled":true,"realtimeOutputPacing":true,"webrtcBitrateKbps":10000,"webrtcPlayoutDelayMs":260,"h264WebSocketLiveEdgeTargetMs":80,"h264WebSocketSeekThresholdMs":260,"controlTransitionFlushDelayMs":0,"targetFps":24,"sinkSize":9,"windowFrames":18,"dualModels":{"minwm":{"label":"Zing · WebRTC","transportLabel":"H.264 · WebRTC · 10 Mbps","size":"1280x704","targetFps":24,"sinkSize":9,"windowFrames":18,"playbackMode":"smooth_timeline"},"lingbot2":{"label":"Zing · WebSocket WebP","transportLabel":"WebP · WebSocket","size":"1280x704","targetFps":24,"sinkSize":9,"windowFrames":18,"transportFormat":"webp","transportQuality":55,"playbackMode":"smooth_timeline"},"happyoyster":{"label":"Zing · WebSocket H.264","transportLabel":"H.264 · WebSocket · 10 Mbps","size":"1280x704","targetFps":24,"sinkSize":9,"windowFrames":18,"playbackMode":"smooth_timeline"}}}'
+              value: '{"generationModes":["i2v"],"defaultGenerationMode":"i2v","availableModels":["minwm","lingbot2","happyoyster"],"modelSlotCount":3,"lockModelSlots":true,"singleExperience":true,"sessionMaxLifetimeSeconds":600,"protocolComparison":true,"h264WebSocketComparison":true,"primaryTransport":"webrtc-h264","webrtcManagedPlayback":false,"playbackAckEnabled":true,"realtimeOutputPacing":true,"webrtcBitrateKbps":8000,"webrtcPlayoutDelayMs":320,"h264WebSocketLiveEdgeTargetMs":80,"h264WebSocketSeekThresholdMs":260,"controlTransitionFlushDelayMs":0,"targetFps":24,"sinkSize":9,"windowFrames":18,"dualModels":{"minwm":{"label":"Zing · WebRTC","transportLabel":"H.264 · WebRTC · 8 Mbps","size":"1280x704","targetFps":24,"sinkSize":9,"windowFrames":18,"playbackMode":"smooth_timeline"},"lingbot2":{"label":"Zing · WebSocket WebP","transportLabel":"WebP · WebSocket","size":"1280x704","targetFps":24,"sinkSize":9,"windowFrames":18,"transportFormat":"webp","transportQuality":55,"playbackMode":"smooth_timeline"},"happyoyster":{"label":"Zing · WebSocket H.264","transportLabel":"H.264 · WebSocket · 8 Mbps","size":"1280x704","targetFps":24,"sinkSize":9,"windowFrames":18,"playbackMode":"smooth_timeline"}}}'
           ports:
             - {name: http, containerPort: 18080}
           startupProbe:
