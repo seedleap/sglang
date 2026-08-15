@@ -26,6 +26,7 @@ from aiohttp import WSMsgType, web
 
 from webrtc_bridge import (
     ALLOWED_CONTROL_KINDS,
+    BRIDGE_MANAGER,
     ENCODED_IMAGE_TYPES,
     RAW_RGB_CONTENT_TYPE,
     _bounded_int,
@@ -75,6 +76,9 @@ class H264WebSocketSession:
     pending_cutover_event_id: int = 0
     dropped_frames: int = 0
     latency_dropped_frames: int = 0
+    shared_metadata_queue: asyncio.Queue[dict[str, Any]] = field(
+        default_factory=lambda: asyncio.Queue(maxsize=128)
+    )
     frame_queue: asyncio.Queue[_QueuedFrame] = field(init=False)
 
     def __post_init__(self) -> None:
@@ -89,6 +93,70 @@ class H264WebSocketSession:
         return urlunsplit(parsed._replace(query=urlencode(query)))
 
     async def run(self) -> None:
+        shared_session_id = str(self.init.get("shared_webrtc_session_id") or "")
+        if shared_session_id:
+            manager = self.manager.app.get(BRIDGE_MANAGER)
+            shared_session = manager.sessions.get(shared_session_id) if manager else None
+            if shared_session is None:
+                raise RuntimeError("shared WebRTC source session is unavailable")
+            await self._run_shared(shared_session)
+            return
+        await self._run_upstream()
+
+    async def _run_shared(self, shared_session: Any) -> None:
+        tasks: list[asyncio.Task] = []
+        shared_session.comparison_frame_subscribers.add(self.frame_queue)
+        shared_session.comparison_metadata_subscribers.add(self.shared_metadata_queue)
+        try:
+            await self._send_json(
+                {
+                    "type": "status",
+                    "state": "connected",
+                    "session_id": self.session_id,
+                    "shared_webrtc_session_id": shared_session.session_id,
+                    "codec": "h264",
+                    "protocol": "websocket",
+                }
+            )
+            self.encoder_task = asyncio.create_task(
+                self._encode_frames(), name=f"h264ws-encoder-{self.session_id}"
+            )
+            tasks = [
+                self.encoder_task,
+                asyncio.create_task(
+                    self._receive_controls(), name=f"h264ws-control-{self.session_id}"
+                ),
+                asyncio.create_task(
+                    self._forward_shared_metadata(),
+                    name=f"h264ws-metadata-{self.session_id}",
+                ),
+            ]
+            done, pending = await asyncio.wait(
+                tasks, return_when=asyncio.FIRST_COMPLETED
+            )
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+            for task in done:
+                task.result()
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            LOGGER.exception("Shared H.264 WebSocket session %s failed", self.session_id)
+            if not self.websocket.closed:
+                await self._send_json({"type": "error", "message": str(error)})
+        finally:
+            shared_session.comparison_frame_subscribers.discard(self.frame_queue)
+            shared_session.comparison_metadata_subscribers.discard(
+                self.shared_metadata_queue
+            )
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            await self._stop_ffmpeg()
+
+    async def _run_upstream(self) -> None:
         client = self.manager.app[self.manager.upstream_session_key]
         tasks: list[asyncio.Task] = []
         try:
@@ -142,6 +210,14 @@ class H264WebSocketSession:
             await asyncio.gather(*tasks, return_exceptions=True)
             await self._stop_ffmpeg()
 
+    async def _forward_shared_metadata(self) -> None:
+        while True:
+            payload = await self.shared_metadata_queue.get()
+            try:
+                await self._send_json(payload)
+            finally:
+                self.shared_metadata_queue.task_done()
+
     async def _receive_upstream(self) -> None:
         async for message in self.upstream:
             if message.type == WSMsgType.BINARY:
@@ -179,7 +255,8 @@ class H264WebSocketSession:
                 self.pending_cutover_event_id = max(
                     self.pending_cutover_event_id, event_id
                 )
-            await self.upstream.send_bytes(msgspec.msgpack.encode(envelope))
+            if self.upstream is not None and not self.upstream.closed:
+                await self.upstream.send_bytes(msgspec.msgpack.encode(envelope))
             await self._send_json(
                 {
                     "type": "control_ack",

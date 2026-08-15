@@ -1062,7 +1062,10 @@ const dualModelController = new DualModelController({
         ? "H.264 WebSocket 仅支持 I2V"
         : "仅支持 I2V Adventure",
       transformInit: H264_WEBSOCKET_COMPARISON_ENABLED
-        ? (init) => ({ ...init })
+        ? (init) => ({
+            ...init,
+            shared_webrtc_session_id: primaryWebRTCSession?.sessionId || "",
+          })
         : buildHappyOysterInit,
       wsUrl: "",
     },

@@ -168,6 +168,12 @@ class WebRTCBridgeSession:
     queue_overflow_dropped_frames: int = 0
     control_dropped_frames: int = 0
     latency_dropped_frames: int = 0
+    comparison_frame_subscribers: set[asyncio.Queue[_QueuedFrame]] = field(
+        default_factory=set
+    )
+    comparison_metadata_subscribers: set[asyncio.Queue[dict[str, Any]]] = field(
+        default_factory=set
+    )
     frame_queue: asyncio.Queue[_QueuedFrame] = field(init=False)
 
     def __post_init__(self) -> None:
@@ -367,6 +373,17 @@ class WebRTCBridgeSession:
             self.dropped_source_bytes += len(frame.rgb)
             self.control_dropped_frames += 1
             return
+        closed_subscribers: list[asyncio.Queue[_QueuedFrame]] = []
+        for subscriber in self.comparison_frame_subscribers:
+            try:
+                if subscriber.full():
+                    subscriber.get_nowait()
+                    subscriber.task_done()
+                subscriber.put_nowait(frame)
+            except Exception:
+                closed_subscribers.append(subscriber)
+        for subscriber in closed_subscribers:
+            self.comparison_frame_subscribers.discard(subscriber)
         if self.frame_queue.full():
             dropped = self.frame_queue.get_nowait()
             self.frame_queue.task_done()
@@ -596,6 +613,18 @@ class WebRTCBridgeSession:
         await upstream.send_bytes(msgspec.msgpack.encode(envelope))
 
     async def _broadcast(self, payload: dict[str, Any]) -> None:
+        if payload.get("type") in {"chunk_telemetry", "control_ack"}:
+            closed_subscribers: list[asyncio.Queue[dict[str, Any]]] = []
+            for subscriber in self.comparison_metadata_subscribers:
+                try:
+                    if subscriber.full():
+                        subscriber.get_nowait()
+                        subscriber.task_done()
+                    subscriber.put_nowait(dict(payload))
+                except Exception:
+                    closed_subscribers.append(subscriber)
+            for subscriber in closed_subscribers:
+                self.comparison_metadata_subscribers.discard(subscriber)
         closed: list[web.WebSocketResponse] = []
         for client in self.control_clients:
             try:
@@ -653,6 +682,8 @@ class WebRTCBridgeSession:
         for client in list(self.control_clients):
             await client.close(code=1000, message=b"session stopped")
         self.control_clients.clear()
+        self.comparison_frame_subscribers.clear()
+        self.comparison_metadata_subscribers.clear()
 
     def status(self) -> dict[str, Any]:
         elapsed = max(0.001, time.time() - self.created_at)

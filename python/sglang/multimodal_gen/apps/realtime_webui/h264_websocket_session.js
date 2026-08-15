@@ -95,6 +95,7 @@
       this.frameCallback = 0;
       this.lastRenderedChunk = null;
       this.traceId = "";
+      this.mediaFps = 24;
       this.playbackAckEnabled = false;
       this.lastStats = {};
       this.handlePlayable = () => this._markPlayable();
@@ -127,6 +128,7 @@
       this.expectedClose = false;
       this.playable = false;
       this.traceId = String(init.trace_id || "");
+      this.mediaFps = Math.max(1, Number(init.fps || 24));
       this.playbackAckEnabled = init.playback_ack_enabled === true;
       this.appendQueue = [];
       this.appendQueueBytes = 0;
@@ -332,6 +334,7 @@
     _handleMetadata(event) {
       if (event.type === "media_batch") {
         this.mediaBatches.push({
+          sourceFrameIndex: Number(event.first_frame_index || 0),
           chunkIndex: Number(event.chunk_index || 0),
           eventId: Number(event.event_id || 0),
           frameBatchIndex: Number(event.frame_batch_index || 0),
@@ -368,8 +371,13 @@
             + (serverSentEpochMs - clientReceivedEpochMs)
           ) / 2;
         }
+        const controlKind = String(event.kind || "");
+        const isInteractiveControl = Number(event.event_id || 0) > 0
+          && ["camera_actions", "prompt", "scene_cut"].includes(controlKind);
         this._emitStats({
-          lastInputUplinkMs: Math.max(0, (roundTripMs - serverProcessingMs) / 2),
+          ...(clientSentEpochMs && isInteractiveControl
+            ? { lastInputUplinkMs: Math.max(0, (roundTripMs - serverProcessingMs) / 2) }
+            : {}),
           controlBridgeRoundTripMs: roundTripMs,
           bridgeClockOffsetMs: this.lastBridgeClockOffsetMs,
         });
@@ -381,7 +389,18 @@
       const generation = this.generation;
       const handle = (now, presentation = {}) => {
         if (generation !== this.generation || this.expectedClose) return;
-        const metadata = this.mediaBatches.shift() || {};
+        const mediaTime = Number(presentation.mediaTime);
+        const targetFrameIndex = Number.isFinite(mediaTime)
+          ? Math.max(0, Math.round(mediaTime * this.mediaFps))
+          : this.presentedSequence;
+        while (
+          this.mediaBatches.length > 1
+          && Number(this.mediaBatches[1].sourceFrameIndex || 0) <= targetFrameIndex
+        ) {
+          this.mediaBatches.shift();
+        }
+        const metadata = this.mediaBatches[0] || {};
+        this.presentedSequence = targetFrameIndex + 1;
         const eventId = Number(metadata.eventId || 0);
         const isFirstForEvent = eventId > this.lastPresentedEventId;
         if (isFirstForEvent) this.lastPresentedEventId = eventId;

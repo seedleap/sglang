@@ -153,7 +153,7 @@ spec:
             - {name: WEBRTC_MEDIA_RTSP_BASE, value: rtsp://zing-webrtc-mediamtx:8554}
             - {name: WEBRTC_MEDIA_HTTP_BASE, value: http://REPLACE_WITH_MEDIA_PUBLIC_HOST}
             - {name: WEBRTC_BRIDGE_MAX_SESSIONS, value: "8"}
-            - {name: WEBRTC_BRIDGE_MAX_QUEUED_FRAMES, value: "12"}
+            - {name: WEBRTC_BRIDGE_MAX_QUEUED_FRAMES, value: "24"}
             - {name: WEBRTC_BRIDGE_MAX_FRAME_AGE_MS, value: "250"}
             - {name: WEBRTC_BRIDGE_LIVE_EDGE_FRAMES, value: "6"}
             - {name: WEBRTC_BRIDGE_SESSION_TTL_S, value: "600"}
@@ -164,7 +164,7 @@ spec:
             - {name: WEBRTC_H264_GOP_SECONDS, value: "1"}
             - {name: WEBRTC_RAW_CHANNEL_ORDER, value: gbr}
             - {name: H264_WS_BITRATE_KBPS, value: "10000"}
-            - {name: H264_WS_MAX_QUEUED_FRAMES, value: "12"}
+            - {name: H264_WS_MAX_QUEUED_FRAMES, value: "24"}
             - {name: H264_WS_MAX_FRAME_AGE_MS, value: "250"}
             - {name: H264_WS_LIVE_EDGE_FRAMES, value: "6"}
             - name: REALTIME_UI_CONFIG_JSON
