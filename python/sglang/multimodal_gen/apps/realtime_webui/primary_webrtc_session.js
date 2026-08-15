@@ -359,18 +359,28 @@
             const roundTripMs = clientSentEpochMs
               ? Math.max(0, clientReceivedEpochMs - clientSentEpochMs)
               : 0;
+            const controlKind = String(event.kind || "");
+            const isInteractiveControl = Number(event.event_id || 0) > 0
+              && ["camera_actions", "prompt", "scene_cut"].includes(controlKind);
             const timing = clientSentEpochMs && serverReceivedEpochMs && serverSentEpochMs
               ? {
-                  lastInputUplinkMs: Math.max(0, (roundTripMs - serverProcessingMs) / 2),
                   bridgeClockOffsetMs: (
                     (serverReceivedEpochMs - clientSentEpochMs)
                     + (serverSentEpochMs - clientReceivedEpochMs)
                   ) / 2,
+                  ...(isInteractiveControl
+                    ? {
+                        lastInputUplinkMs: Math.max(
+                          0,
+                          (roundTripMs - serverProcessingMs) / 2,
+                        ),
+                      }
+                    : {}),
                 }
               : {};
             this.onStats({
               lastControlEventId: Number(event.event_id || 0),
-              lastControlKind: String(event.kind || ""),
+              lastControlKind: controlKind,
               controlBridgeRoundTripMs: roundTripMs,
               controlBridgeForwardMs: Number(event.bridge_forward_ms || 0),
               controlBridgeReceivedEpochMs: Number(event.bridge_received_epoch_ms || 0),
