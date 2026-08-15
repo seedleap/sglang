@@ -782,6 +782,7 @@ const lingbot2Session = new RealtimeModelSession({
     root.dataset.chunk = stats.lastChunk ?? "";
     root.dataset.frames = String(stats.frames || 0);
     renderModelTelemetry("lingbot2", stats);
+    renderProtocolPerformance("lingbot2", stats);
     markModelEventApplied("lingbot2", stats.lastAppliedEventId);
   },
   onFrame: () => markSessionPlayable("lingbot2"),
@@ -884,6 +885,7 @@ if (PRIMARY_WEBRTC_ENABLED) {
       frames = Number(primaryWebRTCStats.framesDecoded || primaryWebRTCStats.sourceFrames || 0);
       bytes = Number(primaryWebRTCStats.bytesReceived || 0);
       updateStats();
+      renderProtocolPerformance("minwm", primaryWebRTCStats);
     },
     onError: (error) => {
       setModelConnectionState("minwm", "error");
@@ -1941,6 +1943,41 @@ function resetModelTelemetry(key) {
     bufferMs: 0,
     queueFrames: 0,
   });
+  renderProtocolPerformance(key, {});
+}
+
+function performanceMs(value) {
+  const number = Number(value || 0);
+  return number > 0 ? `${number.toFixed(number < 10 ? 1 : 0)} ms` : "-";
+}
+
+function renderProtocolPerformance(key, stats = {}) {
+  const prefix = key === "lingbot2" ? "lingbot2" : "minwm";
+  const telemetry = stats.chunkTelemetry || {};
+  const vaeMs = Number(telemetry.vae_queue_wait_ms || 0)
+    + Number(telemetry.vae_decode_ms || 0);
+  const encodeMs = Number(telemetry.vae_encode_ms || 0)
+    + Number(telemetry.transport_encode_ms || 0)
+    + (prefix === "minwm" ? Number(stats.lastBridgeEncoderFeedMs || 0) : 0);
+  const downlinkMs = prefix === "minwm"
+    ? Number(stats.lastPresentedTransportMs || 0)
+    : Number(stats.lastDownlinkMs || 0);
+  const e2eMs = prefix === "minwm"
+    ? Number(stats.lastPresentedControlToVideoMs || 0)
+    : Number(stats.lastControlToVideoMs || 0);
+  const bytesReceived = Number(stats.bytesReceived ?? stats.bytes ?? 0);
+  const receiveMbps = Number(stats.receiveMbps || 0);
+  $(`${prefix}PerfData`).textContent = bytesReceived > 0
+    ? `${(bytesReceived / 1048576).toFixed(1)} MB · ${receiveMbps.toFixed(1)} Mb/s`
+    : "-";
+  $(`${prefix}PerfUplink`).textContent = performanceMs(telemetry.input_uplink_ms);
+  $(`${prefix}PerfChunk`).textContent = performanceMs(
+    telemetry.model_denoise_ms || telemetry.scheduler_forward_ms,
+  );
+  $(`${prefix}PerfVae`).textContent = performanceMs(vaeMs);
+  $(`${prefix}PerfEncode`).textContent = performanceMs(encodeMs);
+  $(`${prefix}PerfDownlink`).textContent = performanceMs(downlinkMs);
+  $(`${prefix}PerfE2E`).textContent = performanceMs(e2eMs);
 }
 
 function renderModelTelemetry(key, stats = {}) {
@@ -6946,4 +6983,16 @@ window.__sglangRealtimeDebug = () => ({
   status: $("statusText").textContent,
   streamEpoch,
   visibilityState: document.visibilityState,
+});
+
+window.__sglangProtocolComparisonDebug = () => ({
+  capturedAtEpochMs: Date.now(),
+  webrtc: {
+    protocol: "H.264/WebRTC",
+    ...primaryWebRTCStats,
+  },
+  websocket: {
+    protocol: "WebP/WebSocket",
+    ...lingbot2Session.snapshot(),
+  },
 });

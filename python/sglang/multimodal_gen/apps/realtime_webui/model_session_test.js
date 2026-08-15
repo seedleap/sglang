@@ -125,6 +125,15 @@ async function main() {
   assert.equal(socket.sent[0].type, "init");
   assert.equal(socket.sent[0].playback_ack_enabled, true);
   assert.ok(states.includes("live"));
+  socket.message({
+    type: "chunk_telemetry",
+    chunk_index: 2,
+    event_id: 7,
+    input_uplink_ms: 12.5,
+    scheduler_forward_ms: 420,
+    vae_decode_ms: 90,
+  });
+  assert.equal(session.snapshot().chunkTelemetry.input_uplink_ms, 12.5);
   socket.message({ type: "error", content: "invalid event" });
   assert.equal(sessionErrors.length, 0, "invalid control events must remain non-fatal");
   assert.equal(socket.readyState, FakeSocket.OPEN);
@@ -173,6 +182,7 @@ async function main() {
     event_id: 7,
     num_frames: 1,
     content_type: "image/webp",
+    server_sent_epoch_ms: Date.now() - 15,
     payload: new Uint8Array([1, 2, 3]),
   });
   await flush();
@@ -183,6 +193,7 @@ async function main() {
   assert.equal(canvas.draws.length, 1);
   assert.equal(frames[0].chunk, 3);
   assert.equal(session.snapshot().renderFps, 1);
+  assert.ok(session.snapshot().lastDownlinkMs >= 15);
   await new Promise((resolve) => setTimeout(resolve, 60));
   const playbackAck = socket.sent.find((message) => message.kind === "playback_ack");
   assert.equal(playbackAck.payload.last_received_chunk, 3);

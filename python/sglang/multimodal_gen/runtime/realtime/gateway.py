@@ -188,6 +188,7 @@ _WORKER_CONTROL_MESSAGES = {
     "session_ready",
     "control_ack",
     "heartbeat",
+    "chunk_telemetry",
 }
 
 

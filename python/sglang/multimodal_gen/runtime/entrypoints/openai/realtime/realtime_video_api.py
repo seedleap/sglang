@@ -473,6 +473,69 @@ def _emit_realtime_result_stage_traces(
             )
 
 
+def _collect_realtime_result_stage_metrics(result: Any) -> dict[str, float]:
+    collected: dict[str, float] = {}
+    for stage_name, duration_ms, _ in _iter_realtime_result_stage_metrics(result):
+        event_name = _realtime_stage_event_name(stage_name)
+        if event_name == "server.model_denoise_complete":
+            collected["model_denoise_ms"] = round(duration_ms, 3)
+        elif event_name == "server.vae_encode_complete":
+            collected["model_vae_encode_ms"] = round(duration_ms, 3)
+        elif event_name == "server.vae_decode_complete":
+            collected["model_vae_decode_ms"] = round(duration_ms, 3)
+        elif event_name == "server.post_decode_complete":
+            collected["model_post_decode_ms"] = round(duration_ms, 3)
+    return collected
+
+
+async def _send_chunk_telemetry(
+    ws: WebSocket,
+    session: GenerateSession,
+    chunk: RealtimeChunkContext,
+    batch: "Req",
+    *,
+    request_prepare_ms: float,
+    scheduler_forward_ms: float,
+    chunk_total_ms: float,
+    send_stats: RealtimeFrameSendStats,
+    stage_metrics: dict[str, float] | None = None,
+    remote_result: Any | None = None,
+) -> None:
+    event_id = getattr(batch, "realtime_event_id", None)
+    input_timing = session.consume_input_timing(event_id) or {}
+    telemetry: dict[str, Any] = {
+        "type": "chunk_telemetry",
+        "trace_id": session.trace_id,
+        "request_id": chunk.request_id,
+        "chunk_index": chunk.index,
+        "event_id": event_id,
+        "request_prepare_ms": round(request_prepare_ms, 3),
+        "scheduler_forward_ms": round(scheduler_forward_ms, 3),
+        "chunk_total_ms": round(chunk_total_ms, 3),
+        "output_pace_ms": round(send_stats["pace_wait_ms"], 3),
+        "transport_encode_ms": round(send_stats["raw_payload_build_ms"], 3),
+        "transport_write_ms": round(send_stats["ws_write_ms"], 3),
+        "raw_bytes": int(send_stats["raw_bytes"]),
+        "transport_bytes": int(send_stats["ws_payload_bytes"]),
+        "num_frames": int(send_stats["num_frames"]),
+        "content_type": send_stats["content_type"],
+        "server_completed_epoch_ms": time.time() * 1000,
+        **input_timing,
+        **(stage_metrics or {}),
+    }
+    if remote_result is not None:
+        telemetry.update(
+            vae_queue_wait_ms=round(remote_result.queue_wait_ms, 3),
+            vae_decode_ms=round(remote_result.decode_ms, 3),
+            vae_encode_ms=round(remote_result.encode_ms, 3),
+            vae_transfer_ms=round(remote_result.transfer_ms, 3),
+            latent_serialize_ms=round(remote_result.serialize_ms, 3),
+            latent_send_ms=round(remote_result.latent_send_ms, 3),
+            vae_credit_wait_ms=round(remote_result.credit_wait_ms, 3),
+        )
+    await ws.send_bytes(msgspec.msgpack.encode(telemetry))
+
+
 def _log_realtime_chunk_timing(
     session: GenerateSession,
     chunk: RealtimeChunkContext,
@@ -649,6 +712,7 @@ async def _complete_remote_chunk(
     scheduler_forward_ms: float,
     chunk_started: float,
     vae_started: float,
+    stage_metrics: dict[str, float],
 ) -> None:
     remote_result = await handle.wait()
     send_stats["pace_wait_ms"] += await _wait_for_realtime_output_slot(
@@ -747,6 +811,18 @@ async def _complete_remote_chunk(
         chunk_total_ms,
         send_stats,
     )
+    await _send_chunk_telemetry(
+        ws,
+        session,
+        chunk,
+        batch,
+        request_prepare_ms=request_prepare_ms,
+        scheduler_forward_ms=scheduler_forward_ms,
+        chunk_total_ms=chunk_total_ms,
+        send_stats=send_stats,
+        stage_metrics=stage_metrics,
+        remote_result=remote_result,
+    )
     session.generate_chunk_completed(chunk)
 
 
@@ -829,6 +905,7 @@ async def _generate_loop_async_vae(ws, session: GenerateSession, server_args):
             )
             scheduler_forward_ms = timer.mark_ms()
             _emit_realtime_result_stage_traces(session, chunk, batch, result)
+            stage_metrics = _collect_realtime_result_stage_metrics(result)
             if result.realtime_latents is None or result.realtime_handoff is None:
                 raise RuntimeError("remote VAE path received no latent handoff")
 
@@ -864,7 +941,8 @@ async def _generate_loop_async_vae(ws, session: GenerateSession, server_args):
                 request_prepare_ms=request_prepare_ms,
                 scheduler_forward_ms=scheduler_forward_ms,
                 chunk_started=chunk_started,
-                vae_started=vae_started: _complete_remote_chunk(
+                vae_started=vae_started,
+                stage_metrics=stage_metrics: _complete_remote_chunk(
                     ws,
                     session,
                     chunk,
@@ -875,6 +953,7 @@ async def _generate_loop_async_vae(ws, session: GenerateSession, server_args):
                     scheduler_forward_ms,
                     chunk_started,
                     vae_started,
+                    stage_metrics,
                 )
             )
         await coordinator.finish()
@@ -1338,6 +1417,12 @@ async def _listen_events(ws: WebSocket, session: GenerateSession):
                 client_sent_epoch_ms=realtime_event.client_sent_epoch_ms,
                 payload_bytes=_safe_len(message),
             )
+            if realtime_event.kind in {"camera_actions", "prompt", "scene_cut"}:
+                session.record_input_event(
+                    realtime_event.event_id,
+                    realtime_event.client_sent_epoch_ms,
+                    time.time() * 1000,
+                )
             event_log = session.adapter.ingest_event(session, realtime_event)
             session.mark_event_version(realtime_event.kind)
             session.mark_client_activity()

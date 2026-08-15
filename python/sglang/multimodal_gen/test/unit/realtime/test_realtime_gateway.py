@@ -300,6 +300,9 @@ def test_gateway_builds_a_fenced_worker_route_and_rejects_media_or_trace():
     assert "trace_id=trace-a" in url
     assert not worker_message_allowed(encode_message("chunk_stats"))
     assert worker_message_allowed(encode_message("error"))
+    assert worker_message_allowed(
+        encode_message("chunk_telemetry", chunk_index=4, event_id=9)
+    )
     assert not worker_message_allowed(msgspec.msgpack.encode({"type": "chunk_stats"}))
     assert not worker_message_allowed(_frame(0))
     assert not worker_message_allowed(encode_message("trace_events", traces=[]))

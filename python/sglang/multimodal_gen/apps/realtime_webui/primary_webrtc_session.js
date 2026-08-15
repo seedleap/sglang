@@ -358,6 +358,8 @@
             });
           } else if (event.type === "media_batch") {
             this._queueMediaBatch(event);
+          } else if (event.type === "chunk_telemetry") {
+            this.onStats({ chunkTelemetry: { ...event } });
           } else if (event.type === "media_chunk_complete") {
             this._finalizeMediaChunk(event);
           }
@@ -672,6 +674,10 @@
         numFrameBatches: Number(event.num_frame_batches || 0),
         isFinalFrameBatch: Boolean(event.is_final_frame_batch),
         bridgeEncodedEpochMs: Number(event.bridge_encoded_epoch_ms || 0),
+        serverSentEpochMs: Number(event.server_sent_epoch_ms || 0),
+        bridgeReceivedEpochMs: Number(event.bridge_received_epoch_ms || 0),
+        bridgeQueueMs: Number(event.bridge_queue_ms || 0),
+        bridgeEncoderFeedMs: Number(event.bridge_encoder_feed_ms || 0),
         metadataReceivedAtMs: global.performance?.now?.() ?? Date.now(),
       };
       if (this.mediaBatches.some((item) => (
@@ -683,12 +689,22 @@
       if (this.mediaBatches.length > 1024) {
         this.mediaBatches.splice(0, this.mediaBatches.length - 1024);
       }
-      const sentEpochMs = this.controlSentEpochByEvent.get(batch.eventId) || 0;
+      const pendingEventIds = Array.from(this.controlSentEpochByEvent.keys())
+        .filter((eventId) => eventId <= batch.eventId)
+        .sort((left, right) => left - right);
+      const sentEpochMs = pendingEventIds.length
+        ? this.controlSentEpochByEvent.get(pendingEventIds[0])
+        : 0;
       const isFirstBatchForEvent = batch.eventId > this.lastQueuedMediaEventId;
       if (isFirstBatchForEvent) this.lastQueuedMediaEventId = batch.eventId;
       this.onStats({
         lastMediaEventId: batch.eventId,
         lastMediaBatchBridgeEpochMs: Number(event.bridge_received_epoch_ms || 0),
+        lastBridgeQueueMs: batch.bridgeQueueMs,
+        lastBridgeEncoderFeedMs: batch.bridgeEncoderFeedMs,
+        lastServerToBridgeMs: batch.serverSentEpochMs > 0
+          ? Math.max(0, batch.bridgeReceivedEpochMs - batch.serverSentEpochMs)
+          : 0,
         ...(sentEpochMs && isFirstBatchForEvent
           ? { mediaControlToBatchMs: Math.max(0, Date.now() - sentEpochMs) }
           : {}),
@@ -794,6 +810,10 @@
           ? batch.isFinalFrameBatch && sourceFrameIndex >= batch.lastFrameIndex
           : true,
         bridgeEncodedEpochMs: Number(batch?.bridgeEncodedEpochMs || 0),
+        serverSentEpochMs: Number(batch?.serverSentEpochMs || 0),
+        bridgeReceivedEpochMs: Number(batch?.bridgeReceivedEpochMs || 0),
+        bridgeQueueMs: Number(batch?.bridgeQueueMs || 0),
+        bridgeEncoderFeedMs: Number(batch?.bridgeEncoderFeedMs || 0),
         metadataReceivedAtMs: Number(batch?.metadataReceivedAtMs || 0),
       };
     }
@@ -880,7 +900,12 @@
           ...metadata,
         });
         if (metadata.bridgeEncodedEpochMs > 0) {
-          const sentEpochMs = this.controlSentEpochByEvent.get(metadata.eventId) || 0;
+          const pendingEventIds = Array.from(this.controlSentEpochByEvent.keys())
+            .filter((eventId) => eventId <= metadata.eventId)
+            .sort((left, right) => left - right);
+          const sentEpochMs = pendingEventIds.length
+            ? this.controlSentEpochByEvent.get(pendingEventIds[0])
+            : 0;
           const presentedAtMs = global.performance?.now?.() ?? Date.now();
           this.onStats({
             lastPresentedTransportMs: Math.max(
@@ -898,8 +923,15 @@
                   ),
                 }
               : {}),
+            lastBridgeQueueMs: metadata.bridgeQueueMs,
+            lastBridgeEncoderFeedMs: metadata.bridgeEncoderFeedMs,
             lastPresentedSourceFrameIndex: metadata.sourceFrameIndex,
           });
+          if (sentEpochMs && isFirstPresentedFrameForEvent) {
+            for (const eventId of pendingEventIds) {
+              this.controlSentEpochByEvent.delete(eventId);
+            }
+          }
         }
         this.presentedFrameCallback = this.video.requestVideoFrameCallback(handleFrame);
       };

@@ -96,6 +96,8 @@
       this.decodeRequestId = 1;
       this.playbackAckTimer = null;
       this.playbackAckEnabled = false;
+      this.controlSentEpochByEvent = new Map();
+      this.lastNetworkSample = null;
       this.stats = {
         frames: 0,
         bytes: 0,
@@ -110,6 +112,10 @@
         lastDecodeMs: 0,
         lastDisplayLagMs: 0,
         lastRenderedEventId: 0,
+        lastControlToVideoMs: 0,
+        lastDownlinkMs: 0,
+        receiveMbps: 0,
+        chunkTelemetry: null,
       };
       this.setState("idle");
     }
@@ -132,6 +138,8 @@
       this.decodeQueue = [];
       this.decodeInProgress = false;
       this.renderSamples = [];
+      this.controlSentEpochByEvent.clear();
+      this.lastNetworkSample = null;
       this.awaitingStableFrame = this.startupMinChunk > 0;
       this.stats = {
         frames: 0,
@@ -147,6 +155,10 @@
         lastDecodeMs: 0,
         lastDisplayLagMs: 0,
         lastRenderedEventId: 0,
+        lastControlToVideoMs: 0,
+        lastDownlinkMs: 0,
+        receiveMbps: 0,
+        chunkTelemetry: null,
       };
       for (const frame of this.playback.clear?.() || []) closeFrame(frame);
       this.playback.reset?.({ targetFps: init.fps || 24 });
@@ -210,6 +222,16 @@
       if (!this.socket || this.socket.readyState !== this.WebSocketCtor.OPEN) return false;
       this.socket.send(this.pack({ ...envelope, trace_id: this.traceId }));
       this.stats.lastSentEventId = Number(envelope.event_id || this.stats.lastSentEventId);
+      const eventId = Number(envelope.event_id || 0);
+      if (eventId > 0 && ["camera_actions", "prompt", "scene_cut"].includes(envelope.kind)) {
+        this.controlSentEpochByEvent.set(
+          eventId,
+          Number(envelope.client_sent_epoch_ms || Date.now()),
+        );
+        while (this.controlSentEpochByEvent.size > 64) {
+          this.controlSentEpochByEvent.delete(this.controlSentEpochByEvent.keys().next().value);
+        }
+      }
       this.playback.noteInputEvent?.(envelope.event_id, this.now(), {
         cutoverMode: envelope.kind === "prompt"
           ? "prompt"
@@ -229,6 +251,8 @@
       this.socket = null;
       this.pendingHeader = null;
       this.decodeQueue = [];
+      this.controlSentEpochByEvent.clear();
+      this.lastNetworkSample = null;
       for (const frame of this.playback.clear?.() || []) closeFrame(frame);
       this.worker?.postMessage?.({ type: "reset" });
       if (socket && socket.readyState !== this.WebSocketCtor.CLOSED) {
@@ -269,7 +293,10 @@
         error.retryAfterS = Number(message.retry_after_s || 0);
         throw error;
       }
-      if (message.type === "frame_batch") {
+      if (message.type === "chunk_telemetry") {
+        this.stats.chunkTelemetry = { ...message };
+        this.emitStats();
+      } else if (message.type === "frame_batch") {
         const payload = message.payload;
         delete message.payload;
         if (payload !== undefined) {
@@ -319,6 +346,10 @@
       }
       this.stats.lastReceivedChunk = chunkIndex;
       this.stats.lastReceivedFrameBatchIndex = frameBatchIndex;
+      const serverSentEpochMs = Number(header.server_sent_epoch_ms || 0);
+      if (serverSentEpochMs > 0) {
+        this.stats.lastDownlinkMs = Math.max(0, Date.now() - serverSentEpochMs);
+      }
       this.schedulePlaybackAck();
     }
 
@@ -338,6 +369,7 @@
         const decodeMs = decodedAt - startedAt;
         const prepared = frames.map((frame) => ({
           ...frame,
+          eventId: Number(frame.eventId ?? item.header.event_id ?? 0),
           receivedAt: frame.receivedAt || item.header.__received_at,
           decodedAt,
           decodeMs: frame.decodeMs ?? decodeMs,
@@ -347,6 +379,15 @@
         const bytes = Number(item.payload?.byteLength || item.payload?.size || item.payload?.length || 0);
         this.stats.frames += Number(item.header.num_frames || prepared.length);
         this.stats.bytes += bytes;
+        const networkNow = this.now();
+        if (this.lastNetworkSample && networkNow > this.lastNetworkSample.at) {
+          const elapsedSeconds = (networkNow - this.lastNetworkSample.at) / 1000;
+          this.stats.receiveMbps = Math.max(
+            0,
+            (this.stats.bytes - this.lastNetworkSample.bytes) * 8 / elapsedSeconds / 1_000_000,
+          );
+        }
+        this.lastNetworkSample = { at: networkNow, bytes: this.stats.bytes };
         this.stats.lastChunk = Number(item.header.chunk_index || 0);
         this.stats.lastEventId = Number(item.header.event_id || this.stats.lastEventId);
         this.stats.lastAppliedEventId = Number(
@@ -449,6 +490,15 @@
         this.stats.lastRenderedEventId = Number(
           frame.eventId || this.stats.lastRenderedEventId || 0,
         );
+        const appliedEventId = this.stats.lastRenderedEventId;
+        const pendingEventIds = Array.from(this.controlSentEpochByEvent.keys())
+          .filter((eventId) => eventId <= appliedEventId)
+          .sort((left, right) => left - right);
+        if (pendingEventIds.length) {
+          const sentEpochMs = this.controlSentEpochByEvent.get(pendingEventIds[0]);
+          this.stats.lastControlToVideoMs = Math.max(0, Date.now() - sentEpochMs);
+          for (const eventId of pendingEventIds) this.controlSentEpochByEvent.delete(eventId);
+        }
         this.onFrame({
           key: this.key,
           chunk: this.stats.lastChunk,

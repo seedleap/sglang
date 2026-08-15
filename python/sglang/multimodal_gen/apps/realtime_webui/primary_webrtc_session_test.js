@@ -290,6 +290,14 @@ const { PrimaryWebRTCSession } = require("./primary_webrtc_session.js");
     bridge_forward_ms: 0.4,
     minimum_event_id: 9,
   }) });
+  controlSockets[0].emit("message", { data: JSON.stringify({
+    type: "chunk_telemetry",
+    chunk_index: 2,
+    event_id: 9,
+    input_uplink_ms: 11,
+    scheduler_forward_ms: 410,
+    vae_decode_ms: 85,
+  }) });
   await new Promise((resolve) => setTimeout(resolve, 0));
   assert.ok(stats.some((snapshot) => snapshot.framesDecoded === 32));
   assert.ok(stats.some((snapshot) => snapshot.jitterBufferTargetMs === 500));
@@ -298,6 +306,7 @@ const { PrimaryWebRTCSession } = require("./primary_webrtc_session.js");
     && snapshot.controlBridgeRoundTripMs >= 20
     && snapshot.controlBridgeForwardMs === 0.4
   )));
+  assert.ok(stats.some((snapshot) => snapshot.chunkTelemetry?.input_uplink_ms === 11));
   const mediaEventSentAt = Date.now() - 40;
   assert.equal(session.sendEvent({
     type: "event",

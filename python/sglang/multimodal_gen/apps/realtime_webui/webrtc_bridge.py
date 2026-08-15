@@ -126,6 +126,7 @@ class _QueuedFrame:
     num_frame_batches: int
     is_final_frame_batch: bool
     bridge_received_epoch_ms: float
+    server_sent_epoch_ms: float
 
 
 @dataclass
@@ -277,6 +278,9 @@ class WebRTCBridgeSession:
             # independently paced encoder and could falsely mark an early
             # frame as the end of the chunk in the browser.
             return
+        if message_type == "chunk_telemetry":
+            await self._broadcast(message)
+            return
         if message_type not in {"frame_batch", "frame_batch_header"}:
             return
         payload = message.pop("payload", None)
@@ -352,6 +356,7 @@ class WebRTCBridgeSession:
                     is_final_frame_batch and frame_index == len(frames) - 1
                 ),
                 bridge_received_epoch_ms=bridge_received_epoch_ms,
+                server_sent_epoch_ms=float(header.get("server_sent_epoch_ms") or 0),
             )
             self._enqueue_frame(queued)
 
@@ -386,6 +391,10 @@ class WebRTCBridgeSession:
                     await self._start_ffmpeg(self.width, self.height)
                 if self.ffmpeg is None or self.ffmpeg.stdin is None:
                     raise RuntimeError("H.264 encoder is unavailable")
+                encode_started_epoch_ms = time.time() * 1000
+                self.ffmpeg.stdin.write(frame.rgb)
+                await self.ffmpeg.stdin.drain()
+                encoded_epoch_ms = time.time() * 1000
                 media_batch = {
                     "type": "media_batch",
                     "chunk_index": frame.chunk_index,
@@ -395,13 +404,19 @@ class WebRTCBridgeSession:
                     "frame_batch_index": frame.frame_batch_index,
                     "num_frame_batches": frame.num_frame_batches,
                     "is_final_frame_batch": frame.is_final_frame_batch,
+                    "server_sent_epoch_ms": frame.server_sent_epoch_ms,
                     "bridge_received_epoch_ms": frame.bridge_received_epoch_ms,
-                    "bridge_encoded_epoch_ms": time.time() * 1000,
+                    "bridge_encode_started_epoch_ms": encode_started_epoch_ms,
+                    "bridge_encoded_epoch_ms": encoded_epoch_ms,
+                    "bridge_queue_ms": max(
+                        0.0, encode_started_epoch_ms - frame.bridge_received_epoch_ms
+                    ),
+                    "bridge_encoder_feed_ms": max(
+                        0.0, encoded_epoch_ms - encode_started_epoch_ms
+                    ),
                 }
                 self.media_batch_history.append(media_batch)
                 await self._broadcast(media_batch)
-                self.ffmpeg.stdin.write(frame.rgb)
-                await self.ffmpeg.stdin.drain()
                 self.frames += 1
                 self.state = "streaming"
             finally:

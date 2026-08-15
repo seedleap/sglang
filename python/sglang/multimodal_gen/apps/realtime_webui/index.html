@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>World Studio · 实时模型对比</title>
-    <link rel="stylesheet" href="./styles.css?v=world-studio-v8" />
+    <link rel="stylesheet" href="./styles.css?v=protocol-telemetry-v1" />
   </head>
   <body class="world-studio">
     <header class="app-header">
@@ -142,6 +142,15 @@
                     <span class="telemetry-detail">Lag<b id="minwmDisplayLagText">-</b></span>
                   </div>
                 </header>
+                <div class="protocol-performance" aria-label="Zing WebRTC 端到端实时耗时">
+                  <span>流量<b id="minwmPerfData">-</b></span>
+                  <span>按键上行<b id="minwmPerfUplink">-</b></span>
+                  <span>Chunk<b id="minwmPerfChunk">-</b></span>
+                  <span>VAE<b id="minwmPerfVae">-</b></span>
+                  <span>编码<b id="minwmPerfEncode">-</b></span>
+                  <span>下行/播放<b id="minwmPerfDownlink">-</b></span>
+                  <span class="e2e">按键→画面<b id="minwmPerfE2E">-</b></span>
+                </div>
                 <div class="preview-frame">
                   <canvas id="minwmViewport" width="1280" height="720" tabindex="0"></canvas>
                   <video id="minwmWebrtcViewport" autoplay playsinline muted tabindex="0" hidden></video>
@@ -166,6 +175,15 @@
                     <span class="telemetry-detail">Lag<b id="lingbot2DisplayLagText">-</b></span>
                   </div>
                 </header>
+                <div class="protocol-performance" aria-label="Zing WebSocket 端到端实时耗时">
+                  <span>流量<b id="lingbot2PerfData">-</b></span>
+                  <span>按键上行<b id="lingbot2PerfUplink">-</b></span>
+                  <span>Chunk<b id="lingbot2PerfChunk">-</b></span>
+                  <span>VAE<b id="lingbot2PerfVae">-</b></span>
+                  <span>编码<b id="lingbot2PerfEncode">-</b></span>
+                  <span>下行/播放<b id="lingbot2PerfDownlink">-</b></span>
+                  <span class="e2e">按键→画面<b id="lingbot2PerfE2E">-</b></span>
+                </div>
                 <div class="preview-frame">
                   <canvas id="lingbot2Viewport" width="1280" height="720" tabindex="0"></canvas>
                   <div id="lingbot2PreviewOverlay" class="preview-overlay" aria-hidden="true">
@@ -322,9 +340,9 @@
     </main>
     <script src="./runtime-config.js"></script>
     <script src="./playback_controller.js?v=realtime-playback-v34"></script>
-    <script src="./model_session.js?v=dual-model-v10"></script>
+    <script src="./model_session.js?v=protocol-telemetry-v1"></script>
     <script src="./dual_model_controller.js?v=dual-model-v7"></script>
-    <script src="./primary_webrtc_session.js?v=primary-webrtc-v7"></script>
+    <script src="./primary_webrtc_session.js?v=protocol-telemetry-v1"></script>
     <script src="./happy_oyster_sdk.js?v=happyoyster-sdk-0.1.0-ticket-only"></script>
     <script src="./happy_oyster_session.js?v=happyoyster-session-v5"></script>
     <script src="./session_lifetime.js?v=session-lifetime-v1"></script>
@@ -332,6 +350,6 @@
     <script src="./fullscreen_controller.js?v=dual-fullscreen-v1"></script>
     <script src="./trace_topology.js?v=realtime-trace-topology-v6"></script>
     <script src="./trace_transport.js?v=realtime-trace-http-v2"></script>
-    <script src="./app.js?v=world-studio-v33"></script>
+    <script src="./app.js?v=protocol-telemetry-v1"></script>
   </body>
 </html>

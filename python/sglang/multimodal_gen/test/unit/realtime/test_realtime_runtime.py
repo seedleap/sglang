@@ -280,6 +280,22 @@ def test_gateway_managed_session_can_allocate_reservation_owner():
     assert first != second
 
 
+def test_generate_session_folds_quick_tap_into_keydown_uplink_timing():
+    session = GenerateSession()
+    session.record_input_event(7, 1_000.0, 1_012.0)
+    session.record_input_event(8, 1_035.0, 1_049.0)
+
+    timing = session.consume_input_timing(8)
+
+    assert timing == {
+        "input_event_id": 7.0,
+        "client_sent_epoch_ms": 1_000.0,
+        "server_received_epoch_ms": 1_012.0,
+        "input_uplink_ms": 12.0,
+    }
+    assert session.consume_input_timing(8) is None
+
+
 def test_realtime_diffusion_stage_declares_long_lived_components():
     stage = _TestRealtimeDiffusionStage()
     server_args = SimpleNamespace(
