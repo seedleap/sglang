@@ -951,6 +951,9 @@ const dualModelController = new DualModelController({
       wsUrl: (init) => backendWebSocketUrl("minwm", init.trace_id),
     },
     lingbot2: {
+      connectDelayMs: PROTOCOL_COMPARISON_ENABLED
+        ? configuredNumber("protocolComparisonSecondaryConnectDelayMs", 2500)
+        : 0,
       model: (init) => String(
         PROTOCOL_COMPARISON_ENABLED
           ? init.model

@@ -49,6 +49,11 @@
         }
       }
       const connectOne = async (key, { replayLatest = false } = {}) => {
+        const delayMs = Math.max(0, Number(this.backends[key]?.connectDelayMs) || 0);
+        if (delayMs) {
+          await new Promise((resolve) => global.setTimeout(resolve, delayMs));
+          if (generation !== this.connectionGeneration) return false;
+        }
         await this.connectKey(key, baseInit, { reconnect: false });
         if (generation !== this.connectionGeneration) {
           this.sessions[key]?.close("stale connection");
