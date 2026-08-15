@@ -1960,8 +1960,11 @@ function renderProtocolPerformance(key, stats = {}) {
     + Number(telemetry.transport_encode_ms || 0)
     + (prefix === "minwm" ? Number(stats.lastBridgeEncoderFeedMs || 0) : 0);
   const downlinkMs = prefix === "minwm"
-    ? Number(stats.lastPresentedTransportMs || 0)
-    : Number(stats.lastDownlinkMs || 0);
+    ? Math.max(
+        Number(stats.lastPresentedTransportMs || 0),
+        Number(stats.lastPresentedAfterMetadataMs || 0),
+      )
+    : Number(stats.lastDownlinkMs || 0) + Number(stats.lastDisplayLagMs || 0);
   const e2eMs = prefix === "minwm"
     ? Number(stats.lastPresentedControlToVideoMs || 0)
     : Number(stats.lastControlToVideoMs || 0);
