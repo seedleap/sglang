@@ -318,6 +318,24 @@ const { PrimaryWebRTCSession } = require("./primary_webrtc_session.js");
     snapshot.lastMediaEventId === 9
     && snapshot.mediaControlToBatchMs >= 30
   )));
+  const firstBatchTimingSamples = stats.filter((snapshot) => (
+    Object.hasOwn(snapshot, "mediaControlToBatchMs")
+  )).length;
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  controlSockets[0].emit("message", { data: JSON.stringify({
+    type: "media_batch",
+    chunk_index: 3,
+    event_id: 9,
+    first_frame_index: 48,
+    num_frames: 16,
+    bridge_received_epoch_ms: Date.now() - 5,
+  }) });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(
+    stats.filter((snapshot) => Object.hasOwn(snapshot, "mediaControlToBatchMs")).length,
+    firstBatchTimingSamples,
+    "control-to-media timing must remain latched to the first batch for an event",
+  );
 
   controlSockets[0].close(1002);
   await new Promise((resolve) => setTimeout(resolve, 10));

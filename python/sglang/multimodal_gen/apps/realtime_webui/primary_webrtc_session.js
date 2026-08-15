@@ -166,6 +166,7 @@
       this.mediaReconnectTimer = 0;
       this.mediaReconnectAttempt = 0;
       this.mediaReconnectInFlight = false;
+      this.lastQueuedMediaEventId = 0;
       this.lastProcessedMediaEventId = 0;
       this.lastRtcSample = null;
       this.receiver = null;
@@ -291,6 +292,7 @@
       this.mediaEpochOffsetMs = null;
       this.processedFrames = 0;
       this.controlSentEpochByEvent.clear();
+      this.lastQueuedMediaEventId = 0;
       this.lastProcessedMediaEventId = 0;
       this._stopStats();
       this._stopControlKeepalive();
@@ -682,10 +684,14 @@
         this.mediaBatches.splice(0, this.mediaBatches.length - 1024);
       }
       const sentEpochMs = this.controlSentEpochByEvent.get(batch.eventId) || 0;
+      const isFirstBatchForEvent = batch.eventId > this.lastQueuedMediaEventId;
+      if (isFirstBatchForEvent) this.lastQueuedMediaEventId = batch.eventId;
       this.onStats({
         lastMediaEventId: batch.eventId,
         lastMediaBatchBridgeEpochMs: Number(event.bridge_received_epoch_ms || 0),
-        mediaControlToBatchMs: sentEpochMs ? Math.max(0, Date.now() - sentEpochMs) : 0,
+        ...(sentEpochMs && isFirstBatchForEvent
+          ? { mediaControlToBatchMs: Math.max(0, Date.now() - sentEpochMs) }
+          : {}),
       });
     }
 
@@ -857,7 +863,10 @@
           : Number.NaN;
         const sequence = this.processedFrames++;
         const metadata = this._metadataForFrame({ timestamp }, sequence);
-        if (metadata.eventId > this.lastProcessedMediaEventId) {
+        const isFirstPresentedFrameForEvent = (
+          metadata.eventId > this.lastProcessedMediaEventId
+        );
+        if (isFirstPresentedFrameForEvent) {
           this.lastProcessedMediaEventId = metadata.eventId;
           this.onStats({ lastPresentedMediaEventId: metadata.eventId });
         }
@@ -881,9 +890,14 @@
             lastPresentedAfterMetadataMs: metadata.metadataReceivedAtMs > 0
               ? Math.max(0, presentedAtMs - metadata.metadataReceivedAtMs)
               : 0,
-            lastPresentedControlToVideoMs: sentEpochMs
-              ? Math.max(0, Date.now() - sentEpochMs)
-              : 0,
+            ...(sentEpochMs && isFirstPresentedFrameForEvent
+              ? {
+                  lastPresentedControlToVideoMs: Math.max(
+                    0,
+                    Date.now() - sentEpochMs,
+                  ),
+                }
+              : {}),
             lastPresentedSourceFrameIndex: metadata.sourceFrameIndex,
           });
         }
