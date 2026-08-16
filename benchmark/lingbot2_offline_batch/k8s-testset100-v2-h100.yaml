@@ -1,0 +1,156 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: codex-lingbot2-testset100-v2-results
+  namespace: default
+  labels:
+    seedleap.ai/owner: chenshengdong
+    seedleap.ai/task: lingbot2-testset100-v2
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: gp2
+  resources:
+    requests:
+      storage: 50Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: codex-lingbot2-testset100-v2-h100
+  namespace: default
+  labels:
+    app: codex-lingbot2-testset100-v2-h100
+    seedleap.ai/owner: chenshengdong
+    seedleap.ai/task: lingbot2-testset100-v2
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: codex-lingbot2-testset100-v2-h100
+  template:
+    metadata:
+      labels:
+        app: codex-lingbot2-testset100-v2-h100
+        seedleap.ai/owner: chenshengdong
+        seedleap.ai/task: lingbot2-testset100-v2
+      annotations:
+        seedleap.ai/code-git-ref: d9a7e0e6630ea8aea135191115a13e6451618a6f
+        seedleap.ai/model-revision: 59cccf49f2d2dd27418ae7a04b82b10868d455c2
+        seedleap.ai/benchmark-contract: priority-thirdperson50-5s-then-testset100-v2-337-samples-832x480-16fps-4x2gpu
+    spec:
+      restartPolicy: Always
+      terminationGracePeriodSeconds: 30
+      nodeSelector:
+        karpenter.sh/nodepool: minwm-test-h100-spot
+        node.kubernetes.io/instance-type: p5.48xlarge
+      tolerations:
+        - key: seedleap.ai/workload
+          operator: Equal
+          value: wan22-ti2v
+          effect: NoSchedule
+      containers:
+        - name: benchmark
+          image: lmsysorg/sglang:dev@sha256:8f78575e03ab59a39191a4a6f718bbbe1726fa940f72a86a187a3f1628ada9a7
+          imagePullPolicy: IfNotPresent
+          workingDir: /workspace
+          command: [/bin/bash, -lc]
+          args:
+            - |
+              set -euo pipefail
+              rm -rf /workspace/sglang
+              git clone --filter=blob:none "https://x-access-token:${GITHUB_TOKEN}@github.com/seedleap/sglang.git" /workspace/sglang
+              cd /workspace/sglang
+              git checkout --detach "${CODE_GIT_REF}"
+              test "$(git rev-parse HEAD)" = "${CODE_GIT_REF}"
+              python3 -m pip install -e "python[diffusion]" --root-user-action=ignore
+              python3 -m pip install \
+                --force-reinstall \
+                --no-deps \
+                --index-url https://flashinfer.ai/whl/cu130 \
+                'flashinfer-jit-cache==0.6.12+cu130'
+              command -v ffmpeg
+              command -v ffprobe
+              set +e
+              /opt/bench/run_evalset.sh
+              eval_status=$?
+              set -e
+              echo "${eval_status}" > /results/pod-eval-exit-code
+              touch /results/pod-eval-finished
+              sleep infinity
+          env:
+            - name: CODE_GIT_REF
+              value: d9a7e0e6630ea8aea135191115a13e6451618a6f
+            - name: MODEL_ID
+              value: robbyant/lingbot-world-v2-14b-causal-fast-diffusers
+            - name: MODEL_REVISION
+              value: 59cccf49f2d2dd27418ae7a04b82b10868d455c2
+            - name: GPU_TOTAL
+              value: "8"
+            - name: GPUS_PER_SERVER
+              value: "2"
+            - name: RESULTS_ROOT
+              value: /results/testset100-v2-480p-16fps
+            - name: MESSAGES_PATH
+              value: /opt/bench/messages.jsonl.gz
+            - name: IMAGE_URLS_PATH
+              value: /opt/bench/image_urls.json
+            - name: PRIORITY_MESSAGES_PATH
+              value: /opt/bench/thirdperson50-messages.jsonl.gz
+            - name: PRIORITY_IMAGE_URLS_PATH
+              value: /opt/bench/thirdperson50-image-urls.json
+            - name: GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: github-token
+                  key: token
+            - name: HF_HUB_ENABLE_HF_TRANSFER
+              value: "1"
+            - name: HF_HOME
+              value: /cache/huggingface
+            - name: PIP_CACHE_DIR
+              value: /cache/pip
+          resources:
+            requests:
+              cpu: "150"
+              memory: 1100Gi
+              nvidia.com/gpu: "8"
+            limits:
+              cpu: "175"
+              memory: 1500Gi
+              nvidia.com/gpu: "8"
+          volumeMounts:
+            - name: benchmark-scripts
+              mountPath: /opt/bench
+              readOnly: true
+            - name: results
+              mountPath: /results
+            - name: cache
+              mountPath: /cache
+        - name: result-server
+          image: busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662
+          imagePullPolicy: IfNotPresent
+          command: [httpd, -f, -p, "18082", -h, /results]
+          resources:
+            requests:
+              cpu: 100m
+              memory: 64Mi
+            limits:
+              cpu: "1"
+              memory: 256Mi
+          volumeMounts:
+            - name: results
+              mountPath: /results
+              readOnly: true
+      volumes:
+        - name: benchmark-scripts
+          configMap:
+            name: codex-lingbot2-testset100-v2-h100
+            defaultMode: 0555
+        - name: results
+          persistentVolumeClaim:
+            claimName: codex-lingbot2-testset100-v2-results
+        - name: cache
+          emptyDir:
+            sizeLimit: 350Gi

@@ -1,0 +1,57 @@
+{
+  "ImageId": "ami-05d137128918f2c04",
+  "InstanceType": "p5.48xlarge",
+  "MinCount": 1,
+  "MaxCount": 1,
+  "SubnetId": "subnet-0bd2dd06829249871",
+  "SecurityGroupIds": [
+    "sg-09da0107e02f90294"
+  ],
+  "IamInstanceProfile": {
+    "Name": "AmazonSSMManagedInstanceCore"
+  },
+  "BlockDeviceMappings": [
+    {
+      "DeviceName": "/dev/sda1",
+      "Ebs": {
+        "DeleteOnTermination": true,
+        "Encrypted": true,
+        "VolumeSize": 600,
+        "VolumeType": "gp3",
+        "Iops": 3000,
+        "Throughput": 125
+      }
+    }
+  ],
+  "InstanceMarketOptions": {
+    "MarketType": "spot",
+    "SpotOptions": {
+      "SpotInstanceType": "one-time",
+      "InstanceInterruptionBehavior": "terminate"
+    }
+  },
+  "MetadataOptions": {
+    "HttpEndpoint": "enabled",
+    "HttpTokens": "required"
+  },
+  "TagSpecifications": [
+    {
+      "ResourceType": "instance",
+      "Tags": [
+        {"Key": "Name", "Value": "codex-lingbot2-h100-perf-apse2"},
+        {"Key": "seedleap.ai/owner", "Value": "chenshengdong"},
+        {"Key": "seedleap.ai/task", "Value": "lingbot2-h100-perf"},
+        {"Key": "managed-by", "Value": "codex"}
+      ]
+    },
+    {
+      "ResourceType": "volume",
+      "Tags": [
+        {"Key": "Name", "Value": "codex-lingbot2-h100-perf-apse2"},
+        {"Key": "seedleap.ai/owner", "Value": "chenshengdong"},
+        {"Key": "seedleap.ai/task", "Value": "lingbot2-h100-perf"},
+        {"Key": "managed-by", "Value": "codex"}
+      ]
+    }
+  ]
+}

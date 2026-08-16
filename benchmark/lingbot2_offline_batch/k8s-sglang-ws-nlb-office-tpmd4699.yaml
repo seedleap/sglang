@@ -1,0 +1,46 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: sglang-ws-office-tpmd4699
+  namespace: default
+  labels:
+    app.kubernetes.io/name: sglang-ws-office-tpmd4699
+    seedleap.ai/owner: chenshengdong
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
+    service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing
+    service.beta.kubernetes.io/aws-load-balancer-subnets: subnet-0d2e23b6eeedac8d2,subnet-07ecaa9e4531071af,subnet-07eb90f6b28dfa087
+    service.beta.kubernetes.io/aws-load-balancer-cross-zone-load-balancing-enabled: "true"
+    service.beta.kubernetes.io/aws-load-balancer-healthcheck-protocol: HTTP
+    service.beta.kubernetes.io/aws-load-balancer-healthcheck-path: /healthz
+spec:
+  type: LoadBalancer
+  externalTrafficPolicy: Local
+  loadBalancerSourceRanges:
+    - 5.34.217.44/32
+    - 45.8.204.4/32
+  selector:
+    job-name: sglang-video-tpmd4699-genprompt-neg-20260717-0138
+  ports:
+    # Office proxy/TUN permits WebSocket traffic on 443 but closes the high
+    # ports below. This is the primary office-facing endpoint.
+    - name: ws-primary-443
+      protocol: TCP
+      port: 443
+      targetPort: 31443
+    - name: ws-30000
+      protocol: TCP
+      port: 30000
+      targetPort: 31000
+    - name: ws-30100
+      protocol: TCP
+      port: 30100
+      targetPort: 31100
+    - name: ws-30200
+      protocol: TCP
+      port: 30200
+      targetPort: 31200
+    - name: ws-30300
+      protocol: TCP
+      port: 30300
+      targetPort: 31300

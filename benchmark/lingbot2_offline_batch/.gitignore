@@ -1,0 +1,23 @@
+# Runtime-only artifacts. Keep reproducible configs and compact summaries in Git.
+__pycache__/
+*.pyc
+*.log
+*.mp4
+*.html
+.DS_Store
+
+# These files contain short-lived presigned S3 URLs or expanded batch payloads.
+results/**/artifact-urls.json
+results/**/input/
+results/**/metadata/
+results/**/preview10/
+results/**/cache-*/
+results/**/torch_compile_cache/
+
+# Large visual QA/runtime payloads are published to S3 instead.
+results/**/videos/
+results/**/priority-thirdperson50/
+results/actual_video_actions/
+results/**/*.jsonl
+results/**/*.jsonl.gz
+results/**/*.jpg

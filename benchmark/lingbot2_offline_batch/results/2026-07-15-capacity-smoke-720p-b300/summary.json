@@ -1,0 +1,221 @@
+{
+  "config": {
+    "source_messages": "/opt/bench/smoke-messages.jsonl.gz",
+    "fixture_samples": 5,
+    "urls": [
+      "ws://127.0.0.1:30000/v1/realtime_video/generate",
+      "ws://127.0.0.1:30100/v1/realtime_video/generate",
+      "ws://127.0.0.1:30200/v1/realtime_video/generate",
+      "ws://127.0.0.1:30300/v1/realtime_video/generate"
+    ],
+    "request_concurrency": 4,
+    "gpu_count": 8,
+    "gpus_per_request": 2,
+    "size": "1280x720",
+    "fps": 24.0,
+    "steps": 4,
+    "output_format": "raw-to-H.264-MP4",
+    "temporal_control_downsample": 4,
+    "lingbot_latents_per_chunk": 3,
+    "prompt_switch_quantization": "first 3-latent chunk boundary at or after fixture switch",
+    "sample_id_regex": null
+  },
+  "summary": {
+    "warmup_wall_sec": 89.31719958999929,
+    "measured_wall_sec": 50.748155371000394,
+    "selected_samples": 5,
+    "resumed_samples": 0,
+    "new_successful_samples": 5,
+    "successful_samples": 5,
+    "failed_samples": 0,
+    "failure_rate": 0.0,
+    "total_persisted_video_seconds": 26.875,
+    "new_persisted_video_seconds": 26.875,
+    "node_videos_per_hour_this_run": 354.69269510209523,
+    "videos_per_gpu_hour_this_run": 44.336586887761904,
+    "generated_seconds_per_gpu_hour_this_run": 238.30915452172025,
+    "aggregate_realtime_factor_this_run": 0.5295758989371561,
+    "request_persisted_end_to_end_sec": {
+      "mean": 25.65678344759981,
+      "p50": 25.72704469999917,
+      "p95": 26.02814438600035,
+      "max": 26.02814438600035
+    },
+    "successful_by_group": {
+      "TPV_SMOKE_720P": 5
+    },
+    "failed_sample_ids": []
+  },
+  "results": [
+    {
+      "sample_id": "capacity-smoke-720p/TPV/gvs2_00000109-action-00",
+      "group": "TPV_SMOKE_720P",
+      "image_id": "gvs2_00000109",
+      "view": {
+        "tier": "tpv",
+        "sub": "dataset_label"
+      },
+      "trajectory": "lingbot_world2_traj_00000",
+      "url": "ws://127.0.0.1:30000/v1/realtime_video/generate",
+      "output": "/results/capacity-smoke-720p/cases/videos/TPV/gvs2_00000109-action-00.mp4",
+      "chunks": 11,
+      "generated_latent_frames": 32,
+      "service_frames": 129,
+      "persisted_frames": 129,
+      "trimmed_service_frames": 0,
+      "video_seconds": 5.375,
+      "generation_delivery_sec": 24.4939452159997,
+      "persisted_end_to_end_sec": 25.784755646998747,
+      "scheduler_generated_fps": 5.447635135135135,
+      "delivered_and_persisted_fps": 5.002956078624509,
+      "realtime_factor": 0.2084565032760212,
+      "prompt_events": [],
+      "media": {
+        "frames": 129,
+        "duration_sec": 5.375,
+        "width": 1280,
+        "height": 720,
+        "avg_frame_rate": "24/1",
+        "bytes": 9086692
+      },
+      "resumed": false,
+      "success": true
+    },
+    {
+      "sample_id": "capacity-smoke-720p/TPV/gvs2_00000109-action-01",
+      "group": "TPV_SMOKE_720P",
+      "image_id": "gvs2_00000109",
+      "view": {
+        "tier": "tpv",
+        "sub": "dataset_label"
+      },
+      "trajectory": "lingbot_world2_traj_00001",
+      "url": "ws://127.0.0.1:30100/v1/realtime_video/generate",
+      "output": "/results/capacity-smoke-720p/cases/videos/TPV/gvs2_00000109-action-01.mp4",
+      "chunks": 11,
+      "generated_latent_frames": 32,
+      "service_frames": 129,
+      "persisted_frames": 129,
+      "trimmed_service_frames": 0,
+      "video_seconds": 5.375,
+      "generation_delivery_sec": 24.62472164599967,
+      "persisted_end_to_end_sec": 26.02814438600035,
+      "scheduler_generated_fps": 5.411527812735968,
+      "delivered_and_persisted_fps": 4.956173520744134,
+      "realtime_factor": 0.20650723003100555,
+      "prompt_events": [],
+      "media": {
+        "frames": 129,
+        "duration_sec": 5.375,
+        "width": 1280,
+        "height": 720,
+        "avg_frame_rate": "24/1",
+        "bytes": 10253184
+      },
+      "resumed": false,
+      "success": true
+    },
+    {
+      "sample_id": "capacity-smoke-720p/TPV/gvs2_00000109-action-02",
+      "group": "TPV_SMOKE_720P",
+      "image_id": "gvs2_00000109",
+      "view": {
+        "tier": "tpv",
+        "sub": "dataset_label"
+      },
+      "trajectory": "lingbot_world2_traj_00002",
+      "url": "ws://127.0.0.1:30200/v1/realtime_video/generate",
+      "output": "/results/capacity-smoke-720p/cases/videos/TPV/gvs2_00000109-action-02.mp4",
+      "chunks": 11,
+      "generated_latent_frames": 32,
+      "service_frames": 129,
+      "persisted_frames": 129,
+      "trimmed_service_frames": 0,
+      "video_seconds": 5.375,
+      "generation_delivery_sec": 24.411867337999865,
+      "persisted_end_to_end_sec": 25.72704469999917,
+      "scheduler_generated_fps": 5.432951482479784,
+      "delivered_and_persisted_fps": 5.014178717542484,
+      "realtime_factor": 0.20892411323093685,
+      "prompt_events": [],
+      "media": {
+        "frames": 129,
+        "duration_sec": 5.375,
+        "width": 1280,
+        "height": 720,
+        "avg_frame_rate": "24/1",
+        "bytes": 9246930
+      },
+      "resumed": false,
+      "success": true
+    },
+    {
+      "sample_id": "capacity-smoke-720p/TPV/gvs2_00000109-action-03",
+      "group": "TPV_SMOKE_720P",
+      "image_id": "gvs2_00000109",
+      "view": {
+        "tier": "tpv",
+        "sub": "dataset_label"
+      },
+      "trajectory": "lingbot_world2_traj_00003",
+      "url": "ws://127.0.0.1:30300/v1/realtime_video/generate",
+      "output": "/results/capacity-smoke-720p/cases/videos/TPV/gvs2_00000109-action-03.mp4",
+      "chunks": 11,
+      "generated_latent_frames": 32,
+      "service_frames": 129,
+      "persisted_frames": 129,
+      "trimmed_service_frames": 0,
+      "video_seconds": 5.375,
+      "generation_delivery_sec": 24.20496434799861,
+      "persisted_end_to_end_sec": 25.415934792999906,
+      "scheduler_generated_fps": 5.507407249284891,
+      "delivered_and_persisted_fps": 5.075555986850005,
+      "realtime_factor": 0.21148149945208353,
+      "prompt_events": [],
+      "media": {
+        "frames": 129,
+        "duration_sec": 5.375,
+        "width": 1280,
+        "height": 720,
+        "avg_frame_rate": "24/1",
+        "bytes": 7895502
+      },
+      "resumed": false,
+      "success": true
+    },
+    {
+      "sample_id": "capacity-smoke-720p/TPV/gvs2_00000109-action-04",
+      "group": "TPV_SMOKE_720P",
+      "image_id": "gvs2_00000109",
+      "view": {
+        "tier": "tpv",
+        "sub": "dataset_label"
+      },
+      "trajectory": "lingbot_world2_traj_00004",
+      "url": "ws://127.0.0.1:30300/v1/realtime_video/generate",
+      "output": "/results/capacity-smoke-720p/cases/videos/TPV/gvs2_00000109-action-04.mp4",
+      "chunks": 11,
+      "generated_latent_frames": 32,
+      "service_frames": 129,
+      "persisted_frames": 129,
+      "trimmed_service_frames": 0,
+      "video_seconds": 5.375,
+      "generation_delivery_sec": 24.155940034001105,
+      "persisted_end_to_end_sec": 25.328037712000878,
+      "scheduler_generated_fps": 5.4902962206333,
+      "delivered_and_persisted_fps": 5.093169927604675,
+      "realtime_factor": 0.2122154136501948,
+      "prompt_events": [],
+      "media": {
+        "frames": 129,
+        "duration_sec": 5.375,
+        "width": 1280,
+        "height": 720,
+        "avg_frame_rate": "24/1",
+        "bytes": 7598232
+      },
+      "resumed": false,
+      "success": true
+    }
+  ]
+}

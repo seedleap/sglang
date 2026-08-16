@@ -1,0 +1,28 @@
+{
+  "ranked_by_node_videos_per_hour": [
+    {
+      "topology": "4x2gpu",
+      "server_startup_sec": 186.0,
+      "warmup_wall_sec": 24.42689506299996,
+      "measured_wall_sec": 32.53874026799997,
+      "requested_videos": 8,
+      "successful_videos": 8,
+      "failed_videos": 0,
+      "failure_rate": 0.0,
+      "total_generated_video_seconds": 41.28,
+      "node_videos_per_hour": 885.0988010842937,
+      "videos_per_gpu_hour": 110.6373501355367,
+      "generated_seconds_per_gpu_hour": 570.8887266993694,
+      "aggregate_realtime_factor": 1.2686416148874875,
+      "request_persisted_end_to_end_sec": {
+        "mean": 16.048396408125015,
+        "p50": 16.04581572899997,
+        "p95": 16.374378137999997,
+        "max": 16.374378137999997
+      },
+      "perspective_p50_sec": {
+        "third_person": 16.04581572899997
+      }
+    }
+  ]
+}

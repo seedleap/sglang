@@ -1,0 +1,513 @@
+{
+  "files": 50,
+  "fully_decoded": 50,
+  "expected_frames_per_video": 81,
+  "resolution": "832x480",
+  "fps": 16,
+  "action_segments_per_video": 10,
+  "single_segments_per_video": 6,
+  "combo_segments_per_video": 4,
+  "failures": [],
+  "checks": [
+    {
+      "image_id": "gvs2_00000109",
+      "frames": 81,
+      "width": 832,
+      "height": 480,
+      "single_segments": 6,
+      "combo_segments": 4,
+      "bytes": 3234528,
+      "valid": true
+    },
+    {
+      "image_id": "gvs2_00000110",
+      "frames": 81,
+      "width": 832,
+      "height": 480,
+      "single_segments": 6,
+      "combo_segments": 4,
+      "bytes": 3951389,
+      "valid": true
+    },
+    {
+      "image_id": "gvs2_00000125",
+      "frames": 81,
+      "width": 832,
+      "height": 480,
+      "single_segments": 6,
+      "combo_segments": 4,
+      "bytes": 4621077,
+      "valid": true
+    },
+    {
+      "image_id": "gvs2_00000127",
+      "frames": 81,
+      "width": 832,
+      "height": 480,
+      "single_segments": 6,
+      "combo_segments": 4,
+      "bytes": 3552719,
+      "valid": true
+    },
+    {
+      "image_id": "gvs2_00000189",
+      "frames": 81,
+      "width": 832,
+      "height": 480,
+      "single_segments": 6,
+      "combo_segments": 4,
+      "bytes": 4625758,
+      "valid": true
+    },
+    {
+      "image_id": "gvs2_00000191",
+      "frames": 81,
+      "width": 832,
+      "height": 480,
+      "single_segments": 6,
+      "combo_segments": 4,
+      "bytes": 3763397,
+      "valid": true
+    },
+    {
+      "image_id": "gvs2_00000205",
+      "frames": 81,
+      "width": 832,
+      "height": 480,
+      "single_segments": 6,
+      "combo_segments": 4,
+      "bytes": 5474571,
+      "valid": true
+    },
+    {
+      "image_id": "gvs2_00000207",
+      "frames": 81,
+      "width": 832,
+      "height": 480,
+      "single_segments": 6,
+      "combo_segments": 4,
+      "bytes": 5411629,
+      "valid": true
+    },
+    {
+      "image_id": "gvs2_00000208",
+      "frames": 81,
+      "width": 832,
+      "height": 480,
+      "single_segments": 6,
+      "combo_segments": 4,
+      "bytes": 3337485,
+      "valid": true
+    },
+    {
+      "image_id": "gvs2_00000221",
+      "frames": 81,
+      "width": 832,
+      "height": 480,
+      "single_segments": 6,
+      "combo_segments": 4,
+      "bytes": 7159955,
+      "valid": true
+    },
+    {
+      "image_id": "gvs2_00000225",
+      "frames": 81,
+      "width": 832,
+      "height": 480,
+      "single_segments": 6,
+      "combo_segments": 4,
+      "bytes": 5343301,
+      "valid": true
+    },
+    {
+      "image_id": "gvs2_00000285",
+      "frames": 81,
+      "width": 832,
+      "height": 480,
+      "single_segments": 6,
+      "combo_segments": 4,
+      "bytes": 2782778,
+      "valid": true
+    },
+    {
+      "image_id": "gvs2_00000286",
+      "frames": 81,
+      "width": 832,
+      "height": 480,
+      "single_segments": 6,
+      "combo_segments": 4,
+      "bytes": 2959830,
+      "valid": true
+    },
+    {
+      "image_id": "gvs2_00000288",
+      "frames": 81,
+      "width": 832,
+      "height": 480,
+      "single_segments": 6,
+      "combo_segments": 4,
+      "bytes": 4882541,
+      "valid": true
+    },
+    {
+      "image_id": "gvs2_00000291",
+      "frames": 81,
+      "width": 832,
+      "height": 480,
+      "single_segments": 6,
+      "combo_segments": 4,
+      "bytes": 3179771,
+      "valid": true
+    },
+    {
+      "image_id": "gvs2_00000292",
+      "frames": 81,
+      "width": 832,
+      "height": 480,
+      "single_segments": 6,
+      "combo_segments": 4,
+      "bytes": 4864924,
+      "valid": true
+    },
+    {
+      "image_id": "gvs2_00000397",
+      "frames": 81,
+      "width": 832,
+      "height": 480,
+      "single_segments": 6,
+      "combo_segments": 4,
+      "bytes": 4152120,
+      "valid": true
+    },
+    {
+      "image_id": "gvs2_00000414",
+      "frames": 81,
+      "width": 832,
+      "height": 480,
+      "single_segments": 6,
+      "combo_segments": 4,
+      "bytes": 4585800,
+      "valid": true
+    },
+    {
+      "image_id": "gvs2_00000448",
+      "frames": 81,
+      "width": 832,
+      "height": 480,
+      "single_segments": 6,
+      "combo_segments": 4,
+      "bytes": 2389183,
+      "valid": true
+    },
+    {
+      "image_id": "gvs2_00000453",
+      "frames": 81,
+      "width": 832,
+      "height": 480,
+      "single_segments": 6,
+      "combo_segments": 4,
+      "bytes": 2724471,
+      "valid": true
+    },
+    {
+      "image_id": "gvs2_00000454",
+      "frames": 81,
+      "width": 832,
+      "height": 480,
+      "single_segments": 6,
+      "combo_segments": 4,
+      "bytes": 4620812,
+      "valid": true
+    },
+    {
+      "image_id": "gvs2_00000462",
+      "frames": 81,
+      "width": 832,
+      "height": 480,
+      "single_segments": 6,
+      "combo_segments": 4,
+      "bytes": 2743611,
+      "valid": true
+    },
+    {
+      "image_id": "gvs2_00000469",
+      "frames": 81,
+      "width": 832,
+      "height": 480,
+      "single_segments": 6,
+      "combo_segments": 4,
+      "bytes": 3701861,
+      "valid": true
+    },
+    {
+      "image_id": "gvs2_00000471",
+      "frames": 81,
+      "width": 832,
+      "height": 480,
+      "single_segments": 6,
+      "combo_segments": 4,
+      "bytes": 3918889,
+      "valid": true
+    },
+    {
+      "image_id": "gvs2_00000493",
+      "frames": 81,
+      "width": 832,
+      "height": 480,
+      "single_segments": 6,
+      "combo_segments": 4,
+      "bytes": 4081698,
+      "valid": true
+    },
+    {
+      "image_id": "gvs2_00000495",
+      "frames": 81,
+      "width": 832,
+      "height": 480,
+      "single_segments": 6,
+      "combo_segments": 4,
+      "bytes": 3440985,
+      "valid": true
+    },
+    {
+      "image_id": "gvs2_00000542",
+      "frames": 81,
+      "width": 832,
+      "height": 480,
+      "single_segments": 6,
+      "combo_segments": 4,
+      "bytes": 4842571,
+      "valid": true
+    },
+    {
+      "image_id": "gvs2_00000589",
+      "frames": 81,
+      "width": 832,
+      "height": 480,
+      "single_segments": 6,
+      "combo_segments": 4,
+      "bytes": 2731689,
+      "valid": true
+    },
+    {
+      "image_id": "gvs2_00000688",
+      "frames": 81,
+      "width": 832,
+      "height": 480,
+      "single_segments": 6,
+      "combo_segments": 4,
+      "bytes": 4837818,
+      "valid": true
+    },
+    {
+      "image_id": "gvs2_00000763",
+      "frames": 81,
+      "width": 832,
+      "height": 480,
+      "single_segments": 6,
+      "combo_segments": 4,
+      "bytes": 4082479,
+      "valid": true
+    },
+    {
+      "image_id": "gvs2_00000764",
+      "frames": 81,
+      "width": 832,
+      "height": 480,
+      "single_segments": 6,
+      "combo_segments": 4,
+      "bytes": 3024296,
+      "valid": true
+    },
+    {
+      "image_id": "gvs2_00000840",
+      "frames": 81,
+      "width": 832,
+      "height": 480,
+      "single_segments": 6,
+      "combo_segments": 4,
+      "bytes": 3500483,
+      "valid": true
+    },
+    {
+      "image_id": "gvs2_00000869",
+      "frames": 81,
+      "width": 832,
+      "height": 480,
+      "single_segments": 6,
+      "combo_segments": 4,
+      "bytes": 3200295,
+      "valid": true
+    },
+    {
+      "image_id": "gvs2_00000893",
+      "frames": 81,
+      "width": 832,
+      "height": 480,
+      "single_segments": 6,
+      "combo_segments": 4,
+      "bytes": 4147646,
+      "valid": true
+    },
+    {
+      "image_id": "gvs2_00000895",
+      "frames": 81,
+      "width": 832,
+      "height": 480,
+      "single_segments": 6,
+      "combo_segments": 4,
+      "bytes": 3534283,
+      "valid": true
+    },
+    {
+      "image_id": "gvs2_00000898",
+      "frames": 81,
+      "width": 832,
+      "height": 480,
+      "single_segments": 6,
+      "combo_segments": 4,
+      "bytes": 5068946,
+      "valid": true
+    },
+    {
+      "image_id": "gvs2_00000899",
+      "frames": 81,
+      "width": 832,
+      "height": 480,
+      "single_segments": 6,
+      "combo_segments": 4,
+      "bytes": 3179269,
+      "valid": true
+    },
+    {
+      "image_id": "gvs2_00001037",
+      "frames": 81,
+      "width": 832,
+      "height": 480,
+      "single_segments": 6,
+      "combo_segments": 4,
+      "bytes": 2525055,
+      "valid": true
+    },
+    {
+      "image_id": "gvs2_00001280",
+      "frames": 81,
+      "width": 832,
+      "height": 480,
+      "single_segments": 6,
+      "combo_segments": 4,
+      "bytes": 5442908,
+      "valid": true
+    },
+    {
+      "image_id": "gvs2_00001316",
+      "frames": 81,
+      "width": 832,
+      "height": 480,
+      "single_segments": 6,
+      "combo_segments": 4,
+      "bytes": 2154502,
+      "valid": true
+    },
+    {
+      "image_id": "gvs2_00001388",
+      "frames": 81,
+      "width": 832,
+      "height": 480,
+      "single_segments": 6,
+      "combo_segments": 4,
+      "bytes": 4406982,
+      "valid": true
+    },
+    {
+      "image_id": "gvs2_00001468",
+      "frames": 81,
+      "width": 832,
+      "height": 480,
+      "single_segments": 6,
+      "combo_segments": 4,
+      "bytes": 3102509,
+      "valid": true
+    },
+    {
+      "image_id": "gvs2_00001478",
+      "frames": 81,
+      "width": 832,
+      "height": 480,
+      "single_segments": 6,
+      "combo_segments": 4,
+      "bytes": 3548330,
+      "valid": true
+    },
+    {
+      "image_id": "gvs2_00001484",
+      "frames": 81,
+      "width": 832,
+      "height": 480,
+      "single_segments": 6,
+      "combo_segments": 4,
+      "bytes": 2273360,
+      "valid": true
+    },
+    {
+      "image_id": "gvs2_00001677",
+      "frames": 81,
+      "width": 832,
+      "height": 480,
+      "single_segments": 6,
+      "combo_segments": 4,
+      "bytes": 3762508,
+      "valid": true
+    },
+    {
+      "image_id": "gvs2_00001692",
+      "frames": 81,
+      "width": 832,
+      "height": 480,
+      "single_segments": 6,
+      "combo_segments": 4,
+      "bytes": 4231716,
+      "valid": true
+    },
+    {
+      "image_id": "gvs2_00001891",
+      "frames": 81,
+      "width": 832,
+      "height": 480,
+      "single_segments": 6,
+      "combo_segments": 4,
+      "bytes": 4791985,
+      "valid": true
+    },
+    {
+      "image_id": "gvs2_00002013",
+      "frames": 81,
+      "width": 832,
+      "height": 480,
+      "single_segments": 6,
+      "combo_segments": 4,
+      "bytes": 2837858,
+      "valid": true
+    },
+    {
+      "image_id": "gvs2_00002029",
+      "frames": 81,
+      "width": 832,
+      "height": 480,
+      "single_segments": 6,
+      "combo_segments": 4,
+      "bytes": 4222803,
+      "valid": true
+    },
+    {
+      "image_id": "gvs2_00002030",
+      "frames": 81,
+      "width": 832,
+      "height": 480,
+      "single_segments": 6,
+      "combo_segments": 4,
+      "bytes": 2036483,
+      "valid": true
+    }
+  ]
+}

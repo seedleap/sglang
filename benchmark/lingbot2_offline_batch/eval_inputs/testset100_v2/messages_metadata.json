@@ -1,0 +1,30 @@
+{
+  "source_prefix": "s3://leap-world-us-east-2/world-model/eval/platform/eval_sets/minWM/testset100_v2/",
+  "source_samples": "s3://leap-world-us-east-2/world-model/eval/platform/eval_sets/minWM/testset100_v2/samples.jsonl",
+  "output_messages": ".local/eval/testset100_v2/messages.jsonl",
+  "schema_version": 2,
+  "num_samples": 337,
+  "groups": {
+    "G1": 64,
+    "G2": 44,
+    "G3": 79,
+    "G4": 100,
+    "G5": 50
+  },
+  "generated_latent_frames": {
+    "8": 32,
+    "20": 74,
+    "32": 31,
+    "64": 38,
+    "80": 60,
+    "160": 48,
+    "240": 54
+  },
+  "condition_switch_counts": {
+    "0": 187,
+    "1": 60,
+    "3": 48,
+    "5": 42
+  },
+  "temporal_downsample_factor": 4
+}

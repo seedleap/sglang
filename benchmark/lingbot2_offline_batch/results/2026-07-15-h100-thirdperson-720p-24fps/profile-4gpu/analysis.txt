@@ -1,0 +1,5 @@
+device0 kernel count: 111298
+detected 1 request/chunk windows (gap>500ms)
+typeIds found (one per physical GPU): [281479271677952, 281479271677953, 281479271677954, 281479271677955]
+
+=== window 0 === wall=22613.0ms busy=94.5%  SMs Active [Throughput %]=84.5%  Tensor Active [Throughput %]=57.2%  DRAM Read Bandwidth [Throughput %]=14.4%  DRAM Write Bandwidth [Throughput %]=7.7%

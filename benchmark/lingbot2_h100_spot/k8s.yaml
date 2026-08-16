@@ -1,0 +1,332 @@
+apiVersion: karpenter.k8s.aws/v1
+kind: EC2NodeClass
+metadata:
+  name: codex-lingbot2-h100-perf-ec2
+  labels:
+    seedleap.ai/owner: chenshengdong
+    seedleap.ai/task: lingbot2-h100-perf
+spec:
+  amiFamily: AL2023
+  amiSelectorTerms:
+    - id: ami-0cba08f75775ef406
+  blockDeviceMappings:
+    - deviceName: /dev/xvda
+      ebs:
+        deleteOnTermination: true
+        encrypted: true
+        volumeSize: 400Gi
+        volumeType: gp3
+  role: KarpenterNodeRole-leap-world
+  securityGroupSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: leap-world
+  subnetSelectorTerms:
+    - id: subnet-0b3e75dab2f514ab3
+    - id: subnet-0245e620ed4f40137
+    - id: subnet-0bcfc20f6b0e5f29c
+  networkInterfaces:
+    - deviceIndex: 0
+      interfaceType: interface
+      networkCardIndex: 0
+    - deviceIndex: 1
+      interfaceType: efa-only
+      networkCardIndex: 1
+    - deviceIndex: 1
+      interfaceType: efa-only
+      networkCardIndex: 2
+    - deviceIndex: 1
+      interfaceType: efa-only
+      networkCardIndex: 3
+    - deviceIndex: 1
+      interfaceType: efa-only
+      networkCardIndex: 4
+    - deviceIndex: 1
+      interfaceType: efa-only
+      networkCardIndex: 5
+    - deviceIndex: 1
+      interfaceType: efa-only
+      networkCardIndex: 6
+    - deviceIndex: 1
+      interfaceType: efa-only
+      networkCardIndex: 7
+    - deviceIndex: 1
+      interfaceType: efa-only
+      networkCardIndex: 8
+    - deviceIndex: 1
+      interfaceType: efa-only
+      networkCardIndex: 9
+    - deviceIndex: 1
+      interfaceType: efa-only
+      networkCardIndex: 10
+    - deviceIndex: 1
+      interfaceType: efa-only
+      networkCardIndex: 11
+    - deviceIndex: 1
+      interfaceType: efa-only
+      networkCardIndex: 12
+    - deviceIndex: 1
+      interfaceType: efa-only
+      networkCardIndex: 13
+    - deviceIndex: 1
+      interfaceType: efa-only
+      networkCardIndex: 14
+    - deviceIndex: 1
+      interfaceType: efa-only
+      networkCardIndex: 15
+---
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: codex-lingbot2-h100-perf
+  labels:
+    seedleap.ai/owner: chenshengdong
+    seedleap.ai/task: lingbot2-h100-perf
+spec:
+  disruption:
+    consolidateAfter: 10m
+    consolidationPolicy: WhenEmpty
+    budgets:
+      - nodes: "0"
+        reasons: [Empty, Underutilized]
+  limits:
+    cpu: "192"
+    nvidia.com/gpu: "8"
+  template:
+    metadata:
+      labels:
+        seedleap.ai/capacity-pool: codex-lingbot2-h100-perf
+        seedleap.ai/owner: chenshengdong
+        seedleap.ai/task: lingbot2-h100-perf
+    spec:
+      expireAfter: 8h
+      nodeClassRef:
+        group: karpenter.k8s.aws
+        kind: EC2NodeClass
+        name: codex-lingbot2-h100-perf-ec2
+      requirements:
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: [spot, on-demand]
+        - key: node.kubernetes.io/instance-type
+          operator: In
+          values: [p5.48xlarge]
+        - key: topology.kubernetes.io/zone
+          operator: In
+          values: [us-east-2b]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: codex-lingbot2-h100-perf
+  namespace: default
+  labels:
+    app: codex-lingbot2-h100-perf
+    seedleap.ai/owner: chenshengdong
+    seedleap.ai/task: lingbot2-h100-perf
+spec:
+  type: ClusterIP
+  selector:
+    app: codex-lingbot2-h100-perf
+  ports:
+    - name: api
+      port: 30000
+      targetPort: api
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: codex-lingbot2-h100-perf
+  namespace: default
+  labels:
+    app: codex-lingbot2-h100-perf
+    seedleap.ai/owner: chenshengdong
+    seedleap.ai/task: lingbot2-h100-perf
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: codex-lingbot2-h100-perf
+  template:
+    metadata:
+      labels:
+        app: codex-lingbot2-h100-perf
+        seedleap.ai/owner: chenshengdong
+        seedleap.ai/task: lingbot2-h100-perf
+      annotations:
+        cloudwatch.aws.amazon.com/auto-annotate-dotnet: "false"
+        cloudwatch.aws.amazon.com/auto-annotate-java: "false"
+        cloudwatch.aws.amazon.com/auto-annotate-nodejs: "false"
+        cloudwatch.aws.amazon.com/auto-annotate-python: "false"
+        instrumentation.opentelemetry.io/inject-dotnet: "false"
+        instrumentation.opentelemetry.io/inject-java: "false"
+        instrumentation.opentelemetry.io/inject-nodejs: "false"
+        instrumentation.opentelemetry.io/inject-python: "false"
+        seedleap.ai/code-git-ref: afc619cc79a2960f9cab53b3823d904672f3c5c0
+        seedleap.ai/model-revision: 59cccf49f2d2dd27418ae7a04b82b10868d455c2
+        seedleap.ai/runtime-image-ref: lmsysorg/sglang:dev@sha256:8f78575e03ab59a39191a4a6f718bbbe1726fa940f72a86a187a3f1628ada9a7
+    spec:
+      nodeSelector:
+        karpenter.sh/nodepool: codex-lingbot2-h100-perf
+        node.kubernetes.io/instance-type: p5.48xlarge
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: server
+          image: lmsysorg/sglang:dev@sha256:8f78575e03ab59a39191a4a6f718bbbe1726fa940f72a86a187a3f1628ada9a7
+          imagePullPolicy: IfNotPresent
+          workingDir: /workspace
+          securityContext:
+            capabilities:
+              add: [SYS_ADMIN]
+          command: [/bin/bash, -lc]
+          args:
+            - |
+              set -euo pipefail
+              rm -rf /workspace/sglang
+              git clone --filter=blob:none "https://x-access-token:${GITHUB_TOKEN}@github.com/seedleap/sglang.git" /workspace/sglang
+              cd /workspace/sglang
+              git checkout --detach "${CODE_GIT_REF}"
+              test "$(git rev-parse HEAD)" = "${CODE_GIT_REF}"
+              python3 -m pip install -e "python[diffusion]" --root-user-action=ignore
+              python3 -m pip install \
+                --force-reinstall \
+                --no-deps \
+                --index-url https://flashinfer.ai/whl/cu130 \
+                'flashinfer-jit-cache==0.6.12+cu130'
+              serve_cmd=(sglang serve \
+                --model-path "${MODEL_ID}" \
+                --revision "${MODEL_REVISION}" \
+                --pipeline-class-name LingBotWorldCausalDMDPipeline \
+                --num-gpus "${NUM_GPUS}" \
+                --performance-mode "${PERFORMANCE_MODE}" \
+                --tp-size "${TP_SIZE}" \
+                --sp-degree "${ULYSSES_DEGREE}" \
+                --ulysses-degree "${ULYSSES_DEGREE}" \
+                --dit-cpu-offload false \
+                --text-encoder-cpu-offload false \
+                --vae-config.use-parallel-decode true \
+                --vae-config.parallel-decode-mode spatial \
+                --enable-torch-compile "${ENABLE_TORCH_COMPILE}" \
+                --enable-layerwise-nvtx-marker "${ENABLE_NSYS_PROFILE}" \
+                --host 0.0.0.0 \
+                --port 30000)
+              if [[ -n "${ATTENTION_BACKEND_CONFIG}" ]]; then
+                serve_cmd+=(--attention-backend-config "${ATTENTION_BACKEND_CONFIG}")
+              fi
+              if [[ "${ENABLE_NSYS_PROFILE}" == "true" ]]; then
+                nsys profile \
+                  --trace=cuda,nvtx,nccl \
+                  --sample=none \
+                  --cpuctxsw=none \
+                  --capture-range=nvtx \
+                  --nvtx-capture="${NSYS_NVTX_CAPTURE}" \
+                  --capture-range-end=stop \
+                  --force-overwrite=true \
+                  --output="${NSYS_OUTPUT_PATH}" \
+                  "${serve_cmd[@]}" &
+              else
+                "${serve_cmd[@]}" &
+              fi
+              server_pid=$!
+              trap 'kill -TERM "${server_pid}" 2>/dev/null || true' TERM INT
+              wait "${server_pid}"
+          env:
+            - name: CODE_GIT_REF
+              value: afc619cc79a2960f9cab53b3823d904672f3c5c0
+            - name: MODEL_ID
+              value: robbyant/lingbot-world-v2-14b-causal-fast-diffusers
+            - name: MODEL_REVISION
+              value: 59cccf49f2d2dd27418ae7a04b82b10868d455c2
+            - name: NUM_GPUS
+              value: "8"
+            - name: PERFORMANCE_MODE
+              value: speed
+            - name: TP_SIZE
+              value: "1"
+            - name: ULYSSES_DEGREE
+              value: "8"
+            - name: ENABLE_TORCH_COMPILE
+              value: "false"
+            - name: ENABLE_NSYS_PROFILE
+              value: "false"
+            - name: ATTENTION_BACKEND_CONFIG
+              value: lingbot_causal_fa_num_splits=2
+            - name: NSYS_NVTX_CAPTURE
+              value: stage_LingBotWorldCausalDMDDenoisingStage
+            - name: NSYS_OUTPUT_PATH
+              value: /results/e2-baseline-dit
+            - name: GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: github-token
+                  key: token
+            - name: SGLANG_LINGBOT_LAZY_VAE_ENCODE_BLACK_FRAMES
+              value: "60"
+            - name: SGLANG_LINGBOT_ENABLE_INTERACTIVE_KV_WINDOW
+              value: "true"
+            - name: SGLANG_DIFFUSION_CACHE_ROOT
+              value: /results/sgl-diffusion-cache
+            - name: SGLANG_DIFFUSION_STAGE_LOGGING
+              value: "true"
+            - name: SGLANG_DIFFUSION_BENCHMARK_BYPASS_USP_A2A
+              value: "false"
+            - name: PYTHONUNBUFFERED
+              value: "1"
+            - name: NCCL_DEBUG
+              value: WARN
+            - name: NCCL_PROTO
+              value: Simple
+          ports:
+            - name: api
+              containerPort: 30000
+          startupProbe:
+            tcpSocket:
+              port: api
+            periodSeconds: 20
+            timeoutSeconds: 2
+            failureThreshold: 120
+          readinessProbe:
+            httpGet:
+              path: /v1/models
+              port: api
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: "64"
+              memory: 512Gi
+              ephemeral-storage: 160Gi
+              nvidia.com/gpu: "8"
+            limits:
+              cpu: "192"
+              memory: 1Ti
+              ephemeral-storage: 350Gi
+              nvidia.com/gpu: "8"
+          volumeMounts:
+            - name: dshm
+              mountPath: /dev/shm
+            - name: hf-cache
+              mountPath: /root/.cache/huggingface
+            - name: pip-cache
+              mountPath: /root/.cache/pip
+            - name: results
+              mountPath: /results
+      volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 32Gi
+        - name: hf-cache
+          hostPath:
+            path: /var/lib/codex-lingbot2-h100-perf/hf-cache
+            type: DirectoryOrCreate
+        - name: pip-cache
+          hostPath:
+            path: /var/lib/codex-lingbot2-h100-perf/pip-cache
+            type: DirectoryOrCreate
+        - name: results
+          hostPath:
+            path: /var/lib/codex-lingbot2-h100-perf/results
+            type: DirectoryOrCreate

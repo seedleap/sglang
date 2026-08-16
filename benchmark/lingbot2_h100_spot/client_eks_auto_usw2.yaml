@@ -1,0 +1,39 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: codex-lingbot2-h100-perf-client
+  namespace: default
+  annotations:
+    cloudwatch.aws.amazon.com/auto-annotate-python: "false"
+    instrumentation.opentelemetry.io/inject-python: "false"
+  labels:
+    app: codex-lingbot2-h100-perf-client
+    seedleap.ai/owner: chenshengdong
+    seedleap.ai/task: lingbot2-h100-perf
+spec:
+  restartPolicy: Never
+  nodeSelector:
+    karpenter.sh/nodepool: general-purpose
+  containers:
+    - name: client
+      image: python:3.11-slim
+      imagePullPolicy: Always
+      command: [/bin/bash, -lc]
+      args:
+        - |
+          set -euo pipefail
+          python -m pip install --no-cache-dir websockets==15.0.1 msgspec==0.19.0
+          exec sleep infinity
+      resources:
+        requests:
+          cpu: "1"
+          memory: 2Gi
+        limits:
+          cpu: "2"
+          memory: 4Gi
+      volumeMounts:
+        - name: results
+          mountPath: /results
+  volumes:
+    - name: results
+      emptyDir: {}

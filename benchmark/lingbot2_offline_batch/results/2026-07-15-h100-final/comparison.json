@@ -1,0 +1,79 @@
+{
+  "ranked_by_node_videos_per_hour": [
+    {
+      "topology": "4x2gpu",
+      "server_startup_sec": 121.0,
+      "warmup_wall_sec": 15.790439507999963,
+      "measured_wall_sec": 100.3253689410003,
+      "requested_videos": 8,
+      "successful_videos": 8,
+      "failed_videos": 0,
+      "failure_rate": 0.0,
+      "total_generated_video_seconds": 121.92,
+      "node_videos_per_hour": 287.06597647237965,
+      "videos_per_gpu_hour": 35.883247059047456,
+      "generated_seconds_per_gpu_hour": 546.8606851798831,
+      "aggregate_realtime_factor": 1.215245967066407,
+      "request_persisted_end_to_end_sec": {
+        "mean": 49.91010059325009,
+        "p50": 50.049326503999964,
+        "p95": 50.27270580200002,
+        "max": 50.27270580200002
+      },
+      "perspective_p50_sec": {
+        "first_person": 49.842003349500146,
+        "third_person": 50.067345397000054
+      }
+    },
+    {
+      "topology": "2x4gpu",
+      "server_startup_sec": 186.0,
+      "warmup_wall_sec": 24.119256565999876,
+      "measured_wall_sec": 109.51995785600002,
+      "requested_videos": 8,
+      "successful_videos": 8,
+      "failed_videos": 0,
+      "failure_rate": 0.0,
+      "total_generated_video_seconds": 121.92,
+      "node_videos_per_hour": 262.9657695619922,
+      "videos_per_gpu_hour": 32.870721195249025,
+      "generated_seconds_per_gpu_hour": 500.94979101559517,
+      "aggregate_realtime_factor": 1.1132217578124337,
+      "request_persisted_end_to_end_sec": {
+        "mean": 27.237010554999983,
+        "p50": 27.17002874700006,
+        "p95": 27.664311180999903,
+        "max": 27.664311180999903
+      },
+      "perspective_p50_sec": {
+        "first_person": 27.038668035,
+        "third_person": 27.33353024400003
+      }
+    },
+    {
+      "topology": "1x8gpu",
+      "server_startup_sec": 231.0,
+      "warmup_wall_sec": 29.327769483999987,
+      "measured_wall_sec": 143.994726356,
+      "requested_videos": 8,
+      "successful_videos": 8,
+      "failed_videos": 0,
+      "failure_rate": 0.0,
+      "total_generated_video_seconds": 121.92,
+      "node_videos_per_hour": 200.00732477380728,
+      "videos_per_gpu_hour": 25.00091559672591,
+      "generated_seconds_per_gpu_hour": 381.0139536941029,
+      "aggregate_realtime_factor": 0.8466976748757842,
+      "request_persisted_end_to_end_sec": {
+        "mean": 17.993588664249998,
+        "p50": 17.976811756500013,
+        "p95": 18.285333698000045,
+        "max": 18.285333698000045
+      },
+      "perspective_p50_sec": {
+        "first_person": 17.958924104999994,
+        "third_person": 18.087335316999997
+      }
+    }
+  ]
+}

@@ -1,0 +1,44 @@
+{
+  "eval_set_id": "testset100_v2",
+  "format": "stage4_streaming_switch_samples_jsonl",
+  "source": "/Users/lstarry/Code/minWM/eval_outputs/testset100",
+  "num_samples": 337,
+  "groups": {
+    "G1": 64,
+    "G2": 44,
+    "G3": 79,
+    "G4": 100,
+    "G5": 50
+  },
+  "num_output_frames": {
+    "8": 32,
+    "20": 74,
+    "32": 31,
+    "64": 38,
+    "80": 60,
+    "160": 48,
+    "240": 54
+  },
+  "condition_switch_counts": {
+    "0": 187,
+    "1": 60,
+    "3": 48,
+    "5": 42
+  },
+  "multishot_block_format": {
+    "enabled_for_condition_switch_samples": true,
+    "num_frame_per_block": 8,
+    "event": "condition_switch",
+    "samples_with_blocks": 150,
+    "block_counts": {
+      "10": 60,
+      "20": 48,
+      "30": 42
+    }
+  },
+  "files": [
+    "samples.jsonl",
+    "metadata.json",
+    "img/"
+  ]
+}
