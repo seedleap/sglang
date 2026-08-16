@@ -15,7 +15,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.request import Request, urlopen
 
-
 SERVICE_ACCOUNT_ROOT = Path("/var/run/secrets/kubernetes.io/serviceaccount")
 WORKLOAD_RESOURCES = {
     "minwm-async-denoiser": "statefulsets",
@@ -172,7 +171,9 @@ class KubernetesScaleClient:
         self.namespace = namespace
         self.token = token_path.read_text(encoding="utf-8").strip()
         self.opener = opener
-        self.ssl_context = ssl_context or ssl.create_default_context(cafile=str(ca_path))
+        self.ssl_context = ssl_context or ssl.create_default_context(
+            cafile=str(ca_path)
+        )
 
     def _scale_url(self, workload: str) -> str:
         resource = WORKLOAD_RESOURCES.get(workload)

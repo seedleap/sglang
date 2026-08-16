@@ -72,10 +72,7 @@ def worker_message_allowed(wire: bytes) -> bool:
         message = msgspec.msgpack.decode(wire)
     except msgspec.DecodeError:
         return False
-    return (
-        isinstance(message, dict)
-        and message.get("type") in _WORKER_CONTROL_MESSAGES
-    )
+    return isinstance(message, dict) and message.get("type") in _WORKER_CONTROL_MESSAGES
 
 
 def worker_message_type(wire: bytes) -> str:
@@ -132,9 +129,7 @@ class GatewayOutputRoute:
     _last_frame_batch_index: int = field(default=-1, init=False)
     _seen_chunks: set[int] = field(default_factory=set, init=False)
     _output_closed: asyncio.Event = field(init=False)
-    _chunk_completed: dict[int, asyncio.Event] = field(
-        default_factory=dict, init=False
-    )
+    _chunk_completed: dict[int, asyncio.Event] = field(default_factory=dict, init=False)
     dropped_messages: int = field(default=0, init=False)
     bound: bool = field(default=False, init=False)
     closed: bool = field(default=False, init=False)
@@ -183,9 +178,7 @@ class GatewayOutputRoute:
         if message_type == "media_chunk_complete":
             if chunk_index not in self._seen_chunks:
                 raise OutputProtocolError("completion before frame batch")
-            completed = self._chunk_completed.setdefault(
-                chunk_index, asyncio.Event()
-            )
+            completed = self._chunk_completed.setdefault(chunk_index, asyncio.Event())
             if completed.is_set():
                 raise OutputProtocolError("duplicate completion")
             await self._put_with_bounded_drop(wire)
@@ -209,9 +202,7 @@ class GatewayOutputRoute:
         self._last_frame_batch_index = frame_batch_index
         self._seen_chunks.add(chunk_index)
         if message.get("is_final_frame_batch") is True:
-            self._chunk_completed.setdefault(
-                chunk_index, asyncio.Event()
-            ).set()
+            self._chunk_completed.setdefault(chunk_index, asyncio.Event()).set()
 
     async def _put_with_bounded_drop(self, wire: bytes) -> None:
         try:
@@ -230,17 +221,13 @@ class GatewayOutputRoute:
         try:
             self._queue.put_nowait(wire)
         except asyncio.QueueFull as exc:
-            raise OutputBackpressureError(
-                "Gateway output queue remained full"
-            ) from exc
+            raise OutputBackpressureError("Gateway output queue remained full") from exc
 
     def _drop_oldest_queued_message(self) -> None:
         try:
             dropped = self._queue.get_nowait()
         except asyncio.QueueEmpty as exc:
-            raise OutputBackpressureError(
-                "Gateway output queue remained full"
-            ) from exc
+            raise OutputBackpressureError("Gateway output queue remained full") from exc
         if dropped is None:
             try:
                 self._queue.put_nowait(None)
@@ -282,9 +269,7 @@ class GatewayOutputRoute:
 
 
 class GatewayOutputRegistry:
-    def __init__(
-        self, *, queue_depth: int = 2, enqueue_timeout_s: float = 1.0
-    ) -> None:
+    def __init__(self, *, queue_depth: int = 2, enqueue_timeout_s: float = 1.0) -> None:
         if queue_depth < 1:
             raise ValueError("queue_depth must be positive")
         if enqueue_timeout_s <= 0:

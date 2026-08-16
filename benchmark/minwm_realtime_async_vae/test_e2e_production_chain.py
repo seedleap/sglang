@@ -1,5 +1,4 @@
 import pytest
-
 from e2e_production_chain import (
     REQUIRED_TRACE_EVENTS,
     ProductionGateError,

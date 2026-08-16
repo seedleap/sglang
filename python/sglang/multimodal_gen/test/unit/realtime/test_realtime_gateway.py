@@ -116,9 +116,7 @@ def test_gateway_output_route_uses_media_completion_as_authoritative_marker():
         route = await registry.register("s", "g", token="secret")
 
         await route.put(_frame(0, 0))
-        completion_waiter = asyncio.create_task(
-            route.wait_until_chunk_completed(0)
-        )
+        completion_waiter = asyncio.create_task(route.wait_until_chunk_completed(0))
         await asyncio.sleep(0)
         assert not completion_waiter.done()
 

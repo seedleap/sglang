@@ -4,7 +4,6 @@ import os
 import subprocess
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[2]
 DEPLOY = ROOT / "benchmark/minwm_realtime_async_vae/deploy_production.sh"
 
@@ -19,8 +18,8 @@ def test_ondelete_statefulset_waits_for_the_whole_batched_rollout():
 
     assert "set -Eeuo pipefail" in source
     assert "wait_for_ondelete_statefulset" in source
-    assert 'updated_replicas >= desired_replicas' in source
-    assert 'ready_replicas >= desired_replicas' in source
+    assert "updated_replicas >= desired_replicas" in source
+    assert "ready_replicas >= desired_replicas" in source
     assert 'DENOISER_RESTART_BATCH_SIZE="${DENOISER_RESTART_BATCH_SIZE:-2}"' in source
     assert "restart_statefulset_in_batches()" in source
     assert "restart_statefulset_in_parallel()" not in source

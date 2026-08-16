@@ -8,14 +8,14 @@ from types import SimpleNamespace
 
 import pytest
 
+from sglang.multimodal_gen.runtime.entrypoints.openai.realtime.generate_session import (
+    GenerateSession,
+)
 from sglang.multimodal_gen.runtime.realtime.admission import (
     AdmissionRejected,
     DynamoDBSessionLeaseStore,
     InMemorySessionLeaseStore,
     RealtimeAdmissionController,
-)
-from sglang.multimodal_gen.runtime.entrypoints.openai.realtime.generate_session import (
-    GenerateSession,
 )
 
 
@@ -143,9 +143,7 @@ def test_dynamodb_capacity_slot_is_reclaimed_after_gateway_lease_expires(monkeyp
                         item = deepcopy(request["Item"])
                         key = item["lease_key"]["S"]
                         existing = staged.get(key)
-                        now = int(
-                            request["ExpressionAttributeValues"][":now"]["N"]
-                        )
+                        now = int(request["ExpressionAttributeValues"][":now"]["N"])
                         if (
                             existing is not None
                             and int(existing["expires_at"]["N"]) > now
@@ -171,13 +169,17 @@ def test_dynamodb_capacity_slot_is_reclaimed_after_gateway_lease_expires(monkeyp
                             raise TransactionCanceledException
                         staged.pop(key)
                     else:
-                        raise AssertionError("capacity leases must use fixed slot items")
+                        raise AssertionError(
+                            "capacity leases must use fixed slot items"
+                        )
             except TransactionCanceledException:
                 raise
             self.items = staged
 
         def update_item(self, **kwargs):
-            raise AssertionError(f"renew must update user and slot atomically: {kwargs}")
+            raise AssertionError(
+                f"renew must update user and slot atomically: {kwargs}"
+            )
 
     now = [1_000]
     monkeypatch.setattr(

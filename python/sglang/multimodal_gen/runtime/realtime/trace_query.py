@@ -15,7 +15,6 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Callable
 
-
 _TRACE_ID = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
 _RETRYABLE_LOGS_ERROR_CODES = {
     "InternalFailure",
@@ -233,15 +232,11 @@ class CloudWatchTraceQuery:
         }
 
     @staticmethod
-    def _project(
-        base: dict[str, Any], *, after: int, limit: int
-    ) -> dict[str, Any]:
+    def _project(base: dict[str, Any], *, after: int, limit: int) -> dict[str, Any]:
         result = {key: value for key, value in base.items() if key != "events"}
         all_events = base.get("events", [])
         events = [
-            event
-            for event in all_events
-            if int(event.get("trace_seq") or 0) > after
+            event for event in all_events if int(event.get("trace_seq") or 0) > after
         ]
         result["events"] = events[-limit:]
         result["next_cursor"] = max(
@@ -261,8 +256,7 @@ class CloudWatchTraceQuery:
     @staticmethod
     def _has_stage_samples(value: dict[str, Any]) -> bool:
         return any(
-            int(stage.get("count") or 0) > 0
-            for stage in value.get("stages", [])
+            int(stage.get("count") or 0) > 0 for stage in value.get("stages", [])
         )
 
     @staticmethod

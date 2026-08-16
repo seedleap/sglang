@@ -9,7 +9,6 @@ import re
 from pathlib import Path
 
 import numpy as np
-
 from common import load_cases, sha256_file, write_json
 from compare_results import metric_block
 

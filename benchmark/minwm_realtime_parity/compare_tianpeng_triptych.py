@@ -10,7 +10,6 @@ import shutil
 from pathlib import Path
 
 import numpy as np
-
 from common import sha256_file, write_json
 from tianpeng_alignment import _run_ffmpeg_metric
 
