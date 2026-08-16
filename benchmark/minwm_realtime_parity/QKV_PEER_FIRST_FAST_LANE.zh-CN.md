@@ -148,6 +148,10 @@ saturated、clean commit、cache eviction、prompt switch、scene cut、非均�
 
 当前分支 `codex/minwm-qkv-fusion-benefit`，基线 `origin/main=d9d3d87fdb`。开关：
 
+交付 checkpoint：H200 acceptance 文档提交 `a754257ab3`；独立 draft PR
+[`seedleap/sglang#33`](https://github.com/seedleap/sglang/pull/33)。正式 H200 运行代码仍精确 pin
+到 `05158e858e`，后续提交只更新实测记录与 PR 链接，没有改变被测 fast-path 代码。
+
 | 开关 | 默认 | 作用 | 回退 |
 | --- | --- | --- | --- |
 | `MINWM_FUSED_QKV_PROJECTION` | `0` | 三个 Q/K/V GEMM 合一 | quantized、未知 linear/gather 布局自动三 GEMM |
