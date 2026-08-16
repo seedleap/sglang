@@ -243,6 +243,12 @@ PYTHONPATH=python pytest -q \
 - setup 的 pip resolver 报 `open-clip-torch/timm` 与 `wandb/protobuf` 警告；这两个包不在
   本 MinWM serving/测量调用链，服务成功加载并完成 200 chunks，故记录为环境 warning，
   未把它当成通过项或静默删除。
+- draft PR #33 创建后，AMD、AMD-extra、XPU 的 3–5 秒 gate 显示 failure。按
+  `github:gh-fix-ci` 流程查日志：首次调用 bundled inspector 用了本机不存在的 `python`
+  命令而失败，改用 `python3` 后再以 `gh run view --log-failed` 核对；三个根因均为仓库
+  `pr-gate` 有意执行 `PR is draft. Blocking CI.`，聚合 finish job 只传播该状态，不是代码或
+  测试失败。按 draft PR 交付约定没有擅自转 Ready；lint/CodeQL 等非 gate 检查继续由 GitHub
+  运行，不把 pending 写成通过。
 
 ## 2026-08-14 续跑：预估、证据与当前候选
 
