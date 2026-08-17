@@ -326,6 +326,7 @@ assert result["target_ms_per_chunk"] == 1000 * 16 / 24
 for field in (
     "scheduler_forward_ms",
     "chunk_total_ms",
+    "model_vae_encode_ms",
     "model_denoise_ms",
     "model_vae_decode_ms",
     "raw_payload_build_ms",
@@ -336,8 +337,6 @@ for field in (
         result["server"][field],
     )
     assert result["server"][field]["missing_count"] == 0
-assert result["server"]["model_vae_encode_ms"]["sample_count"] == 0
-assert result["server"]["model_vae_encode_ms"]["missing_count"] == expected_measured
 if os.environ["MINWM_REQUIRE_CANDIDATE_EVIDENCE"] == "true":
     async_enqueue = result["server"]["raw_frame_async_enqueue_ms"]
     assert async_enqueue["sample_count"] == expected_measured, async_enqueue

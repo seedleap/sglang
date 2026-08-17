@@ -84,6 +84,10 @@ kubectl --context <context> apply --dry-run=server -f <generated-yaml>
   duplicate timing message is fatal; every field records measured sample and
   missing counts. Raw payloads must be exactly 1248x704 RGB, not merely
   self-consistent with their own headers.
+- Current main emits a tiny `model_vae_encode_ms` sample for the steady no-op
+  image-encode stage wrapper on every chunk. The harness requires complete
+  samples but does not interpret that host wrapper time as native VAE
+  re-encoding; GPU attribution still comes from Nsight.
 - Reference main remains compatible with its legacy layer-0 alignment line and
   may report zero samples for the candidate-only async-enqueue timing. A
   candidate rendered with `--require-24fps` (or an NSYS candidate rendered with

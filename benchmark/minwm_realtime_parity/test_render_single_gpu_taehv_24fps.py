@@ -255,6 +255,8 @@ def test_render_preserves_single_gpu_hardware_and_profile_contract(
     assert 'kill -KILL "${server_pid}"' in runner
     assert runner.count("timeout --kill-after=5s 20s") == 2
     assert 'result["server"]["raw_frame_async_enqueue_ms"]' in runner
+    assert '"model_vae_encode_ms",' in runner
+    assert 'model_vae_encode_ms"]["sample_count"] == 0' not in runner
     assert 'structured_marker = "MINWM_RUNTIME_ALIGNMENT_JSON "' in runner
     assert '"cache_tokens": "27456"' in runner
     assert '"sink_tokens": "6864"' in runner
