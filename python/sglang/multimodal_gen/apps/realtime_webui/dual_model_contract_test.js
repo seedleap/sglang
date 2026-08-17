@@ -103,9 +103,10 @@ assert.match(
 assert.match(html, /playback_controller\.js\?v=realtime-playback-v34/);
 assert.match(html, /model_session\.js\?v=dual-model-v10/);
 assert.match(html, /dual_model_controller\.js\?v=dual-model-v6/);
-assert.match(html, /prompt_rewrite_controller\.js\?v=prompt-rewrite-v2/);
-assert.match(html, /styles\.css\?v=world-studio-v7/);
-assert.match(html, /app\.js\?v=world-studio-v27/);
+assert.match(html, /prompt_rewrite_controller\.js\?v=prompt-rewrite-v3/);
+assert.match(html, /world_rules_controller\.js\?v=world-rules-v1/);
+assert.match(html, /styles\.css\?v=world-studio-v8/);
+assert.match(html, /app\.js\?v=world-studio-v28/);
 assert.doesNotMatch(
   app,
   /window\.location\.hostname === "localhost"/,
@@ -127,10 +128,20 @@ assert.match(html, /id="firstFrameState"/, "first-frame completeness should be v
 assert.match(html, /id="referenceDropZone"/, "first-frame picker should expose a drag-and-drop target");
 assert.match(html, /点击或拖入 PNG、JPG、WebP/, "first-frame picker should advertise drag and drop");
 assert.match(html, /id="worldDescriptionState"/, "description completeness should be visible");
+assert.match(html, /<details id="worldRulesPanel" class="world-rules-panel">/, "world rules should be optional and collapsed by default");
+assert.doesNotMatch(html, /<details id="worldRulesPanel"[^>]*\sopen/, "world rules must not occupy sidebar space until expanded");
+assert.match(html, /id="addSkillRuleBtn"/, "world rules should support multiple skills");
+assert.match(html, /id="goalProbability"[^>]*min="0"[^>]*max="1"/, "goal probability should be constrained to 0-1");
+assert.match(html, /id="runtimeSkillBar"[^>]*hidden/, "prepared skills should render above movement controls only when active");
+assert.match(html, /id="goalAchievementToast"[^>]*hidden/, "goal completion should have an accessible popup");
 assert.match(app, /function clearWorldDraft\(\)/);
 assert.match(app, /async function completeWorldDraft\(\)/);
 assert.match(app, /function setWorldCompletionBusy\(pending, completingFromImage = false\)/);
 assert.match(app, /function setupFirstFrameDropZone\(\)/);
+assert.match(app, /async function prepareWorldRulesForEntry\(description\)/);
+assert.match(app, /worldRulesController\.activate\(preparedWorldRules\)/);
+assert.match(app, /achievementDelayMs:\s*5000/);
+assert.match(app, /function keyboardSkill\(event\)/);
 assert.match(app, /function appendPromptLog\(prompt, metadata = \{\}\)/);
 assert.match(app, /metadata\.trigger === "rule" \|\| metadata\.phase === "restore"/);
 assert.match(app, /rule === "one_time_timeout_restore"/);

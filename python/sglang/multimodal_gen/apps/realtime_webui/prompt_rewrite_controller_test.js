@@ -37,6 +37,38 @@ async function main() {
   assert.equal(sends[0].metadata.trigger, "user");
   assert.equal(sends[0].metadata.instruction, "下雪");
 
+  const preparedSends = [];
+  const preparedTimers = [];
+  const preparedController = new PromptRewriteController({
+    rewrite: async () => {
+      throw new Error("prepared prompts must not call the rewriter");
+    },
+    sendPrompt: (prompt, metadata) => {
+      preparedSends.push({ prompt, metadata });
+      return preparedSends.length;
+    },
+    setTimer: (callback, delay) => {
+      const timer = { callback, delay };
+      preparedTimers.push(timer);
+      return timer;
+    },
+    clearTimer: () => {},
+  });
+  preparedController.beginSession("prepared baseline");
+  const prepared = preparedController.submitPrepared(
+    { prompt: "prepared skill action", change_type: "one_time" },
+    "召唤飞船",
+    { trigger: "skill", skillName: "召唤飞船" },
+  );
+  assert.equal(prepared.change_type, "one_time");
+  assert.equal(preparedSends[0].prompt, "prepared skill action");
+  assert.equal(preparedSends[0].metadata.phase, "prepared");
+  assert.equal(preparedSends[0].metadata.trigger, "skill");
+  assert.equal(preparedSends[0].metadata.skillName, "召唤飞船");
+  assert.equal(preparedTimers[0].delay, 10000);
+  preparedTimers[0].callback();
+  assert.equal(preparedSends[1].prompt, "prepared baseline");
+
   const oneTime = await controller.submit("跳一下");
   assert.equal(oneTime.change_type, "one_time");
   assert.deepEqual(rewriteCalls[1], {

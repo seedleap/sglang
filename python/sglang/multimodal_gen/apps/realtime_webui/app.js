@@ -490,6 +490,13 @@ let selectedReferenceLabel = "";
 let selectedReferenceMimeType = "";
 let selectedReferencePreviewReady = false;
 let worldCompletionPending = false;
+let skillRuleNextId = 1;
+let preparedWorldRulesCache = null;
+let worldRulesDraftGeneration = 0;
+let sessionLifetimeExpired = false;
+let sessionPlayable = false;
+let worldExperiencePending = false;
+let worldExperienceReady = false;
 let lastGenerationMode = null;
 let savedI2VNumFrames = "9";
 let savedT2VNumFrames = String(DEFAULT_T2V_NUM_FRAMES);
@@ -542,6 +549,8 @@ let recordingBaseFileName = "";
 let recordingDownloads = [];
 let recordingReadyToastTimer = 0;
 let recordingReadyToastHideTimer = 0;
+let goalAchievementToastHideTimer = 0;
+let goalAchievementToastFinalizeTimer = 0;
 let recordingPromptDraft = "";
 let recordingPromptSubmitted = "";
 let recordingPromptStatus = "idle";
@@ -554,6 +563,7 @@ let currentTrace = null;
 let renderedTraceChunks = new Set();
 const decodeRequests = new Map();
 let controlStateController = null;
+let worldRulesController = null;
 let lastSentEventId = 0;
 let lastSampledEventId = 0;
 const pendingModelEvents = new Map();
@@ -729,7 +739,7 @@ const happyOysterSession = new HappyOysterSession({
 });
 
 function buildHappyOysterInit(init) {
-  const unchangedPresetKey = selectedWorldIsUnchanged(init.prompt)
+  const unchangedPresetKey = selectedWorldContentIsUnchanged(init.prompt)
     ? presetKey(selectedPreset)
     : "";
   const customKey = `custom-${fallbackBytesFingerprint(init.first_frame).split("-").at(-1)}-${fallbackBytesFingerprint(new TextEncoder().encode(init.prompt || "")).split("-").at(-1)}`;
@@ -822,13 +832,18 @@ function promptLogTypeLabel(changeType) {
 }
 
 function promptLogSourceLabel(trigger) {
-  return trigger === "user" ? "用户输入" : "规则触发";
+  if (trigger === "user") return "用户输入";
+  if (trigger === "skill") return "技能按键";
+  return "规则触发";
 }
 
-function promptLogRuleLabel(rule, afterMs) {
+function promptLogRuleLabel(rule, afterMs, entry = {}) {
   if (rule === "session_start") return "进入世界，建立初始持久状态";
   if (rule === "preset_runtime_update") return "切换世界预设，重建持久状态";
   if (rule === "rewrite_failure_restore") return "新指令改写失败，恢复持久状态";
+  if (rule === "goal_probability") {
+    return `目标概率命中 ${Number(entry.probability || 0)} · ${entry.goalName || "隐藏目标"}`;
+  }
   if (rule === "one_time_timeout_restore") {
     return `一次性指令持续 ${Math.round(Number(afterMs || 10000) / 1000)} 秒后恢复`;
   }
@@ -844,9 +859,11 @@ function clearPromptLog() {
 function appendPromptLog(prompt, metadata = {}) {
   const normalizedPrompt = String(prompt || "").trim();
   if (!normalizedPrompt) return;
-  const trigger = metadata.trigger === "rule" || metadata.phase === "restore"
-    ? "rule"
-    : "user";
+  const trigger = metadata.trigger === "skill"
+    ? "skill"
+    : metadata.trigger === "rule" || metadata.phase === "restore"
+      ? "rule"
+      : "user";
   const changeType = metadata.changeType === "one_time" ? "one_time" : "persistent";
   promptLogEntries.push({
     id: promptLogNextId++,
@@ -855,8 +872,12 @@ function appendPromptLog(prompt, metadata = {}) {
     trigger,
     changeType,
     instruction: trigger === "user" ? String(metadata.instruction || "").trim() : "",
+    skillName: trigger === "skill" ? String(metadata.skillName || "").trim() : "",
+    skillInstruction: trigger === "skill" ? String(metadata.instruction || "").trim() : "",
     rule: trigger === "rule" ? String(metadata.rule || "") : "",
     afterMs: Number(metadata.afterMs || 0),
+    goalName: trigger === "rule" ? String(metadata.goalName || "") : "",
+    probability: trigger === "rule" ? Number(metadata.probability || 0) : 0,
   });
   if (promptLogEntries.length > PROMPT_LOG_LIMIT) {
     promptLogEntries.splice(0, promptLogEntries.length - PROMPT_LOG_LIMIT);
@@ -895,7 +916,9 @@ function renderPromptLog() {
     context.className = "prompt-log-context";
     context.textContent = entry.trigger === "user"
       ? `用户输入：${entry.instruction || "（未记录）"}`
-      : `触发规则：${promptLogRuleLabel(entry.rule, entry.afterMs)}`;
+      : entry.trigger === "skill"
+        ? `技能：${entry.skillName || "未命名技能"} · ${entry.skillInstruction}`
+        : `触发规则：${promptLogRuleLabel(entry.rule, entry.afterMs, entry)}`;
     const fullPrompt = document.createElement("pre");
     fullPrompt.className = "prompt-log-full";
     fullPrompt.textContent = entry.prompt;
@@ -934,15 +957,25 @@ const promptRewriteController = new PromptRewriteController({
   },
   restoreDelayMs: 10000,
 });
-let sessionLifetimeExpired = false;
-let sessionPlayable = false;
+worldRulesController = new WorldRulesController({
+  rewrite: rewriteRuntimePrompt,
+  dispatchPrepared: (prepared, metadata) => {
+    markRecordingPromptSubmitted(metadata.instruction || metadata.skillName || metadata.goalName || "");
+    return promptRewriteController.submitPrepared(
+      prepared,
+      metadata.instruction || "",
+      metadata,
+    );
+  },
+  achievementDelayMs: 5000,
+  onAchievement: (goal) => showGoalAchievement(goal.name),
+  onStateChange: (snapshot) => renderRuntimeSkillBar(snapshot),
+});
 let playbackAckTimer = 0;
 let lastRenderedEventId = 0;
 let primaryHasVisibleFrame = false;
 let sessionCountdownTimer = 0;
 let sessionCountdownDeadlineMs = 0;
-let worldExperiencePending = false;
-let worldExperienceReady = false;
 const sessionLifetimeGuard = new SessionLifetimeGuard({
   durationMs: SESSION_MAX_LIFETIME_MS,
   onExpire: () => expireSessionLifetime({ closeSessions: true }),
@@ -956,6 +989,7 @@ function resetSessionLifetimeUi() {
   sessionLifetimeGuard.cancel();
   stopSessionCountdown();
   hideRecordingReadyToast({ immediate: true });
+  hideGoalAchievement({ immediate: true });
   sessionLifetimeExpired = false;
   sessionPlayable = false;
   worldExperiencePending = false;
@@ -973,6 +1007,7 @@ function markWorldExperienceReady(modelKey) {
   startRecording({ source: "first_visible_frame" });
   setStatus("Live", "live");
   $("sessionNotice").hidden = true;
+  renderRuntimeSkillBar();
   addHistory(`world ready · ${modelLabel(modelKey)} visible · timer and dual recordings started`);
   return true;
 }
@@ -983,6 +1018,8 @@ function stopWorldExperienceTiming({ recordingReason = "session_closed" } = {}) 
   sessionPlayable = false;
   sessionLifetimeGuard.cancel();
   stopSessionCountdown();
+  worldRulesController?.endSession();
+  hideGoalAchievement({ immediate: true });
   if (recordingActive) void stopRecording({ reason: recordingReason });
   updateRecordButton();
 }
@@ -1088,6 +1125,37 @@ function showRecordingReadyToast() {
   );
 }
 
+function hideGoalAchievement({ immediate = false } = {}) {
+  if (goalAchievementToastHideTimer) window.clearTimeout(goalAchievementToastHideTimer);
+  if (goalAchievementToastFinalizeTimer) window.clearTimeout(goalAchievementToastFinalizeTimer);
+  goalAchievementToastHideTimer = 0;
+  goalAchievementToastFinalizeTimer = 0;
+  const toast = $("goalAchievementToast");
+  if (!toast) return;
+  toast.classList.remove("is-visible");
+  if (immediate) {
+    toast.hidden = true;
+    return;
+  }
+  goalAchievementToastFinalizeTimer = window.setTimeout(() => {
+    if (!toast.classList.contains("is-visible")) toast.hidden = true;
+    goalAchievementToastFinalizeTimer = 0;
+  }, 300);
+}
+
+function showGoalAchievement(goalName) {
+  const toast = $("goalAchievementToast");
+  if (!toast) return;
+  hideGoalAchievement({ immediate: true });
+  $("goalAchievementText").textContent = `你成功获得「${String(goalName || "隐藏目标").trim()}」`;
+  toast.hidden = false;
+  window.requestAnimationFrame(() => toast.classList.add("is-visible"));
+  goalAchievementToastHideTimer = window.setTimeout(
+    () => hideGoalAchievement(),
+    4500,
+  );
+}
+
 function isExperienceBusyError(error) {
   const reason = String(error?.reason || "");
   const message = String(error?.message || error || "");
@@ -1140,6 +1208,7 @@ function setModelConnectionState(key, state) {
     closed: "已断开",
     idle: "待连接",
   }[state] || "待连接";
+  renderRuntimeSkillBar();
 }
 
 function setHappyOysterStageText(message, state = "") {
@@ -2308,6 +2377,7 @@ function customWorldPresetFromRecord(record) {
     source: "自定义世界",
     mime: record.mime || imageBlob.type || "image/png",
     imageBlob,
+    rules: record.rules || null,
     fingerprint: record.fingerprint,
     createdAt: Number(record.createdAt || Date.now()),
     isCustom: true,
@@ -2332,10 +2402,21 @@ function ensureCustomWorldPresetsLoaded() {
   return customWorldLoadPromise;
 }
 
-function selectedWorldIsUnchanged(description, preset = selectedPreset) {
+function selectedWorldContentIsUnchanged(description, preset = selectedPreset) {
   return Boolean(
     preset
     && normalizeWorldDescription(preset.prompt) === normalizeWorldDescription(description)
+  );
+}
+
+function selectedWorldIsUnchanged(
+  description,
+  preset = selectedPreset,
+  rules = readWorldRulesDraft(),
+) {
+  return Boolean(
+    selectedWorldContentIsUnchanged(description, preset)
+    && worldRulesStorageSignature(preset.rules || {}) === worldRulesStorageSignature(rules)
   );
 }
 
@@ -2361,11 +2442,19 @@ async function rememberEnteredWorld(firstFrame, referenceImage, entrySnapshot = 
     entrySnapshot.description ?? $("prompt").value,
   );
   const entryPreset = entrySnapshot.preset ?? selectedPreset;
+  const entryRules = normalizedWorldRulesForStorage(
+    entrySnapshot.rules ?? readWorldRulesDraft(),
+  );
   const shouldKeepSelection = () => (
     selectedPreset === entryPreset
     && normalizeWorldDescription($("prompt").value) === description
+    && worldRulesStorageSignature(readWorldRulesDraft()) === worldRulesStorageSignature(entryRules)
   );
-  if (!firstFrame?.byteLength || !description || selectedWorldIsUnchanged(description, entryPreset)) {
+  if (!firstFrame?.byteLength || !description || selectedWorldIsUnchanged(
+    description,
+    entryPreset,
+    entryRules,
+  )) {
     return false;
   }
   try {
@@ -2373,7 +2462,8 @@ async function rememberEnteredWorld(firstFrame, referenceImage, entrySnapshot = 
     const imageHash = referenceImage?.first_frame_sha256
       || await sha256Bytes(firstFrame)
       || fallbackBytesFingerprint(firstFrame);
-    if (await matchesBuiltInWorld(firstFrame, description, imageHash)) return false;
+    if (!hasConfiguredWorldRules(entryRules)
+      && await matchesBuiltInWorld(firstFrame, description, imageHash)) return false;
     const fingerprint = await customWorldFingerprint(
       firstFrame,
       description,
@@ -2381,6 +2471,22 @@ async function rememberEnteredWorld(firstFrame, referenceImage, entrySnapshot = 
     );
     const existing = customWorldPresets.find((preset) => preset.fingerprint === fingerprint);
     if (existing) {
+      if (worldRulesStorageSignature(existing.rules || {}) !== worldRulesStorageSignature(entryRules)) {
+        const updatedRecord = {
+          fingerprint: existing.fingerprint,
+          name: existing.name,
+          prompt: existing.prompt,
+          mime: existing.mime,
+          size: existing.size,
+          fps: existing.fps,
+          createdAt: existing.createdAt,
+          imageBlob: existing.imageBlob,
+          rules: entryRules,
+        };
+        await writeStoredCustomWorld(updatedRecord);
+        existing.rules = entryRules;
+        addHistory(`updated ${existing.name} world rules`);
+      }
       if (shouldKeepSelection()) selectedPreset = existing;
       renderPresets();
       return false;
@@ -2399,6 +2505,7 @@ async function rememberEnteredWorld(firstFrame, referenceImage, entrySnapshot = 
       fps: Number(modelControl("minwm", "fps").value || DEFAULT_TARGET_FPS),
       createdAt,
       imageBlob: new Blob([firstFrame], { type: mime }),
+      rules: entryRules,
     };
     await writeStoredCustomWorld(record);
     const preset = customWorldPresetFromRecord(record);
@@ -4477,6 +4584,312 @@ function hasWorldDescription() {
   return Boolean($("prompt").value.trim());
 }
 
+function skillRuleElements() {
+  return Array.from(document.querySelectorAll(".skill-rule-item"));
+}
+
+function setWorldRulesStatus(message, state = "") {
+  const status = $("worldRulesStatus");
+  status.textContent = message;
+  if (state) status.dataset.state = state;
+  else delete status.dataset.state;
+}
+
+function readWorldRulesDraft() {
+  return {
+    skills: skillRuleElements().map((item) => ({
+      id: item.dataset.skillRuleId,
+      name: item.querySelector("[data-rule-field='name']").value,
+      instruction: item.querySelector("[data-rule-field='instruction']").value,
+    })),
+    goal: {
+      name: $("goalName").value,
+      probability: $("goalProbability").value,
+      instruction: $("goalPrompt").value,
+    },
+  };
+}
+
+function normalizedWorldRulesForStorage(draft = readWorldRulesDraft()) {
+  return normalizeWorldRulesDraft(draft);
+}
+
+function worldRulesStorageSignature(draft = readWorldRulesDraft()) {
+  try {
+    return JSON.stringify(normalizedWorldRulesForStorage(draft));
+  } catch {
+    return JSON.stringify(draft || {});
+  }
+}
+
+function hasConfiguredWorldRules(draft = readWorldRulesDraft()) {
+  try {
+    const normalized = normalizedWorldRulesForStorage(draft);
+    return Boolean(normalized.skills.length || normalized.goal);
+  } catch {
+    return true;
+  }
+}
+
+function worldRulesPreparationSignature(description, draft = readWorldRulesDraft()) {
+  return JSON.stringify({
+    description: normalizeWorldDescription(description),
+    rules: normalizedWorldRulesForStorage(draft),
+  });
+}
+
+function invalidatePreparedWorldRules() {
+  preparedWorldRulesCache = null;
+  worldRulesDraftGeneration += 1;
+  skillRuleElements().forEach((item) => {
+    const state = item.querySelector(".skill-rule-state");
+    state.textContent = item.querySelector("[data-rule-field='instruction']").value.trim()
+      ? "待进入世界时润色"
+      : "填写 Prompt 后启用";
+    delete state.dataset.state;
+  });
+}
+
+function updateWorldRulesDraftUi() {
+  const items = skillRuleElements();
+  items.forEach((item, index) => {
+    item.querySelector(".skill-rule-key").textContent = String(index + 1);
+  });
+  $("skillRuleEmpty").hidden = items.length > 0;
+  $("addSkillRuleBtn").disabled = items.length >= 9;
+  const skillCount = items.filter((item) => (
+    item.querySelector("[data-rule-field='instruction']").value.trim()
+  )).length;
+  const hasGoal = Boolean($("goalPrompt").value.trim() || $("goalName").value.trim());
+  const parts = [];
+  if (skillCount) parts.push(`${skillCount} 个技能`);
+  if (hasGoal) parts.push("1 个目标");
+  $("worldRulesSummary").textContent = parts.length ? parts.join(" · ") : "未配置";
+
+  if (!parts.length) {
+    setWorldRulesStatus("规则非必填", "");
+    return;
+  }
+  try {
+    normalizedWorldRulesForStorage();
+    setWorldRulesStatus("进入世界前会自动完成 Prompt 润色", "ready");
+  } catch (error) {
+    setWorldRulesStatus(error.message || "规则配置不完整", "error");
+  }
+}
+
+function handleWorldRulesDraftInput() {
+  invalidatePreparedWorldRules();
+  updateWorldRulesDraftUi();
+}
+
+function addSkillRule(skill = {}, { focus = true } = {}) {
+  const list = $("skillRuleList");
+  if (skillRuleElements().length >= 9) {
+    setWorldRulesStatus("最多可以配置 9 个技能", "error");
+    return null;
+  }
+  const item = document.createElement("article");
+  item.className = "skill-rule-item";
+  const existingIds = new Set(skillRuleElements().map((entry) => entry.dataset.skillRuleId));
+  let skillId = String(skill.id || "").trim();
+  if (!skillId || existingIds.has(skillId)) {
+    do {
+      skillId = `skill-${skillRuleNextId++}`;
+    } while (existingIds.has(skillId));
+  } else {
+    const numericId = /^skill-(\d+)$/.exec(skillId);
+    if (numericId) skillRuleNextId = Math.max(skillRuleNextId, Number(numericId[1]) + 1);
+  }
+  item.dataset.skillRuleId = skillId;
+
+  const head = document.createElement("div");
+  head.className = "skill-rule-item-head";
+  const key = document.createElement("span");
+  key.className = "skill-rule-key";
+  key.setAttribute("aria-hidden", "true");
+  const name = document.createElement("input");
+  name.type = "text";
+  name.maxLength = 28;
+  name.placeholder = "技能名称（例如：召唤飞船）";
+  name.value = String(skill.name || "");
+  name.dataset.ruleField = "name";
+  name.setAttribute("aria-label", "技能名称");
+  const remove = document.createElement("button");
+  remove.className = "skill-rule-remove";
+  remove.type = "button";
+  remove.setAttribute("aria-label", "删除技能");
+  remove.title = "删除技能";
+  remove.textContent = "×";
+  head.append(key, name, remove);
+
+  const instruction = document.createElement("textarea");
+  instruction.rows = 3;
+  instruction.maxLength = 2000;
+  instruction.placeholder = "输入技能 Prompt，例如：从云层中召唤一艘发光飞船……";
+  instruction.value = String(skill.instruction || "");
+  instruction.dataset.ruleField = "instruction";
+  instruction.setAttribute("aria-label", "技能 Prompt");
+  const state = document.createElement("span");
+  state.className = "skill-rule-state";
+  state.textContent = instruction.value.trim() ? "待进入世界时润色" : "填写 Prompt 后启用";
+  item.append(head, instruction, state);
+  list.appendChild(item);
+
+  name.addEventListener("input", handleWorldRulesDraftInput);
+  instruction.addEventListener("input", handleWorldRulesDraftInput);
+  remove.onclick = () => {
+    item.remove();
+    handleWorldRulesDraftInput();
+  };
+  updateWorldRulesDraftUi();
+  if (focus) name.focus({ preventScroll: true });
+  return item;
+}
+
+function applyWorldRulesDraft(draft = null) {
+  $("skillRuleList").innerHTML = "";
+  const skills = Array.isArray(draft?.skills) ? draft.skills : [];
+  skills.slice(0, 9).forEach((skill) => addSkillRule(skill, { focus: false }));
+  $("goalName").value = String(draft?.goal?.name || "");
+  $("goalProbability").value = draft?.goal?.probability == null
+    ? ""
+    : String(draft.goal.probability);
+  $("goalPrompt").value = String(draft?.goal?.instruction || "");
+  invalidatePreparedWorldRules();
+  updateWorldRulesDraftUi();
+}
+
+function setWorldRulesPreparing(pending) {
+  $("worldRulesPanel").setAttribute("aria-busy", pending ? "true" : "false");
+  $("worldRulesPanel").querySelectorAll("input, textarea, button").forEach((control) => {
+    control.disabled = pending;
+  });
+  $("addSkillRuleBtn").disabled = pending || skillRuleElements().length >= 9;
+}
+
+async function prepareWorldRulesForEntry(description) {
+  const draft = readWorldRulesDraft();
+  const signature = worldRulesPreparationSignature(description, draft);
+  if (preparedWorldRulesCache?.signature === signature) {
+    return preparedWorldRulesCache.prepared;
+  }
+  const normalized = normalizedWorldRulesForStorage(draft);
+  const ruleCount = normalized.skills.length + (normalized.goal ? 1 : 0);
+  if (!ruleCount) {
+    setWorldRulesStatus("当前世界未配置规则", "");
+    return { skills: [], goal: null };
+  }
+
+  const generation = worldRulesDraftGeneration;
+  setWorldRulesPreparing(true);
+  setWorldRulesStatus(`正在并行润色 ${ruleCount} 条规则 Prompt…`, "working");
+  skillRuleElements().forEach((item) => {
+    const state = item.querySelector(".skill-rule-state");
+    if (item.querySelector("[data-rule-field='instruction']").value.trim()) {
+      state.textContent = "正在润色…";
+      delete state.dataset.state;
+    }
+  });
+  try {
+    const prepared = await worldRulesController.prepare(normalized, description);
+    if (generation !== worldRulesDraftGeneration) {
+      throw new Error("规则已发生变化，请重新进入世界");
+    }
+    prepared.skills.forEach((skill) => {
+      const item = skillRuleElements().find((candidate) => (
+        candidate.dataset.skillRuleId === skill.id
+      ));
+      const state = item?.querySelector(".skill-rule-state");
+      if (!state) return;
+      state.textContent = skill.prepared.change_type === "one_time"
+        ? "✓ 已润色 · 一次性"
+        : "✓ 已润色 · 持久";
+      state.dataset.state = "ready";
+    });
+    preparedWorldRulesCache = { signature, prepared };
+    setWorldRulesStatus(`${ruleCount} 条规则已润色，进入后可立即触发`, "ready");
+    return prepared;
+  } catch (error) {
+    $("worldRulesPanel").open = true;
+    skillRuleElements().forEach((item) => {
+      const state = item.querySelector(".skill-rule-state");
+      if (!state.dataset.state) {
+        state.textContent = "润色失败，请重试";
+        state.dataset.state = "error";
+      }
+    });
+    setWorldRulesStatus(error.message || "规则 Prompt 润色失败", "error");
+    throw error;
+  } finally {
+    setWorldRulesPreparing(false);
+  }
+}
+
+function hasLiveWorldRuleTarget() {
+  return selectedModelKeys().some((key) => (
+    document.querySelector(`[data-model-key="${key}"]`)?.dataset.sessionState === "live"
+  ));
+}
+
+function renderRuntimeSkillBar(snapshot = null) {
+  snapshot = snapshot || worldRulesController?.snapshot() || { skills: [] };
+  const bar = $("runtimeSkillBar");
+  const container = $("runtimeSkillButtons");
+  if (!bar || !container) return;
+  container.innerHTML = "";
+  bar.hidden = snapshot.skills.length === 0;
+  const canTrigger = worldExperienceReady
+    && sessionPlayable
+    && !sessionLifetimeExpired
+    && hasLiveWorldRuleTarget();
+  snapshot.skills.forEach((skill, index) => {
+    const button = document.createElement("button");
+    button.className = "runtime-skill-button";
+    button.type = "button";
+    button.dataset.skillId = skill.id;
+    button.disabled = !canTrigger || skill.pending;
+    button.classList.toggle("is-pending", Boolean(skill.pending));
+    button.title = skill.instruction;
+    const shortcut = document.createElement("kbd");
+    shortcut.textContent = String(index + 1);
+    const label = document.createElement("span");
+    label.textContent = skill.pending ? `${skill.name}…` : skill.name;
+    button.append(shortcut, label);
+    button.onclick = () => triggerWorldSkill(skill.id);
+    container.appendChild(button);
+  });
+}
+
+async function triggerWorldSkill(skillId) {
+  const skill = worldRulesController.snapshot().skills.find((item) => item.id === skillId);
+  if (!skill || !worldExperienceReady || !sessionPlayable || !hasLiveWorldRuleTarget()) {
+    setPromptRewriteStatus("模型连接已断开，请重新进入世界", "error");
+    renderRuntimeSkillBar();
+    return;
+  }
+  setPromptRewriteStatus(`正在触发技能「${skill.name}」…`, "working");
+  try {
+    const result = await worldRulesController.triggerSkill(skillId);
+    if (result?.ignored) return;
+    setPromptRewriteStatus(
+      result.goal?.triggered
+        ? `已触发「${skill.name}」和世界目标 · 5 秒后显示达成提示`
+        : result.change_type === "one_time"
+          ? `已触发「${skill.name}」· 一次性，10 秒后恢复`
+          : `已触发「${skill.name}」· 持久状态`,
+      result.change_type,
+    );
+    if (result.goalError) {
+      addHistory(`goal trigger failed · ${result.goalError.message || result.goalError}`);
+    }
+    canvas.focus({ preventScroll: true });
+  } catch (error) {
+    setPromptRewriteStatus(error.message || "技能触发失败，请重试", "error");
+    addHistory(`skill trigger failed · ${skill.name} · ${error.message || error}`);
+  }
+}
+
 function setWorldDraftStatus(message, state = "") {
   const status = $("worldDraftStatus");
   status.textContent = message;
@@ -4537,6 +4950,7 @@ function clearWorldDraft() {
   selectedReferenceMimeType = "";
   $("firstFrame").value = "";
   $("prompt").value = "";
+  applyWorldRulesDraft(null);
   document.querySelectorAll(".preset").forEach((button) => {
     button.classList.remove("is-selected");
     button.setAttribute("aria-pressed", "false");
@@ -4592,6 +5006,8 @@ async function completeWorldDraft() {
       throw new Error(result?.error || `world completion failed (${response.status})`);
     }
     $("prompt").value = String(result.world_description || "").trim();
+    invalidatePreparedWorldRules();
+    updateWorldRulesDraftUi();
     if (result.image_url) {
       selectedPreset = null;
       selectedReferenceBytes = null;
@@ -4816,6 +5232,7 @@ async function connect() {
     await stopRecording({ reason: "session_replaced" });
   }
   promptRewriteController.endSession();
+  worldRulesController.endSession();
   setPromptRewriteStatus("进入世界后可发送新指令", "");
   cancelLingbot2Reconnect();
   resetSessionLifetimeUi();
@@ -4857,10 +5274,13 @@ async function connect() {
       (hasWorldDescription() ? $("firstFrame") : $("prompt")).focus?.({ preventScroll: true });
       return;
     }
+    const enteredWorldRules = normalizedWorldRulesForStorage();
+    const preparedWorldRules = await prepareWorldRulesForEntry($("prompt").value.trim());
     const continuousT2V = generationMode === "t2v" && $("continuous").checked;
     const enteredWorldSnapshot = {
       description: $("prompt").value,
       preset: selectedPreset,
+      rules: enteredWorldRules,
     };
     let enteredFirstFrame;
     let firstFrame;
@@ -4931,6 +5351,7 @@ async function connect() {
       addHistory("快乐生蚝 World 正在独立构建 · Zing/LingBot2 已先行启动");
     }
     promptRewriteController.beginSession(init.prompt);
+    worldRulesController.activate(preparedWorldRules);
     beginPromptLogSession(init.prompt);
     if (!worldExperienceReady) setStatus("Loading world", "live");
   } catch (error) {
@@ -5378,6 +5799,7 @@ function sendCameraControlTransitions(transitions) {
 async function applyPreset(preset, options = {}) {
   const sendRuntimeEvents = options.sendRuntimeEvents
     ?? Boolean(ws && ws.readyState === WebSocket.OPEN);
+  let preparedPresetRules = null;
   selectedPreset = preset;
   document.querySelectorAll(".preset").forEach((button) => {
     const selected = button.dataset.presetName === preset.name;
@@ -5385,6 +5807,7 @@ async function applyPreset(preset, options = {}) {
     button.setAttribute("aria-pressed", selected ? "true" : "false");
   });
   $("prompt").value = preset.prompt;
+  applyWorldRulesDraft(preset.rules || null);
   modelControl("minwm", "fps").value = UI_CONFIG.targetFps == null
     ? preset.fps
     : DEFAULT_TARGET_FPS;
@@ -5392,9 +5815,16 @@ async function applyPreset(preset, options = {}) {
   syncPlaybackTargetFps();
   await setPresetReference(preset);
   updateWorldDraftState();
-  setWorldDraftStatus(`已填充「${preset.name}」的首帧和世界描述`, "ready");
+  const presetRuleCount = normalizedWorldRulesForStorage(preset.rules || {}).skills.length
+    + (normalizedWorldRulesForStorage(preset.rules || {}).goal ? 1 : 0);
+  setWorldDraftStatus(
+    `已填充「${preset.name}」的首帧、世界描述${presetRuleCount ? `和 ${presetRuleCount} 条规则` : ""}`,
+    "ready",
+  );
   if (sendRuntimeEvents) {
+    preparedPresetRules = await prepareWorldRulesForEntry(preset.prompt);
     promptRewriteController.beginSession(preset.prompt);
+    worldRulesController.activate(preparedPresetRules);
     const eventId = sendEvent("prompt", preset.prompt, `prompt update · ${preset.name}`);
     if (eventId) beginPromptLogSession(preset.prompt, "preset_runtime_update");
   }
@@ -5746,9 +6176,11 @@ function renderPresets() {
       "Asylum Corridor": "废墟走廊",
     })[preset.name] || preset.name;
     const meta = document.createElement("span");
+    const presetRules = normalizedWorldRulesForStorage(preset.rules || {});
+    const ruleCount = presetRules.skills.length + (presetRules.goal ? 1 : 0);
     meta.textContent = preset.isCustom
-      ? "已保存的自定义世界"
-      : "填充首帧 + 世界描述";
+      ? `已保存的自定义世界${ruleCount ? ` · ${ruleCount} 条规则` : ""}`
+      : `填充首帧 + 世界描述${ruleCount ? ` + ${ruleCount} 条规则` : ""}`;
     btn.append(thumb, title, meta);
     btn.onclick = () => applyPreset(preset).catch(showError);
     $("presetList").appendChild(btn);
@@ -5997,7 +6429,18 @@ $("removeModelSlotBtn").onclick = () => {
 };
 $("clearWorldBtn").onclick = clearWorldDraft;
 $("enhanceBtn").onclick = completeWorldDraft;
-$("prompt").addEventListener("input", updateWorldDraftState);
+$("prompt").addEventListener("input", () => {
+  updateWorldDraftState();
+  handleWorldRulesDraftInput();
+});
+$("addSkillRuleBtn").onclick = () => {
+  $("worldRulesPanel").open = true;
+  addSkillRule();
+  handleWorldRulesDraftInput();
+};
+for (const id of ["goalName", "goalProbability", "goalPrompt"]) {
+  $(id).addEventListener("input", handleWorldRulesDraftInput);
+}
 $("stopBtn").onclick = () => {
   closeSession();
   setModelConnectionState("minwm", "closed");
@@ -6056,6 +6499,14 @@ async function sendRuntimePromptUpdate() {
     } else {
       setPromptRewriteStatus("已发送 · 持久指令", "persistent");
     }
+    void worldRulesController.noteUserPromptSuccess().then((goalResult) => {
+      if (goalResult?.triggered) {
+        setPromptRewriteStatus("目标已触发 · 5 秒后显示达成提示", "one_time");
+      }
+    }).catch((error) => {
+      addHistory(`goal trigger failed · ${error.message || error}`);
+      setPromptRewriteStatus("新指令已发送，但目标触发失败", "error");
+    });
   } catch (error) {
     markRecordingPromptFailed(error.message || error);
     setPromptRewriteStatus(error.message || "指令改写失败，请重试", "error");
@@ -6289,6 +6740,12 @@ function keyboardAction(event) {
   return CONTROL_KEY_ACTIONS.get(event.key.toLowerCase()) || null;
 }
 
+function keyboardSkill(event) {
+  if (event.altKey || event.ctrlKey || event.metaKey) return null;
+  if (!/^[1-9]$/.test(event.key)) return null;
+  return worldRulesController.snapshot().skills[Number(event.key) - 1] || null;
+}
+
 function setControlButtonActive(action, active) {
   document.querySelectorAll(`[data-action="${action}"]`).forEach((btn) => {
     btn.classList.toggle("is-key-active", active);
@@ -6431,6 +6888,12 @@ window.setInterval(() => {
 
 document.addEventListener("keydown", (event) => {
   if (isTypingTarget(event.target)) return;
+  const skill = keyboardSkill(event);
+  if (skill) {
+    event.preventDefault();
+    if (!event.repeat) void triggerWorldSkill(skill.id);
+    return;
+  }
   const action = keyboardAction(event);
   if (!action) return;
   event.preventDefault();
