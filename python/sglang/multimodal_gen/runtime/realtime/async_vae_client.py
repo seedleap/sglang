@@ -7,17 +7,24 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Awaitable, Callable
 
 import torch
 from websockets.asyncio.client import connect
 
 from sglang.multimodal_gen.runtime.realtime.async_vae_protocol import (
+    PAYLOAD_TRANSPORT_SHARED_MEMORY,
+    PAYLOAD_TRANSPORT_WEBSOCKET,
     LatentChunkHeader,
     ProtocolViolation,
     checksum_payload,
     decode_message,
+    discard_shared_memory_payload,
     encode_message,
+    is_loopback_url,
+    materialize_payload_from_shared_memory,
+    store_payload_in_shared_memory,
 )
 
 
@@ -58,6 +65,7 @@ class RemoteDecodeResult:
     latent_send_ms: float
     credit_wait_ms: float
     first_frame_ms: float | None
+    is_final_chunk: bool
     completed_at: float
 
 
@@ -205,6 +213,8 @@ class RealtimeVAEClient:
         *,
         session_id: str,
         generation_id: str,
+        transport: str = "auto",
+        shared_memory_dir: str | Path | None = None,
         timeout_s: float = 10.0,
         max_message_bytes: int = 64 * 1024 * 1024,
         connect_factory=connect,
@@ -212,6 +222,17 @@ class RealtimeVAEClient:
         self.url = url
         self.session_id = session_id
         self.generation_id = generation_id
+        if transport not in {"auto", "websocket", "shared_memory"}:
+            raise ValueError("transport must be auto, websocket, or shared_memory")
+        if transport == "shared_memory" and not is_loopback_url(url):
+            raise ValueError("shared_memory transport requires a loopback VAE URL")
+        self.payload_transport = (
+            PAYLOAD_TRANSPORT_SHARED_MEMORY
+            if transport == "shared_memory"
+            or (transport == "auto" and is_loopback_url(url))
+            else PAYLOAD_TRANSPORT_WEBSOCKET
+        )
+        self.shared_memory_dir = shared_memory_dir
         self.timeout_s = timeout_s
         self.max_message_bytes = max_message_bytes
         self._connect_factory = connect_factory
@@ -222,10 +243,12 @@ class RealtimeVAEClient:
         self._background_tasks: set[asyncio.Task] = set()
         self._callback_tail: asyncio.Task | None = None
         self._closed = False
+        self.decoder_backend: str | None = None
 
     async def open(
         self,
         *,
+        decoder_backend: str,
         output_format: str,
         quality: int,
         preview_max_width: int | None,
@@ -237,6 +260,9 @@ class RealtimeVAEClient:
     ) -> None:
         if self._ws is not None:
             return
+        if decoder_backend not in {"exact", "taehv"}:
+            raise ValueError("decoder_backend must be exact or taehv")
+        self.decoder_backend = decoder_backend
         self._ws = await self._connect_factory(
             self.url,
             max_size=self.max_message_bytes,
@@ -251,6 +277,12 @@ class RealtimeVAEClient:
                 "session_open",
                 session_id=self.session_id,
                 generation_id=self.generation_id,
+                decoder_backend=decoder_backend,
+                response_transport=(
+                    self.payload_transport
+                    if output_url is None
+                    else PAYLOAD_TRANSPORT_WEBSOCKET
+                ),
                 output_format=output_format,
                 quality=quality,
                 preview_max_width=preview_max_width,
@@ -274,6 +306,11 @@ class RealtimeVAEClient:
             or response.get("generation_id") != self.generation_id
         ):
             raise ProtocolViolation("VAE session acceptance identity mismatch")
+        if response.get("decoder_backend") != decoder_backend:
+            raise ProtocolViolation("VAE worker decoder backend mismatch")
+        expected_fidelity = "approximate" if decoder_backend == "taehv" else "exact"
+        if response.get("decoder_fidelity") != expected_fidelity:
+            raise ProtocolViolation("VAE worker decoder fidelity mismatch")
         self._reader_task = asyncio.create_task(
             self._read_loop(), name=f"vae-reader-{self.session_id[:8]}"
         )
@@ -307,8 +344,12 @@ class RealtimeVAEClient:
             prompt_version=int(handoff.get("prompt_version") or 0),
             deadline_epoch_ms=int(time.time() * 1000 + self.timeout_s * 1000),
             has_reference=bool(handoff.get("has_reference")),
+            is_final_chunk=bool(handoff.get("is_final_chunk")),
         )
-        if header.session_id != self.session_id or header.generation_id != self.generation_id:
+        if (
+            header.session_id != self.session_id
+            or header.generation_id != self.generation_id
+        ):
             raise ProtocolViolation("VAE latent handoff identity mismatch")
         if header.request_id in self._pending:
             raise ProtocolViolation("duplicate in-flight VAE request ID")
@@ -323,8 +364,26 @@ class RealtimeVAEClient:
             serialize_ms=serialize_ms,
         )
         self._pending[header.request_id] = pending
+        shared_reference = None
         try:
-            wire = encode_message("latent_chunk", header=header, payload=payload)
+            if self.payload_transport == PAYLOAD_TRANSPORT_SHARED_MEMORY:
+                shared_reference = store_payload_in_shared_memory(
+                    payload,
+                    root=self.shared_memory_dir,
+                )
+                wire = encode_message(
+                    "latent_chunk",
+                    header=header,
+                    payload_transport=self.payload_transport,
+                    payload_reference=shared_reference,
+                )
+            else:
+                wire = encode_message(
+                    "latent_chunk",
+                    header=header,
+                    payload_transport=self.payload_transport,
+                    payload=payload,
+                )
             if len(wire) > self.max_message_bytes:
                 raise ProtocolViolation("encoded latent exceeds VAE message limit")
             send_started = time.perf_counter()
@@ -333,12 +392,14 @@ class RealtimeVAEClient:
             pending.latent_send_ms = (time.perf_counter() - send_started) * 1000.0
             credit_started = time.perf_counter()
             await asyncio.wait_for(pending.accepted.wait(), self.timeout_s)
-            pending.credit_wait_ms = (
-                time.perf_counter() - credit_started
-            ) * 1000.0
+            pending.credit_wait_ms = (time.perf_counter() - credit_started) * 1000.0
             if pending.result.done():
                 pending.result.result()
         except Exception:
+            discard_shared_memory_payload(
+                shared_reference,
+                root=self.shared_memory_dir,
+            )
             self._pending.pop(header.request_id, None)
             if not pending.result.done():
                 pending.result.cancel()
@@ -421,12 +482,32 @@ class RealtimeVAEClient:
         if int(message.get("chunk_index", -1)) != header.chunk_index:
             raise ProtocolViolation("VAE response chunk mismatch")
 
-    @staticmethod
     def _decode_frame_batch(
+        self,
         message: dict,
         header: LatentChunkHeader,
     ) -> RemoteFrameBatch:
+        if bool(message.get("is_final_chunk", False)) != header.is_final_chunk:
+            raise ProtocolViolation("remote frame final-chunk marker mismatch")
         payload = message.get("payload")
+        payload_transport = message.get(
+            "payload_transport", PAYLOAD_TRANSPORT_WEBSOCKET
+        )
+        if payload_transport == PAYLOAD_TRANSPORT_SHARED_MEMORY:
+            reference = message.get("payload_reference")
+            if not isinstance(reference, dict):
+                raise ProtocolViolation(
+                    "remote frame shared-memory reference is missing"
+                )
+            payload = materialize_payload_from_shared_memory(
+                reference,
+                root=self.shared_memory_dir,
+                max_bytes=self.max_message_bytes,
+            )
+            if checksum_payload(payload) != message.get("payload_checksum"):
+                raise ProtocolViolation("remote frame shared-memory checksum mismatch")
+        elif payload_transport != PAYLOAD_TRANSPORT_WEBSOCKET:
+            raise ProtocolViolation("unsupported remote frame payload transport")
         lengths = message.get("payload_lengths")
         if not isinstance(payload, bytes) or not isinstance(lengths, list):
             raise ProtocolViolation("invalid remote frame payload")
@@ -461,6 +542,12 @@ class RealtimeVAEClient:
 
     async def _finish_pending(self, pending: _PendingDecode, message: dict) -> None:
         completed_at = time.perf_counter()
+        if bool(message.get("is_final_chunk", False)) != pending.header.is_final_chunk:
+            self._fail_pending(
+                pending,
+                ProtocolViolation("remote completion final-chunk marker mismatch"),
+            )
+            return
         try:
             if pending.callback_tail is not None:
                 await pending.callback_tail
@@ -488,6 +575,7 @@ class RealtimeVAEClient:
                 latent_send_ms=pending.latent_send_ms,
                 credit_wait_ms=pending.credit_wait_ms,
                 first_frame_ms=pending.first_frame_ms,
+                is_final_chunk=bool(message.get("is_final_chunk")),
                 completed_at=completed_at,
             )
         )

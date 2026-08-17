@@ -256,6 +256,43 @@ minWM 当前 eval 所称的 720p 档是 `1248x704`。精确 `1280x720` 经 VAE `
 45 行 latent，不能被 DiT 的 `2x2` 空间 patch 整除。24 FPS、每 chunk 16 个 decoded
 frame 的固定粒度也无法恰好生成 5.000 秒；八个 chunk 加首帧是 129 帧，即 5.375 秒。
 
+### Realtime VAE 后端
+
+默认 `--realtime-vae-backend local` 保持原生 causal VAE 在 Denoiser 进程内，不会自动
+切换画质。需要第二张 GPU overlap 时，显式选择 `exact_remote` 或
+`taehv_remote`，并让统一 worker 选择匹配的 `exact` 或 `taehv` decoder：
+
+```bash
+# GPU 1：原生 exact causal VAE；模型级 cache 只允许一个活动 Session。
+CUDA_VISIBLE_DEVICES=1 python -m \
+  sglang.multimodal_gen.runtime.entrypoints.realtime_vae_server \
+  --decoder-backend exact \
+  --vae-path /models/minwm/vae \
+  --model-path /models/minwm \
+  --pipeline-class-name MinWMCausalDMDPipeline \
+  --max-sessions 1 \
+  --host 127.0.0.1 --port 18081
+
+# GPU 0：把 latent 交给上面的 exact worker。
+CUDA_VISIBLE_DEVICES=0 sglang serve \
+  --model-path /models/minwm \
+  --pipeline-class-name MinWMCausalDMDPipeline \
+  --realtime-vae-backend exact_remote \
+  --realtime-vae-worker-url ws://127.0.0.1:18081/v1/realtime_vae/decode \
+  --realtime-vae-transport auto \
+  --port 30000
+```
+
+同机 loopback 的 `auto` 优先使用 `/dev/shm/sglang-realtime-vae`；容器部署必须让两个
+进程看到同一路径，或在两侧同时显式设置 `--shared-memory-dir` 与
+`--realtime-vae-shared-memory-dir`。跨主机使用 `--realtime-vae-transport websocket`。
+
+TAEHV worker 把 `--decoder-backend exact --vae-path ...` 改为
+`--decoder-backend taehv --checkpoint-path /models/taehv/taew2_2.pth`，Denoiser 改为
+`--realtime-vae-backend taehv_remote`。TAEHV 是近似 decoder，不提供 bitwise 或
+numerical parity 承诺。完整的历史关系、生命周期、T2V 裁剪、部署命令和 GPU 测量
+gate 见 [Realtime VAE overlap 后端统一决策](/docs/sglang-diffusion/minwm/specs/2026-08-09-realtime-vae-backend-unification)。
+
 ## 实时数据流
 
 ```mermaid

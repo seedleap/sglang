@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import json
 import sys
 from pathlib import Path
 
@@ -9,6 +10,10 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from benchmark_realtime_throughput import (  # noqa: E402
+    record_frame_batch,
+    validate_frame_batch,
+)
 from common import (  # noqa: E402
     action_label_sequence,
     build_minwm_message,
@@ -16,10 +21,139 @@ from common import (  # noqa: E402
     load_cases,
     materialize_first_frame,
 )
-
+from compare_realtime_vae_outputs import compare_results  # noqa: E402
 
 DRAGON_CASES = Path(__file__).with_name("cases_dragon_ride_60s_832x480.json")
 STEP1600_T2V_CASES = Path(__file__).with_name("cases_step1600_t2v_30s_832x480.json")
+SPOT_MATRIX_RUNNER = Path(__file__).with_name("run_unified_exact_vae_spot_matrix.sh")
+
+
+def _raw_header(**overrides):
+    header = {
+        "chunk_index": 0,
+        "num_frames": 1,
+        "content_type": "application/x-raw-rgb",
+        "width": 2,
+        "height": 2,
+        "channels": 3,
+        "bytes_per_frame": 12,
+        "raw_size": 12,
+        "total_size": 12,
+        "frame_batch_index": 0,
+        "num_frame_batches": 1,
+        "is_final_frame_batch": True,
+    }
+    header.update(overrides)
+    return header
+
+
+def test_spot_matrix_python_heredocs_execute_standard_input() -> None:
+    lines = SPOT_MATRIX_RUNNER.read_text().splitlines()
+    heredoc_invocations = []
+    for line_index, line in enumerate(lines):
+        if "python3" not in line:
+            continue
+        invocation = [line]
+        while invocation[-1].rstrip().endswith("\\"):
+            line_index += 1
+            invocation.append(lines[line_index])
+        if "<<'PY'" in "\n".join(invocation):
+            heredoc_invocations.append(invocation)
+
+    assert heredoc_invocations
+    for invocation in heredoc_invocations:
+        assert "python3 -" in invocation[0], "\n".join(invocation)
+
+
+def test_exact_vae_numerical_gate_keeps_bitwise_status_separate(tmp_path) -> None:
+    local_dir = tmp_path / "local"
+    remote_dir = tmp_path / "remote"
+    local_dir.mkdir()
+    remote_dir.mkdir()
+    base = {
+        "measured_payload_sha256": "local",
+        "measured_frame_sha256": {"20:0": "local"},
+        "measured_frame_samples_base64": {"20:0": "AAECAw=="},
+        "client": {"steady_received_fps_ratio_of_sums": 20.0},
+    }
+    (local_dir / "throughput.json").write_text(json.dumps(base))
+    remote = {
+        **base,
+        "measured_payload_sha256": "remote",
+        "measured_frame_sha256": {"20:0": "remote"},
+        "measured_frame_samples_base64": {"20:0": "AQIDBA=="},
+        "client": {"steady_received_fps_ratio_of_sums": 25.0},
+    }
+    (remote_dir / "throughput.json").write_text(json.dumps(remote))
+    (local_dir / "first-measured-frame.rgb").write_bytes(bytes((0, 1, 2, 3)))
+    (remote_dir / "first-measured-frame.rgb").write_bytes(bytes((1, 2, 3, 4)))
+
+    summary = compare_results(
+        local_dir / "throughput.json",
+        remote_dir / "throughput.json",
+        max_absolute_error_threshold=4,
+        psnr_threshold_db=40.0,
+    )
+
+    assert summary["bitwise_equal"] is False
+    assert summary["numerical_parity"] is True
+    assert summary["first_frame_max_absolute_error"] == 1
+    assert summary["max_absolute_error_threshold"] == 4
+
+    (remote_dir / "first-measured-frame.rgb").write_bytes(bytes((4, 1, 2, 3)))
+    assert compare_results(
+        local_dir / "throughput.json",
+        remote_dir / "throughput.json",
+        max_absolute_error_threshold=4,
+        psnr_threshold_db=40.0,
+    )["numerical_parity"]
+
+    (remote_dir / "first-measured-frame.rgb").write_bytes(bytes((5, 1, 2, 3)))
+    assert not compare_results(
+        local_dir / "throughput.json",
+        remote_dir / "throughput.json",
+        max_absolute_error_threshold=4,
+        psnr_threshold_db=40.0,
+    )["numerical_parity"]
+
+
+def test_streamed_frame_batch_completes_unknown_count_from_frame_contract() -> None:
+    payload = bytes(12)
+    state = {
+        "num_batches": None,
+        "seen": set(),
+        "frames": 0,
+        "complete": False,
+    }
+
+    for batch_index in range(4):
+        header = _raw_header(
+            frame_batch_index=batch_index,
+            num_frame_batches=0,
+            is_final_frame_batch=False,
+        )
+        index, count, frames = validate_frame_batch(header, payload, chunk_index=0)
+        complete = record_frame_batch(
+            state,
+            chunk_index=0,
+            batch_index=index,
+            num_batches=count,
+            batch_frames=frames,
+            expected_frames=4,
+        )
+        assert complete == (batch_index == 3)
+
+    assert state == {
+        "num_batches": None,
+        "seen": {0, 1, 2, 3},
+        "frames": 4,
+        "complete": True,
+    }
+
+
+def test_streamed_frame_batch_rejects_final_unknown_count() -> None:
+    with pytest.raises(AssertionError, match="is_final_frame_batch"):
+        validate_frame_batch(_raw_header(num_frame_batches=0), bytes(12), chunk_index=0)
 
 
 def test_realtime_trace_events_are_out_of_band() -> None:

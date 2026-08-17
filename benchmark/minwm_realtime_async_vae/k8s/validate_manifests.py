@@ -7,7 +7,6 @@ from pathlib import Path
 
 import yaml
 
-
 ROOT = Path(__file__).resolve().parent
 BASE_MANIFESTS = (
     "namespace.yaml",
@@ -43,7 +42,10 @@ def load_documents(paths: tuple[str, ...] = BASE_MANIFESTS) -> list[dict]:
 
 def find(documents: list[dict], kind: str, name: str) -> dict:
     for document in documents:
-        if document.get("kind") == kind and document.get("metadata", {}).get("name") == name:
+        if (
+            document.get("kind") == kind
+            and document.get("metadata", {}).get("name") == name
+        ):
             return document
     raise AssertionError(f"missing {kind}/{name}")
 
@@ -98,9 +100,10 @@ def validate(documents: list[dict]) -> None:
         "us-east-2b",
         "us-east-2c",
     ]
-    assert all(value.startswith("g6.") for value in requirement_values(
-        vae, "node.kubernetes.io/instance-type"
-    ))
+    assert all(
+        value.startswith("g6.")
+        for value in requirement_values(vae, "node.kubernetes.io/instance-type")
+    )
     assert 1 <= int(denoiser["spec"]["limits"]["nvidia.com/gpu"]) <= 8
     assert int(denoiser_8x["spec"]["limits"]["nvidia.com/gpu"]) == 8
     assert 1 <= int(vae["spec"]["limits"]["nvidia.com/gpu"]) <= 8
@@ -146,6 +149,7 @@ def validate(documents: list[dict]) -> None:
     containers = denoiser["spec"]["template"]["spec"]["containers"]
     assert {container["name"] for container in containers} == {"denoiser"}
     command = " ".join(containers[0]["args"])
+    assert "--realtime-vae-backend taehv_remote" in command
     assert "--realtime-vae-worker-url" not in command
     init_containers = denoiser["spec"]["template"]["spec"]["initContainers"]
     heartbeat = next(

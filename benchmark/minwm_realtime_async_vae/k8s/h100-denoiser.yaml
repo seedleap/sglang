@@ -280,7 +280,7 @@ spec:
                 --batching-delay-ms 2 \
                 --realtime-max-sessions "${REALTIME_MAX_SESSIONS}" \
                 --realtime-max-sessions-per-worker "${REALTIME_MAX_SESSIONS}" \
-                --realtime-remote-vae-enabled \
+                --realtime-vae-backend taehv_remote \
                 --realtime-session-idle-timeout-s 60 \
                 --realtime-session-max-lifetime-s 70 \
                 --realtime-admission-wait-s 10 \

@@ -6,6 +6,11 @@ geometry, chunk count, and the exact 81-class `primitive_token_residual` action
 label. `cases_720p_5s.json` is a separate three-case long-video regression using
 continuous primitive weights.
 
+For hardware-specific jobs, use
+[`HARDWARE_PROFILES.md`](HARDWARE_PROFILES.md) and the sole committed generic
+Kubernetes template. Generated run manifests belong under the ignored
+`k8s/generated/` directory and must not be committed.
+
 For an architecture-first review of the implementation, numerical-parity
 decisions, sequence-parallel status, and the required comprehension quiz, read
 [`CHANGE_GUIDE.zh-CN.md`](CHANGE_GUIDE.zh-CN.md).

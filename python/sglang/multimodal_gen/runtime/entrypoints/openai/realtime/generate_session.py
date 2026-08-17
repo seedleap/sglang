@@ -11,10 +11,8 @@ from uuid import uuid4
 from sglang.multimodal_gen.runtime.entrypoints.openai.protocol import (
     RealtimeVideoGenerationsRequest,
 )
+from sglang.multimodal_gen.runtime.realtime.session import RealtimeSession
 from sglang.multimodal_gen.runtime.utils.realtime_trace import normalize_trace_id
-from sglang.multimodal_gen.runtime.realtime.session import (
-    RealtimeSession,
-)
 
 if TYPE_CHECKING:
     from sglang.multimodal_gen.runtime.entrypoints.openai.realtime.realtime_adapter import (
@@ -87,6 +85,7 @@ class GenerateSession:
         self.output_pace_next_send_at: float | None = None
         self.output_pace_last_event_id: int | None = None
         self.vae_client: Any = None
+        self.vae_decoder_backend: str | None = None
         self.vae_worker_url: str | None = None
         self.vae_worker_epoch: str | None = None
         self.coordinator_token: str | None = None
@@ -123,6 +122,7 @@ class GenerateSession:
         self.output_pace_next_send_at = None
         self.output_pace_last_event_id = None
         self.vae_client = None
+        self.vae_decoder_backend = None
         self.pending_control_refresh = None
         self.control_refresh_task = None
         self.input_event_timings.clear()
