@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import math
 import time
 from collections import defaultdict
 from pathlib import Path
@@ -43,6 +44,10 @@ def parse_args() -> argparse.Namespace:
         choices=("native_v1", "rife2x_v1"),
         default="native_v1",
         help="Request native frames or the negotiated remote-VAE RIFE 2x profile.",
+    )
+    parser.add_argument(
+        "--expected-media-weights-sha256",
+        help="Required exact 64-hex RIFE weights digest for rife2x_v1 runs.",
     )
     parser.add_argument("--sink", type=int, default=9)
     parser.add_argument("--window", type=int, default=18)
@@ -314,6 +319,26 @@ def stage_values_from_chunk_messages(
     return dict(values)
 
 
+def merged_stage_values(
+    trace_events: list[dict],
+    chunk_messages: dict[int, dict],
+    *,
+    min_chunk_index: int = 0,
+) -> dict[str, list[float]]:
+    """Prefer complete Trace columns without dropping chunk telemetry evidence."""
+
+    telemetry_values = stage_values_from_chunk_messages(
+        chunk_messages, min_chunk_index=min_chunk_index
+    )
+    trace_values = stage_values(trace_events, min_chunk_index=min_chunk_index)
+    merged = dict(telemetry_values)
+    for field, values in trace_values.items():
+        telemetry_samples = telemetry_values.get(field, [])
+        if len(values) >= len(telemetry_samples):
+            merged[field] = values
+    return merged
+
+
 def trace_contract_summary(trace_events: list[dict]) -> dict:
     event_names = sorted(
         {
@@ -366,13 +391,26 @@ def record_frame_batch(message: dict, *, frame_counts: dict[int, int]) -> None:
     frame_counts[chunk_index] = frame_counts.get(chunk_index, 0) + num_frames
 
 
+def frame_batch_contract_metadata(message: dict) -> dict:
+    """Retain contract fields without holding encoded payloads during a soak."""
+
+    fields = (
+        "media_profile",
+        "source_timeline_fps",
+        "output_timeline_fps",
+    )
+    return {field: message[field] for field in fields if field in message}
+
+
 def validate_media_profile_contract(
     *,
     media_profile: str,
     requested_fps: float,
+    expected_media_weights_sha256: str | None,
     session_ready: dict | None,
     completions: dict[int, dict],
     frame_counts: dict[int, int],
+    frame_messages: dict[int, list[dict]],
     expected_chunks: set[int],
 ) -> dict:
     """Validate negotiated RIFE timing and exact source/output frame counts."""
@@ -395,6 +433,8 @@ def validate_media_profile_contract(
         raise RuntimeError(f"RIFE profile was not accepted: {session_ready!r}")
     source_timeline_fps = float(session_ready.get("source_timeline_fps") or 0)
     output_timeline_fps = float(session_ready.get("output_timeline_fps") or 0)
+    if not math.isfinite(source_timeline_fps) or not math.isfinite(output_timeline_fps):
+        raise RuntimeError("RIFE session_ready returned a non-finite timeline")
     if abs(source_timeline_fps - requested_fps) > 1e-6:
         raise RuntimeError(
             "RIFE source timeline does not match the request: "
@@ -405,8 +445,21 @@ def validate_media_profile_contract(
             "RIFE output timeline is not 2x the source: "
             f"{output_timeline_fps} != {requested_fps * 2.0}"
         )
-    if not session_ready.get("media_weights_sha256"):
-        raise RuntimeError("RIFE session_ready omitted the weights digest")
+    expected_digest = (expected_media_weights_sha256 or "").lower()
+    actual_digest = str(session_ready.get("media_weights_sha256") or "").lower()
+    if len(expected_digest) != 64 or any(
+        character not in "0123456789abcdef" for character in expected_digest
+    ):
+        raise RuntimeError("RIFE validation requires an exact 64-hex weights digest")
+    if len(actual_digest) != 64 or any(
+        character not in "0123456789abcdef" for character in actual_digest
+    ):
+        raise RuntimeError("RIFE session_ready returned an invalid weights digest")
+    if actual_digest != expected_digest:
+        raise RuntimeError(
+            "RIFE weights digest mismatch: "
+            f"expected={expected_digest} actual={actual_digest}"
+        )
 
     missing = sorted(expected_chunks - set(completions))
     if missing:
@@ -421,9 +474,19 @@ def validate_media_profile_contract(
             raise RuntimeError(f"chunk {chunk} omitted the effective RIFE profile")
         source_frames = int(completion.get("source_num_frames", -1))
         output_frames = int(completion.get("output_num_frames", -1))
+        completion_frames = int(completion.get("num_frames", -1))
         actual_frames = frame_counts.get(chunk, 0)
         if source_frames < 0 or output_frames < 0:
             raise RuntimeError(f"chunk {chunk} omitted RIFE frame counts")
+        completion_source_fps = float(completion.get("source_timeline_fps") or 0)
+        completion_output_fps = float(completion.get("output_timeline_fps") or 0)
+        if (
+            not math.isfinite(completion_source_fps)
+            or not math.isfinite(completion_output_fps)
+            or abs(completion_source_fps - source_timeline_fps) > 1e-6
+            or abs(completion_output_fps - output_timeline_fps) > 1e-6
+        ):
+            raise RuntimeError(f"chunk {chunk} completion timeline drifted")
         expected_output = 0
         if source_frames > 0:
             expected_output = (
@@ -436,11 +499,24 @@ def validate_media_profile_contract(
                 f"source={source_frames} output={output_frames} "
                 f"expected={expected_output}"
             )
-        if actual_frames != output_frames:
+        if completion_frames != output_frames or actual_frames != output_frames:
             raise RuntimeError(
-                f"chunk {chunk} delivered {actual_frames} frames but completion "
-                f"reported {output_frames}"
+                f"chunk {chunk} frame count mismatch: received={actual_frames} "
+                f"num_frames={completion_frames} output_num_frames={output_frames}"
             )
+        if output_frames > 0 and not frame_messages.get(chunk):
+            raise RuntimeError(f"chunk {chunk} omitted RIFE frame metadata")
+        for frame_message in frame_messages.get(chunk, []):
+            frame_source_fps = float(frame_message.get("source_timeline_fps") or 0)
+            frame_output_fps = float(frame_message.get("output_timeline_fps") or 0)
+            if (
+                frame_message.get("media_profile") != media_profile
+                or not math.isfinite(frame_source_fps)
+                or not math.isfinite(frame_output_fps)
+                or abs(frame_source_fps - source_timeline_fps) > 1e-6
+                or abs(frame_output_fps - output_timeline_fps) > 1e-6
+            ):
+                raise RuntimeError(f"chunk {chunk} frame metadata drifted")
         source_total += source_frames
         output_total += output_frames
 
@@ -452,7 +528,7 @@ def validate_media_profile_contract(
             "effective_media_profile": session_ready["effective_media_profile"],
             "source_timeline_fps": source_timeline_fps,
             "output_timeline_fps": output_timeline_fps,
-            "media_weights_sha256": session_ready["media_weights_sha256"],
+            "media_weights_sha256": actual_digest,
         },
     }
 
@@ -632,6 +708,7 @@ async def run_session(args: argparse.Namespace, concurrency: int, index: int) ->
     stats: dict[int, dict] = {}
     first_frame_at: dict[int, float] = {}
     frame_counts: dict[int, int] = {}
+    frame_messages: dict[int, list[dict]] = defaultdict(list)
     trace_events: list[dict] = []
     action_sent_at: dict[int, float] = {}
     action_latencies: list[float] = []
@@ -727,6 +804,10 @@ async def run_session(args: argparse.Namespace, concurrency: int, index: int) ->
                     chunk = int(message.get("chunk_index") or 0)
                     observed_at = time.perf_counter()
                     record_frame_batch(message, frame_counts=frame_counts)
+                    if media_profile == "rife2x_v1":
+                        frame_messages[chunk].append(
+                            frame_batch_contract_metadata(message)
+                        )
                     first_frame_at.setdefault(chunk, observed_at)
                     record_action_latency(
                         message,
@@ -776,9 +857,13 @@ async def run_session(args: argparse.Namespace, concurrency: int, index: int) ->
     media_contract = validate_media_profile_contract(
         media_profile=media_profile,
         requested_fps=float(args.fps),
+        expected_media_weights_sha256=getattr(
+            args, "expected_media_weights_sha256", None
+        ),
         session_ready=media_acceptance,
         completions=completion_metadata,
         frame_counts=frame_counts,
+        frame_messages=frame_messages,
         expected_chunks=expected_chunks,
     )
 
@@ -852,11 +937,10 @@ async def run_session(args: argparse.Namespace, concurrency: int, index: int) ->
         "measured_seconds": measured_seconds,
         "measured_started_at": measured_started_at,
         "measured_completed_at": measured_completed_at,
-        "stage_values": (
-            stage_values(trace_events, min_chunk_index=args.warmup_chunks)
-            or stage_values_from_chunk_messages(
-                websocket_stats, min_chunk_index=args.warmup_chunks
-            )
+        "stage_values": merged_stage_values(
+            trace_events,
+            websocket_stats,
+            min_chunk_index=args.warmup_chunks,
         ),
         "trace_event_names": trace_contract["event_names"],
         "direct_vae_frame_batches": trace_contract["direct_vae_frame_batches"],
@@ -940,6 +1024,16 @@ async def async_main(args: argparse.Namespace) -> None:
     levels = [int(value) for value in args.concurrency.split(",") if value.strip()]
     if not levels or any(value < 1 for value in levels):
         raise ValueError("concurrency levels must be positive")
+    if args.realtime_media_profile == "rife2x_v1":
+        expected_digest = (args.expected_media_weights_sha256 or "").lower()
+        if len(expected_digest) != 64 or any(
+            character not in "0123456789abcdef" for character in expected_digest
+        ):
+            raise ValueError(
+                "--expected-media-weights-sha256 must be an exact 64-hex digest "
+                "for rife2x_v1"
+            )
+        args.expected_media_weights_sha256 = expected_digest
     if args.generation_mode == "i2v":
         if args.first_frame is None or not args.first_frame.is_file():
             raise ValueError("--first-frame must name an existing image for i2v")
@@ -961,6 +1055,7 @@ async def async_main(args: argparse.Namespace) -> None:
             "size": args.size,
             "fps": args.fps,
             "realtime_media_profile": args.realtime_media_profile,
+            "expected_media_weights_sha256": args.expected_media_weights_sha256,
             "sink": args.sink,
             "window": args.window,
             "completion_signal": args.completion_signal,

@@ -34,6 +34,16 @@ def test_report_rejects_high_aggregate_fps_when_one_session_is_slow():
     assert report["max_supported_concurrency"] == 0
 
 
+def test_rife_slo_uses_source_fps_instead_of_interpolated_output_fps():
+    run = _run(2, p95=800, fps=29.4)
+    run["aggregate_source_fps"] = 29.4
+    run["min_session_source_fps"] = 14.7
+
+    report = summarize_runs([run])
+
+    assert report["max_supported_concurrency"] == 0
+
+
 def test_report_calculates_async_improvement_at_common_concurrency():
     report = build_report(
         {"runs": [_run(1, p95=800, fps=16)]},
