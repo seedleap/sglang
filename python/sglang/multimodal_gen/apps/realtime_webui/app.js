@@ -611,6 +611,7 @@ let lastRenderedChunk = null;
 let lastReceivedChunk = null;
 let lastReceivedFrameBatchIndex = null;
 let frameBatchGapCount = 0;
+let primaryProtocolStats = {};
 let encodedDecodeErrors = 0;
 let socketHadError = false;
 let socketCloseExpected = false;
@@ -770,6 +771,7 @@ const lingbot2FallbackSession = new RealtimeModelSession({
   unpack,
   workerUrl: DECODER_WORKER_URL,
   startupMinChunk: 1,
+  startupTimeoutMs: configuredModelNumber("lingbot2", "startupTimeoutMs", 60000),
   onState: (state, details) => {
     setModelConnectionState("lingbot2", state);
     if (state === "error") {
@@ -1881,6 +1883,7 @@ function resetStreamStats() {
   lastReceivedChunk = null;
   lastReceivedFrameBatchIndex = null;
   frameBatchGapCount = 0;
+  primaryProtocolStats = {};
   encodedDecodeErrors = 0;
   renderedPreviewFrames = 0;
   lastSentEventId = 0;
@@ -2039,6 +2042,7 @@ function updateStats() {
   const totalDroppedFrames = playback.droppedFrames + droppedDecodeFrames;
   renderModelTelemetry("minwm", {
     ...playback,
+    ...primaryProtocolStats,
     frames,
     bytes,
     lastChunk: lastRenderedChunk,
@@ -2048,6 +2052,10 @@ function updateStats() {
     renderFps: fpsSamples.length,
     droppedFrames: totalDroppedFrames,
     decodeQueueLength: pendingDecodeBatches,
+  });
+  renderProtocolPerformance("minwm", {
+    ...playback,
+    ...primaryProtocolStats,
   });
 }
 
@@ -5924,6 +5932,38 @@ function receive(data, epoch) {
       if (!renderedPreviewFrames) setPreviewState("idle");
       return;
     }
+    if (message.type === "control_ack") {
+      if (message.stage === "worker") {
+        const clientSentEpochMs = Number(message.client_sent_epoch_ms || 0);
+        const serverReceivedEpochMs = Number(message.server_received_epoch_ms || 0);
+        const serverSentEpochMs = Number(message.server_sent_epoch_ms || 0);
+        const clientReceivedEpochMs = Date.now();
+        if (clientSentEpochMs && serverReceivedEpochMs && serverSentEpochMs) {
+          const serverProcessingMs = Math.max(0, serverSentEpochMs - serverReceivedEpochMs);
+          const controlRoundTripMs = Math.max(0, clientReceivedEpochMs - clientSentEpochMs);
+          primaryProtocolStats = {
+            ...primaryProtocolStats,
+            controlRoundTripMs,
+            lastInputUplinkMs: Math.max(0, (controlRoundTripMs - serverProcessingMs) / 2),
+            serverClockOffsetMs: (
+              (serverReceivedEpochMs - clientSentEpochMs)
+              + (serverSentEpochMs - clientReceivedEpochMs)
+            ) / 2,
+          };
+          updateStats();
+        }
+      }
+      return;
+    }
+    if (message.type === "chunk_telemetry") {
+      primaryProtocolStats = {
+        ...primaryProtocolStats,
+        chunkTelemetry: { ...message },
+      };
+      updateStats();
+      return;
+    }
+    if (message.type === "session_ready" || message.type === "heartbeat") return;
     if (message.type === "frame_batch") {
       const payload = message.payload;
       delete message.payload;
@@ -5949,7 +5989,14 @@ function receive(data, epoch) {
       });
       return;
     }
-    pendingHeader = message;
+    if (message.type === "frame_batch_header" || (!message.type && message.content_type)) {
+      pendingHeader = message;
+    } else {
+      recordTrajectoryEvent("server_control_ignored", {
+        type: String(message.type || "unknown"),
+      });
+      return;
+    }
     if (pendingHeader && !renderedPreviewFrames) setStatus("Receiving", "live");
     return;
   }
