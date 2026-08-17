@@ -824,6 +824,18 @@ function createH264ModelSession(key) {
     endpoint: h264WebSocketEndpoint(key),
     liveEdgeTargetMs: configuredNumber("h264WebSocketLiveEdgeTargetMs", 80),
     liveEdgeSeekThresholdMs: configuredNumber("h264WebSocketSeekThresholdMs", 420),
+    smoothTimelineStartupBufferMs: configuredNumber(
+      "h264WebSocketSmoothTimelineStartupBufferMs",
+      450,
+    ),
+    smoothTimelineTargetLagMs: configuredNumber(
+      "h264WebSocketSmoothTimelineTargetLagMs",
+      650,
+    ),
+    smoothTimelineMaxLagMs: configuredNumber(
+      "h264WebSocketSmoothTimelineMaxLagMs",
+      1800,
+    ),
     onState: (state, details = {}) => {
       setModelConnectionState(key, state);
       if (state === "connecting") {
@@ -834,6 +846,31 @@ function createH264ModelSession(key) {
         activeH264Models.delete(key);
         video.hidden = true;
         fallbackCanvas.hidden = false;
+      }
+      if (state === "draining" && details.playbackError) {
+        addHistory(
+          `${modelLabel(key)} H.264 tail autoplay rejected · ${details.playbackError}`,
+        );
+      }
+      if (key === "minwm" && state === "closed") {
+        // H264WebSocketSession emits `closed` only after MSE has presented its
+        // buffered tail. Re-enable entry and finish recording at that point,
+        // not when the transport first starts draining.
+        $("connectBtn").disabled = false;
+        setStatus(details.complete ? "Completed" : "Closed");
+        stopWorldExperienceTiming({
+          recordingReason: details.complete ? "generation_complete" : "primary_disconnected",
+        });
+        if (details.complete) {
+          addHistory(
+            `Zing H.264 generation complete · ${Number(details.terminal?.encoded_frames || 0)} frames`,
+          );
+        }
+        if (details.drainTimedOut) {
+          addHistory(
+            `Zing H.264 tail drain timeout · ${Math.round(Number(details.remainingPlaybackMs || 0))}ms remained`,
+          );
+        }
       }
       if (state === "error") {
         addHistory(`${modelLabel(key)} H.264 error · ${details.message || "unknown"}`);
@@ -903,7 +940,10 @@ function preferredRealtimeSession(key, h264Session, fallbackSession) {
       h264Session?.setUnavailable?.(reason);
       fallbackSession?.setUnavailable?.(reason);
     },
-    configure(options) { fallbackSession?.configure?.(options); },
+    configure(options) {
+      h264Session?.configure?.(options);
+      fallbackSession?.configure?.(options);
+    },
     snapshot() { return selected?.snapshot?.() || h264ModelStats[key] || {}; },
     get active() { return Boolean(selected?.active); },
     get connected() { return Boolean(selected?.connected); },
@@ -989,6 +1029,9 @@ const primarySessionAdapter = {
       return;
     }
     abortCurrentSession(reason, { expectedClose: true });
+  },
+  configure(options) {
+    minwmH264Session?.configure?.(options);
   },
 };
 
@@ -1473,6 +1516,7 @@ function setModelConnectionState(key, state) {
     ready: "准备完成",
     connecting: "连接中",
     live: "已连接",
+    draining: "播放收尾",
     unavailable: "不可用",
     error: "连接异常",
     closed: "已断开",
@@ -2185,6 +2229,7 @@ function previewPlaybackTargetFps(key = "minwm") {
 
 function syncPlaybackTargetFps() {
   playbackController.setTargetFps(previewPlaybackTargetFps("minwm"));
+  primarySessionAdapter.configure({ targetFps: previewPlaybackTargetFps("minwm") });
   lingbot2Session.configure({ targetFps: previewPlaybackTargetFps("lingbot2") });
   updateStats();
 }
@@ -2194,6 +2239,7 @@ function syncSmoothCatchupRate() {
   $("smoothCatchupRate").value = String(rate);
   $("smoothCatchupRateText").textContent = `${rate.toFixed(2)}x`;
   playbackController.setSmoothTimelinePlaybackRateMax(rate);
+  primarySessionAdapter.configure({ smoothTimelinePlaybackRateMax: rate });
   lingbot2Session.configure({ smoothTimelinePlaybackRateMax: rate });
 }
 
@@ -2216,6 +2262,7 @@ function syncPlaybackMode({ addToHistory = true } = {}) {
   const mode = selectedPlaybackMode("minwm");
   const lingbot2Mode = selectedPlaybackMode("lingbot2");
   playbackController.setMode(mode);
+  primarySessionAdapter.configure({ mode });
   lingbot2Session.configure({ mode: lingbot2Mode });
   if (addToHistory) {
     const historyText =

@@ -93,6 +93,11 @@ assert.match(app, /\$\(`\$\{key\}PerfPlaybackBuffer`\)\.textContent/);
 assert.match(app, /activeH264Models\.has\("minwm"\)/, "H.264 stats should not be overwritten by WebP playback stats");
 assert.match(
   app,
+  /if \(key === "minwm" && state === "closed"\) \{[\s\S]*?\$\("connectBtn"\)\.disabled = false;[\s\S]*?stopWorldExperienceTiming/,
+  "finite Zing H.264 playback should re-enable entry and stop timing only after its buffered tail ends",
+);
+assert.match(
+  app,
   /"h264StartupDropFrames",[\s\S]*?key === "lingbot2" \? 8 : 0/,
   "LingBot2 should hide eight startup transition frames without changing Zing",
 );
@@ -153,11 +158,21 @@ for (const selector of ["model-slot-config", "stage-controls", "prompt-update-he
 assert.match(html, /playback_controller\.js\?v=realtime-playback-v34/);
 assert.match(html, /model_session\.js\?v=dual-h264-telemetry-v1/);
 assert.match(html, /dual_model_controller\.js\?v=dual-model-v6/);
-assert.match(html, /h264_websocket_session\.js\?v=h264-stage-timing-v1/);
+assert.match(html, /h264_websocket_session\.js\?v=h264-smooth-timeline-v1/);
+assert.match(
+  app,
+  /configure\(options\)\s*\{\s*h264Session\?\.configure\?\.\(options\);\s*fallbackSession\?\.configure\?\.\(options\);\s*\}/,
+  "preferred realtime sessions must configure both the H264 primary and WebP fallback",
+);
+assert.match(
+  app,
+  /playbackController\.setMode\(mode\);\s*primarySessionAdapter\.configure\(\{ mode \}\);/,
+  "Zing playback mode must reach the H264 primary adapter",
+);
 assert.match(html, /prompt_rewrite_controller\.js\?v=prompt-rewrite-v3/);
 assert.match(html, /world_rules_controller\.js\?v=world-rules-v3/);
-assert.match(html, /styles\.css\?v=world-studio-h264-rules-v5/);
-assert.match(html, /app\.js\?v=world-studio-h264-rules-v5/);
+assert.match(html, /styles\.css\?v=world-studio-h264-rules-v6/);
+assert.match(html, /app\.js\?v=world-studio-h264-smooth-timeline-v1/);
 assert.match(html, /id="minwmH264Viewport"/);
 assert.match(html, /id="lingbot2H264Viewport"/);
 assert.match(html, /id="minwmPerfScheduler"/);
