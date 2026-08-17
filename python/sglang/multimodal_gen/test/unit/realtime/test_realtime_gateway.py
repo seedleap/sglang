@@ -393,6 +393,30 @@ def test_gateway_finite_waiter_rejects_output_close_without_final_marker():
     asyncio.run(run())
 
 
+def test_gateway_finite_waiters_stop_when_never_bound_route_closes():
+    async def run():
+        registry = GatewayOutputRegistry(queue_depth=2)
+        route = await registry.register("s", "g", token="secret")
+        route.configure_request_mode(finite_request=True)
+        chunk_waiter = asyncio.create_task(route.wait_until_chunk_forwarded(0))
+        final_waiter = asyncio.create_task(
+            route.wait_until_final_completion_forwarded()
+        )
+        await asyncio.sleep(0)
+
+        await route.close()
+
+        for waiter in (chunk_waiter, final_waiter):
+            with pytest.raises(OutputIncompleteError, match="route closed before"):
+                await asyncio.wait_for(waiter, timeout=0.05)
+        with pytest.raises(OutputIncompleteError, match="route closed before"):
+            await asyncio.wait_for(
+                route.wait_until_final_completion_forwarded(), timeout=0.05
+            )
+
+    asyncio.run(run())
+
+
 def test_gateway_finite_expected_chunk_requires_final_marker():
     async def run():
         registry = GatewayOutputRegistry(queue_depth=2)
@@ -405,6 +429,35 @@ def test_gateway_finite_expected_chunk_requires_final_marker():
 
         with pytest.raises(OutputProtocolError, match="lacks final media marker"):
             await route.put(_media_complete(0))
+        metrics = route.queue_metrics()
+        assert metrics["gateway_rejected_completions"] == 1
+        assert metrics["gateway_output_failure_kind"] == "protocol"
+        assert metrics["gateway_output_failure_reason"] == (
+            "expected final chunk lacks final media marker"
+        )
+
+        with pytest.raises(OutputProtocolError, match="lacks final media marker"):
+            await route.wait_until_final_completion_forwarded()
+
+    asyncio.run(run())
+
+
+def test_gateway_finite_rejects_final_marker_on_unexpected_chunk():
+    async def run():
+        registry = GatewayOutputRegistry(queue_depth=2)
+        route = await registry.register("s", "g", token="secret")
+        route.configure_request_mode(finite_request=True, expected_final_chunk=1)
+        frame = _frame(0)
+        await route.put(frame)
+        assert await route.get() == frame
+        route.task_done()
+
+        with pytest.raises(OutputProtocolError, match="unexpected chunk index"):
+            await route.put(_media_complete(0, is_final=True))
+        metrics = route.queue_metrics()
+        assert metrics["gateway_rejected_completions"] == 1
+        assert metrics["gateway_output_failure_kind"] == "protocol"
+        assert metrics["gateway_final_completion_received"] is False
 
     asyncio.run(run())
 

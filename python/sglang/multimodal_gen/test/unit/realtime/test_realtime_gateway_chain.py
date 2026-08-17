@@ -524,7 +524,10 @@ def test_gateway_marks_t2v_finite_route_and_ack_window_before_forwarding_init():
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("failure_mode", ("output_closed", "output_timeout"))
+@pytest.mark.parametrize(
+    "failure_mode",
+    ("output_closed", "output_timeout", "missing_final_marker"),
+)
 def test_gateway_finite_session_rejects_missing_final_completion(
     failure_mode, monkeypatch
 ):
@@ -550,7 +553,7 @@ def test_gateway_finite_session_rejects_missing_final_completion(
             output_token = query["gateway_output_token"][0]
             assert decode_message(await connection.recv())["max_chunks"] == 1
 
-            if failure_mode == "output_closed":
+            if failure_mode != "output_timeout":
                 async with connect(
                     output_url, max_size=None, compression=None
                 ) as output:
@@ -582,6 +585,23 @@ def test_gateway_finite_session_rejects_missing_final_completion(
                             is_final_frame_batch=True,
                         )
                     )
+                    if failure_mode == "missing_final_marker":
+                        await output.send(
+                            encode_message(
+                                "media_chunk_complete",
+                                session_id=session_id,
+                                generation_id=generation_id,
+                                request_id="request-0",
+                                chunk_index=0,
+                                num_frames=1,
+                            )
+                        )
+                        try:
+                            await output.recv()
+                        except ConnectionClosed as exc:
+                            observed["output_close_code"] = (
+                                exc.rcvd.code if exc.rcvd is not None else None
+                            )
             await connection.close(code=1000, reason="producer stopped")
 
         coordinator = _Coordinator(
@@ -630,7 +650,19 @@ def test_gateway_finite_session_rejects_missing_final_completion(
             message["type"] == "media_chunk_complete" for message in messages
         )
         error = next(message for message in messages if message["type"] == "error")
-        assert "final media completion" in error["content"]
+        if failure_mode == "missing_final_marker":
+            assert "lacks final media marker" in error["content"]
+            assert observed["output_close_code"] == 1008
+            rejected = next(
+                trace for trace in traces if trace["event"] == "gateway.output_rejected"
+            )
+            assert rejected["reject_kind"] == "protocol"
+            assert rejected["reject_reason"] == (
+                "expected final chunk lacks final media marker"
+            )
+            assert rejected["gateway_rejected_completions"] == 1
+        else:
+            assert "final media completion" in error["content"]
         incomplete = next(
             trace for trace in traces if trace["event"] == "gateway.output_incomplete"
         )
