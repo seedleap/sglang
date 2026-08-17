@@ -37,6 +37,7 @@ from sglang.multimodal_gen.runtime.utils.quantization_utils import (
     get_quant_config,
     get_quant_config_from_safetensors_metadata,
 )
+
 logger = init_logger(__name__)
 
 PostLoadHook = Callable[[nn.Module], None]

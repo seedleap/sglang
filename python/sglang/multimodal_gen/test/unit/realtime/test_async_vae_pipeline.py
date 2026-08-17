@@ -9,9 +9,7 @@ from unittest.mock import patch
 import pytest
 import torch
 
-from sglang.multimodal_gen.runtime.entrypoints.openai.realtime import (
-    realtime_video_api,
-)
+from sglang.multimodal_gen.runtime.entrypoints.openai.realtime import realtime_video_api
 from sglang.multimodal_gen.runtime.entrypoints.openai.realtime.realtime_video_api import (
     _OrderedDecodeCoordinator,
 )
@@ -33,12 +31,16 @@ def test_chunk_n_plus_one_denoises_while_chunk_n_decodes():
         coordinator = _OrderedDecodeCoordinator()
 
         async def denoise(index):
-            timeline.append((f"denoise:{index}:start", asyncio.get_running_loop().time()))
+            timeline.append(
+                (f"denoise:{index}:start", asyncio.get_running_loop().time())
+            )
             await asyncio.sleep(0.02)
             timeline.append((f"denoise:{index}:end", asyncio.get_running_loop().time()))
 
         async def decode(index):
-            timeline.append((f"decode:{index}:start", asyncio.get_running_loop().time()))
+            timeline.append(
+                (f"decode:{index}:start", asyncio.get_running_loop().time())
+            )
             await asyncio.sleep(0.05)
             emitted.append(index)
             timeline.append((f"decode:{index}:end", asyncio.get_running_loop().time()))
@@ -210,7 +212,10 @@ def test_async_vae_open_failure_still_closes_client(monkeypatch):
             vae_client=None,
         )
         server_args = SimpleNamespace(
+            realtime_vae_backend="taehv_remote",
             realtime_vae_worker_url="ws://vae",
+            realtime_vae_transport="websocket",
+            realtime_vae_shared_memory_dir=None,
             realtime_vae_timeout_s=1,
             realtime_vae_max_message_mb=64,
         )
@@ -255,6 +260,8 @@ def test_remote_vae_client_streams_batches_before_chunk_completion():
                 "session_accepted",
                 session_id="s",
                 generation_id="g",
+                decoder_backend="taehv",
+                decoder_fidelity="approximate",
                 credit_chunk_index=0,
             )
         )
@@ -265,6 +272,7 @@ def test_remote_vae_client_streams_batches_before_chunk_completion():
             connect_factory=connect_factory,
         )
         await client.open(
+            decoder_backend="taehv",
             output_format="webp",
             quality=80,
             preview_max_width=560,
@@ -277,6 +285,8 @@ def test_remote_vae_client_streams_batches_before_chunk_completion():
         assert connect_kwargs["compression"] is None
         session_open = decode_message(await socket.sent.get())
         assert session_open["type"] == "session_open"
+        assert session_open["decoder_backend"] == "taehv"
+        assert session_open["response_transport"] == "websocket"
         assert session_open["output_url"].startswith("ws://gateway/")
         assert session_open["output_token"] == "output-secret"
         assert session_open["trace_id"] == "trace-a"
@@ -390,7 +400,7 @@ def test_gateway_output_client_binds_identity_and_sends_frames_directly():
         await client.open()
         opened = decode_message(await socket.sent.get())
         assert opened == {
-            "version": 1,
+            "version": 2,
             "type": "session_output_open",
             "session_id": "s",
             "generation_id": "g",
@@ -461,6 +471,8 @@ def test_remote_vae_client_orders_frame_callbacks_across_chunks():
                 "session_accepted",
                 session_id="s",
                 generation_id="g",
+                decoder_backend="taehv",
+                decoder_fidelity="approximate",
                 credit_chunk_index=0,
             )
         )
@@ -470,7 +482,12 @@ def test_remote_vae_client_orders_frame_callbacks_across_chunks():
             generation_id="g",
             connect_factory=connect_factory,
         )
-        await client.open(output_format="webp", quality=80, preview_max_width=560)
+        await client.open(
+            decoder_backend="taehv",
+            output_format="webp",
+            quality=80,
+            preview_max_width=560,
+        )
         await socket.sent.get()
 
         first_started = asyncio.Event()
@@ -579,6 +596,8 @@ def test_remote_vae_client_fails_and_removes_pending_on_frame_callback_error():
                 "session_accepted",
                 session_id="s",
                 generation_id="g",
+                decoder_backend="taehv",
+                decoder_fidelity="approximate",
                 credit_chunk_index=0,
             )
         )
@@ -589,7 +608,12 @@ def test_remote_vae_client_fails_and_removes_pending_on_frame_callback_error():
             timeout_s=1,
             connect_factory=connect_factory,
         )
-        await client.open(output_format="webp", quality=80, preview_max_width=560)
+        await client.open(
+            decoder_backend="taehv",
+            output_format="webp",
+            quality=80,
+            preview_max_width=560,
+        )
         await socket.sent.get()
 
         async def fail_callback(_batch):

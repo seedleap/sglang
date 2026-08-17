@@ -205,6 +205,8 @@ else
     --local-attn-size "${MINWM_CONVERT_LOCAL_ATTN_SIZE:--1}" \
     --sink-size "${MINWM_CONVERT_SINK_SIZE:-0}" \
     --sliding-window-num-frames "${MINWM_CONVERT_WINDOW_SIZE:-128}" \
+    --rope-position-mode "${MINWM_CONVERT_ROPE_POSITION_MODE:-absolute}" \
+    --rope-max-frame-gap "${MINWM_CONVERT_ROPE_MAX_FRAME_GAP:-1}" \
     | tee "${RESULTS}/conversion.log"
 fi
 cp "${MODEL_DIR}/minwm_conversion_manifest.json" "${RESULTS}/"
@@ -612,6 +614,7 @@ PY
       --enable-torch-compile false \
       --enable-cuda-graph "${enabled}" \
       --warmup-mode off \
+      --realtime-session-idle-timeout-s 1800 \
       --port 30000 \
       > "${profile_dir}/server.log" 2>&1 &
     local server_pid=$!
@@ -759,9 +762,7 @@ for degree in (1, 2):
     }
     comparison["sampled_pixel_error"] = sampled_pixel_error(eager, graph)
     for name, getter in {
-        "scheduler_fps": lambda item: item["server"]["scheduler_forward_fps_ratio_of_sums"],
         "client_fps": lambda item: item["client"]["steady_received_fps_ratio_of_sums"],
-        "scheduler_p50_ms": lambda item: item["server"]["scheduler_forward_ms"]["p50"],
         "dit_denoise_pixel_fps": lambda item: item["dit_denoise"]["pixel_fps_ratio_of_sums"],
         "dit_denoise_p50_ms": lambda item: item["dit_denoise"]["p50_ms"],
     }.items():
@@ -1346,6 +1347,18 @@ run_throughput_profile() {
   local native_components="$4" torch_compile="$5" kv_frames="$6"
   local profile_dir="${LOCAL_RESULTS}/throughput/${profile}"
   local profile_results="${RESULTS}/throughput/${profile}"
+  local realtime_vae_args=()
+  if [[ -n "${MINWM_REALTIME_VAE_BACKEND:-}" ]]; then
+    if [[ -z "${MINWM_REALTIME_VAE_WORKER_URL:-}" ]]; then
+      echo "MINWM_REALTIME_VAE_WORKER_URL is required with MINWM_REALTIME_VAE_BACKEND" >&2
+      return 2
+    fi
+    realtime_vae_args+=(
+      --realtime-vae-backend "${MINWM_REALTIME_VAE_BACKEND}"
+      --realtime-vae-worker-url "${MINWM_REALTIME_VAE_WORKER_URL}"
+      --realtime-vae-transport "${MINWM_REALTIME_VAE_TRANSPORT:-auto}"
+    )
+  fi
   mkdir -p "${profile_dir}" "${profile_results}"
   MINWM_ATTENTION_IMPL="${attention_impl}" \
   MINWM_PACKED_ATTENTION_DETERMINISTIC="${packed_deterministic}" \
@@ -1357,6 +1370,7 @@ run_throughput_profile() {
     --performance-mode speed \
     --enable-torch-compile "${torch_compile}" \
     --warmup-mode off \
+    "${realtime_vae_args[@]}" \
     --port 30000 \
     > "${profile_results}/server.log" 2>&1 &
   local profile_server_pid=$!

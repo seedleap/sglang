@@ -20,6 +20,96 @@ assert.match(
   "recording metadata should describe that the stage was captured",
 );
 assert.match(
+  appJs,
+  /timing:\s*"wall_clock"/,
+  "gameplay recordings should preserve real user timing independently of model FPS",
+);
+assert.match(
+  appJs,
+  /function startRecordingFramePump\(\)/,
+  "recording should use a wall-clock frame pump",
+);
+assert.match(
+  appJs,
+  /await track\.encoder\.flush\(\);\s*if \(!track\.samples\.length\)/,
+  "short recordings should flush the encoder before checking for output samples",
+);
+assert.match(
+  appJs,
+  /track\.encoder\?\.encodeQueueSize > 4/,
+  "recording backpressure should drop capture frames instead of stalling realtime play",
+);
+assert.doesNotMatch(
+  appJs,
+  /recordDecodedFrameBatch\(decodedFrames\)/,
+  "decoded model batches must not drive recording time",
+);
+assert.match(
+  appJs,
+  /function drawRecordingPromptComposer\(\)/,
+  "downloaded gameplay should include the prompt composer overlay",
+);
+assert.match(
+  appJs,
+  /function drawRecordingPromptComposer\(\)[\s\S]{0,180}?const x = 450;[\s\S]{0,100}?const width = 700;/,
+  "the recorded prompt composer should stay compact and leave the world visible",
+);
+assert.match(
+  appJs,
+  /runtime_prompt_input/,
+  "recording should retain the user's real prompt input timeline",
+);
+assert.match(
+  appJs,
+  /runtime_prompt_submitted/,
+  "recording should distinguish submit time from model send time",
+);
+assert.match(
+  appJs,
+  /runtime_prompt_sent/,
+  "recording should mark the exact model send event",
+);
+assert.match(
+  appJs,
+  /stopWorldExperienceTiming\(\{ recordingReason: "session_timeout" \}\)/,
+  "session timeout should finalize the downloadable gameplay recording",
+);
+assert.match(
+  appJs,
+  /setRecordingDownloads\(outputs\)/,
+  "both finalized gameplay videos should be exposed through one download control",
+);
+assert.match(
+  appJs,
+  /key: "comparison"[\s\S]{0,300}?key: "zing"/,
+  "recording should encode comparison and Zing-only tracks",
+);
+assert.match(
+  appJs,
+  /fileName: `\$\{baseFileName\}-\$\{track\.key\}\.\$\{extension\}`/,
+  "the two synchronized tracks should receive distinct downloadable file names",
+);
+assert.match(
+  appJs,
+  /function downloadGameplayRecordings[\s\S]*?for \(const item of recordingDownloads\)[\s\S]*?link\.click\(\)/,
+  "one download action should synchronously trigger both video downloads",
+);
+assert.match(
+  appJs,
+  /function markWorldExperienceReady\(modelKey\)[\s\S]*?source: "first_visible_frame"/,
+  "recording must be gated by the first visible world frame",
+);
+assert.match(
+  appJs,
+  /const RECORDING_READY_TOAST_MS = 5000;/,
+  "the recording-ready toast should stay visible for five seconds",
+);
+assert.match(
+  appJs,
+  /\["session_timeout", "session_closed", "primary_disconnected"\][\s\S]{0,220}?showRecordingReadyToast\(\)/,
+  "world-ending recording paths should show the download reminder toast",
+);
+assert.match(
   replayHtmlBuilder,
   /class="replay-stage"/,
   "exported replay index should render a stage-style video area",

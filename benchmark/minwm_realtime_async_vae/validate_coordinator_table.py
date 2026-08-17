@@ -10,7 +10,6 @@ from pathlib import Path
 
 import yaml
 
-
 EXPECTED_PRIMARY_KEY = [
     {"AttributeName": "pk", "KeyType": "HASH"},
     {"AttributeName": "sk", "KeyType": "RANGE"},
@@ -47,8 +46,7 @@ def validate(payload: dict) -> None:
     if attributes != EXPECTED_ATTRIBUTES:
         raise ValueError("Coordinator key attribute definitions must all use String")
     indexes = {
-        item.get("IndexName"): item
-        for item in table.get("GlobalSecondaryIndexes", [])
+        item.get("IndexName"): item for item in table.get("GlobalSecondaryIndexes", [])
     }
     allocation = indexes.get("allocation-index")
     if allocation is None or allocation.get("IndexStatus") != "ACTIVE":

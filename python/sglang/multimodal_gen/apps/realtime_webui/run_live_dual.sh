@@ -19,7 +19,7 @@ export MINWM_UPSTREAM_WS="${DUAL_GATEWAY_WS%/}/backends/minwm"
 export LINGBOT2_UPSTREAM_HTTP="${DUAL_GATEWAY_HTTP%/}/backends/lingbot2"
 export LINGBOT2_UPSTREAM_WS="${DUAL_GATEWAY_WS%/}/backends/lingbot2"
 if [[ -z "${REALTIME_UI_CONFIG_JSON:-}" ]]; then
-  export REALTIME_UI_CONFIG_JSON="{\"generationModes\":[\"i2v\",\"t2v\"],\"defaultGenerationMode\":\"i2v\",\"t2vFrameStep\":4,\"t2vDefaultNumFrames\":121,\"sessionMaxLifetimeSeconds\":90,\"singleExperience\":true,\"singleExperienceUserIds\":{\"minwm\":\"showcase:zing\",\"lingbot2\":\"showcase:lingbot2\"},\"smoothCatchupRateMax\":1.1,\"dualModels\":{\"minwm\":{\"label\":\"Zing\",\"wsUrl\":\"${DUAL_GATEWAY_WS%/}/backends/minwm/v1/realtime_video/generate\"},\"lingbot2\":{\"label\":\"LingBot2\",\"wsUrl\":\"${DUAL_GATEWAY_WS%/}/backends/lingbot2/v1/realtime_video/generate\",\"targetFps\":16,\"sinkSize\":9,\"windowFrames\":18}}}"
+  export REALTIME_UI_CONFIG_JSON="{\"generationModes\":[\"i2v\",\"t2v\"],\"defaultGenerationMode\":\"i2v\",\"t2vFrameStep\":4,\"t2vDefaultNumFrames\":121,\"sessionMaxLifetimeSeconds\":90,\"playbackAckEnabled\":false,\"h264WebSocketEnabled\":true,\"h264WebSocketBaseUrl\":\"https://zing-world-studio.loopit.me\",\"h264CompressedBitrateKbps\":3000,\"h264CompressedCrf\":20,\"h264CompressedPreset\":\"fast\",\"h264CompressedGopSeconds\":2,\"h264CompressedVbvBufferMs\":250,\"h264WebSocketLiveEdgeTargetMs\":80,\"h264WebSocketSeekThresholdMs\":260,\"singleExperience\":false,\"smoothCatchupRateMax\":1.1,\"dualModels\":{\"minwm\":{\"label\":\"Zing\",\"sinkSize\":8,\"windowFrames\":32,\"h264StartupDropFrames\":0},\"lingbot2\":{\"label\":\"LingBot2\",\"targetFps\":16,\"sinkSize\":9,\"windowFrames\":18,\"h264StartupDropFrames\":8}}}"
 fi
 
 exec python3 "${SCRIPT_DIR}/server.py"

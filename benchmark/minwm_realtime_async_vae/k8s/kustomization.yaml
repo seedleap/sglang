@@ -4,6 +4,7 @@ resources:
   - namespace.yaml
   - cpu-control-plane.yaml
   - west-s3-volume.yaml
+  - east2-model-serving-s3-volume.yaml
   - observability.yaml
   - coordinator.yaml
   - gateway.yaml
@@ -12,8 +13,9 @@ resources:
   - autoscaling.yaml
   - gpu-scheduled-scaling.yaml
   - gpu-capacity-scaler.yaml
+  - gpu-replica-safety.yaml
+  - 8gpu-nodeclass.yaml
   - h100-denoiser.yaml
   - lingbot2-h100-denoiser.yaml
-  - tianpeng-direct.yaml
   - l4-vae.yaml
   - gateway-service.yaml

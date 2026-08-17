@@ -4,8 +4,12 @@ from types import SimpleNamespace
 
 import torch
 
+from sglang.multimodal_gen.runtime.pipelines_core.stages.realtime.text_encoding import (
+    RealtimeTextEncodingStage,
+)
 from sglang.multimodal_gen.runtime.pipelines_core.stages.realtime.vae import (
     CausalVaeDecodingStage,
+    RealtimeImageVAEEncodingStage,
     RealtimeVAEDecodeState,
 )
 
@@ -192,6 +196,7 @@ def test_causal_vae_decoding_stage_uses_streaming_taehv_decoder(monkeypatch):
 
         def to(self, device=None, dtype=None):
             del device, dtype
+            self.calls.append("to")
             return self
 
         def causal_decode(self, latents):
@@ -274,6 +279,56 @@ def test_causal_vae_decoding_stage_uses_streaming_taehv_decoder(monkeypatch):
     )
     assert tuple(frames.shape) == (1, 3, 1, 16, 16)
     assert torch.equal(frames, torch.full((1, 3, 1, 16, 16), 0.25))
+
+
+def test_taehv_decode_does_not_declare_native_vae_residency():
+    server_args = SimpleNamespace(
+        pipeline_config=SimpleNamespace(
+            vae_precision="fp32",
+            vae_config=SimpleNamespace(taehv_checkpoint_path="/tmp/taehv.pth"),
+        )
+    )
+    stage = CausalVaeDecodingStage.__new__(CausalVaeDecodingStage)
+    stage.component_name = "vae"
+
+    assert stage.component_uses(server_args, "decoder") == []
+
+    server_args.pipeline_config.vae_config.taehv_checkpoint_path = None
+    uses = stage.component_uses(server_args, "decoder")
+    assert [use.component_name for use in uses] == ["vae"]
+
+
+def test_taehv_image_encode_offload_marks_native_vae_as_large_no_prefetch():
+    server_args = SimpleNamespace(
+        vae_cpu_offload=True,
+        pipeline_config=SimpleNamespace(
+            vae_precision="fp32",
+            vae_config=SimpleNamespace(taehv_checkpoint_path="/tmp/taehv.pth"),
+        ),
+    )
+    stage = RealtimeImageVAEEncodingStage.__new__(RealtimeImageVAEEncodingStage)
+    stage.component_name = "vae"
+
+    uses = stage.component_uses(server_args, "encoder")
+
+    assert len(uses) == 1
+    assert uses[0].component_name == "vae"
+    assert uses[0].memory_intensive is True
+    assert uses[0].allow_prefetch is False
+
+
+def test_realtime_text_offload_does_not_prefetch_cached_encoder():
+    stage = RealtimeTextEncodingStage.__new__(RealtimeTextEncodingStage)
+    stage.text_encoders = [object()]
+    server_args = SimpleNamespace(text_encoder_cpu_offload=True)
+
+    uses = stage.component_uses(server_args, "text")
+
+    assert len(uses) == 1
+    assert uses[0].component_name == "text_encoder"
+    assert uses[0].preferred_ready_after_request is False
+    assert uses[0].allow_prefetch is False
+    assert uses[0].memory_intensive is True
 
 
 def test_causal_vae_decoding_stage_preloads_taehv_model(monkeypatch):

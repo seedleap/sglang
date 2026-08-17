@@ -42,6 +42,12 @@ from sglang.multimodal_gen.runtime.platforms import (
     AttentionBackendEnum,
     current_platform,
 )
+from sglang.multimodal_gen.runtime.realtime_vae_config import (
+    LOCAL_VAE_BACKEND,
+    REALTIME_VAE_BACKENDS,
+    REALTIME_VAE_TRANSPORTS,
+    uses_remote_vae,
+)
 from sglang.multimodal_gen.runtime.server_args_auto_tune import (
     PERFORMANCE_MODES,
     ServerArgsAutoTuner,
@@ -290,8 +296,10 @@ class ServerArgs(DisaggServerArgsMixin):
     realtime_admission_wait_s: float = 10.0
     realtime_session_lease_table: str | None = None
     realtime_require_authenticated_user: bool = False
-    realtime_remote_vae_enabled: bool = False
+    realtime_vae_backend: str = LOCAL_VAE_BACKEND
     realtime_vae_worker_url: str | None = None
+    realtime_vae_transport: str = "auto"
+    realtime_vae_shared_memory_dir: str | None = None
     realtime_vae_timeout_s: float = 10.0
     realtime_vae_max_message_mb: int = 64
 
@@ -1654,12 +1662,13 @@ class ServerArgs(DisaggServerArgsMixin):
             ),
         )
         parser.add_argument(
-            "--realtime-remote-vae-enabled",
-            action="store_true",
-            default=ServerArgs.realtime_remote_vae_enabled,
+            "--realtime-vae-backend",
+            choices=REALTIME_VAE_BACKENDS,
+            default=ServerArgs.realtime_vae_backend,
             help=(
-                "Build the realtime pipeline with a latent handoff stage. The "
-                "Gateway may still supply the remote VAE endpoint per session."
+                "Realtime VAE deployment mode. local keeps the native decoder in "
+                "the denoiser process; exact_remote and taehv_remote use the "
+                "persistent remote worker protocol."
             ),
         )
         parser.add_argument(
@@ -1667,6 +1676,24 @@ class ServerArgs(DisaggServerArgsMixin):
             type=str,
             default=ServerArgs.realtime_vae_worker_url,
             help="Persistent WebSocket endpoint for remote realtime VAE decoding.",
+        )
+        parser.add_argument(
+            "--realtime-vae-transport",
+            choices=REALTIME_VAE_TRANSPORTS,
+            default=ServerArgs.realtime_vae_transport,
+            help=(
+                "Remote VAE payload transport. auto selects shared memory for a "
+                "loopback worker and WebSocket payloads otherwise."
+            ),
+        )
+        parser.add_argument(
+            "--realtime-vae-shared-memory-dir",
+            type=str,
+            default=ServerArgs.realtime_vae_shared_memory_dir,
+            help=(
+                "Shared directory visible to both loopback realtime VAE "
+                "processes. Defaults to /dev/shm/sglang-realtime-vae."
+            ),
         )
         parser.add_argument(
             "--realtime-vae-timeout-s",
@@ -2278,6 +2305,31 @@ class ServerArgs(DisaggServerArgsMixin):
             raise ValueError("realtime_session_max_lifetime_s must be >= 0")
         if self.realtime_admission_wait_s < 0:
             raise ValueError("realtime_admission_wait_s must be >= 0")
+        if self.realtime_vae_backend not in REALTIME_VAE_BACKENDS:
+            raise ValueError(
+                "realtime_vae_backend must be one of: "
+                + ", ".join(REALTIME_VAE_BACKENDS)
+            )
+        if self.realtime_vae_transport not in REALTIME_VAE_TRANSPORTS:
+            raise ValueError(
+                "realtime_vae_transport must be one of: "
+                + ", ".join(REALTIME_VAE_TRANSPORTS)
+            )
+        if self.realtime_vae_worker_url and not uses_remote_vae(
+            self.realtime_vae_backend
+        ):
+            raise ValueError(
+                "realtime_vae_worker_url requires realtime_vae_backend="
+                "exact_remote or taehv_remote"
+            )
+        if not uses_remote_vae(self.realtime_vae_backend) and (
+            self.realtime_vae_transport != "auto"
+            or self.realtime_vae_shared_memory_dir is not None
+        ):
+            raise ValueError(
+                "realtime_vae_transport and realtime_vae_shared_memory_dir "
+                "require realtime_vae_backend=exact_remote or taehv_remote"
+            )
         if self.realtime_vae_timeout_s <= 0:
             raise ValueError("realtime_vae_timeout_s must be > 0")
         if self.realtime_vae_max_message_mb < 1:

@@ -20,10 +20,10 @@ assert.match(html, /id="happyoysterViewport"[^>]*autoplay[^>]*playsinline/);
 assert.match(html, /happy_oyster_sdk\.js/);
 assert.match(html, /happy_oyster_sdk\.js\?v=happyoyster-sdk-0\.1\.0-ticket-only/);
 assert.match(html, /happy_oyster_session\.js/);
-assert.match(html, /happy_oyster_session\.js\?v=happyoyster-session-v4/);
+assert.match(html, /happy_oyster_session\.js\?v=happyoyster-session-v5/);
 assert.match(html, /dual_model_controller\.js\?v=dual-model-v6/);
-assert.match(html, /app\.js\?v=world-studio-v18/);
-assert.match(html, /styles\.css\?v=world-studio-v6/);
+assert.match(html, /app\.js\?v=world-studio-h264-rules-v5/);
+assert.match(html, /styles\.css\?v=world-studio-h264-rules-v5/);
 assert.match(app, /happyoyster:\s*happyOysterSession/);
 assert.match(app, /enabled:\s*\(init\) => modelSelected\("happyoyster"\)/);
 assert.match(server, /\/api\/happyoyster\/prepare/);
@@ -67,6 +67,7 @@ async function testSessionLifecycle() {
   const fetchImpl = async (url, options = {}) => {
     calls.push({ url, options });
     if (url.endsWith("/config")) return jsonResponse({ enabled: true });
+    if (url.endsWith("/worlds/resolve")) return jsonResponse({ status: "missing" });
     if (url.endsWith("/share-image")) return jsonResponse({ url: "https://example.test/frame.png" });
     if (url.endsWith("/worlds")) return jsonResponse({ encryptedWorldId: "world-test" });
     if (url.includes("/build-status")) return jsonResponse({ status: "ready" });
@@ -111,6 +112,7 @@ async function testSessionLifecycle() {
     prompt: "A safe test world",
     firstFrame: new Uint8Array([1, 2, 3]),
     firstFrameMimeType: "image/png",
+    presetKey: "safe-test-world",
   });
   assert.strictEqual(calls.filter(({ url }) => url.endsWith("/worlds")).length, 1);
   assert.strictEqual(session.connected, false, "prepare should not start RTC playback");
@@ -134,6 +136,39 @@ async function testSessionLifecycle() {
   assert.ok(states.includes("live"));
 }
 
+async function testPrebuiltWorldSkipsUploadAndCreation() {
+  const calls = [];
+  const fetchImpl = async (url, options = {}) => {
+    calls.push({ url, options });
+    if (url.endsWith("/config")) return jsonResponse({ enabled: true });
+    if (url.endsWith("/worlds/resolve")) {
+      return jsonResponse({
+        status: "ready",
+        source: "prebuilt",
+        encryptedWorldId: "world-prebuilt",
+      });
+    }
+    if (url.endsWith("/prepare")) {
+      assert.deepStrictEqual(JSON.parse(options.body), { encryptedWorldId: "world-prebuilt" });
+      return jsonResponse({
+        apiBaseUrl: "https://example.test/api/v2/apps/happyoyster-1.0",
+        token: "temporary-token",
+        ticket: "one-time-ticket",
+      });
+    }
+    throw new Error(`unexpected URL ${url}`);
+  };
+  const session = new HappyOysterSession({ video: null, fetchImpl });
+  await session.prepare({
+    prompt: "Prebuilt world",
+    firstFrame: new Uint8Array([1, 2, 3]),
+    presetKey: "prebuilt-world",
+  });
+  assert.strictEqual(calls.some(({ url }) => url.endsWith("/share-image")), false);
+  assert.strictEqual(calls.some(({ url }) => url.endsWith("/worlds")), false);
+  assert.strictEqual(session.prepared.encryptedWorldId, undefined);
+}
+
 async function testDefaultFetchKeepsGlobalReceiver() {
   const originalFetch = global.fetch;
   let calls = 0;
@@ -153,7 +188,11 @@ async function testDefaultFetchKeepsGlobalReceiver() {
   }
 }
 
-Promise.all([testSessionLifecycle(), testDefaultFetchKeepsGlobalReceiver()])
+Promise.all([
+  testSessionLifecycle(),
+  testPrebuiltWorldSkipsUploadAndCreation(),
+  testDefaultFetchKeepsGlobalReceiver(),
+])
   .then(() => console.log("HappyOyster SBS contract checks passed"))
   .catch((error) => {
     console.error(error);

@@ -47,15 +47,15 @@ assert.match(
 );
 assert.match(
   appJs,
-  /configuredNumber\("sessionMaxLifetimeSeconds", 90\)/,
-  "browser safety guard should use a 90 second fallback",
+  /configuredNumber\("sessionMaxLifetimeSeconds", 60\)/,
+  "browser safety guard should use a 60 second fallback",
 );
 assert.match(
   appJs,
   /const SESSION_MAX_LIFETIME_MS = SESSION_MAX_LIFETIME_SECONDS \* 1000;/,
   "browser safety guard should use the configured session lifetime",
 );
-assert.match(indexHtml, /id="sessionCountdownText">01:30<\/b>/);
+assert.match(indexHtml, /id="sessionCountdownText">01:00<\/b>/);
 assert.match(
   appJs,
   /连接已断开，请重新连接/,
@@ -73,8 +73,23 @@ assert.match(
 );
 assert.match(
   appJs,
-  /sessionLifetimeGuard\.start\(\);\s*startSessionCountdown\(\);/,
-  "the countdown should start only after the dual-model connection succeeds",
+  /function markSessionPlayable[\s\S]*?markWorldExperienceReady\(modelKey\)/,
+  "the countdown should start only when a selected model renders a playable frame",
+);
+assert.match(
+  appJs,
+  /function markWorldExperienceReady\(modelKey\)[\s\S]*?sessionLifetimeGuard\.start\(\);\s*startSessionCountdown\(\);\s*startRecording\(\{ source: "first_visible_frame" \}\)/,
+  "the countdown and recording should start together on the first selected-model frame",
+);
+assert.match(
+  appJs,
+  /primaryHasVisibleFrame = true;[\s\S]*?markSessionPlayable\("minwm"\)/,
+  "Zing must mark the session playable only after an actual model frame is drawn",
+);
+assert.doesNotMatch(
+  appJs,
+  /const connectionReport = await dualModelController\.connect\(init\);[\s\S]{0,2200}sessionLifetimeGuard\.start\(\)/,
+  "opening model sockets must not consume playable session time",
 );
 assert.match(
   appJs,
@@ -83,7 +98,7 @@ assert.match(
 );
 assert.match(
   appJs,
-  /function closeSession[\s\S]*?sessionLifetimeGuard\.cancel\(\);\s*stopSessionCountdown\(\);/,
+  /function closeSession[\s\S]*?stopWorldExperienceTiming\(\{ recordingReason: "session_closed" \}\)/,
   "closing a session should stop and hide the countdown",
 );
 

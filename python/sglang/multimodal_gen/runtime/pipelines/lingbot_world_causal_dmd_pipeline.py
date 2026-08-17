@@ -99,9 +99,7 @@ class LingBotWorldCausalDMDPipeline(LoRAPipeline, ComposedPipelineBase):
             ),
         )
         if _use_remote_realtime_vae(server_args):
-            self.add_stage(
-                RealtimeLatentHandoffStage()
-            )
+            self.add_stage(RealtimeLatentHandoffStage())
         else:
             self.add_stage(
                 CausalVaeDecodingStage(

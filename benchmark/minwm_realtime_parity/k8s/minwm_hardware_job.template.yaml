@@ -1,0 +1,70 @@
+# Sole committed template for one-off MinWM hardware jobs.
+# Codex must read ../HARDWARE_PROFILES.md, render into k8s/generated/, and keep
+# the rendered manifest untracked.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: REPLACE_WITH_RUN_NAME
+  namespace: REPLACE_WITH_NAMESPACE
+  labels:
+    seedleap.ai/task: minwm-hardware-validation
+    seedleap.ai/hardware-profile: REPLACE_WITH_HARDWARE_PROFILE
+  annotations:
+    seedleap.ai/sglang-git-ref: REPLACE_WITH_SGLANG_GIT_REF
+    seedleap.ai/model-git-ref: REPLACE_WITH_MODEL_GIT_REF
+    seedleap.ai/result-uri: REPLACE_WITH_RESULT_URI
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: REPLACE_WITH_DEADLINE_SECONDS
+  template:
+    metadata:
+      labels:
+        seedleap.ai/task: minwm-hardware-validation
+        seedleap.ai/hardware-profile: REPLACE_WITH_HARDWARE_PROFILE
+    spec:
+      restartPolicy: Never
+      terminationGracePeriodSeconds: 120
+      nodeSelector:
+        node.kubernetes.io/instance-type: REPLACE_WITH_INSTANCE_TYPE
+      containers:
+        - name: minwm
+          image: REPLACE_WITH_IMAGE_DIGEST
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: MINWM_HARDWARE_PROFILE
+              value: REPLACE_WITH_HARDWARE_PROFILE
+            - name: PYTORCH_CUDA_ALLOC_CONF
+              value: REPLACE_WITH_ALLOCATOR_CONFIG
+          command:
+            - /bin/bash
+            - -lc
+          args:
+            - |
+              set -euo pipefail
+              gpu_total_mib="$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits | head -n1)"
+              gpu_compute_cap="$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader | head -n1)"
+              echo "MINWM_HARDWARE profile=${MINWM_HARDWARE_PROFILE} total_mib=${gpu_total_mib} compute_cap=${gpu_compute_cap}"
+
+              case "${MINWM_HARDWARE_PROFILE}" in
+                blackwell-32g)
+                  [[ "${gpu_compute_cap}" == "12.0" && "${gpu_total_mib}" -le 36864 ]]
+                  ;;
+                blackwell-high-memory)
+                  [[ "${gpu_compute_cap}" == "12.0" && "${gpu_total_mib}" -ge 65536 ]]
+                  ;;
+                *)
+                  echo "Unclassified or experimental hardware profile" >&2
+                  exit 2
+                  ;;
+              esac
+
+              REPLACE_WITH_WORKLOAD_COMMAND
+          resources:
+            requests:
+              cpu: REPLACE_WITH_CPU_REQUEST
+              memory: REPLACE_WITH_MEMORY_REQUEST
+              nvidia.com/gpu: "1"
+            limits:
+              cpu: REPLACE_WITH_CPU_LIMIT
+              memory: REPLACE_WITH_MEMORY_LIMIT
+              nvidia.com/gpu: "1"

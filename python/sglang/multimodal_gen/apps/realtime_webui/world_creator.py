@@ -14,10 +14,8 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Literal
 from urllib.parse import urlsplit
 
-from pydantic import BaseModel, ConfigDict, Field
-
 from prompt_rewriter import DEFAULT_CREDENTIALS_PATH, VERTEX_SCOPE
-
+from pydantic import BaseModel, ConfigDict, Field
 
 ROOT = Path(__file__).resolve().parent
 SECRETS_ROOT = ROOT.parent / "realtime_webui_secrets"
@@ -26,19 +24,42 @@ DEFAULT_IMAGE_CONFIG_PATH = SECRETS_ROOT / "world-image-model-config.json"
 DESCRIPTION_MODEL = "gemini-3.1-flash-lite"
 DEFAULT_VERTEX_LOCATION = "global"
 DEFAULT_IMAGE_SIZE = "1536x1024"
+DEFAULT_IMAGE_MODEL = "gpt-image-1.5"
 DEFAULT_IMAGE_QUALITY = "medium"
 FINAL_IMAGE_SIZE = (1280, 720)
 IMAGE_CONFIG_NAME = "azure/gpt-image-2"
 
 
 class WorldDescriptionOutput(BaseModel):
-    camera_mode: Literal["first_person", "third_person"]
+    camera_mode: Literal["first_person", "third_person"] = Field(
+        description=(
+            "For an uploaded image, third_person only when a clear external playable "
+            "subject is visible; otherwise first_person."
+        )
+    )
+    source_image_has_clear_external_subject: bool = Field(
+        description=(
+            "Whether the source image visibly contains a distinct external playable "
+            "person, creature, rider, or vehicle separate from the camera."
+        )
+    )
+    visible_first_person_body_parts: list[str] = Field(
+        description=(
+            "Only player body parts visibly present in a first-person source image; "
+            "empty for third-person or when no body parts are visible."
+        )
+    )
     world_description: str = Field(min_length=1)
 
     model_config = ConfigDict(
         extra="forbid",
         json_schema_extra={
-            "propertyOrdering": ["camera_mode", "world_description"]
+            "propertyOrdering": [
+                "source_image_has_clear_external_subject",
+                "camera_mode",
+                "visible_first_person_body_parts",
+                "world_description",
+            ]
         },
     )
 
@@ -51,46 +72,28 @@ class CompletedWorld(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
 
-class GameplayImageValidation(BaseModel):
-    camera_mode_matches: bool
-    avatar_orientation_valid: bool
-    camera_distance_and_scale_valid: bool
-    continuous_walkable_route: bool
-    explorable_space: bool
-    not_poster_or_portrait: bool
-    passed: bool
-    feedback: str
-
-    model_config = ConfigDict(
-        extra="forbid",
-        json_schema_extra={
-            "propertyOrdering": [
-                "camera_mode_matches",
-                "avatar_orientation_valid",
-                "camera_distance_and_scale_valid",
-                "continuous_walkable_route",
-                "explorable_space",
-                "not_poster_or_portrait",
-                "passed",
-                "feedback",
-            ]
-        },
-    )
-
-
 WORLD_DESCRIPTION_SYSTEM_PROMPT = """Create one detailed, standalone English description for the opening state of an explorable 3D game world. Return the schema only.
 
+When a source image is supplied, visually classify its gameplay perspective before writing. Do not default every uploaded image to third-person:
+- Set source_image_has_clear_external_subject=true only when the image visibly contains a clear external playable subject separate from the camera, such as a recognizable person, creature, rider, or vehicle that can serve as the controlled avatar. A landscape landmark, building, incidental crowd, distant indistinct figure, first-person hands/forearms/legs, held equipment, vehicle cockpit, handlebars, dashboard, or mount edge does not count as an external subject.
+- If the source image has a clear external playable subject, use third_person. Preserve that subject's supported identity and appearance, but convert the gameplay composition so the subject is seen from behind and centered in the frame.
+- If the source image has no clear external playable subject, use first_person. Do not invent a third-person avatar merely because the seed text mentions a person or role.
+- Image evidence determines the perspective for an uploaded image. Seed text may clarify identity and world details but must not override the source image's first-person-versus-third-person evidence.
+- When there is no source image, honor an explicitly requested perspective; otherwise retain the normal third-person default.
+
+For visible_first_person_body_parts, return a concise list of only the player body parts actually visible in a first-person source image, including side/count/appearance when supported, for example ["both gloved hands", "left forearm"] or ["knees and boots"]. Do not include equipment or vehicle parts. Return [] when no player body part is visible or when camera_mode is third_person.
+
 The camera must use exactly one standard gameplay perspective:
-- first_person: an eye-level forward gameplay view. The player character is not visible except for optional small hands, forearms, held equipment, or a vehicle edge at the bottom of frame.
-- third_person: a trailing follow camera 4-7 meters behind the playable subject. The subject is lower-center, occupies only about 18-28% of frame height, and faces directly away from the camera toward the route ahead. Never show the subject's face, front, three-quarter front, portrait pose, or close-up.
+- first_person: an eye-level forward gameplay view. The world_description must explicitly state whether player body parts are visible. If visible_first_person_body_parts is empty, include the exact fact that no player body parts are visible in the frame. Otherwise, describe every listed visible body part, its screen-edge position, appearance, and relation to held equipment without inventing hidden anatomy. No external player avatar is visible.
+- third_person: a trailing follow camera 4-7 meters behind the playable subject. The subject must be centered in the frame on the central vertical axis, occupy only about 18-28% of frame height, and face directly away from the camera toward the route ahead. Explicitly state that the subject is centered in the frame. Never show the subject's face, front, three-quarter front, portrait pose, or close-up.
 
 Use an explicitly requested first- or third-person perspective. If none is requested, choose third_person. Convert cinematic, portrait, poster, front-facing, aerial, side-profile, or close-up framing into one of these two playable perspectives.
 
 Every world must be immediately traversable on foot. Describe continuous walkable ground beginning at the bottom edge/player position and extending through the midground into the background. Include a clearly readable path, road, trail, corridor, street, bridge, or broad traversable terrain with forward space and at least one reachable area or route choice. Keep the path unobstructed and wide enough for movement. Do not place the player at a cliff edge, on an isolated pedestal, in open flight, behind an impassable wall, or facing only water/void. Compose landmarks around and beyond the route so the environment invites exploration rather than functioning as a static backdrop.
 
 Write in this exact semantic order:
-1. Viewpoint and camera: explicitly name first-person or third-person and follow the matching gameplay rules above; state camera height, direction, framing, visible foreground elements, and forward movement space.
-2. Main subject: describe identity/species, anatomy or appearance, clothing/equipment, materials and textures, pose/action, scale, screen position, silhouette, and relationship to the camera.
+1. Viewpoint and camera: explicitly name first-person or third-person and follow the matching gameplay rules above; state camera height, direction, framing, visible foreground elements, and forward movement space. For first-person, explicitly say whether body parts are visible and identify every actually visible part. For third-person, explicitly say the subject is centered in the frame.
+2. Main subject: for third-person, describe identity/species, anatomy or appearance, clothing/equipment, materials and textures, pose/action, scale, centered screen position, silhouette, and relationship to the camera. For first-person, describe only image-supported body parts and held equipment; if no body parts are visible, state that clearly and do not invent an avatar.
 3. Traversal and environment: first describe the continuous walkable route from foreground to background and its reachable destinations or branches, then describe terrain and ground, vegetation, water, weather, atmosphere and particles, architecture or landmarks, foreground/midground/background depth, lighting direction and quality, shadows, color palette, mood, and visual style.
 
 Preserve explicit user details and visibly supported image details unless they conflict with the mandatory gameplay camera or traversability rules. When both seed text and an image are supplied, combine them while converting unsuitable framing into a playable composition. Add coherent details needed to form a complete world, but do not invent named characters, brands, text, logos, or unrelated story events.
@@ -98,23 +101,13 @@ Preserve explicit user details and visibly supported image details unless they c
 Target 180-320 English words. Use concrete visible facts suitable both as an image-generation prompt and as the persistent description of the world. Do not use headings, bullets, markdown, alternatives, or explanatory commentary inside world_description."""
 
 
-FIRST_PERSON_IMAGE_RULES = """MANDATORY FIRST-PERSON GAMEPLAY CAMERA: Render an eye-level forward in-engine gameplay view from approximately 1.6 meters above the ground. Do not show a third-person avatar, face, body, portrait, or posed hero. Only optional small hands, forearms, held equipment, or a vehicle edge may appear along the bottom edge. The playable ground begins at the bottom center and a broad unobstructed walkable route continues clearly through the midground toward reachable background destinations."""
+FIRST_PERSON_IMAGE_RULES = """MANDATORY FIRST-PERSON GAMEPLAY CAMERA: Render an eye-level forward in-engine gameplay view from approximately 1.6 meters above the ground. Do not show an external third-person avatar, face, portrait, or posed hero. Player-attached hands, forearms, knees, lower legs, or feet may appear only when the world description explicitly says they are visible; preserve the stated body parts and place them naturally at the lower or peripheral frame without blocking the route. If the description says no player body parts are visible, show none. Held equipment or a vehicle edge may appear along the bottom edge. The playable ground begins at the bottom center and a broad unobstructed walkable route continues clearly through the midground toward reachable background destinations."""
 
 
-THIRD_PERSON_IMAGE_RULES = """MANDATORY THIRD-PERSON GAMEPLAY CAMERA: Render a trailing follow-camera view 4-7 meters behind the playable subject. Show the subject's back facing the camera and their head, torso, and feet oriented directly toward the route ahead. Never show their face, front, three-quarter front, side-profile hero pose, or over-the-shoulder close-up. Keep the full-body subject lower-center and relatively small, approximately 18-28% of frame height, with generous navigable space around them. The playable ground begins beneath the subject and a broad unobstructed walkable route continues clearly through the midground toward reachable background destinations."""
+THIRD_PERSON_IMAGE_RULES = """MANDATORY THIRD-PERSON GAMEPLAY CAMERA: Render a trailing follow-camera view 4-7 meters behind the playable subject. Show the subject's back facing the camera and their head, torso, and feet oriented directly toward the route ahead. Never show their face, front, three-quarter front, side-profile hero pose, or over-the-shoulder close-up. Keep the full-body subject precisely centered on the frame's vertical centerline, with the body midpoint close to the visual center, and relatively small at approximately 18-28% of frame height, leaving generous navigable space around them. The playable ground begins beneath the subject and a broad unobstructed walkable route continues clearly through the midground toward reachable background destinations."""
 
 
 SHARED_GAMEPLAY_IMAGE_RULES = """This must look like a playable 3D game screenshot, not key art, concept art, a movie poster, a character portrait, or a scenic establishing shot. Prioritize spatial readability and traversal: show continuous ground, clear depth, a forward route wide enough to walk along, and at least one visible reachable area or branch to explore. Do not begin at a cliff edge, isolated platform, open flight, impassable barrier, water-only foreground, or dead end. Do not let any character dominate the frame. Use a wide landscape composition with no text, captions, UI, borders, or logos."""
-
-
-GAMEPLAY_IMAGE_VALIDATION_PROMPT = """Strictly review this generated opening frame for an explorable 3D game world. Do not reward visual beauty. It passes only if every requirement is visibly satisfied.
-
-For first_person: it must be an eye-level forward gameplay view, with no external player avatar or visible face/body; only small hands, forearms, held equipment, or a vehicle edge may appear at the bottom.
-For third_person: the full playable subject must be lower-center, seen from behind, facing directly away toward the route, approximately 18-28% of frame height, with a clear 4-7 meter follow-camera feeling. Any visible face, front, three-quarter front, dominant close-up, portrait pose, or hero pose fails.
-
-For both modes: continuous walkable ground must begin at the player position/bottom of frame and lead through the midground toward a reachable background area. There must be a broad readable path, street, corridor, bridge, trail, or traversable terrain, plus enough free space and depth to explore. A cliff edge, isolated platform, open flight, water-only foreground, impassable barrier, scenic-only vista, poster, or portrait fails.
-
-Set passed=true only when all six boolean checks are true. feedback must be a concise English image-regeneration instruction that names every visible failure; use an empty string when passed."""
 
 
 def _parse_world_description(response: Any) -> WorldDescriptionOutput:
@@ -131,6 +124,44 @@ def _parse_world_description(response: Any) -> WorldDescriptionOutput:
         result.world_description = result.world_description.strip()
         return result
     raise RuntimeError("Gemini returned no world description")
+
+
+def _enforce_uploaded_image_perspective(
+    result: WorldDescriptionOutput,
+) -> WorldDescriptionOutput:
+    """Make the visual subject classification authoritative for uploaded frames."""
+
+    description = result.world_description.strip()
+    if result.source_image_has_clear_external_subject:
+        result.camera_mode = "third_person"
+        result.visible_first_person_body_parts = []
+        composition = (
+            "A third-person trailing gameplay view keeps the clear external "
+            "playable subject centered in the frame on the central vertical axis, "
+            "seen from behind and facing the route ahead."
+        )
+    else:
+        result.camera_mode = "first_person"
+        parts = [
+            part.strip()
+            for part in result.visible_first_person_body_parts
+            if part.strip()
+        ]
+        result.visible_first_person_body_parts = parts
+        if parts:
+            visible_parts = ", ".join(parts)
+            body_visibility = (
+                f"The player's visible body parts are {visible_parts}; no other "
+                "player anatomy is visible."
+            )
+        else:
+            body_visibility = "No player body parts are visible in the frame."
+        composition = (
+            "A first-person eye-level forward gameplay view has no external player "
+            f"avatar. {body_visibility}"
+        )
+    result.world_description = f"{composition} {description}"
+    return result
 
 
 def _resource_endpoint(value: str) -> str:
@@ -188,17 +219,12 @@ class WorldCreator:
         ).expanduser()
         self.image_config_path = Path(
             image_config_path
-            or os.environ.get(
-                "CREATE_WORLD_IMAGE_CONFIG", DEFAULT_IMAGE_CONFIG_PATH
-            )
+            or os.environ.get("CREATE_WORLD_IMAGE_CONFIG", DEFAULT_IMAGE_CONFIG_PATH)
         ).expanduser()
         self.generated_root = Path(generated_root or GENERATED_ROOT).expanduser()
         self.request_timeout_seconds = float(
             request_timeout_seconds
             or os.environ.get("CREATE_WORLD_TIMEOUT_SECONDS", "180")
-        )
-        self.image_generation_attempts = max(
-            1, int(os.environ.get("CREATE_WORLD_IMAGE_ATTEMPTS", "2"))
         )
         self._gemini_client_provider = gemini_client_provider
         self._gemini_client = None
@@ -208,7 +234,9 @@ class WorldCreator:
 
     @property
     def description_configured(self) -> bool:
-        return self._gemini_client_provider is not None or self.credentials_path.is_file()
+        return (
+            self._gemini_client_provider is not None or self.credentials_path.is_file()
+        )
 
     @property
     def image_configured(self) -> bool:
@@ -230,7 +258,9 @@ class WorldCreator:
             credentials = service_account.Credentials.from_service_account_file(
                 str(self.credentials_path), scopes=[VERTEX_SCOPE]
             )
-            project_id = os.environ.get("CREATE_WORLD_PROJECT_ID") or credentials.project_id
+            project_id = (
+                os.environ.get("CREATE_WORLD_PROJECT_ID") or credentials.project_id
+            )
             if not project_id:
                 raise RuntimeError("World description Vertex project is not configured")
             self._gemini_client = genai.Client(
@@ -255,8 +285,14 @@ class WorldCreator:
         contents: list[Any] = []
         if normalized_text and image_bytes:
             contents.append(
-                "Create a complete visual world by combining this seed text "
-                "with every visible detail in the supplied first frame:\n"
+                "First inspect the supplied first frame and decide whether it has "
+                "a clear external playable subject. Use third_person only when it "
+                "does; otherwise use first_person. For first_person, inventory only "
+                "the player body parts actually visible in the image and make the "
+                "final description explicitly state whether any are visible. For "
+                "third_person, make the external subject centered in the frame. "
+                "Then create a complete visual world by combining the image with "
+                "this seed text:\n"
                 f"<world_seed>\n{normalized_text}\n</world_seed>"
             )
         elif normalized_text:
@@ -266,7 +302,13 @@ class WorldCreator:
             )
         else:
             contents.append(
-                "Describe the complete visible world as a standalone visual state."
+                "Inspect the supplied first frame before writing. Use third_person "
+                "only if it contains a clear external playable subject; otherwise "
+                "use first_person. In first_person, explicitly describe whether the "
+                "player's body parts are visible and list only image-supported body "
+                "parts. In third_person, keep the external subject centered in the "
+                "frame. Describe the complete visible world as a standalone visual "
+                "state."
             )
         if image_bytes:
             contents.append(
@@ -291,44 +333,10 @@ class WorldCreator:
             ),
             timeout=min(self.request_timeout_seconds, 30),
         )
-        return _parse_world_description(response)
-
-    async def validate_gameplay_image(
-        self, image_bytes: bytes, camera_mode: str
-    ) -> GameplayImageValidation:
-        from google.genai import types
-
-        client = await self._get_gemini_client()
-        response = await asyncio.wait_for(
-            client.aio.models.generate_content(
-                model=self.description_model,
-                contents=[
-                    f"Required camera mode: {camera_mode}\n\n"
-                    + GAMEPLAY_IMAGE_VALIDATION_PROMPT,
-                    types.Part.from_bytes(data=image_bytes, mime_type="image/png"),
-                ],
-                config=types.GenerateContentConfig(
-                    temperature=0,
-                    max_output_tokens=512,
-                    response_mime_type="application/json",
-                    response_json_schema=GameplayImageValidation.model_json_schema(),
-                    thinking_config=types.ThinkingConfig(
-                        thinking_budget=0,
-                        include_thoughts=False,
-                    ),
-                ),
-            ),
-            timeout=min(self.request_timeout_seconds, 30),
-        )
-        parsed = getattr(response, "parsed", None)
-        if isinstance(parsed, BaseModel):
-            parsed = parsed.model_dump()
-        if isinstance(parsed, dict):
-            return GameplayImageValidation.model_validate(parsed)
-        text = getattr(response, "text", None)
-        if isinstance(text, str) and text.strip():
-            return GameplayImageValidation.model_validate_json(text)
-        raise RuntimeError("Gemini returned no gameplay image validation")
+        result = _parse_world_description(response)
+        if image_bytes:
+            result = _enforce_uploaded_image_perspective(result)
+        return result
 
     def _load_image_config(self) -> dict[str, Any]:
         if self._image_config is not None:
@@ -351,9 +359,7 @@ class WorldCreator:
             return self._image_client, config
         from openai import AzureOpenAI
 
-        api_key = os.environ.get("CREATE_WORLD_IMAGE_API_KEY") or config.get(
-            "api_key"
-        )
+        api_key = os.environ.get("CREATE_WORLD_IMAGE_API_KEY") or config.get("api_key")
         base_url = os.environ.get("CREATE_WORLD_IMAGE_ENDPOINT") or (
             config.get("client_args") or {}
         ).get("base_url")
@@ -374,7 +380,6 @@ class WorldCreator:
         self,
         world_description: str,
         camera_mode: str,
-        retry_feedback: str = "",
     ) -> bytes:
         client, config = self._get_image_client()
         camera_rules = (
@@ -391,18 +396,11 @@ class WorldCreator:
             "front-facing, flying, or poster composition. Keep the route and player "
             "inside the central safe area so a 16:9 crop preserves both."
         )
-        if retry_feedback:
-            image_prompt += (
-                "\n\nTHE PREVIOUS IMAGE FAILED THE GAMEPLAY QUALITY GATE. Fix every "
-                f"issue in this review: {retry_feedback}"
-            )
         response = client.images.generate(
-            model=str(config.get("model_name") or "gpt-image-2"),
+            model=os.environ.get("CREATE_WORLD_IMAGE_MODEL", DEFAULT_IMAGE_MODEL),
             prompt=image_prompt,
             size=os.environ.get("CREATE_WORLD_IMAGE_SIZE", DEFAULT_IMAGE_SIZE),
-            quality=os.environ.get(
-                "CREATE_WORLD_IMAGE_QUALITY", DEFAULT_IMAGE_QUALITY
-            ),
+            quality=DEFAULT_IMAGE_QUALITY,
             n=1,
         )
         items = getattr(response, "data", None) or []
@@ -417,7 +415,9 @@ class WorldCreator:
         try:
             return _normalize_generated_image(base64.b64decode(encoded, validate=True))
         except ValueError as exc:
-            raise RuntimeError("World image response contained invalid image data") from exc
+            raise RuntimeError(
+                "World image response contained invalid image data"
+            ) from exc
 
     async def complete(
         self,
@@ -432,29 +432,15 @@ class WorldCreator:
                 image_bytes=None,
                 image_generated=False,
             )
-        retry_feedback = ""
-        for _attempt in range(self.image_generation_attempts):
-            generated = await asyncio.to_thread(
-                self._generate_image_sync,
-                description.world_description,
-                description.camera_mode,
-                retry_feedback,
-            )
-            validation = await self.validate_gameplay_image(
-                generated, description.camera_mode
-            )
-            if validation.passed:
-                return CompletedWorld(
-                    world_description=description.world_description,
-                    image_bytes=generated,
-                    image_generated=True,
-                )
-            retry_feedback = validation.feedback or (
-                "Use the required gameplay camera, show the subject correctly, "
-                "and add a continuous walkable route with explorable depth."
-            )
-        raise RuntimeError(
-            "Generated first frame failed the gameplay composition quality gate"
+        generated = await asyncio.to_thread(
+            self._generate_image_sync,
+            description.world_description,
+            description.camera_mode,
+        )
+        return CompletedWorld(
+            world_description=description.world_description,
+            image_bytes=generated,
+            image_generated=True,
         )
 
     def save_generated_image(self, image_bytes: bytes) -> str:

@@ -190,9 +190,10 @@ def test_dynamodb_capacity_snapshot_uses_shared_ttl_demand_records():
         await store.waiting_finished("waiter-a")
 
         assert len(client.puts) == 2
-        assert {
-            item["Item"]["allocation_key"]["S"] for item in client.puts
-        } == {"CAPACITY#denoiser", "CAPACITY#vae"}
+        assert {item["Item"]["allocation_key"]["S"] for item in client.puts} == {
+            "CAPACITY#denoiser",
+            "CAPACITY#vae",
+        }
         assert len(client.queries) == 2
         assert snapshot["roles"]["denoiser"]["waiting_sessions"] == 1
         assert snapshot["roles"]["denoiser"]["free_slots"] == 1
@@ -270,12 +271,8 @@ def test_coordinator_prefers_same_az_and_filters_incompatible_workers():
         await coordinator.heartbeat(
             _heartbeat("vae-wrong", "vae", az="us-east-2a", vae_fingerprint="wrong")
         )
-        await coordinator.heartbeat(
-            _heartbeat("vae-cross-az", "vae", az="us-east-2b")
-        )
-        await coordinator.heartbeat(
-            _heartbeat("vae-same-az", "vae", az="us-east-2a")
-        )
+        await coordinator.heartbeat(_heartbeat("vae-cross-az", "vae", az="us-east-2b"))
+        await coordinator.heartbeat(_heartbeat("vae-same-az", "vae", az="us-east-2a"))
 
         assignment = await coordinator.admit(
             user_id="user-a",
@@ -373,22 +370,16 @@ def test_coordinator_waiting_admission_wakes_when_assignment_is_released():
         )
         await asyncio.sleep(0.01)
         assert not waiting.done()
-        assert (
-            (await coordinator.capacity_snapshot())["roles"]["denoiser"][
-                "waiting_sessions"
-            ]
-            == 1
-        )
+        assert (await coordinator.capacity_snapshot())["roles"]["denoiser"][
+            "waiting_sessions"
+        ] == 1
 
         await coordinator.release(first)
         second = await asyncio.wait_for(waiting, timeout=0.5)
         assert second.session_id == "session-b"
-        assert (
-            (await coordinator.capacity_snapshot())["roles"]["denoiser"][
-                "waiting_sessions"
-            ]
-            == 0
-        )
+        assert (await coordinator.capacity_snapshot())["roles"]["denoiser"][
+            "waiting_sessions"
+        ] == 0
 
     asyncio.run(run())
 
@@ -488,12 +479,8 @@ def test_coordinator_partial_worker_reserve_rolls_back_and_retries_another_pair(
             reservation_client=reservations,
         )
         await coordinator.heartbeat(_heartbeat("denoiser-a", "denoiser"))
-        await coordinator.heartbeat(
-            _heartbeat("vae-bad", "vae", service_time_ms=0)
-        )
-        await coordinator.heartbeat(
-            _heartbeat("vae-good", "vae", service_time_ms=1)
-        )
+        await coordinator.heartbeat(_heartbeat("vae-bad", "vae", service_time_ms=0))
+        await coordinator.heartbeat(_heartbeat("vae-good", "vae", service_time_ms=1))
 
         assignment = await coordinator.admit(
             user_id="user-a",
@@ -740,9 +727,11 @@ def test_dynamodb_coordinator_admission_is_one_four_item_transaction():
         transaction = client.transactions[0]
         assert len(transaction) == 4
         keys = {
-            item["Put"]["Item"]["pk"]["S"]
-            if "Put" in item
-            else item["Update"]["Key"]["pk"]["S"]
+            (
+                item["Put"]["Item"]["pk"]["S"]
+                if "Put" in item
+                else item["Update"]["Key"]["pk"]["S"]
+            )
             for item in transaction
         }
         assert keys == {
@@ -869,9 +858,7 @@ def test_dynamodb_candidate_pairing_prefers_worker_with_more_free_slots():
             for index in range(free_slots)
         ]
 
-    denoisers = slots("denoiser-mostly-busy", 1) + slots(
-        "denoiser-idle", 4
-    )
+    denoisers = slots("denoiser-mostly-busy", 1) + slots("denoiser-idle", 4)
     vaes = [
         WorkerSlot(
             worker_id="vae-a",
@@ -942,10 +929,7 @@ def test_dynamodb_candidate_pairing_exhausts_worker_layer_before_next_slot():
     assert [
         (pair[0].worker_id, pair[0].slot_index, pair[1].slot_index)
         for pair in competing_pairs
-    ] == [
-        (pair[0].worker_id, pair[0].slot_index, pair[1].slot_index)
-        for pair in pairs
-    ]
+    ] == [(pair[0].worker_id, pair[0].slot_index, pair[1].slot_index) for pair in pairs]
 
 
 def test_dynamodb_admission_requeries_after_a_stale_candidate_snapshot():
@@ -1239,18 +1223,24 @@ def test_dynamodb_renew_condition_checks_current_worker_epochs_and_expiry():
 
     store._renew_sync(assignment)
 
-    checks = [item["ConditionCheck"] for item in client.transaction if "ConditionCheck" in item]
+    checks = [
+        item["ConditionCheck"]
+        for item in client.transaction
+        if "ConditionCheck" in item
+    ]
     assert len(checks) == 2
     assert {check["Key"]["pk"]["S"] for check in checks} == {
         "WORKER#denoiser-a",
         "WORKER#vae-a",
     }
     epochs = {
-        check["ExpressionAttributeValues"][":worker_epoch"]["S"]
-        for check in checks
+        check["ExpressionAttributeValues"][":worker_epoch"]["S"] for check in checks
     }
     assert epochs == {"denoiser-epoch", "vae-epoch"}
-    assert all("heartbeat_expires_at > :now" in check["ConditionExpression"] for check in checks)
+    assert all(
+        "heartbeat_expires_at > :now" in check["ConditionExpression"]
+        for check in checks
+    )
 
 
 def test_dynamodb_renew_retries_a_transient_transaction_conflict():

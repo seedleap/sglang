@@ -200,7 +200,7 @@ function backlogDropsContiguousOldFrames() {
   assert.equal(snapshot.lastDropReason, "backlog");
 }
 
-function actionCutoverUsesBacklogPolicyInsteadOfEventDrop() {
+function actionCutoverKeepsOnlySmallOldFrameGrace() {
   const controller = new RealtimePlaybackController({ targetFps: 25 });
   enqueueChunk(controller, { chunk: 1, frameCount: 24, durationMs: 960, now: 1000 });
   controller.noteInputEvent(5, 1050);
@@ -212,9 +212,9 @@ function actionCutoverUsesBacklogPolicyInsteadOfEventDrop() {
     now: 1150,
   });
   assert.ok(result.cutover);
-  assert.equal(result.droppedFrames.length, 24);
-  assert.equal(controller.snapshot().lastDropReason, "backlog");
-  assert.equal(controller.queue[0].chunk, 2);
+  assert.equal(result.droppedFrames.length, 21);
+  assert.equal(controller.snapshot().lastDropReason, "event cutover");
+  assert.equal(controller.queue[0].chunk, 1);
   assert.equal(controller.queue[0].index, 0);
 }
 
@@ -353,7 +353,7 @@ function smoothTimelineModePreservesBacklogAndCatchesUp() {
   assert.ok(catchUp.renderFps > 27.5 && catchUp.renderFps <= 62.5, `render fps ${catchUp.renderFps}`);
 }
 
-function smoothTimelineModePreservesFramesAcrossEventCutover() {
+function smoothTimelineModeCutsOldFramesAcrossEventCutover() {
   const controller = new RealtimePlaybackController({
     mode: "smooth_timeline",
     targetFps: 25,
@@ -373,11 +373,11 @@ function smoothTimelineModePreservesFramesAcrossEventCutover() {
     now: 1150,
   });
   assert.ok(result.cutover);
-  assert.equal(result.droppedFrames.length, 0);
-  assert.equal(controller.snapshot().droppedFrames, 0);
-  assert.equal(controller.queue.length, 36);
+  assert.equal(result.droppedFrames.length, 21);
+  assert.equal(controller.snapshot().droppedFrames, 21);
+  assert.equal(controller.queue.length, 15);
   assert.equal(controller.queue[0].eventId, 0);
-  assert.equal(controller.queue[24].eventId, 5);
+  assert.equal(controller.queue[3].eventId, 5);
 }
 
 function smoothTimelineModeCutsOldFramesForPromptUpdate() {
@@ -809,14 +809,14 @@ smallBufferContinuesWhenMoreFramesArrive();
 smallBufferPacesSlowChunksAtSourceFps();
 burstySubTargetSourceKeepsWarmBuffer();
 backlogDropsContiguousOldFrames();
-actionCutoverUsesBacklogPolicyInsteadOfEventDrop();
+actionCutoverKeepsOnlySmallOldFrameGrace();
 settleEventCutoverKeepsOnlySmallOldFrameGrace();
 staleFramesAfterWallClockPauseResumeAtFreshestChunk();
 timelineModeNeverDropsBacklog();
 timelineModeDrainsBacklogOnEveryRenderTick();
 timelineModePreservesFramesAcrossEventCutover();
 smoothTimelineModePreservesBacklogAndCatchesUp();
-smoothTimelineModePreservesFramesAcrossEventCutover();
+smoothTimelineModeCutsOldFramesAcrossEventCutover();
 smoothTimelineModeCutsOldFramesForPromptUpdate();
 smoothTimelineModePacesInsteadOfDrainingEveryRenderTick();
 smoothTimelineModeSpeedsUpToCatchBacklogWithoutDropping();

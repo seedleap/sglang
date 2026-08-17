@@ -27,14 +27,12 @@ from sglang.multimodal_gen.runtime.pipelines_core.stages.realtime import (
     RealtimeLatentHandoffStage,
     RealtimeTextEncodingStage,
 )
+from sglang.multimodal_gen.runtime.realtime_vae_config import uses_remote_vae
 from sglang.multimodal_gen.runtime.server_args import ServerArgs
 
 
 def _use_remote_realtime_vae(server_args: ServerArgs) -> bool:
-    if bool(getattr(server_args, "realtime_remote_vae_enabled", False)):
-        return True
-    value = getattr(server_args, "realtime_vae_worker_url", None)
-    return isinstance(value, str) and bool(value.strip())
+    return uses_remote_vae(getattr(server_args, "realtime_vae_backend", "local"))
 
 
 class MinWMCausalDMDPipeline(LoRAPipeline, ComposedPipelineBase):

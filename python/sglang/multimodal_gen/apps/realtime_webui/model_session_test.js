@@ -89,6 +89,7 @@ async function main() {
   const canvas = fakeCanvas();
   const scheduled = [];
   const states = [];
+  const sessionErrors = [];
   const decodedHeaders = [];
   const session = new RealtimeModelSession({
     key: "lingbot2",
@@ -110,14 +111,23 @@ async function main() {
     now: () => 125,
     onState: (state) => states.push(state),
     onFrame: (frame) => frames.push(frame),
+    onError: (error) => sessionErrors.push(error),
   });
 
-  const connecting = session.connect({ type: "init", trace_id: "trace:lingbot2" }, "/lingbot2");
+  const connecting = session.connect({
+    type: "init",
+    trace_id: "trace:lingbot2",
+    playback_ack_enabled: true,
+  }, "/lingbot2");
   const socket = FakeSocket.instances[0];
   socket.open();
   await connecting;
   assert.equal(socket.sent[0].type, "init");
+  assert.equal(socket.sent[0].playback_ack_enabled, true);
   assert.ok(states.includes("live"));
+  socket.message({ type: "error", content: "invalid event" });
+  assert.equal(sessionErrors.length, 0, "invalid control events must remain non-fatal");
+  assert.equal(socket.readyState, FakeSocket.OPEN);
 
   session.sendEvent({ type: "event", kind: "prompt", payload: "new", event_id: 7 });
   assert.equal(socket.sent[1].event_id, 7);
@@ -173,6 +183,11 @@ async function main() {
   assert.equal(canvas.draws.length, 1);
   assert.equal(frames[0].chunk, 3);
   assert.equal(session.snapshot().renderFps, 1);
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  const playbackAck = socket.sent.find((message) => message.kind === "playback_ack");
+  assert.equal(playbackAck.payload.last_received_chunk, 3);
+  assert.equal(playbackAck.payload.last_rendered_chunk, 3);
+  assert.equal(playbackAck.payload.playable, true);
 
   socket.message({
     type: "frame_batch_header",
@@ -208,6 +223,11 @@ async function main() {
   assert.equal(session.snapshot().renderFps, 0, "a new request must not inherit the prior render rate");
   replacementSocket.open();
   await reconnecting;
+  assert.equal(
+    replacementSocket.sent[0].playback_ack_enabled,
+    false,
+    "playback ACK must remain opt-in for workers without protocol support",
+  );
 
   const otherCanvas = fakeCanvas();
   const other = new RealtimeModelSession({

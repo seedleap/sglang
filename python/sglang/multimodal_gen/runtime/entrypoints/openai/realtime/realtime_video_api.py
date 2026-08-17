@@ -5,6 +5,7 @@ import hashlib
 import shutil
 import time
 from dataclasses import dataclass
+from functools import partial
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
@@ -26,12 +27,6 @@ from sglang.multimodal_gen.runtime.entrypoints.openai.realtime.realtime_output_a
 from sglang.multimodal_gen.runtime.entrypoints.openai.realtime.registry import (
     get_realtime_model_adapter,
 )
-from sglang.multimodal_gen.runtime.utils.realtime_trace import (
-    calculate_overlap_ms,
-    calculate_overlap_ratio,
-    log_realtime_trace,
-    normalize_trace_id,
-)
 from sglang.multimodal_gen.runtime.entrypoints.openai.realtime.timer import (
     RealtimeStageTimer,
 )
@@ -43,11 +38,6 @@ from sglang.multimodal_gen.runtime.entrypoints.utils import (
     ReplaceQueuedRealtimeReq,
 )
 from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import OutputBatch
-from sglang.multimodal_gen.runtime.realtime.async_vae_client import (
-    RealtimeVAEClient,
-    RemoteDecodeHandle,
-    RemoteFrameBatch,
-)
 from sglang.multimodal_gen.runtime.realtime.admission import (
     AdmissionRejected,
     DynamoDBSessionLeaseStore,
@@ -55,13 +45,28 @@ from sglang.multimodal_gen.runtime.realtime.admission import (
     RealtimeAdmissionController,
     SessionLease,
 )
+from sglang.multimodal_gen.runtime.realtime.async_vae_client import (
+    RealtimeVAEClient,
+    RemoteDecodeHandle,
+    RemoteFrameBatch,
+)
 from sglang.multimodal_gen.runtime.realtime.worker_reservation import (
     WorkerReservationRegistry,
     WorkerReservationRejected,
 )
+from sglang.multimodal_gen.runtime.realtime_vae_config import (
+    uses_remote_vae,
+    worker_decoder_backend,
+)
 from sglang.multimodal_gen.runtime.scheduler_client import async_scheduler_client
 from sglang.multimodal_gen.runtime.server_args import get_global_server_args
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
+from sglang.multimodal_gen.runtime.utils.realtime_trace import (
+    calculate_overlap_ms,
+    calculate_overlap_ratio,
+    log_realtime_trace,
+    normalize_trace_id,
+)
 
 if TYPE_CHECKING:
     from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import Req
@@ -181,9 +186,7 @@ def _log_previous_chunk_overlap(
         overlap_with_next_denoise_ms=round(
             calculate_overlap_ms(vae_interval, denoise_interval), 3
         ),
-        overlap_ratio=round(
-            calculate_overlap_ratio(vae_interval, denoise_interval), 4
-        ),
+        overlap_ratio=round(calculate_overlap_ratio(vae_interval, denoise_interval), 4),
     )
 
 
@@ -356,7 +359,8 @@ async def _session_watchdog(
             enforce_max_lifetime
             and not internal_startup_warmup
             and max_lifetime_s > 0
-            and now - session.created_at >= max_lifetime_s
+            and session.playable_at is not None
+            and now - session.playable_at >= max_lifetime_s
         ):
             return "maximum session lifetime reached"
         if (
@@ -442,9 +446,11 @@ def _emit_realtime_result_stage_traces(
     if not getattr(session, "trace_id", None):
         return
 
-    for stage_name, duration_ms, metrics_request_id in _iter_realtime_result_stage_metrics(
-        result
-    ):
+    for (
+        stage_name,
+        duration_ms,
+        metrics_request_id,
+    ) in _iter_realtime_result_stage_metrics(result):
         request_id = getattr(chunk, "request_id", None) or metrics_request_id
         log_realtime_trace(
             logger,
@@ -470,6 +476,68 @@ def _emit_realtime_result_stage_traces(
                 duration_ms=round(duration_ms, 3),
                 source="scheduler_result_metrics",
             )
+
+
+def _collect_realtime_result_stage_metrics(result: Any) -> dict[str, float]:
+    collected: dict[str, float] = {}
+    for stage_name, duration_ms, _ in _iter_realtime_result_stage_metrics(result):
+        event_name = _realtime_stage_event_name(stage_name)
+        if event_name == "server.model_denoise_complete":
+            collected["model_denoise_ms"] = round(duration_ms, 3)
+        elif event_name == "server.vae_encode_complete":
+            collected["model_vae_encode_ms"] = round(duration_ms, 3)
+        elif event_name == "server.vae_decode_complete":
+            collected["model_vae_decode_ms"] = round(duration_ms, 3)
+        elif event_name == "server.post_decode_complete":
+            collected["model_post_decode_ms"] = round(duration_ms, 3)
+    return collected
+
+
+async def _send_chunk_telemetry(
+    ws: WebSocket,
+    session: GenerateSession,
+    chunk: RealtimeChunkContext,
+    batch: "Req",
+    *,
+    request_prepare_ms: float,
+    scheduler_forward_ms: float,
+    chunk_total_ms: float,
+    send_stats: RealtimeFrameSendStats,
+    stage_metrics: dict[str, float] | None = None,
+    remote_result: Any | None = None,
+) -> None:
+    event_id = getattr(batch, "realtime_event_id", None)
+    telemetry: dict[str, Any] = {
+        "type": "chunk_telemetry",
+        "trace_id": session.trace_id,
+        "request_id": chunk.request_id,
+        "chunk_index": chunk.index,
+        "event_id": event_id,
+        "request_prepare_ms": round(request_prepare_ms, 3),
+        "scheduler_forward_ms": round(scheduler_forward_ms, 3),
+        "chunk_total_ms": round(chunk_total_ms, 3),
+        "output_pace_ms": round(send_stats["pace_wait_ms"], 3),
+        "transport_encode_ms": round(send_stats["raw_payload_build_ms"], 3),
+        "transport_write_ms": round(send_stats["ws_write_ms"], 3),
+        "raw_bytes": int(send_stats["raw_bytes"]),
+        "transport_bytes": int(send_stats["ws_payload_bytes"]),
+        "num_frames": int(send_stats["num_frames"]),
+        "content_type": send_stats["content_type"],
+        "server_completed_epoch_ms": time.time() * 1000,
+        **(session.consume_input_timing(event_id) or {}),
+        **(stage_metrics or {}),
+    }
+    if remote_result is not None:
+        telemetry.update(
+            vae_queue_wait_ms=round(remote_result.queue_wait_ms, 3),
+            vae_decode_ms=round(remote_result.decode_ms, 3),
+            vae_encode_ms=round(remote_result.encode_ms, 3),
+            vae_transfer_ms=round(remote_result.transfer_ms, 3),
+            latent_serialize_ms=round(remote_result.serialize_ms, 3),
+            latent_send_ms=round(remote_result.latent_send_ms, 3),
+            vae_credit_wait_ms=round(remote_result.credit_wait_ms, 3),
+        )
+    await ws.send_bytes(msgspec.msgpack.encode(telemetry))
 
 
 def _log_realtime_chunk_timing(
@@ -519,7 +587,9 @@ def _log_realtime_chunk_timing(
         request_id=chunk.request_id,
         chunk_index=batch.block_idx,
         event_id=getattr(batch, "realtime_event_id", None),
-        condition_kinds=sorted(batch.condition_inputs) if batch.condition_inputs else [],
+        condition_kinds=(
+            sorted(batch.condition_inputs) if batch.condition_inputs else []
+        ),
         request_prepare_ms=round(request_prepare_ms, 3),
         scheduler_forward_ms=round(scheduler_forward_ms, 3),
         output_pace_ms=round(send_stats["pace_wait_ms"], 3),
@@ -540,8 +610,13 @@ def _log_realtime_chunk_timing(
 
 async def _generate_loop(ws: WebSocket, session: GenerateSession):
     server_args = get_global_server_args()
-    if session.vae_worker_url or getattr(server_args, "realtime_vae_worker_url", None):
+    deployment_backend = getattr(server_args, "realtime_vae_backend", "local")
+    if uses_remote_vae(deployment_backend):
         return await _generate_loop_async_vae(ws, session, server_args)
+    if session.vae_worker_url:
+        raise ValueError(
+            "Gateway supplied a remote VAE worker while realtime_vae_backend=local"
+        )
     return await _generate_loop_local(ws, session)
 
 
@@ -648,6 +723,7 @@ async def _complete_remote_chunk(
     scheduler_forward_ms: float,
     chunk_started: float,
     vae_started: float,
+    stage_metrics: dict[str, float],
 ) -> None:
     remote_result = await handle.wait()
     vae_completed = remote_result.completed_at
@@ -681,7 +757,7 @@ async def _complete_remote_chunk(
         "server.vae_decode_complete",
         **common,
         duration_ms=round(remote_result.decode_ms, 3),
-        source="remote_taehv",
+        source=f"remote_{getattr(session, 'vae_decoder_backend', None) or 'vae'}",
     )
     log_realtime_trace(
         logger,
@@ -740,6 +816,18 @@ async def _complete_remote_chunk(
         chunk_total_ms,
         send_stats,
     )
+    await _send_chunk_telemetry(
+        ws,
+        session,
+        chunk,
+        batch,
+        request_prepare_ms=request_prepare_ms,
+        scheduler_forward_ms=scheduler_forward_ms,
+        chunk_total_ms=chunk_total_ms,
+        send_stats=send_stats,
+        stage_metrics=stage_metrics,
+        remote_result=remote_result,
+    )
     session.generate_chunk_completed(chunk)
 
 
@@ -750,8 +838,7 @@ async def _generate_loop_async_vae(ws, session: GenerateSession, server_args):
 
     session.max_inflight_chunks = 2
     vae_worker_url = (
-        getattr(session, "vae_worker_url", None)
-        or server_args.realtime_vae_worker_url
+        getattr(session, "vae_worker_url", None) or server_args.realtime_vae_worker_url
     )
     if not vae_worker_url:
         raise ValueError("realtime VAE worker URL is required")
@@ -759,16 +846,22 @@ async def _generate_loop_async_vae(ws, session: GenerateSession, server_args):
         vae_worker_url,
         session_id=session.id,
         generation_id=session.generation_id,
+        transport=server_args.realtime_vae_transport,
+        shared_memory_dir=server_args.realtime_vae_shared_memory_dir,
         timeout_s=server_args.realtime_vae_timeout_s,
         max_message_bytes=server_args.realtime_vae_max_message_mb * 1024 * 1024,
     )
     session.vae_client = client
+    session.vae_decoder_backend = worker_decoder_backend(
+        server_args.realtime_vae_backend
+    )
     output_format = session.request.realtime_output_format or "webp"
     quality = int(session.request.output_compression or 90)
     coordinator = _OrderedDecodeCoordinator()
 
     try:
         await client.open(
+            decoder_backend=session.vae_decoder_backend,
             output_format=output_format,
             quality=quality,
             preview_max_width=session.request.realtime_preview_max_width,
@@ -822,6 +915,7 @@ async def _generate_loop_async_vae(ws, session: GenerateSession, server_args):
             )
             scheduler_forward_ms = timer.mark_ms()
             _emit_realtime_result_stage_traces(session, chunk, batch, result)
+            stage_metrics = _collect_realtime_result_stage_metrics(result)
             if result.realtime_latents is None or result.realtime_handoff is None:
                 raise RuntimeError("remote VAE path received no latent handoff")
 
@@ -853,11 +947,8 @@ async def _generate_loop_async_vae(ws, session: GenerateSession, server_args):
             )
             result.realtime_latents = None
             await coordinator.submit(
-                lambda chunk=chunk, batch=batch, handle=handle, send_stats=send_stats,
-                request_prepare_ms=request_prepare_ms,
-                scheduler_forward_ms=scheduler_forward_ms,
-                chunk_started=chunk_started,
-                vae_started=vae_started: _complete_remote_chunk(
+                partial(
+                    _complete_remote_chunk,
                     ws,
                     session,
                     chunk,
@@ -868,6 +959,7 @@ async def _generate_loop_async_vae(ws, session: GenerateSession, server_args):
                     scheduler_forward_ms,
                     chunk_started,
                     vae_started,
+                    stage_metrics,
                 )
             )
         await coordinator.finish()
@@ -888,6 +980,7 @@ async def _generate_loop_async_vae(ws, session: GenerateSession, server_args):
     finally:
         await client.close()
         session.vae_client = None
+        session.vae_decoder_backend = None
 
 
 async def _generate_loop_local(ws: WebSocket, session: GenerateSession):
@@ -958,7 +1051,9 @@ async def _generate_loop_local(ws: WebSocket, session: GenerateSession):
                 chunk_index=batch.block_idx,
                 request_prepare_ms=round(request_prepare_ms, 3),
                 event_id=getattr(batch, "realtime_event_id", None),
-                condition_kinds=sorted(batch.condition_inputs) if batch.condition_inputs else [],
+                condition_kinds=(
+                    sorted(batch.condition_inputs) if batch.condition_inputs else []
+                ),
             )
 
             _, result = await process_generation_batch(async_scheduler_client, batch)
@@ -973,6 +1068,7 @@ async def _generate_loop_local(ws: WebSocket, session: GenerateSession):
                 scheduler_forward_ms=round(scheduler_forward_ms, 3),
             )
             _emit_realtime_result_stage_traces(session, chunk, batch, result)
+            stage_metrics = _collect_realtime_result_stage_metrics(result)
 
             # finish
             adapter.on_chunk_complete(session, result)
@@ -988,6 +1084,7 @@ async def _generate_loop_local(ws: WebSocket, session: GenerateSession):
                     request_prepare_ms,
                     scheduler_forward_ms,
                     chunk_started,
+                    stage_metrics,
                 )
             )
             pending_event_version = scheduled_event_version
@@ -1039,6 +1136,7 @@ async def _send_output_and_log(
     request_prepare_ms: float,
     scheduler_forward_ms: float,
     chunk_started: float,
+    stage_metrics: dict[str, float],
 ) -> RealtimeFrameSendStats:
     if session.adapter is None:
         raise ValueError("realtime adapter is not initialized")
@@ -1060,6 +1158,11 @@ async def _send_output_and_log(
             result,
             batch,
         )
+        # ACK-aware clients start their lifetime only after a frame is
+        # actually rendered. Legacy clients keep the historical first-send
+        # fallback so this protocol extension is backwards compatible.
+        if not session.playback_ack_enabled:
+            session.mark_playable()
         send_stats["pace_wait_ms"] = pace_wait_ms
         chunk_total_ms = (time.perf_counter() - chunk_started) * 1000
         _log_realtime_chunk_timing(
@@ -1071,6 +1174,17 @@ async def _send_output_and_log(
             chunk_total_ms,
             send_stats,
         )
+        await _send_chunk_telemetry(
+            ws,
+            session,
+            chunk,
+            batch,
+            request_prepare_ms=request_prepare_ms,
+            scheduler_forward_ms=scheduler_forward_ms,
+            chunk_total_ms=chunk_total_ms,
+            send_stats=send_stats,
+            stage_metrics=stage_metrics,
+        )
     return send_stats
 
 
@@ -1080,9 +1194,7 @@ async def _wait_for_realtime_interactive_event_window(
     pending_event_version: int | None = None,
 ) -> asyncio.Task | None:
     request = getattr(session, "request", None)
-    grace_ms = int(
-        getattr(request, "realtime_interactive_event_grace_ms", 0) or 0
-    )
+    grace_ms = int(getattr(request, "realtime_interactive_event_grace_ms", 0) or 0)
     if pending_send_task is None or grace_ms <= 0:
         return pending_send_task
 
@@ -1248,8 +1360,23 @@ async def _listen_events(ws: WebSocket, session: GenerateSession):
             if realtime_event.kind == "heartbeat":
                 session.mark_client_activity()
                 continue
+            if realtime_event.kind == "playback_ack":
+                if session.playback_ack_enabled:
+                    session.apply_playback_ack(realtime_event.payload)
+                session.mark_client_activity()
+                log_realtime_trace(
+                    logger,
+                    session,
+                    "server.playback_ack_received",
+                    last_received_chunk=session.last_received_chunk,
+                    last_rendered_chunk=session.last_rendered_chunk,
+                    last_rendered_event_id=session.last_rendered_event_id,
+                    playable=session.playable_at is not None,
+                )
+                continue
             if session.adapter is None:
                 raise ValueError("realtime adapter is not initialized")
+            server_received_epoch_ms = time.time() * 1000
             log_realtime_trace(
                 logger,
                 session,
@@ -1260,9 +1387,29 @@ async def _listen_events(ws: WebSocket, session: GenerateSession):
                 client_sent_epoch_ms=realtime_event.client_sent_epoch_ms,
                 payload_bytes=_safe_len(message),
             )
+            if realtime_event.kind in {"camera_actions", "prompt", "scene_cut"}:
+                session.record_input_event(
+                    realtime_event.event_id,
+                    realtime_event.client_sent_epoch_ms,
+                    server_received_epoch_ms,
+                )
             event_log = session.adapter.ingest_event(session, realtime_event)
             session.mark_event_version(realtime_event.kind)
             session.mark_client_activity()
+            if realtime_event.kind in {"camera_actions", "prompt", "scene_cut"}:
+                await ws.send_bytes(
+                    msgspec.msgpack.encode(
+                        {
+                            "type": "control_ack",
+                            "stage": "worker",
+                            "kind": realtime_event.kind,
+                            "event_id": realtime_event.event_id,
+                            "client_sent_epoch_ms": realtime_event.client_sent_epoch_ms,
+                            "server_received_epoch_ms": server_received_epoch_ms,
+                            "server_sent_epoch_ms": time.time() * 1000,
+                        }
+                    )
+                )
             _schedule_queued_control_refresh(
                 session, realtime_event.kind, realtime_event.event_id
             )

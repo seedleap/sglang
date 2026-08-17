@@ -27,6 +27,7 @@
       this.endSession();
       this.persistentPrompt = prompt;
       this.sessionGeneration += 1;
+      return prompt;
     }
 
     endSession() {
@@ -61,6 +62,8 @@
           this.sendPrompt(previousPrompt, {
             changeType: PERSISTENT,
             phase: "restore",
+            trigger: "rule",
+            rule: "rewrite_failure_restore",
           });
         }
         throw error;
@@ -72,6 +75,39 @@
         return { ignored: true };
       }
 
+      return this._applyPreparedResult(result, {
+        previousPrompt,
+        sessionGeneration,
+        instruction: normalizedInstruction,
+        metadata: {
+          phase: "rewrite",
+          trigger: "user",
+        },
+      });
+    }
+
+    submitPrepared(result, instruction = "", metadata = {}) {
+      if (!this.persistentPrompt) throw new Error("enter a world before sending a direction");
+      this.requestGeneration += 1;
+      this._cancelRestore();
+      return this._applyPreparedResult(result, {
+        previousPrompt: this.persistentPrompt,
+        sessionGeneration: this.sessionGeneration,
+        instruction: String(instruction || "").trim(),
+        metadata: {
+          phase: "prepared",
+          trigger: "user",
+          ...metadata,
+        },
+      });
+    }
+
+    _applyPreparedResult(result, {
+      previousPrompt,
+      sessionGeneration,
+      instruction,
+      metadata,
+    }) {
       const prompt = String(result?.prompt || "").trim();
       const changeType = String(result?.change_type || "");
       if (!prompt) throw new Error("prompt rewriter returned an empty prompt");
@@ -79,8 +115,9 @@
         throw new Error("prompt rewriter returned an invalid change type");
       }
       const eventId = this.sendPrompt(prompt, {
+        ...metadata,
         changeType,
-        phase: "rewrite",
+        instruction,
       });
       if (!eventId) throw new Error("no model session is connected");
       if (changeType === PERSISTENT) {
@@ -95,6 +132,9 @@
           this.sendPrompt(restorePrompt, {
             changeType: PERSISTENT,
             phase: "restore",
+            trigger: "rule",
+            rule: "one_time_timeout_restore",
+            afterMs: this.restoreDelayMs,
           });
         }, this.restoreDelayMs);
         this.restoreTimer = restoreTimer;

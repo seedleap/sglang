@@ -118,8 +118,8 @@ spec:
               args:
                 - -m
                 - sglang.multimodal_gen.runtime.entrypoints.realtime_gpu_scaler
-                - --denoiser-replicas=0
-                - --vae-replicas=0
+                - --denoiser-replicas=REPLACE_WITH_DENOISER_BASE_REPLICAS
+                - --vae-replicas=REPLACE_WITH_VAE_BASE_REPLICAS
               env:
                 - name: POD_NAMESPACE
                   valueFrom: {fieldRef: {fieldPath: metadata.namespace}}

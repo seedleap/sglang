@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 
-import asyncio
 import unittest
 from types import SimpleNamespace
 
-from prompt_rewriter import PromptRewriter, build_user_message
+from prompt_rewriter import (
+    PromptRewriter,
+    build_user_message,
+    build_world_rule_message,
+)
 
 
 class FakeModels:
@@ -82,9 +85,33 @@ class PromptRewriterTest(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(len(models.calls), 1)
 
+    async def test_world_rule_completion_returns_name_prompt_and_lifetime(self):
+        models = FakeModels(
+            [
+                {
+                    "name": "召唤飞船",
+                    "prompt": "A glowing spacecraft descends beside the rider.",
+                    "change_type": "one_time",
+                }
+            ]
+        )
+        client = SimpleNamespace(aio=SimpleNamespace(models=models))
+        result = await PromptRewriter(client=client).complete_world_rule(
+            "召唤飞船", "A rider explores a valley.", "skill"
+        )
+        self.assertEqual(result.name, "召唤飞船")
+        self.assertEqual(result.change_type.value, "one_time")
+        self.assertIn("RULE KIND: skill", models.calls[0]["contents"][0])
+        self.assertIn("召唤飞船", models.calls[0]["contents"][0])
+        self.assertEqual(len(models.calls), 1)
+
     def test_build_message_rejects_missing_state(self):
         with self.assertRaisesRegex(ValueError, "previous_prompt"):
             build_user_message("", "下雪")
+
+    def test_build_world_rule_message_rejects_unknown_kind(self):
+        with self.assertRaisesRegex(ValueError, "kind"):
+            build_world_rule_message("A valley.", "下雪", "unknown")
 
 
 if __name__ == "__main__":

@@ -39,6 +39,13 @@ The local page connects its video WebSockets directly to that gateway so frame
 traffic does not take an additional Python relay hop.
 The World Studio presentation defaults both players to low-latency playback,
 discarding stale backlog so camera and prompt updates remain responsive.
+World drafts may also include optional rules. Up to nine skill instructions and
+one probability-based goal are rewritten concurrently against the initial world
+description before the realtime sessions connect. Prepared skills appear above
+the movement controls and can be sent without another LLM round trip by clicking
+or pressing 1-9. The goal is evaluated once after each successful user or skill
+prompt, can complete only once per session, and shows its achievement notice five
+seconds after the prepared goal prompt is sent.
 The showcase session lifetime is provided by the hidden
 `sessionMaxLifetimeSeconds` runtime setting; the live dual-model launcher uses
 90 seconds, and both model workloads must use the same hard lifetime.

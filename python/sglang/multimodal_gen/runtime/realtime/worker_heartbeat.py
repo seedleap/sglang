@@ -18,7 +18,6 @@ from sglang.multimodal_gen.runtime.realtime.worker_reservation import (
     resolve_worker_epoch,
 )
 
-
 logger = logging.getLogger(__name__)
 WorkerRole = Literal["denoiser", "vae"]
 
@@ -38,7 +37,9 @@ async def discover_kubernetes_node_az(
     try:
         zone = response.json()["metadata"]["labels"]["topology.kubernetes.io/zone"]
     except (KeyError, TypeError) as exc:
-        raise RuntimeError("Kubernetes Node is missing its availability-zone label") from exc
+        raise RuntimeError(
+            "Kubernetes Node is missing its availability-zone label"
+        ) from exc
     if not isinstance(zone, str) or not zone:
         raise RuntimeError("Kubernetes Node availability zone is invalid")
     return zone
@@ -69,7 +70,10 @@ class WorkerHeartbeatReporter:
         if role not in ("denoiser", "vae"):
             raise ValueError("role must be denoiser or vae")
         reservation_parts = urlsplit(reservation_endpoint)
-        if reservation_parts.scheme not in ("http", "https") or not reservation_parts.netloc:
+        if (
+            reservation_parts.scheme not in ("http", "https")
+            or not reservation_parts.netloc
+        ):
             raise ValueError("reservation_endpoint must be an HTTP endpoint")
         if not worker_id or not az or capacity < 1:
             raise ValueError("worker identity, AZ, and positive capacity are required")

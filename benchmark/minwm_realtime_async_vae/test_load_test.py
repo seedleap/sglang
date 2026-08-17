@@ -1,6 +1,5 @@
-from argparse import Namespace
-
 import asyncio
+from argparse import Namespace
 
 from load_test import (
     aggregate_measurement_seconds,
@@ -11,8 +10,8 @@ from load_test import (
     final_frame_batch_chunk,
     init_request,
     measurement_window_start,
-    record_frame_batch,
     record_action_latency,
+    record_frame_batch,
     server_action_latencies,
     stage_values,
     trace_contract_summary,
@@ -58,60 +57,74 @@ def test_init_request_supports_i2v_reference_bytes():
 def test_record_frame_batch_counts_all_batches_in_the_same_chunk():
     frame_counts = {}
 
-    record_frame_batch(
-        {"chunk_index": 3, "num_frames": 8}, frame_counts=frame_counts
-    )
-    record_frame_batch(
-        {"chunk_index": 3, "num_frames": 8}, frame_counts=frame_counts
-    )
+    record_frame_batch({"chunk_index": 3, "num_frames": 8}, frame_counts=frame_counts)
+    record_frame_batch({"chunk_index": 3, "num_frames": 8}, frame_counts=frame_counts)
 
     assert frame_counts == {3: 16}
 
 
 def test_final_frame_batch_is_the_media_websocket_completion_signal():
-    assert final_frame_batch_chunk(
-        {
-            "type": "frame_batch",
-            "chunk_index": 3,
-            "frame_batch_index": 15,
-            "is_final_frame_batch": True,
-        }
-    ) == 3
+    assert (
+        final_frame_batch_chunk(
+            {
+                "type": "frame_batch",
+                "chunk_index": 3,
+                "frame_batch_index": 15,
+                "is_final_frame_batch": True,
+            }
+        )
+        == 3
+    )
 
 
 def test_monolithic_ordered_output_can_complete_on_chunk_stats_after_frames():
     stats = {"type": "chunk_stats", "chunk_index": 4}
 
-    assert completion_chunk(
-        stats,
-        completion_signal="chunk-stats",
-        frame_counts={4: 9},
-    ) == 4
-    assert completion_chunk(
-        stats,
-        completion_signal="chunk-stats",
-        frame_counts={},
-    ) is None
-    assert completion_chunk(
-        stats,
-        completion_signal="final-frame",
-        frame_counts={4: 9},
-    ) is None
-    assert final_frame_batch_chunk(
-        {
-            "type": "frame_batch",
-            "chunk_index": 3,
-            "frame_batch_index": 14,
-            "is_final_frame_batch": False,
-        }
-    ) is None
-    assert final_frame_batch_chunk(
-        {
-            "type": "media_chunk_complete",
-            "chunk_index": 3,
-            "num_frames": 16,
-        }
-    ) == 3
+    assert (
+        completion_chunk(
+            stats,
+            completion_signal="chunk-stats",
+            frame_counts={4: 9},
+        )
+        == 4
+    )
+    assert (
+        completion_chunk(
+            stats,
+            completion_signal="chunk-stats",
+            frame_counts={},
+        )
+        is None
+    )
+    assert (
+        completion_chunk(
+            stats,
+            completion_signal="final-frame",
+            frame_counts={4: 9},
+        )
+        is None
+    )
+    assert (
+        final_frame_batch_chunk(
+            {
+                "type": "frame_batch",
+                "chunk_index": 3,
+                "frame_batch_index": 14,
+                "is_final_frame_batch": False,
+            }
+        )
+        is None
+    )
+    assert (
+        final_frame_batch_chunk(
+            {
+                "type": "media_chunk_complete",
+                "chunk_index": 3,
+                "num_frames": 16,
+            }
+        )
+        == 3
+    )
 
 
 def test_chunk_stats_are_read_from_the_separate_trace_transport():
@@ -182,12 +195,16 @@ def test_stage_values_excludes_warmup_and_records_local_vae():
 
 
 def test_trace_http_url_is_derived_from_the_public_websocket_origin():
-    assert derive_trace_http_url(
-        "wss://realtime.example.com/v1/realtime_video/generate?mode=t2v"
-    ) == "https://realtime.example.com"
-    assert derive_trace_http_url(
-        "ws://127.0.0.1:18080/v1/realtime_video/generate"
-    ) == "http://127.0.0.1:18080"
+    assert (
+        derive_trace_http_url(
+            "wss://realtime.example.com/v1/realtime_video/generate?mode=t2v"
+        )
+        == "https://realtime.example.com"
+    )
+    assert (
+        derive_trace_http_url("ws://127.0.0.1:18080/v1/realtime_video/generate")
+        == "http://127.0.0.1:18080"
+    )
 
 
 def test_collect_trace_events_polls_full_snapshots_and_deduplicates():
@@ -434,24 +451,33 @@ def test_aggregate_measurement_seconds_uses_real_overlapping_wall_window():
 
 
 def test_measurement_window_starts_after_the_last_warmup_chunk():
-    assert measurement_window_start(
-        chunk_index=1,
-        observed_at=10.0,
-        warmup_chunks=2,
-        current=None,
-    ) == 10.0
-    assert measurement_window_start(
-        chunk_index=2,
-        observed_at=10.5,
-        warmup_chunks=2,
-        current=10.0,
-    ) == 10.0
-    assert measurement_window_start(
-        chunk_index=0,
-        observed_at=9.0,
-        warmup_chunks=2,
-        current=None,
-    ) is None
+    assert (
+        measurement_window_start(
+            chunk_index=1,
+            observed_at=10.0,
+            warmup_chunks=2,
+            current=None,
+        )
+        == 10.0
+    )
+    assert (
+        measurement_window_start(
+            chunk_index=2,
+            observed_at=10.5,
+            warmup_chunks=2,
+            current=10.0,
+        )
+        == 10.0
+    )
+    assert (
+        measurement_window_start(
+            chunk_index=0,
+            observed_at=9.0,
+            warmup_chunks=2,
+            current=None,
+        )
+        is None
+    )
 
 
 def test_server_action_latencies_use_sampled_event_and_first_frame_marker():

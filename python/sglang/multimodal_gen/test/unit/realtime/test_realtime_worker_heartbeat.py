@@ -84,9 +84,7 @@ async def _test_worker_registers_capacity_only_after_local_health_is_ready():
                 "worker_epoch": "epoch-a",
                 "role": "denoiser",
                 "endpoint": "ws://10.0.0.7:30000/v1/realtime_video/generate",
-                "reservation_endpoint": (
-                    "http://10.0.0.7:30000/v1/realtime_worker"
-                ),
+                "reservation_endpoint": ("http://10.0.0.7:30000/v1/realtime_worker"),
                 "az": "us-east-2a",
                 "capacity": 4,
                 "model_revision": "model-sha",
@@ -128,21 +126,20 @@ def test_worker_discovers_real_az_from_its_kubernetes_node():
             assert kwargs["headers"] == {"Authorization": "Bearer token"}
             return _Response(
                 200,
-                {
-                    "metadata": {
-                        "labels": {"topology.kubernetes.io/zone": "us-east-2b"}
-                    }
-                },
+                {"metadata": {"labels": {"topology.kubernetes.io/zone": "us-east-2b"}}},
             )
 
-    assert asyncio.run(
-        discover_kubernetes_node_az(
-            Client(),
-            api_url="https://kubernetes.default.svc",
-            node_name="ip-10-0-0-7",
-            token="token",
+    assert (
+        asyncio.run(
+            discover_kubernetes_node_az(
+                Client(),
+                api_url="https://kubernetes.default.svc",
+                node_name="ip-10-0-0-7",
+                token="token",
+            )
         )
-    ) == "us-east-2b"
+        == "us-east-2b"
+    )
 
 
 def test_heartbeat_follows_process_epoch_file_across_worker_restart(tmp_path):

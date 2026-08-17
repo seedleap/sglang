@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, TypedDict
 
@@ -52,6 +53,7 @@ class RealtimeFrameBatchHeader(TypedDict, total=False):
     frame_batch_index: int
     num_frame_batches: int
     is_final_frame_batch: bool
+    server_sent_epoch_ms: float
 
 
 class RealtimeFrameBatchMessage(RealtimeFrameBatchHeader, total=False):
@@ -563,6 +565,7 @@ class RawRGBRealtimeOutputAdapter:
                     "frame_batch_index": frame_batch_index,
                     "num_frame_batches": num_frame_batches,
                     "is_final_frame_batch": frame_batch_index == num_frame_batches - 1,
+                    "server_sent_epoch_ms": time.time() * 1000,
                 }
                 if event_id is not None:
                     header["event_id"] = event_id

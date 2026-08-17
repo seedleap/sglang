@@ -11,6 +11,7 @@ closer to the actual denoising step.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any
 
 import torch
@@ -104,6 +105,23 @@ class RealtimeTextState(BaseRealtimeState):
 
 class RealtimeTextEncodingStage(TextEncodingStage):
     """Cache text encoder outputs across realtime chunks by prompt identity."""
+
+    def component_uses(self, server_args: ServerArgs, stage_name: str | None = None):
+        uses = super().component_uses(server_args, stage_name)
+        if getattr(server_args, "text_encoder_cpu_offload", False):
+            # Realtime sessions cache prompt embeddings. Keep the opt-in CPU
+            # residency effective after a cache miss instead of eagerly moving
+            # the encoder back for every subsequent cached chunk.
+            return [
+                replace(
+                    use,
+                    preferred_ready_after_request=False,
+                    allow_prefetch=False,
+                    memory_intensive=True,
+                )
+                for use in uses
+            ]
+        return uses
 
     def _make_cache_key(self, batch: Req) -> tuple[Any, ...]:
         return (

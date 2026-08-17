@@ -16,12 +16,12 @@ from sglang.multimodal_gen.configs.pipeline_configs.base import (
     PipelineConfig,
 )
 from sglang.multimodal_gen.configs.pipeline_configs.hunyuan import FastHunyuanConfig
+from sglang.multimodal_gen.configs.pipeline_configs.lingbot_world import (
+    LingBotWorldV2CausalDMDConfig,
+)
 from sglang.multimodal_gen.configs.pipeline_configs.ltx_2 import (
     LTX2PipelineConfig,
     LTX23PipelineConfig,
-)
-from sglang.multimodal_gen.configs.pipeline_configs.lingbot_world import (
-    LingBotWorldV2CausalDMDConfig,
 )
 from sglang.multimodal_gen.configs.pipeline_configs.mova import MOVAPipelineConfig
 from sglang.multimodal_gen.configs.pipeline_configs.qwen_image import (
@@ -121,12 +121,11 @@ class TestRealtimeSessionTimeoutArgs(unittest.TestCase):
             "realtime_session_idle_timeout_s",
             "realtime_session_max_lifetime_s",
         ):
-            with self.subTest(field=field), self.assertRaisesRegex(
-                ValueError, "must be >= 0"
+            with (
+                self.subTest(field=field),
+                self.assertRaisesRegex(ValueError, "must be >= 0"),
             ):
-                _from_dict_without_model_resolution(
-                    {"model_path": "/fake", field: -1}
-                )
+                _from_dict_without_model_resolution({"model_path": "/fake", field: -1})
 
 
 class TestServerArgsPathExpansion(unittest.TestCase):
@@ -2104,6 +2103,78 @@ class TestDisaggTransferBackendArgs(unittest.TestCase):
 
         args, _unknown = parser.parse_known_args(argv)
         self.assertEqual(args.disagg_transfer_backend, "mock")
+
+
+class TestRealtimeVAEArgs(unittest.TestCase):
+    def test_defaults_preserve_local_exact_decoder(self):
+        args = _from_dict_without_model_resolution({"model_path": "/fake"})
+
+        self.assertEqual(args.realtime_vae_backend, "local")
+        self.assertEqual(args.realtime_vae_transport, "auto")
+        self.assertIsNone(args.realtime_vae_worker_url)
+
+    def test_remote_backend_cli_args_are_explicit(self):
+        parser = FlexibleArgumentParser()
+        ServerArgs.add_cli_args(parser)
+        args, _unknown = parser.parse_known_args(
+            [
+                "--model-path",
+                "/fake",
+                "--realtime-vae-backend",
+                "exact_remote",
+                "--realtime-vae-worker-url",
+                "ws://127.0.0.1:18081/ws",
+                "--realtime-vae-transport",
+                "shared_memory",
+                "--realtime-vae-shared-memory-dir",
+                "/dev/shm/test-realtime-vae",
+            ]
+        )
+
+        self.assertEqual(args.realtime_vae_backend, "exact_remote")
+        self.assertEqual(args.realtime_vae_worker_url, "ws://127.0.0.1:18081/ws")
+        self.assertEqual(args.realtime_vae_transport, "shared_memory")
+        self.assertEqual(
+            args.realtime_vae_shared_memory_dir,
+            "/dev/shm/test-realtime-vae",
+        )
+
+    def test_worker_url_is_rejected_for_local_backend(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            "realtime_vae_worker_url requires realtime_vae_backend",
+        ):
+            _from_dict_without_model_resolution(
+                {
+                    "model_path": "/fake",
+                    "realtime_vae_backend": "local",
+                    "realtime_vae_worker_url": "ws://127.0.0.1:18081/ws",
+                }
+            )
+
+    def test_remote_transport_is_rejected_for_local_backend(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            "realtime_vae_transport.*require realtime_vae_backend",
+        ):
+            _from_dict_without_model_resolution(
+                {
+                    "model_path": "/fake",
+                    "realtime_vae_backend": "local",
+                    "realtime_vae_transport": "shared_memory",
+                }
+            )
+
+    def test_remote_backend_with_worker_url_is_accepted(self):
+        args = _from_dict_without_model_resolution(
+            {
+                "model_path": "/fake",
+                "realtime_vae_backend": "taehv_remote",
+                "realtime_vae_worker_url": "ws://127.0.0.1:18081/ws",
+            }
+        )
+
+        self.assertEqual(args.realtime_vae_backend, "taehv_remote")
 
 
 if __name__ == "__main__":

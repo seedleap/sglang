@@ -94,6 +94,10 @@
       this.worker = null;
       this.decodeRequests = new Map();
       this.decodeRequestId = 1;
+      this.playbackAckTimer = null;
+      this.playbackAckEnabled = false;
+      this.controlSentEpochByEvent = new Map();
+      this.lastNetworkSample = null;
       this.stats = {
         frames: 0,
         bytes: 0,
@@ -107,6 +111,14 @@
         lastAppliedEventId: 0,
         lastDecodeMs: 0,
         lastDisplayLagMs: 0,
+        lastRenderedEventId: 0,
+        lastControlToVideoMs: 0,
+        lastDownlinkMs: 0,
+        receiveMbps: 0,
+        chunkTelemetry: null,
+        lastInputUplinkMs: 0,
+        controlRoundTripMs: 0,
+        serverClockOffsetMs: 0,
       };
       this.setState("idle");
     }
@@ -124,10 +136,13 @@
       this.epoch += 1;
       const epoch = this.epoch;
       this.traceId = init.trace_id || "";
+      this.playbackAckEnabled = init.playback_ack_enabled === true;
       this.pendingHeader = null;
       this.decodeQueue = [];
       this.decodeInProgress = false;
       this.renderSamples = [];
+      this.controlSentEpochByEvent.clear();
+      this.lastNetworkSample = null;
       this.awaitingStableFrame = this.startupMinChunk > 0;
       this.stats = {
         frames: 0,
@@ -142,6 +157,14 @@
         lastAppliedEventId: 0,
         lastDecodeMs: 0,
         lastDisplayLagMs: 0,
+        lastRenderedEventId: 0,
+        lastControlToVideoMs: 0,
+        lastDownlinkMs: 0,
+        receiveMbps: 0,
+        chunkTelemetry: null,
+        lastInputUplinkMs: 0,
+        controlRoundTripMs: 0,
+        serverClockOffsetMs: 0,
       };
       for (const frame of this.playback.clear?.() || []) closeFrame(frame);
       this.playback.reset?.({ targetFps: init.fps || 24 });
@@ -156,7 +179,10 @@
         socket.onopen = () => {
           if (epoch !== this.epoch) return;
           opened = true;
-          socket.send(this.pack(init));
+          socket.send(this.pack({
+            ...init,
+            playback_ack_enabled: this.playbackAckEnabled,
+          }));
           this.armMediaWatchdog(epoch, "startup");
           if (!this.awaitingStableFrame) this.setState("live");
           this.scheduleRender();
@@ -202,6 +228,16 @@
       if (!this.socket || this.socket.readyState !== this.WebSocketCtor.OPEN) return false;
       this.socket.send(this.pack({ ...envelope, trace_id: this.traceId }));
       this.stats.lastSentEventId = Number(envelope.event_id || this.stats.lastSentEventId);
+      const eventId = Number(envelope.event_id || 0);
+      if (eventId > 0 && ["camera_actions", "prompt", "scene_cut"].includes(envelope.kind)) {
+        this.controlSentEpochByEvent.set(
+          eventId,
+          Number(envelope.client_sent_epoch_ms || Date.now()),
+        );
+        while (this.controlSentEpochByEvent.size > 64) {
+          this.controlSentEpochByEvent.delete(this.controlSentEpochByEvent.keys().next().value);
+        }
+      }
       this.playback.noteInputEvent?.(envelope.event_id, this.now(), {
         cutoverMode: envelope.kind === "prompt"
           ? "prompt"
@@ -214,11 +250,15 @@
 
     close(reason = "session closed", { notify = true } = {}) {
       this.clearMediaWatchdog();
+      if (this.playbackAckTimer) this.clearTimer(this.playbackAckTimer);
+      this.playbackAckTimer = null;
       this.epoch += 1;
       const socket = this.socket;
       this.socket = null;
       this.pendingHeader = null;
       this.decodeQueue = [];
+      this.controlSentEpochByEvent.clear();
+      this.lastNetworkSample = null;
       for (const frame of this.playback.clear?.() || []) closeFrame(frame);
       this.worker?.postMessage?.({ type: "reset" });
       if (socket && socket.readyState !== this.WebSocketCtor.CLOSED) {
@@ -253,12 +293,32 @@
       const message = this.unpack(packed);
       message.__received_at = this.now();
       if (message.type === "error") {
+        if ((message.content || "") === "invalid event") return;
         const error = new Error(message.content || `${this.key} server error`);
         error.reason = message.reason || "";
         error.retryAfterS = Number(message.retry_after_s || 0);
         throw error;
       }
-      if (message.type === "frame_batch") {
+      if (message.type === "control_ack" && message.stage === "worker") {
+        const clientSentEpochMs = Number(message.client_sent_epoch_ms || 0);
+        const serverReceivedEpochMs = Number(message.server_received_epoch_ms || 0);
+        const serverSentEpochMs = Number(message.server_sent_epoch_ms || 0);
+        const clientReceivedEpochMs = Date.now();
+        if (clientSentEpochMs && serverReceivedEpochMs && serverSentEpochMs) {
+          const serverProcessingMs = Math.max(0, serverSentEpochMs - serverReceivedEpochMs);
+          const roundTripMs = Math.max(0, clientReceivedEpochMs - clientSentEpochMs);
+          this.stats.controlRoundTripMs = roundTripMs;
+          this.stats.lastInputUplinkMs = Math.max(0, (roundTripMs - serverProcessingMs) / 2);
+          this.stats.serverClockOffsetMs = (
+            (serverReceivedEpochMs - clientSentEpochMs)
+            + (serverSentEpochMs - clientReceivedEpochMs)
+          ) / 2;
+          this.emitStats();
+        }
+      } else if (message.type === "chunk_telemetry") {
+        this.stats.chunkTelemetry = { ...message };
+        this.emitStats();
+      } else if (message.type === "frame_batch") {
         const payload = message.payload;
         delete message.payload;
         if (payload !== undefined) {
@@ -273,6 +333,12 @@
 
     enqueueDecode(header, payload, epoch) {
       this.observeFrameBatch(header);
+      const eventId = Number(header.event_id || 0);
+      if (this.stats.lastSentEventId > 0 && eventId >= this.stats.lastSentEventId) {
+        this.decodeQueue = this.decodeQueue.filter(
+          (item) => Number(item.header?.event_id || 0) >= eventId,
+        );
+      }
       this.decodeQueue.push({ header, payload, epoch });
       this.trimDecodeQueue();
       this.pumpDecode();
@@ -302,6 +368,14 @@
       }
       this.stats.lastReceivedChunk = chunkIndex;
       this.stats.lastReceivedFrameBatchIndex = frameBatchIndex;
+      const serverSentEpochMs = Number(header.server_sent_epoch_ms || 0);
+      if (serverSentEpochMs > 0) {
+        this.stats.lastDownlinkMs = Math.max(
+          0,
+          Date.now() - serverSentEpochMs + Number(this.stats.serverClockOffsetMs || 0),
+        );
+      }
+      this.schedulePlaybackAck();
     }
 
     async pumpDecode() {
@@ -320,6 +394,7 @@
         const decodeMs = decodedAt - startedAt;
         const prepared = frames.map((frame) => ({
           ...frame,
+          eventId: Number(frame.eventId ?? item.header.event_id ?? 0),
           receivedAt: frame.receivedAt || item.header.__received_at,
           decodedAt,
           decodeMs: frame.decodeMs ?? decodeMs,
@@ -329,6 +404,15 @@
         const bytes = Number(item.payload?.byteLength || item.payload?.size || item.payload?.length || 0);
         this.stats.frames += Number(item.header.num_frames || prepared.length);
         this.stats.bytes += bytes;
+        const networkNow = this.now();
+        if (this.lastNetworkSample && networkNow > this.lastNetworkSample.at) {
+          const elapsedSeconds = (networkNow - this.lastNetworkSample.at) / 1000;
+          this.stats.receiveMbps = Math.max(
+            0,
+            (this.stats.bytes - this.lastNetworkSample.bytes) * 8 / elapsedSeconds / 1_000_000,
+          );
+        }
+        this.lastNetworkSample = { at: networkNow, bytes: this.stats.bytes };
         this.stats.lastChunk = Number(item.header.chunk_index || 0);
         this.stats.lastEventId = Number(item.header.event_id || this.stats.lastEventId);
         this.stats.lastAppliedEventId = Number(
@@ -428,6 +512,18 @@
         this.stats.renderedFrames += 1;
         this.stats.lastChunk = Number(frame.chunk ?? this.stats.lastChunk ?? 0);
         this.stats.lastDisplayLagMs = now - Number(frame.receivedAt || now);
+        this.stats.lastRenderedEventId = Number(
+          frame.eventId || this.stats.lastRenderedEventId || 0,
+        );
+        const appliedEventId = this.stats.lastRenderedEventId;
+        const pendingEventIds = Array.from(this.controlSentEpochByEvent.keys())
+          .filter((eventId) => eventId <= appliedEventId)
+          .sort((left, right) => left - right);
+        if (pendingEventIds.length) {
+          const sentEpochMs = this.controlSentEpochByEvent.get(pendingEventIds[0]);
+          this.stats.lastControlToVideoMs = Math.max(0, Date.now() - sentEpochMs);
+          for (const eventId of pendingEventIds) this.controlSentEpochByEvent.delete(eventId);
+        }
         this.onFrame({
           key: this.key,
           chunk: this.stats.lastChunk,
@@ -436,6 +532,7 @@
           displayLagMs: this.stats.lastDisplayLagMs,
         });
         this.emitStats();
+        this.schedulePlaybackAck();
       }
       if (this.socket || this.decodeInProgress || this.decodeQueue.length || this.snapshot().queueFrames) {
         this.scheduleRender();
@@ -462,6 +559,32 @@
       if (!isImageData) image.close?.();
       this.hasVisibleFrame = true;
       this.setState("live");
+    }
+
+    schedulePlaybackAck() {
+      if (
+        !this.playbackAckEnabled
+        || this.playbackAckTimer
+        || !this.socket
+        || this.socket.readyState !== this.WebSocketCtor.OPEN
+      ) {
+        return;
+      }
+      this.playbackAckTimer = this.setTimer(() => {
+        this.playbackAckTimer = null;
+        if (!this.socket || this.socket.readyState !== this.WebSocketCtor.OPEN) return;
+        this.socket.send(this.pack({
+          type: "event",
+          kind: "playback_ack",
+          trace_id: this.traceId,
+          payload: {
+            last_received_chunk: this.stats.lastReceivedChunk,
+            last_rendered_chunk: this.stats.lastChunk,
+            last_rendered_event_id: this.stats.lastRenderedEventId,
+            playable: this.hasVisibleFrame,
+          },
+        }));
+      }, 50);
     }
 
     setState(state, details = {}) {

@@ -39,13 +39,13 @@ from sglang.multimodal_gen.runtime.entrypoints.openai.realtime.generate_session 
 from sglang.multimodal_gen.runtime.entrypoints.openai.realtime.realtime_output_adapter import (
     empty_frame_send_stats,
 )
+from sglang.multimodal_gen.runtime.entrypoints.openai.realtime.registry import (
+    get_realtime_model_adapter,
+)
 from sglang.multimodal_gen.runtime.entrypoints.utils import (
     ReplaceQueuedRealtimeReq,
 )
 from sglang.multimodal_gen.runtime.managers.scheduler import Scheduler
-from sglang.multimodal_gen.runtime.entrypoints.openai.realtime.registry import (
-    get_realtime_model_adapter,
-)
 from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import OutputBatch, Req
 from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.lingbot_world.lingbot_world_causal_denoising import (
     LingBotWorldCausalDMDDenoisingStage,
@@ -62,8 +62,8 @@ from sglang.multimodal_gen.runtime.realtime.control_signals import (
 )
 from sglang.multimodal_gen.runtime.realtime.session import (
     BaseRealtimeState,
-    RealtimeSessionCapacityError,
     RealtimeSessionCache,
+    RealtimeSessionCapacityError,
 )
 from sglang.multimodal_gen.runtime.realtime.states import (
     RealtimeCausalDecodeState,
@@ -72,7 +72,6 @@ from sglang.multimodal_gen.runtime.utils.perf_logger import RequestMetrics
 from sglang.multimodal_gen.runtime.utils.realtime_video import (
     RAW_RGB_CONTENT_TYPE,
 )
-from sglang.multimodal_gen.runtime.utils.perf_logger import RequestMetrics
 
 
 class _Req(SimpleNamespace):
@@ -379,7 +378,9 @@ def test_scheduler_session_release_retries_transient_failures(monkeypatch):
                 raise RuntimeError("scheduler temporarily unavailable")
             return OutputBatch(output={"released": True})
 
-        monkeypatch.setattr(realtime_video_api.async_scheduler_client, "forward", forward)
+        monkeypatch.setattr(
+            realtime_video_api.async_scheduler_client, "forward", forward
+        )
         released = await realtime_video_api._release_scheduler_realtime_session(
             "session-a",
             attempts=3,
@@ -397,7 +398,9 @@ def test_scheduler_session_release_has_a_short_per_attempt_timeout(monkeypatch):
         async def forward(_request):
             await asyncio.Event().wait()
 
-        monkeypatch.setattr(realtime_video_api.async_scheduler_client, "forward", forward)
+        monkeypatch.setattr(
+            realtime_video_api.async_scheduler_client, "forward", forward
+        )
         started = time.perf_counter()
         released = await realtime_video_api._release_scheduler_realtime_session(
             "session-a",
@@ -813,8 +816,10 @@ def test_scheduler_applies_realtime_replacement_that_arrives_before_request():
     scheduler = Scheduler.__new__(Scheduler)
     scheduler.waiting_queue = deque()
     replies = []
-    scheduler.return_result = lambda output, identity, should_not_return: replies.append(
-        (output.output, identity, should_not_return)
+    scheduler.return_result = (
+        lambda output, identity, should_not_return: replies.append(
+            (output.output, identity, should_not_return)
+        )
     )
     original = Req.__new__(Req)
     original.request_id = "request-1"
@@ -863,8 +868,10 @@ def test_scheduler_reports_realtime_replacement_after_dispatch_as_too_late():
     scheduler = Scheduler.__new__(Scheduler)
     scheduler.waiting_queue = deque()
     replies = []
-    scheduler.return_result = lambda output, identity, should_not_return: replies.append(
-        (output.output, identity, should_not_return)
+    scheduler.return_result = (
+        lambda output, identity, should_not_return: replies.append(
+            (output.output, identity, should_not_return)
+        )
     )
     dispatched = Req.__new__(Req)
     dispatched.request_id = "request-1"
@@ -875,9 +882,7 @@ def test_scheduler_reports_realtime_replacement_after_dispatch_as_too_late():
     dispatched.realtime_prompt_version = 2
     replacement = copy(dispatched)
     replacement.realtime_action_version = 3
-    scheduler._mark_realtime_requests_dispatched(
-        [(b"request", dispatched)], now=100.0
-    )
+    scheduler._mark_realtime_requests_dispatched([(b"request", dispatched)], now=100.0)
 
     scheduler._enqueue_received_reqs(
         [
@@ -914,8 +919,8 @@ def test_scheduler_rejects_replacement_with_mismatched_envelope_identity():
     scheduler = Scheduler.__new__(Scheduler)
     scheduler.waiting_queue = deque()
     replies = []
-    scheduler.return_result = lambda output, identity, should_not_return: replies.append(
-        output.output
+    scheduler.return_result = (
+        lambda output, identity, should_not_return: replies.append(output.output)
     )
     replacement = Req.__new__(Req)
     replacement.request_id = "other-request"
@@ -1075,7 +1080,9 @@ async def _assert_event_listener_does_not_block_on_scheduler_refresh(monkeypatch
         realtime_video_api, "get_global_server_args", lambda: SimpleNamespace()
     )
 
-    listen_task = asyncio.create_task(realtime_video_api._listen_events(WebSocket(), session))
+    listen_task = asyncio.create_task(
+        realtime_video_api._listen_events(WebSocket(), session)
+    )
     try:
         await asyncio.wait_for(second_ingested.wait(), timeout=0.1)
         assert adapter.event_ids == [1, 2]
@@ -1282,7 +1289,9 @@ def test_scheduler_stage_metrics_emit_dedicated_realtime_trace_events(monkeypatc
     def fake_log_realtime_trace(_logger, _session, event, **fields):
         emitted.append((event, fields))
 
-    monkeypatch.setattr(realtime_video_api, "log_realtime_trace", fake_log_realtime_trace)
+    monkeypatch.setattr(
+        realtime_video_api, "log_realtime_trace", fake_log_realtime_trace
+    )
 
     session = GenerateSession()
     session.trace_id = "trace-stage"
@@ -1389,12 +1398,73 @@ def test_session_watchdog_closes_idle_session():
     assert asyncio.run(run()) == "session idle timeout"
 
 
+def test_session_watchdog_starts_max_lifetime_after_media_is_playable():
+    async def run():
+        store = realtime_video_api.InMemorySessionLeaseStore(1, 0.5)
+        controller = realtime_video_api.RealtimeAdmissionController(store)
+        session = GenerateSession()
+        session.created_at -= 10
+        lease = await controller.admit("u1", session.id, session.generation_id)
+        task = asyncio.create_task(
+            realtime_video_api._session_watchdog(
+                session,
+                controller,
+                lease,
+                idle_timeout_s=1,
+                max_lifetime_s=0.01,
+                lease_ttl_s=0.5,
+            )
+        )
+        await asyncio.sleep(0.12)
+        assert not task.done(), "socket/build time must not consume playable lifetime"
+        session.mark_playable()
+        try:
+            return await asyncio.wait_for(task, timeout=0.3)
+        finally:
+            await controller.release(lease)
+
+    assert asyncio.run(run()) == "maximum session lifetime reached"
+
+
+def test_playback_ack_marks_ack_aware_session_playable_without_model_ingest():
+    class RejectingAdapter:
+        def ingest_event(self, *_args):
+            raise AssertionError("playback transport ACK must not reach model adapter")
+
+    class _Ws:
+        async def iter_bytes(self):
+            yield msgspec.msgpack.encode(
+                {
+                    "type": "event",
+                    "kind": "playback_ack",
+                    "payload": {
+                        "last_received_chunk": 3,
+                        "last_rendered_chunk": 2,
+                        "last_rendered_event_id": 9,
+                        "playable": True,
+                    },
+                }
+            )
+
+    session = GenerateSession()
+    session.adapter = RejectingAdapter()
+    session.playback_ack_enabled = True
+    asyncio.run(realtime_video_api._listen_events(_Ws(), session))
+
+    assert session.last_received_chunk == 3
+    assert session.last_rendered_chunk == 2
+    assert session.last_rendered_event_id == 9
+    assert session.playable_at is not None
+
+
 def test_session_watchdog_exempts_internal_startup_warmup_from_max_lifetime():
     async def run():
         store = realtime_video_api.InMemorySessionLeaseStore(1, 0.5)
         controller = realtime_video_api.RealtimeAdmissionController(store)
         session = GenerateSession()
-        lease = await controller.admit("startup-warmup", session.id, session.generation_id)
+        lease = await controller.admit(
+            "startup-warmup", session.id, session.generation_id
+        )
         try:
             return await realtime_video_api._session_watchdog(
                 session,
@@ -1508,10 +1578,13 @@ def test_strict_realtime_identity_requires_authenticated_principal():
         headers={},
         client=SimpleNamespace(host="127.0.0.1"),
     )
-    assert realtime_video_api._resolve_realtime_user_id(
-        authenticated,
-        require_authenticated=True,
-    ) == "auth:user-123"
+    assert (
+        realtime_video_api._resolve_realtime_user_id(
+            authenticated,
+            require_authenticated=True,
+        )
+        == "auth:user-123"
+    )
 
 
 def test_cleanup_realtime_session_releases_scheduler_state(

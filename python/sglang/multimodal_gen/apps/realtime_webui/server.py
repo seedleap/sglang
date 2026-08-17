@@ -7,14 +7,14 @@ import io
 import json
 import logging
 import os
+import re
 from pathlib import Path
 from urllib.parse import urlsplit
 
 from aiohttp import ClientError, ClientSession, ClientTimeout, WSMsgType, web
-
+from h264_websocket_bridge import install_h264_websocket_bridge
 from prompt_rewriter import PromptRewriter
 from world_creator import WorldCreator
-
 
 ROOT = Path(__file__).resolve().parent
 UPSTREAM_HTTP = os.environ.get("REALTIME_UPSTREAM_HTTP", "http://127.0.0.1:30000")
@@ -26,6 +26,8 @@ BACKEND_ENV_PREFIXES = {
 SESSION = web.AppKey("upstream_session", ClientSession)
 PROMPT_REWRITER = web.AppKey("prompt_rewriter", PromptRewriter)
 WORLD_CREATOR = web.AppKey("world_creator", WorldCreator)
+HAPPYOYSTER_WORLD_CACHE = web.AppKey("happyoyster_world_cache", dict)
+HAPPYOYSTER_WORLD_BUILD_LOCKS = web.AppKey("happyoyster_world_build_locks", dict)
 MAX_WORLD_IMAGE_BYTES = 15 * 1024 * 1024
 ALLOWED_WORLD_IMAGE_TYPES = {"image/png", "image/jpeg", "image/webp"}
 HOP_BY_HOP_HEADERS = {
@@ -43,9 +45,9 @@ HAPPYOYSTER_API_BASE_URL = os.environ.get(
     "HAPPYOYSTER_API_BASE_URL",
     "https://llm-0jcmcer24vyvd7rr.cn-beijing.maas.aliyuncs.com/api/v2/apps/happyoyster-1.0/",
 ).rstrip("/")
-HAPPYOYSTER_TOKEN_BASE_URL = os.environ.get(
-    "HAPPYOYSTER_TOKEN_BASE_URL", ""
-).rstrip("/")
+HAPPYOYSTER_TOKEN_BASE_URL = os.environ.get("HAPPYOYSTER_TOKEN_BASE_URL", "").rstrip(
+    "/"
+)
 HAPPYOYSTER_PUBLIC_IMAGE_BASE_URL = os.environ.get(
     "HAPPYOYSTER_PUBLIC_IMAGE_BASE_URL", ""
 ).rstrip("/")
@@ -53,6 +55,13 @@ HAPPYOYSTER_TIMEOUT_SECONDS = float(
     os.environ.get("HAPPYOYSTER_TIMEOUT_SECONDS", "130")
 )
 HAPPYOYSTER_FIRST_FRAME_SIZE = (1280, 720)
+HAPPYOYSTER_PREBUILT_WORLDS_PATH = Path(
+    os.environ.get(
+        "HAPPYOYSTER_PREBUILT_WORLDS_PATH",
+        ROOT / "happyoyster_prebuilt_worlds.json",
+    )
+).expanduser()
+HAPPYOYSTER_PRESET_KEY_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,79}$")
 
 
 def _forward_headers(headers):
@@ -108,9 +117,7 @@ async def _rewrite_prompt(request):
     previous_prompt = str(body.get("previous_prompt", "")).strip()
     if not instruction or not previous_prompt:
         raise web.HTTPBadRequest(
-            text=json.dumps(
-                {"error": "instruction and previous_prompt are required"}
-            ),
+            text=json.dumps({"error": "instruction and previous_prompt are required"}),
             content_type="application/json",
         )
     if len(instruction) > 2000 or len(previous_prompt) > 20000:
@@ -131,6 +138,54 @@ async def _rewrite_prompt(request):
         logging.exception("Live Direction prompt rewrite failed")
         raise web.HTTPBadGateway(
             text=json.dumps({"error": "prompt rewrite failed; please try again"}),
+            content_type="application/json",
+        ) from error
+    return web.json_response(result.model_dump(mode="json"))
+
+
+async def _complete_world_rule(request):
+    """Complete a skill/goal label and prompt without exposing credentials."""
+
+    try:
+        body = await request.json()
+    except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as error:
+        raise web.HTTPBadRequest(
+            text=json.dumps({"error": "request body must be valid JSON"}),
+            content_type="application/json",
+        ) from error
+    if not isinstance(body, dict):
+        raise web.HTTPBadRequest(
+            text=json.dumps({"error": "request body must be a JSON object"}),
+            content_type="application/json",
+        )
+    rule_input = str(body.get("input", "")).strip()
+    previous_prompt = str(body.get("previous_prompt", "")).strip()
+    kind = str(body.get("kind", "")).strip().lower()
+    if not rule_input or not previous_prompt or kind not in {"skill", "goal"}:
+        raise web.HTTPBadRequest(
+            text=json.dumps(
+                {"error": ("input, previous_prompt, and kind=skill|goal are required")}
+            ),
+            content_type="application/json",
+        )
+    if len(rule_input) > 2000 or len(previous_prompt) > 20000:
+        raise web.HTTPRequestEntityTooLarge(
+            max_size=22000,
+            actual_size=len(rule_input) + len(previous_prompt),
+        )
+
+    rewriter = request.app[PROMPT_REWRITER]
+    if not rewriter.configured:
+        raise web.HTTPServiceUnavailable(
+            text=json.dumps({"error": "prompt rewriter is not configured"}),
+            content_type="application/json",
+        )
+    try:
+        result = await rewriter.complete_world_rule(rule_input, previous_prompt, kind)
+    except Exception as error:
+        logging.exception("World rule completion failed")
+        raise web.HTTPBadGateway(
+            text=json.dumps({"error": "rule completion failed; please try again"}),
             content_type="application/json",
         ) from error
     return web.json_response(result.model_dump(mode="json"))
@@ -246,6 +301,39 @@ def _happyoyster_configured():
     return bool(HAPPYOYSTER_API_KEY and HAPPYOYSTER_API_BASE_URL)
 
 
+def _normalize_happyoyster_preset_key(value):
+    preset_key = str(value or "").strip().lower()
+    return preset_key if HAPPYOYSTER_PRESET_KEY_RE.fullmatch(preset_key) else ""
+
+
+def _load_happyoyster_prebuilt_worlds():
+    raw_config = os.environ.get("HAPPYOYSTER_PREBUILT_WORLDS_JSON", "").strip()
+    try:
+        payload = (
+            json.loads(raw_config)
+            if raw_config
+            else json.loads(HAPPYOYSTER_PREBUILT_WORLDS_PATH.read_text())
+        )
+    except FileNotFoundError:
+        return {}
+    except (json.JSONDecodeError, OSError, TypeError, ValueError):
+        logging.exception("Unable to load HappyOyster prebuilt World manifest")
+        return {}
+    worlds = payload.get("worlds", payload) if isinstance(payload, dict) else {}
+    if not isinstance(worlds, dict):
+        return {}
+    result = {}
+    for raw_key, raw_value in worlds.items():
+        key = _normalize_happyoyster_preset_key(raw_key)
+        if isinstance(raw_value, dict):
+            world_id = str(raw_value.get("encryptedWorldId", "")).strip()
+        else:
+            world_id = str(raw_value or "").strip()
+        if key and world_id:
+            result[key] = world_id
+    return result
+
+
 def _normalize_happyoyster_first_frame(image_bytes):
     """Return a bounded 16:9 JPEG accepted by the HappyOyster first-frame API."""
 
@@ -323,7 +411,9 @@ async def _happyoyster_request(
             payload = await response.json(content_type=None)
             if response.status >= 400:
                 raise RuntimeError(
-                    str(payload.get("message") if isinstance(payload, dict) else payload)
+                    str(
+                        payload.get("message") if isinstance(payload, dict) else payload
+                    )
                 )
             return _unwrap_happyoyster_payload(payload)
     except web.HTTPException:
@@ -341,7 +431,7 @@ async def _happyoyster_config(_request):
         {
             "enabled": _happyoyster_configured(),
             "apiBaseUrl": HAPPYOYSTER_API_BASE_URL,
-            "sessionMaxLifetimeSeconds": 90,
+            "sessionMaxLifetimeSeconds": 60,
         },
         headers={"Cache-Control": "no-store"},
     )
@@ -350,7 +440,9 @@ async def _happyoyster_config(_request):
 async def _happyoyster_share_image(request):
     if not HAPPYOYSTER_PUBLIC_IMAGE_BASE_URL:
         raise web.HTTPServiceUnavailable(
-            text=json.dumps({"error": "HappyOyster public image URL is not configured"}),
+            text=json.dumps(
+                {"error": "HappyOyster public image URL is not configured"}
+            ),
             content_type="application/json",
         )
     image_bytes = await request.read()
@@ -421,10 +513,99 @@ async def _happyoyster_create_world(request):
             "url": first_frame_url,
             "referenceType": "default",
         }
-    data = await _happyoyster_request(
-        request.app, "POST", "/openapi/v1/worlds", json_body=upstream_body
+    preset_key = _normalize_happyoyster_preset_key(body.get("presetKey"))
+
+    async def create_or_reuse():
+        if preset_key:
+            cached_world_id = request.app[HAPPYOYSTER_WORLD_CACHE].get(preset_key)
+            if cached_world_id:
+                try:
+                    status_data = await _happyoyster_request(
+                        request.app,
+                        "GET",
+                        "/openapi/v1/worlds/build-status",
+                        params={"encryptedWorldId": cached_world_id},
+                    )
+                except web.HTTPBadGateway:
+                    request.app[HAPPYOYSTER_WORLD_CACHE].pop(preset_key, None)
+                else:
+                    status = str(
+                        status_data.get("status", "")
+                        if isinstance(status_data, dict)
+                        else ""
+                    ).lower()
+                    if status not in {"failed", "expired", "deleted", "not_found"}:
+                        return {
+                            "encryptedWorldId": cached_world_id,
+                            "status": status or "building",
+                            "source": "runtime-cache",
+                        }
+                    request.app[HAPPYOYSTER_WORLD_CACHE].pop(preset_key, None)
+        data = await _happyoyster_request(
+            request.app, "POST", "/openapi/v1/worlds", json_body=upstream_body
+        )
+        world_id = data.get("encryptedWorldId") if isinstance(data, dict) else None
+        if preset_key and world_id:
+            request.app[HAPPYOYSTER_WORLD_CACHE][preset_key] = str(world_id)
+        return data
+
+    if not preset_key:
+        return web.json_response(await create_or_reuse())
+    lock = request.app[HAPPYOYSTER_WORLD_BUILD_LOCKS].setdefault(
+        preset_key, asyncio.Lock()
     )
-    return web.json_response(data)
+    async with lock:
+        return web.json_response(await create_or_reuse())
+
+
+async def _happyoyster_resolve_world(request):
+    """Resolve a reusable preset World, discarding expired or failed IDs."""
+
+    try:
+        body = await request.json()
+    except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as error:
+        raise web.HTTPBadRequest(
+            text=json.dumps({"error": "request body must be valid JSON"}),
+            content_type="application/json",
+        ) from error
+    preset_key = _normalize_happyoyster_preset_key(
+        body.get("presetKey") if isinstance(body, dict) else ""
+    )
+    if not preset_key:
+        return web.json_response({"status": "missing", "source": "none"})
+    world_id = request.app[HAPPYOYSTER_WORLD_CACHE].get(preset_key)
+    if not world_id:
+        return web.json_response({"status": "missing", "source": "none"})
+    try:
+        data = await _happyoyster_request(
+            request.app,
+            "GET",
+            "/openapi/v1/worlds/build-status",
+            params={"encryptedWorldId": world_id},
+        )
+    except web.HTTPBadGateway:
+        logging.warning(
+            "HappyOyster cached World is unavailable; regenerating preset=%s",
+            preset_key,
+        )
+        request.app[HAPPYOYSTER_WORLD_CACHE].pop(preset_key, None)
+        return web.json_response(
+            {"status": "missing", "source": "expired", "expiredWorldId": world_id}
+        )
+    status = str(data.get("status", "") if isinstance(data, dict) else "").lower()
+    if status in {"failed", "expired", "deleted", "not_found"}:
+        request.app[HAPPYOYSTER_WORLD_CACHE].pop(preset_key, None)
+        return web.json_response(
+            {"status": "missing", "source": "expired", "expiredWorldId": world_id}
+        )
+    return web.json_response(
+        {
+            "status": status or "building",
+            "source": "prebuilt",
+            "encryptedWorldId": world_id,
+        },
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 async def _happyoyster_world_status(request):
@@ -582,7 +763,9 @@ async def _proxy_websocket(request):
                 task.cancel()
             await asyncio.gather(*done, *pending, return_exceptions=True)
     except ClientError as error:
-        logging.warning("Upstream websocket unavailable: %s", upstream_url, exc_info=error)
+        logging.warning(
+            "Upstream websocket unavailable: %s", upstream_url, exc_info=error
+        )
         raise web.HTTPBadGateway(text="upstream websocket unavailable") from error
     except Exception:
         if downstream is None:
@@ -618,7 +801,9 @@ async def _proxy_backend_websocket(request):
                 task.cancel()
             await asyncio.gather(*done, *pending, return_exceptions=True)
     except ClientError as error:
-        logging.warning("Backend websocket unavailable: %s", upstream_url, exc_info=error)
+        logging.warning(
+            "Backend websocket unavailable: %s", upstream_url, exc_info=error
+        )
         raise web.HTTPBadGateway(text="backend websocket unavailable") from error
     except Exception:
         if downstream is None:
@@ -649,28 +834,39 @@ def create_app():
     app[WORLD_CREATOR] = WorldCreator(
         gemini_client_provider=prompt_rewriter._get_client
     )
+    app[HAPPYOYSTER_WORLD_CACHE] = _load_happyoyster_prebuilt_worlds()
+    app[HAPPYOYSTER_WORLD_BUILD_LOCKS] = {}
     app.cleanup_ctx.append(_session_context)
     app.router.add_get("/", _index)
     app.router.add_get("/runtime-config.js", _runtime_config)
     app.router.add_post("/api/prompt/rewrite", _rewrite_prompt)
+    app.router.add_post("/api/world-rule/complete", _complete_world_rule)
     app.router.add_post("/api/world/complete", _complete_world)
-    app.router.add_get(
-        "/api/world/images/{image_id}", _generated_world_image
-    )
+    app.router.add_get("/api/world/images/{image_id}", _generated_world_image)
     app.router.add_get("/api/happyoyster/config", _happyoyster_config)
     app.router.add_post("/api/happyoyster/share-image", _happyoyster_share_image)
+    app.router.add_post("/api/happyoyster/worlds/resolve", _happyoyster_resolve_world)
     app.router.add_post("/api/happyoyster/worlds", _happyoyster_create_world)
-    app.router.add_get("/api/happyoyster/worlds/build-status", _happyoyster_world_status)
+    app.router.add_get(
+        "/api/happyoyster/worlds/build-status", _happyoyster_world_status
+    )
     app.router.add_post("/api/happyoyster/prepare", _happyoyster_prepare)
     app.router.add_get(
         "/backends/{backend}/v1/realtime_video/generate",
         _proxy_backend_websocket,
     )
-    app.router.add_route(
-        "*", "/backends/{backend}/v1/{path:.*}", _proxy_backend_http
-    )
+    app.router.add_route("*", "/backends/{backend}/v1/{path:.*}", _proxy_backend_http)
     app.router.add_get("/v1/realtime_video/generate", _proxy_websocket)
     app.router.add_route("*", "/v1/{path:.*}", _proxy_http)
+    install_h264_websocket_bridge(
+        app,
+        upstream_session_key=SESSION,
+        upstream_resolver=lambda backend: _backend_upstream(
+            backend,
+            "ws",
+            "/v1/realtime_video/generate",
+        ),
+    )
     app.router.add_static("/", ROOT)
     return app
 

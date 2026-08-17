@@ -16,9 +16,7 @@ def test_realtime_webui_routes_named_model_backends(monkeypatch):
         == "http://minwm:30000/v1/health?verbose=1"
     )
     assert (
-        server._backend_upstream(
-            "lingbot2", "ws", "/v1/realtime_video/generate", ""
-        )
+        server._backend_upstream("lingbot2", "ws", "/v1/realtime_video/generate", "")
         == "ws://lingbot2:30000/v1/realtime_video/generate"
     )
     try:
@@ -100,9 +98,9 @@ def test_realtime_webui_supports_explicit_minwm_t2v_sessions():
     assert 'savedT2VNumFrames = $("numFrames").value;' in app_js
     assert '$("numFrames").value = savedT2VNumFrames;' in app_js
     assert 'max_chunks: generationMode === "t2v"' in app_js
-    assert '$(' + '"continuous"' + ').disabled = false' in app_js
+    assert "$(" + '"continuous"' + ").disabled = false" in app_js
     assert "let savedT2VContinuous = true" in app_js
-    assert '$(' + '"continuous"' + ').checked = savedT2VContinuous' in app_js
+    assert "$(" + '"continuous"' + ").checked = savedT2VContinuous" in app_js
     assert '"Continuous T2V session"' in app_js
     assert '$("referenceSection").hidden = isT2V' in app_js
 
@@ -155,10 +153,18 @@ def test_realtime_webui_presets_do_not_emit_camera_scripts():
     assert 'id="guidance" type="number" value="1"' in index_html
     assert "styles.css?v=realtime-t2v-dump-trace-v1" in index_html
     assert "app.js?v=realtime-production-gateway-v17" in index_html
-    assert 'const DECODER_WORKER_URL = "./decoder_worker.js?v=rgb-worker-v10";' in app_js
+    assert (
+        'const DECODER_WORKER_URL = "./decoder_worker.js?v=rgb-worker-v10";' in app_js
+    )
     assert 'const DEFAULT_TARGET_FPS = configuredNumber("targetFps", 24);' in app_js
-    assert 'const DEFAULT_PREVIEW_MAX_WIDTH = configuredNumber("previewMaxWidth", 832);' in app_js
-    assert 'const MAX_AUTO_PREVIEW_WIDTH = configuredNumber("maxAutoPreviewWidth", 1280);' in app_js
+    assert (
+        'const DEFAULT_PREVIEW_MAX_WIDTH = configuredNumber("previewMaxWidth", 832);'
+        in app_js
+    )
+    assert (
+        'const MAX_AUTO_PREVIEW_WIDTH = configuredNumber("maxAutoPreviewWidth", 1280);'
+        in app_js
+    )
     assert "function previewMaxWidthForSize(baseSize)" in app_js
     assert "const DEFAULT_FRAME_INTERPOLATION_EXP = 1;" in app_js
     assert "const DEFAULT_FRAME_INTERPOLATION_SCALE = 1.0;" in app_js
@@ -182,7 +188,9 @@ def test_realtime_webui_presets_do_not_emit_camera_scripts():
     assert "preview_scale" in app_js
     assert "sr_scale" in app_js
     assert "playbackController.render(now" in app_js
-    assert "playbackController.enqueueDecodedFrames(header, decodedFrames, now)" in app_js
+    assert (
+        "playbackController.enqueueDecodedFrames(header, decodedFrames, now)" in app_js
+    )
     assert (
         'const REACTOR_PRESET_BASE_URL = "https://www.reactor.inc/lingbot-world-fast-v1";'
         in app_js
@@ -203,7 +211,10 @@ def test_realtime_webui_presets_do_not_emit_camera_scripts():
     assert "dragon-ride.jpg" in app_js
     assert 'referenceUrl: "./assets/dragon-ride.jpg"' in app_js
     assert "function createPresetThumbFallback" in app_js
-    assert "thumb.onerror = () => thumb.replaceWith(createPresetThumbFallback(preset))" in app_js
+    assert (
+        "thumb.onerror = () => thumb.replaceWith(createPresetThumbFallback(preset))"
+        in app_js
+    )
     assert "reference image unavailable" in app_js
     assert ".preset-thumb-fallback" in styles_css
     assert (
@@ -287,7 +298,9 @@ def test_realtime_webui_exposes_live_trace_topology_with_dump_trace_id():
     assert 'id="traceVaeEncodeText"' in index_html
     assert 'id="traceDenoiseText"' in index_html
     assert 'id="traceVaeDecodeText"' in index_html
-    assert "const traceTopologyApi = window.SGLangRealtimeTraceTopology || {};" in app_js
+    assert (
+        "const traceTopologyApi = window.SGLangRealtimeTraceTopology || {};" in app_js
+    )
     assert "function traceWebSocketUrl" in app_js
     assert 'message.type === "chunk_stats"' not in app_js
     assert "currentSessionArtifact.trace_id = currentTrace.traceId" in app_js
@@ -308,6 +321,8 @@ def test_realtime_webui_uses_frame_metadata_for_live_business_status():
         repo_root / "python/sglang/multimodal_gen/apps/realtime_webui/app.js"
     ).read_text()
 
-    assert "lastSampledEventId = Number(header.event_id || lastSampledEventId)" in app_js
+    assert (
+        "lastSampledEventId = Number(header.event_id || lastSampledEventId)" in app_js
+    )
     assert "formatBytes(payloadBytes)" in app_js
     assert "playback.sourceFps.toFixed(1)" in app_js
