@@ -35,18 +35,6 @@ from sglang.multimodal_gen.runtime.realtime.coordinator import (
     SessionAssignment,
     WorkerSlot,
 )
-from sglang.multimodal_gen.runtime.realtime.gateway import (
-    AdmissionQueueFull,
-    BoundedAdmissionWaiterGate,
-    BrowserPlaybackAckWindow,
-    GatewayOutputRegistry,
-    OutputBackpressureError,
-    OutputProtocolError,
-    OutputRouteClosed,
-    build_denoiser_url,
-    worker_message_allowed,
-    worker_message_type,
-)
 from sglang.multimodal_gen.runtime.realtime.critical_path_metrics import (
     infer_model_label,
     observe_client_metric_event,
@@ -54,6 +42,24 @@ from sglang.multimodal_gen.runtime.realtime.critical_path_metrics import (
     prometheus_content_type,
     prometheus_latest,
     result_from_exception,
+)
+from sglang.multimodal_gen.runtime.realtime.gateway import (
+    AdmissionQueueFull,
+    BoundedAdmissionWaiterGate,
+    BrowserPlaybackAckWindow,
+    GatewayOutputRegistry,
+    OutputBackpressureError,
+    OutputIncompleteError,
+    OutputProtocolError,
+    OutputRouteClosed,
+    build_denoiser_url,
+    build_gateway_output_url,
+    worker_message_allowed,
+    worker_message_type,
+)
+from sglang.multimodal_gen.runtime.realtime.request_mode import (
+    expected_final_chunk_from_init,
+    init_requests_finite_output,
 )
 from sglang.multimodal_gen.runtime.utils.realtime_trace import (
     compact_client_trace_event,
@@ -108,6 +114,7 @@ def _browser_send_trace_fields(wire: bytes) -> dict[str, Any]:
         "frame_batch_index",
         "num_frame_batches",
         "is_final_frame_batch",
+        "is_final_chunk",
         "event_id",
         "action_version",
         "prompt_version",
@@ -177,9 +184,7 @@ def _observe_gateway_client_metric(
     model: str,
 ) -> int:
     if message.get("type") == "client_metric":
-        return int(
-            observe_client_metric_event(message, service="gateway", model=model)
-        )
+        return int(observe_client_metric_event(message, service="gateway", model=model))
     if message.get("type") != "client_metric_batch":
         return 0
     events = message.get("events")
@@ -329,6 +334,8 @@ def create_app(
     output_queue_depth: int = 64,
     output_enqueue_timeout_s: float = 0.0,
     output_drain_timeout_s: float = 5.0,
+    output_completion_timeout_s: float | None = None,
+    output_ack_network_margin_s: float = 5.0,
     lease_renew_interval_s: float = 10.0,
     release_grace_s: float = 0.5,
     max_admission_waiters: int = 64,
@@ -343,6 +350,22 @@ def create_app(
         raise ValueError("release_grace_s must be non-negative")
     if output_drain_timeout_s <= 0:
         raise ValueError("output_drain_timeout_s must be positive")
+    resolved_completion_timeout_s = (
+        output_drain_timeout_s
+        if output_completion_timeout_s is None
+        else output_completion_timeout_s
+    )
+    if resolved_completion_timeout_s <= 0:
+        raise ValueError("output_completion_timeout_s must be positive")
+    if output_ack_network_margin_s <= 0:
+        raise ValueError("output_ack_network_margin_s must be positive")
+    completion_ack_timeout_s = (
+        resolved_completion_timeout_s + output_ack_network_margin_s
+    )
+    if completion_ack_timeout_s > 3600:
+        raise ValueError(
+            "output completion timeout plus ACK network margin must be at most 3600s"
+        )
     if readiness_coordinator_timeout_s <= 0:
         raise ValueError("readiness_coordinator_timeout_s must be positive")
     if readiness_coordinator_grace_s < 0:
@@ -350,6 +373,11 @@ def create_app(
     registry = GatewayOutputRegistry(
         queue_depth=output_queue_depth,
         enqueue_timeout_s=output_enqueue_timeout_s,
+        completion_timeout_s=resolved_completion_timeout_s,
+    )
+    routed_internal_output_url = build_gateway_output_url(
+        internal_output_url,
+        completion_ack_timeout_s=completion_ack_timeout_s,
     )
     admission_gate = BoundedAdmissionWaiterGate(max_waiters=max_admission_waiters)
 
@@ -509,6 +537,15 @@ def create_app(
         except (WebSocketDisconnect, OutputRouteClosed):
             pass
         except OutputBackpressureError as exc:
+            if route is not None:
+                _log_gateway_trace(
+                    route.trace_id,
+                    "gateway.output_rejected",
+                    session_id=session_id,
+                    generation_id=generation_id,
+                    reject_reason=str(exc),
+                    **route.queue_metrics(),
+                )
             await websocket.close(code=1013, reason=str(exc))
         except (OutputProtocolError, ProtocolViolation) as exc:
             await websocket.close(code=1008, reason=str(exc))
@@ -535,8 +572,52 @@ def create_app(
         route = None
         upstream = None
         tasks: set[asyncio.Task] = set()
-        expected_last_chunk: int | None = None
+        request_mode_seen = False
+        request_mode_ready = asyncio.Event()
         playback_ack_window = BrowserPlaybackAckWindow()
+        session_succeeded = False
+        browser_disconnected = False
+        close_sent = False
+        session_close_code = 1000
+        session_close_reason = "normal"
+        session_outcome = "unknown"
+
+        def output_state_fields() -> dict[str, Any]:
+            return {
+                **(route.queue_metrics() if route is not None else {}),
+                **playback_ack_window.metrics(),
+            }
+
+        async def fail_browser_session(exc: Exception, *, close_code: int) -> None:
+            nonlocal close_sent, session_close_code, session_close_reason
+            nonlocal session_outcome
+            reason = str(exc).splitlines()[0] or type(exc).__name__
+            if route is not None and route.finite_request:
+                route.fail_output(reason)
+            session_close_code = close_code
+            session_close_reason = reason[:123]
+            finite_output = route is not None and route.finite_request
+            session_outcome = "output_incomplete" if finite_output else "failed"
+            _log_gateway_trace(
+                trace_id,
+                (
+                    "gateway.output_incomplete"
+                    if finite_output
+                    else "gateway.session_failed"
+                ),
+                session_id=session_id,
+                generation_id=generation_id,
+                error_type=type(exc).__name__,
+                incomplete_reason=reason,
+                **output_state_fields(),
+            )
+            try:
+                await sender.error(f"realtime gateway error: {reason}")
+                await websocket.close(code=close_code, reason=session_close_reason)
+                close_sent = True
+            except Exception:
+                pass
+
         try:
             admitted_at = time.perf_counter()
             _log_gateway_trace(trace_id, "gateway.ws_accepted", session_id=session_id)
@@ -593,7 +674,7 @@ def create_app(
                 worker_epoch=assignment.denoiser.worker_epoch,
                 vae_url=assignment.vae.endpoint,
                 vae_worker_epoch=assignment.vae.worker_epoch,
-                output_url=internal_output_url,
+                output_url=routed_internal_output_url,
                 output_token=output_token,
                 trace_id=trace_id,
             )
@@ -613,36 +694,43 @@ def create_app(
             )
 
             async def browser_to_worker():
-                nonlocal expected_last_chunk
+                nonlocal request_mode_seen
                 try:
                     while True:
                         payload = await _receive_browser(websocket)
                         control = None
+                        configured_now = False
                         if isinstance(payload, bytes):
                             try:
                                 control = decode_message(payload)
                             except ProtocolViolation:
                                 pass
-                        if (
-                            isinstance(control, dict)
-                            and control.get("type")
-                            in {"client_metric", "client_metric_batch"}
-                        ):
+                        if isinstance(control, dict) and control.get("type") in {
+                            "client_metric",
+                            "client_metric_batch",
+                        }:
                             _observe_gateway_client_metric(control, model=metric_model)
                             continue
                         if (
                             isinstance(control, dict)
-                            and expected_last_chunk is None
+                            and not request_mode_seen
+                            and control.get("type") == "init"
                         ):
-                            if (
-                                isinstance(control, dict)
-                                and control.get("type") == "init"
-                            ):
-                                max_chunks = int(control.get("max_chunks") or 0)
-                                if max_chunks > 0:
-                                    expected_last_chunk = max_chunks - 1
+                            finite_request = init_requests_finite_output(control)
+                            # The route and ACK window must enter reliable mode
+                            # before init can make Denoiser/VAE produce media.
+                            route.configure_request_mode(
+                                finite_request=finite_request,
+                                expected_final_chunk=(
+                                    expected_final_chunk_from_init(control)
+                                ),
+                            )
+                            request_mode_seen = True
+                            configured_now = True
                         if isinstance(payload, bytes):
                             await playback_ack_window.observe_browser_message(payload)
+                        if configured_now:
+                            request_mode_ready.set()
                         await upstream.send(payload)
                 except ConnectionClosedOK:
                     return
@@ -696,8 +784,44 @@ def create_app(
                 send_started = time.perf_counter()
                 codec, scope = _metric_labels_from_wire(wire)
                 send_fields = _browser_send_trace_fields(wire)
-                queue_fields = queue_fields or {}
-                if not await playback_ack_window.allow_output(wire):
+                initial_queue_fields = queue_fields or {}
+
+                def current_queue_fields() -> dict[str, Any]:
+                    route_fields = route.queue_metrics() if route is not None else {}
+                    return {
+                        **initial_queue_fields,
+                        **route_fields,
+                        **playback_ack_window.metrics(),
+                    }
+
+                try:
+                    output_allowed = await playback_ack_window.allow_output(wire)
+                except OutputBackpressureError as exc:
+                    if route is not None:
+                        route.fail_output(str(exc))
+                    observe_stage_seconds(
+                        "websocket_build_write",
+                        time.perf_counter() - send_started,
+                        service="gateway",
+                        model=metric_model,
+                        result=result_from_exception(exc),
+                        codec=codec,
+                        scope=scope,
+                    )
+                    _log_gateway_trace(
+                        trace_id,
+                        "gateway.browser_send_rejected",
+                        session_id=session_id,
+                        generation_id=generation_id,
+                        send_source=send_source,
+                        reject_reason=str(exc),
+                        last_received_chunk=playback_ack_window.last_received_chunk,
+                        last_rendered_chunk=playback_ack_window.last_rendered_chunk,
+                        **current_queue_fields(),
+                        **send_fields,
+                    )
+                    raise
+                if not output_allowed:
                     observe_stage_seconds(
                         "websocket_build_write",
                         time.perf_counter() - send_started,
@@ -716,13 +840,21 @@ def create_app(
                         drop_reason="playback_ack_window",
                         last_received_chunk=playback_ack_window.last_received_chunk,
                         last_rendered_chunk=playback_ack_window.last_rendered_chunk,
-                        **queue_fields,
+                        **current_queue_fields(),
                         **send_fields,
                     )
                     return
                 try:
                     await sender.send(wire)
                 except Exception as exc:
+                    if (
+                        send_source == "vae"
+                        and route is not None
+                        and route.finite_request
+                    ):
+                        route.fail_output(
+                            f"finite browser send failed: {type(exc).__name__}"
+                        )
                     browser_send_ms = round(
                         (time.perf_counter() - send_started) * 1000, 3
                     )
@@ -745,10 +877,12 @@ def create_app(
                         send_ms=browser_send_ms,
                         browser_send_ms=browser_send_ms,
                         error_type=type(exc).__name__,
-                        **queue_fields,
+                        **current_queue_fields(),
                         **send_fields,
                     )
                     raise
+                if send_source == "vae" and route is not None:
+                    route.mark_output_forwarded(wire)
                 browser_send_ms = round((time.perf_counter() - send_started) * 1000, 3)
                 observe_stage_seconds(
                     "websocket_build_write",
@@ -768,7 +902,7 @@ def create_app(
                     send_ok=True,
                     send_ms=browser_send_ms,
                     browser_send_ms=browser_send_ms,
-                    **queue_fields,
+                    **current_queue_fields(),
                     **send_fields,
                 )
 
@@ -777,6 +911,62 @@ def create_app(
                 while True:
                     await asyncio.sleep(lease_renew_interval_s)
                     assignment = await coordinator.renew(assignment)
+
+            async def drain_finite_output() -> None:
+                final_wait = asyncio.create_task(
+                    route.wait_until_final_completion_forwarded(),
+                    name="gateway-final-completion",
+                )
+                watched = {final_wait, browser_input_task, output_task}
+                try:
+                    done, _ = await asyncio.wait(
+                        watched,
+                        timeout=output_drain_timeout_s,
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    if not done:
+                        reason = (
+                            "finite Gateway output timed out before final media "
+                            "completion"
+                        )
+                        route.fail_output(reason)
+                        raise OutputIncompleteError(reason)
+                    for task in done - {final_wait}:
+                        try:
+                            task.result()
+                        except OutputRouteClosed:
+                            if route.final_completion_forwarded:
+                                continue
+                            raise
+                        raise OutputIncompleteError(
+                            "finite Gateway output stopped before final media "
+                            "completion"
+                        )
+                    if final_wait not in done:
+                        if route.final_completion_forwarded:
+                            await final_wait
+                        else:
+                            raise OutputIncompleteError(
+                                "finite Gateway output stopped before final media "
+                                "completion"
+                            )
+                    final_wait.result()
+                    try:
+                        await asyncio.wait_for(
+                            route.join(), timeout=output_drain_timeout_s
+                        )
+                    except TimeoutError:
+                        reason = "finite Gateway output queue drain timed out"
+                        route.fail_output(reason)
+                        raise OutputIncompleteError(reason) from None
+                    if not route.final_completion_forwarded:
+                        raise OutputIncompleteError(
+                            "finite final media completion was not browser-forwarded"
+                        )
+                finally:
+                    if not final_wait.done():
+                        final_wait.cancel()
+                    await asyncio.gather(final_wait, return_exceptions=True)
 
             browser_input_task = asyncio.create_task(
                 browser_to_worker(), name="gateway-browser-input"
@@ -788,35 +978,63 @@ def create_app(
                 output_to_browser(), name="gateway-vae-output"
             )
             lease_task = asyncio.create_task(renew_lease(), name="gateway-lease-renew")
+            request_mode_task = asyncio.create_task(
+                request_mode_ready.wait(), name="gateway-request-mode"
+            )
             tasks = {
                 browser_input_task,
                 worker_control_task,
                 output_task,
                 lease_task,
+                request_mode_task,
             }
             done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            if request_mode_task in done:
+                tasks.remove(request_mode_task)
+                done.remove(request_mode_task)
+                if route.finite_request:
+                    final_completion_task = asyncio.create_task(
+                        route.wait_until_final_completion_forwarded(),
+                        name="gateway-final-completion-signal",
+                    )
+                    tasks.add(final_completion_task)
+                if not done:
+                    done, _ = await asyncio.wait(
+                        tasks, return_when=asyncio.FIRST_COMPLETED
+                    )
             for task in done:
                 exception = task.exception()
                 if exception is not None:
+                    if (
+                        task is output_task
+                        and isinstance(exception, OutputRouteClosed)
+                        and (
+                            not route.finite_request or route.final_completion_forwarded
+                        )
+                    ):
+                        continue
                     raise exception
-            if route is not None and worker_control_task in done:
+            if route.finite_request:
+                await drain_finite_output()
+                session_succeeded = True
+                session_outcome = "finite_complete"
+            elif worker_control_task in done:
                 try:
-                    if expected_last_chunk is not None:
-                        await asyncio.wait_for(
-                            route.wait_until_chunk_completed(expected_last_chunk),
-                            timeout=output_drain_timeout_s,
-                        )
-                    else:
-                        await asyncio.wait_for(
-                            route.wait_until_output_closed(),
-                            timeout=output_drain_timeout_s,
-                        )
+                    await asyncio.wait_for(
+                        route.wait_until_output_closed(),
+                        timeout=output_drain_timeout_s,
+                    )
                     await asyncio.wait_for(route.join(), timeout=output_drain_timeout_s)
                 except TimeoutError:
                     logger.warning(
                         "Gateway media drain timed out for session_id=%s",
                         session_id,
                     )
+                session_succeeded = True
+                session_outcome = "continuous_closed"
+            elif output_task in done:
+                session_succeeded = True
+                session_outcome = "continuous_output_closed"
         except CoordinatorRejected as exc:
             await sender.error(
                 f"realtime admission rejected: {exc.reason}",
@@ -825,19 +1043,38 @@ def create_app(
             )
             close_code = 1013 if exc.reason == "CAPACITY_EXHAUSTED" else 1008
             await websocket.close(code=close_code, reason=exc.reason)
+            close_sent = True
+            session_close_code = close_code
+            session_close_reason = exc.reason
+            session_outcome = "admission_rejected"
         except AdmissionQueueFull as exc:
             await sender.error(f"realtime admission rejected: {exc.reason}")
             await websocket.close(code=1013, reason=exc.reason)
-        except (WebSocketDisconnect, OutputRouteClosed):
-            pass
+            close_sent = True
+            session_close_code = 1013
+            session_close_reason = exc.reason
+            session_outcome = "admission_queue_full"
+        except WebSocketDisconnect as exc:
+            browser_disconnected = True
+            session_close_code = exc.code
+            session_close_reason = "browser_disconnected"
+            session_outcome = "browser_disconnected"
+        except OutputRouteClosed as exc:
+            if route is not None and route.finite_request:
+                if route.final_completion_forwarded:
+                    session_succeeded = True
+                    session_outcome = "finite_complete"
+                else:
+                    await fail_browser_session(exc, close_code=1011)
+            else:
+                session_succeeded = True
+                session_outcome = "continuous_output_closed"
+        except OutputBackpressureError as exc:
+            await fail_browser_session(exc, close_code=1013)
+        except OutputIncompleteError as exc:
+            await fail_browser_session(exc, close_code=1011)
         except Exception as exc:
-            try:
-                await sender.error(
-                    f"realtime gateway error: {str(exc).splitlines()[0]}"
-                )
-                await websocket.close(code=1011, reason="gateway session failed")
-            except Exception:
-                pass
+            await fail_browser_session(exc, close_code=1011)
         finally:
             await _cancel_tasks(tasks)
             if upstream is not None:
@@ -854,13 +1091,44 @@ def create_app(
                         "Coordinator release failed for session_id=%s",
                         assignment.session_id,
                     )
+            if (
+                route is not None
+                and route.finite_request
+                and not route.final_completion_forwarded
+                and session_outcome == "unknown"
+            ):
+                session_outcome = "output_incomplete"
+                session_close_code = 1011
+                session_close_reason = "missing final media completion"
+                route.fail_output(session_close_reason)
+                _log_gateway_trace(
+                    trace_id,
+                    "gateway.output_incomplete",
+                    session_id=session_id,
+                    generation_id=generation_id,
+                    error_type="OutputIncompleteError",
+                    incomplete_reason=session_close_reason,
+                    **output_state_fields(),
+                )
             _log_gateway_trace(
-                trace_id, "gateway.session_closed", session_id=session_id
+                trace_id,
+                "gateway.session_closed",
+                session_id=session_id,
+                generation_id=generation_id,
+                session_succeeded=session_succeeded,
+                session_outcome=session_outcome,
+                close_code=session_close_code,
+                close_reason=session_close_reason,
+                **output_state_fields(),
             )
-            try:
-                await websocket.close(code=1000)
-            except Exception:
-                pass
+            if not close_sent and not browser_disconnected:
+                try:
+                    await websocket.close(
+                        code=session_close_code,
+                        reason=session_close_reason[:123],
+                    )
+                except Exception:
+                    pass
 
     @app.websocket("/backends/lingbot2/v1/realtime_video/generate")
     async def generate_lingbot2(websocket: WebSocket):
@@ -914,8 +1182,27 @@ def _parse_args() -> argparse.Namespace:
         default=os.environ.get("REALTIME_GATEWAY_OUTPUT_URL"),
     )
     parser.add_argument("--output-queue-depth", type=int, default=64)
-    parser.add_argument("--output-enqueue-timeout-s", type=float, default=0.0)
+    parser.add_argument(
+        "--output-enqueue-timeout-s",
+        type=float,
+        default=0.0,
+        help=(
+            "bounded wait for finite media queue capacity; 0 rejects a finite "
+            "batch immediately when the queue is full"
+        ),
+    )
     parser.add_argument("--output-drain-timeout-s", type=float, default=5.0)
+    parser.add_argument(
+        "--output-completion-timeout-s",
+        type=float,
+        help="finite completion barrier timeout (defaults to drain timeout)",
+    )
+    parser.add_argument(
+        "--output-ack-network-margin-s",
+        type=float,
+        default=5.0,
+        help="extra VAE completion-ACK budget beyond the Gateway barrier",
+    )
     parser.add_argument("--lease-renew-interval-s", type=float, default=10.0)
     parser.add_argument("--release-grace-s", type=float, default=0.5)
     parser.add_argument("--max-admission-waiters", type=int, default=64)
@@ -962,6 +1249,8 @@ def main() -> None:
         output_queue_depth=args.output_queue_depth,
         output_enqueue_timeout_s=args.output_enqueue_timeout_s,
         output_drain_timeout_s=args.output_drain_timeout_s,
+        output_completion_timeout_s=args.output_completion_timeout_s,
+        output_ack_network_margin_s=args.output_ack_network_margin_s,
         lease_renew_interval_s=args.lease_renew_interval_s,
         release_grace_s=args.release_grace_s,
         max_admission_waiters=args.max_admission_waiters,

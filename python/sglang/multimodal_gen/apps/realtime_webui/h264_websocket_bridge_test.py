@@ -256,7 +256,7 @@ def test_finite_session_backpressures_instead_of_dropping_tail():
             manager=manager,
             websocket=object(),
             backend="minwm",
-            init={"max_chunks": 1},
+            init={"type": "init", "max_chunks": 1},
         )
         header = {
             "content_type": "application/x-raw-rgb",
@@ -333,6 +333,7 @@ def test_i2v_num_frames_does_not_turn_default_continuous_stream_finite():
         websocket=object(),
         backend="minwm",
         init={
+            "type": "init",
             "generation_mode": "i2v",
             "first_frame": "data:image/png;base64,AA==",
             "num_frames": 17,
@@ -343,6 +344,7 @@ def test_i2v_num_frames_does_not_turn_default_continuous_stream_finite():
         websocket=object(),
         backend="minwm",
         init={
+            "type": "init",
             "generation_mode": "i2v",
             "first_frame": "data:image/png;base64,AA==",
             "num_frames": 17,
@@ -353,12 +355,178 @@ def test_i2v_num_frames_does_not_turn_default_continuous_stream_finite():
         manager=manager,
         websocket=object(),
         backend="minwm",
-        init={"generation_mode": "t2v", "num_frames": 121},
+        init={"type": "init", "generation_mode": "t2v", "num_frames": 121},
+    )
+    inferred_t2v = H264WebSocketSession(
+        manager=manager,
+        websocket=object(),
+        backend="minwm",
+        init={"type": "init", "num_frames": 121},
+    )
+    inferred_i2v = H264WebSocketSession(
+        manager=manager,
+        websocket=object(),
+        backend="minwm",
+        init={"type": "init", "first_frame": b"png", "num_frames": 121},
     )
 
     assert continuous_i2v.finite_request is False
     assert finite_i2v.finite_request is True
     assert finite_t2v.finite_request is True
+    assert inferred_t2v.finite_request is True
+    assert inferred_i2v.finite_request is False
+
+
+def test_finite_upstream_graceful_close_without_final_marker_is_1011():
+    class FakeBrowser:
+        def __init__(self):
+            self.closed = False
+            self.close_code = None
+            self.messages = []
+            self._blocked = asyncio.Event()
+
+        async def send_json(self, payload):
+            self.messages.append(payload)
+
+        async def close(self, *, code=1000, message=b""):
+            del message
+            self.closed = True
+            self.close_code = code
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            await self._blocked.wait()
+            raise StopAsyncIteration
+
+    class FakeUpstream:
+        def __init__(self, close_code):
+            self.close_code = close_code
+            self.closed = False
+            self.sent = []
+
+        async def send_bytes(self, payload):
+            self.sent.append(payload)
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise StopAsyncIteration
+
+    class UpstreamContext:
+        def __init__(self, upstream):
+            self.upstream = upstream
+
+        async def __aenter__(self):
+            return self.upstream
+
+        async def __aexit__(self, *_args):
+            return False
+
+    class FakeClient:
+        def __init__(self, upstream):
+            self.upstream = upstream
+
+        def ws_connect(self, *_args, **_kwargs):
+            return UpstreamContext(self.upstream)
+
+    async def exercise(close_code):
+        app = web.Application()
+        session_key = web.AppKey("session", object)
+        upstream = FakeUpstream(close_code)
+        app[session_key] = FakeClient(upstream)
+        manager = H264WebSocketBridgeManager(
+            app,
+            session_key,
+            lambda backend: f"ws://gateway/{backend}",
+        )
+        browser = FakeBrowser()
+        session = H264WebSocketSession(
+            manager=manager,
+            websocket=browser,
+            backend="minwm",
+            init={"type": "init", "max_chunks": 1},
+        )
+
+        await session.run()
+
+        assert browser.close_code == 1011
+        error = next(
+            message for message in browser.messages if message["type"] == "error"
+        )
+        assert "without final media completion" in error["message"]
+
+    for close_code in (1000, 1001):
+        asyncio.run(exercise(close_code))
+
+
+def test_continuous_upstream_graceful_close_without_final_marker_is_unchanged():
+    class FakeBrowser:
+        closed = False
+
+        def __init__(self):
+            self.messages = []
+            self._blocked = asyncio.Event()
+
+        async def send_json(self, payload):
+            self.messages.append(payload)
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            await self._blocked.wait()
+            raise StopAsyncIteration
+
+    class FakeUpstream:
+        close_code = 1000
+        closed = False
+
+        async def send_bytes(self, _payload):
+            return None
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise StopAsyncIteration
+
+    class UpstreamContext:
+        async def __aenter__(self):
+            return FakeUpstream()
+
+        async def __aexit__(self, *_args):
+            return False
+
+    class FakeClient:
+        def ws_connect(self, *_args, **_kwargs):
+            return UpstreamContext()
+
+    async def exercise():
+        app = web.Application()
+        session_key = web.AppKey("session", object)
+        app[session_key] = FakeClient()
+        manager = H264WebSocketBridgeManager(
+            app,
+            session_key,
+            lambda backend: f"ws://gateway/{backend}",
+        )
+        browser = FakeBrowser()
+        session = H264WebSocketSession(
+            manager=manager,
+            websocket=browser,
+            backend="minwm",
+            init={},
+        )
+
+        await session.run()
+
+        assert browser.closed is False
+        assert not any(message["type"] == "error" for message in browser.messages)
+
+    asyncio.run(exercise())
 
 
 def test_final_completion_is_published_only_after_queue_and_output_flush():
@@ -383,7 +551,7 @@ def test_final_completion_is_published_only_after_queue_and_output_flush():
             manager=manager,
             websocket=websocket,
             backend="minwm",
-            init={"max_chunks": 1},
+            init={"type": "init", "max_chunks": 1},
         )
         await session._receive_binary(
             msgspec.msgpack.encode(
@@ -508,7 +676,7 @@ def test_ffmpeg_timeout_cancels_blocked_output_before_bounded_kill_wait():
             manager=manager,
             websocket=websocket,
             backend="minwm",
-            init={"max_chunks": 1},
+            init={"type": "init", "max_chunks": 1},
         )
         process = HungProcess()
         session.ffmpeg = process
