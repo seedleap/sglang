@@ -1,0 +1,67 @@
+{
+  "destination": {
+    "bucket": "leap-world-model-serving-829115578968-us-east-2",
+    "prefix": "models/lingbot2-denoiser/robbyant-lingbot-world-v2-14b-causal-fast-diffusers/20260814T054118Z-e0650875",
+    "region": "us-east-2"
+  },
+  "model": {
+    "serving_name": "lingbot2-denoiser",
+    "version": "robbyant-lingbot-world-v2-14b-causal-fast-diffusers",
+    "family": "lingbot2",
+    "id": "robbyant-lingbot-world-v2-14b-causal-fast-diffusers",
+    "revision": "59cccf49f2d2dd27418ae7a04b82b10868d455c2",
+    "rollback_release": null
+  },
+  "release_id": "20260814T054118Z-e0650875",
+  "release_manifest_created_at": "2026-08-14T05:41:18Z",
+  "publisher_bundle_sha256": "3685a541f6d43c55794eeb2a9e955fe3cd4caba4da3f96f25329b5be6cfee033",
+  "schema_version": 1,
+  "source": {
+    "artifact_manifest": {
+      "key": "world-model/minwm/serving-artifacts/lingbot2/59cccf49f2d2dd27418ae7a04b82b10868d455c2/manifest.json",
+      "sha256": "e065087570bde5ae45cac0f678239d6da5dafb7c1af3a2a1be0ddd6ea8929fdd",
+      "size": 3994,
+      "version_id": "tqLDe6FpPr8I0jABgrYHfAmJ1kBgRO5y"
+    },
+    "bucket": "leap-world-us-west-2",
+    "bytes": 86071995490,
+    "manifest_revision": "59cccf49f2d2dd27418ae7a04b82b10868d455c2",
+    "object_count": 26,
+    "object_version_ids": {
+      ".gitattributes": "hqpAWfyrgfiHa1smzScAxA4IGr7vCHyl",
+      "README.md": "xrYcE6yl8P5vWPtQeaxl0We0KAziJ_IE",
+      "assets/teaser.png": "rSqPIrRjFxHt0GrQlcxAR_3A1_oOaLoh",
+      "model_index.json": "_2GzOK_NMyjXIIFvzge5S7R3CdVsHCkC",
+      "scheduler/scheduler_config.json": "xvla3FwLTpcd9Fbe6yGWjB0bSNgz2w2o",
+      "text_encoder/config.json": "61GvoncsGWiBAn44WDtzA2wCL9hwbncn",
+      "text_encoder/model-00001-of-00003.safetensors": "w8TW0XJVk8UNdBnRRCbqDfLXOoBBse.y",
+      "text_encoder/model-00002-of-00003.safetensors": "VZOLldC0ROKkx6ge6WtM_Ht4D3Vm3ERu",
+      "text_encoder/model-00003-of-00003.safetensors": "xenwq.EmMFl7c080JUD2IzG2P.5eHdXl",
+      "text_encoder/model.safetensors.index.json": "V4.FNCRxI337cTxftbv3go1e_ts5zp8N",
+      "tokenizer/special_tokens_map.json": "FzIPIPcxrObeGd_BsU91L5rAQoG_bhzO",
+      "tokenizer/spiece.model": "CkUjiN7vdtyoFsn7yk2576LEI1Ce3b1p",
+      "tokenizer/tokenizer.json": "iJ90OZYZ7Qxg1TCurdCOOtwx3Xz2eH6Y",
+      "tokenizer/tokenizer_config.json": "OTRC6JWpi3JVNYNebpdSdXdSKh2tPXvR",
+      "transformer/config.json": "JTkONuBQznatwlvu_bJsSuf.cX8RxzNe",
+      "transformer/diffusion_pytorch_model-00001-of-00008.safetensors": "pTw7kv07VObpiR1VfAR0_rKdxblNCcWg",
+      "transformer/diffusion_pytorch_model-00002-of-00008.safetensors": "B98Zj8DL.hHSMt5lZUPL4hLcBiWfIEQa",
+      "transformer/diffusion_pytorch_model-00003-of-00008.safetensors": "2YHio1h7uN7ANNQR9PTwirS621w8sUHe",
+      "transformer/diffusion_pytorch_model-00004-of-00008.safetensors": "LeV6yJ3WrJ8R2CA_QF8wrXwECkeOzEYm",
+      "transformer/diffusion_pytorch_model-00005-of-00008.safetensors": "dPCrvpn40.B3jx_PQTGDP3BzIy5CwAEF",
+      "transformer/diffusion_pytorch_model-00006-of-00008.safetensors": "t5Qm6URKFsU9ikpiNz.bZT0h3ghAyN7N",
+      "transformer/diffusion_pytorch_model-00007-of-00008.safetensors": "QzDal6jyAmmS_lh8h_dXJ3qPdNlio9uO",
+      "transformer/diffusion_pytorch_model-00008-of-00008.safetensors": "dDZeTXYJRJ_Gyili9P8a20BgxHKXUOXS",
+      "transformer/diffusion_pytorch_model.safetensors.index.json": "8pxnu6vPelpKZz1LVhqSp2kT1CToByTy",
+      "vae/config.json": "K4pKoU6O4AEBktkJTeRInck68mrc.mlN",
+      "vae/diffusion_pytorch_model.safetensors": "qW6PXS2FpSD0CzkqnfjLzJMR4TBovUrJ"
+    },
+    "prefix": "world-model/minwm/serving-artifacts/lingbot2/59cccf49f2d2dd27418ae7a04b82b10868d455c2/model",
+    "ready": {
+      "key": "world-model/minwm/serving-artifacts/lingbot2/59cccf49f2d2dd27418ae7a04b82b10868d455c2/model/_READY",
+      "sha256": "86502d4f03a8ce24330b5f1ec28bfbbc38f3fff7260e8e4967127f4c06764a90",
+      "size": 285,
+      "version_id": "PU5mmMmYpesGZA6Lh8SxaCVec0FcSSFp"
+    },
+    "region": "us-west-2"
+  }
+}

@@ -1,0 +1,255 @@
+{
+  "affinity": {},
+  "annotations": {
+    "logs.loopit.me/bucket": "world-model",
+    "logs.loopit.me/enabled": "true"
+  },
+  "appGroup": "world-studio",
+  "appName": "World Realtime Gateway",
+  "args": [
+    "exec python -m sglang.multimodal_gen.runtime.entrypoints.realtime_gateway_server --host=0.0.0.0 --port=18080 --coordinator-url=http://world-realtime-coordinator:18081 --model-revision=${MODEL_REVISION} --lingbot2-model-revision=${LINGBOT2_MODEL_REVISION} --vae-fingerprint=${VAE_FINGERPRINT} --lingbot2-vae-fingerprint=${LINGBOT2_VAE_FINGERPRINT} --internal-output-url=ws://${POD_IP}:18080/v1/internal/realtime_output --output-queue-depth=64 --output-enqueue-timeout-s=0 --output-drain-timeout-s=90 --lease-renew-interval-s=10 --release-grace-s=0.5 --trace-log-group=${TRACE_LOG_GROUP}"
+  ],
+  "businessLineId": "world-model",
+  "clusterId": "${WORLD_MODEL_CLUSTER_ID}",
+  "command": [
+    "/bin/sh",
+    "-ec"
+  ],
+  "deployType": "deployment",
+  "env": [
+    {
+      "name": "POD_IP",
+      "valueFrom": {
+        "fieldRef": {
+          "fieldPath": "status.podIP"
+        }
+      }
+    },
+    {
+      "name": "MODEL_REVISION",
+      "value": "wan22-5b-stage3-dmd-47-0808-2fb2cfec2a2"
+    },
+    {
+      "name": "VAE_FINGERPRINT",
+      "value": "taew2_2-d053e216"
+    },
+    {
+      "name": "LINGBOT2_MODEL_REVISION",
+      "value": "robbyant/lingbot-world-v2-14b-causal-fast-diffusers"
+    },
+    {
+      "name": "LINGBOT2_VAE_FINGERPRINT",
+      "value": "taew2_1-d26151e7"
+    },
+    {
+      "name": "TRACE_LOG_GROUP",
+      "value": "/aws/eks/world-model/realtime-traces"
+    },
+    {
+      "name": "AWS_REGION",
+      "value": "us-east-2"
+    },
+    {
+      "name": "AWS_DEFAULT_REGION",
+      "value": "us-east-2"
+    },
+    {
+      "name": "OTEL_SERVICE_NAME",
+      "value": "world-realtime-gateway"
+    },
+    {
+      "name": "OTEL_EXPORTER_OTLP_ENDPOINT",
+      "value": "http://adot-collector.monitoring:4317"
+    }
+  ],
+  "gitRepo": "git@github.com:seedleap/sglang.git",
+  "image": "${WORLD_REALTIME_GATEWAY_IMAGE_DIGEST}",
+  "initContainers": [],
+  "jenkinsJob": "loopit/world-model/world-realtime-gateway",
+  "labels": {
+    "app.kubernetes.io/name": "world-realtime-gateway",
+    "world-model.loopit.me/application-group": "world-studio",
+    "world-model.loopit.me/service": "world-realtime-gateway"
+  },
+  "livenessProbe": {
+    "enabled": true,
+    "failureThreshold": 6,
+    "path": "/healthz",
+    "periodSeconds": 15,
+    "port": 18080,
+    "timeoutSeconds": 5,
+    "type": "httpGet"
+  },
+  "name": "world-realtime-gateway",
+  "namespace": "world-model",
+  "networkPolicy": {
+    "defaultDeny": true,
+    "egress": [
+      {
+        "ports": [
+          {
+            "port": 53,
+            "protocol": "UDP"
+          }
+        ],
+        "to": [
+          {
+            "namespaceSelector": {
+              "matchLabels": {
+                "kubernetes.io/metadata.name": "kube-system"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "ports": [
+          {
+            "port": 53,
+            "protocol": "TCP"
+          }
+        ],
+        "to": [
+          {
+            "namespaceSelector": {
+              "matchLabels": {
+                "kubernetes.io/metadata.name": "kube-system"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "ports": [
+          {
+            "port": 18081,
+            "protocol": "TCP"
+          }
+        ],
+        "to": [
+          {
+            "podSelector": {
+              "matchLabels": {
+                "app.kubernetes.io/name": "world-realtime-coordinator"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "ports": [
+          {
+            "port": 30000,
+            "protocol": "TCP"
+          }
+        ],
+        "to": [
+          {
+            "podSelector": {
+              "matchLabels": {
+                "app.kubernetes.io/name": "minwm-denoiser"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "ports": [
+          {
+            "port": 30000,
+            "protocol": "TCP"
+          }
+        ],
+        "to": [
+          {
+            "podSelector": {
+              "matchLabels": {
+                "app.kubernetes.io/name": "lingbot2-denoiser"
+              }
+            }
+          }
+        ]
+      }
+    ],
+    "enabled": true,
+    "ingress": [
+      {
+        "from": [
+          {
+            "podSelector": {
+              "matchLabels": {
+                "app.kubernetes.io/name": "world-studio-webui"
+              }
+            }
+          }
+        ],
+        "ports": [
+          {
+            "port": 18080,
+            "protocol": "TCP"
+          }
+        ]
+      }
+    ]
+  },
+  "nodeSelector": {},
+  "podDisruptionBudget": {
+    "minAvailable": 1
+  },
+  "readinessProbe": {
+    "enabled": true,
+    "failureThreshold": 6,
+    "path": "/readyz",
+    "periodSeconds": 5,
+    "port": 18080,
+    "timeoutSeconds": 5,
+    "type": "httpGet"
+  },
+  "replicas": 2,
+  "resources": {
+    "limits": {
+      "cpu": "2",
+      "memory": "2Gi"
+    },
+    "requests": {
+      "cpu": "500m",
+      "memory": "512Mi"
+    }
+  },
+  "serviceAccountName": "wm-gateway",
+  "serviceSpec": {
+    "headless": false,
+    "ports": [
+      {
+        "name": "http",
+        "port": 18080,
+        "targetPort": 18080
+      }
+    ]
+  },
+  "startupProbe": {
+    "enabled": true,
+    "failureThreshold": 30,
+    "path": "/healthz",
+    "periodSeconds": 2,
+    "port": 18080,
+    "timeoutSeconds": 5,
+    "type": "httpGet"
+  },
+  "terminationGracePeriodSeconds": 30,
+  "tolerations": [],
+  "topologySpreadConstraints": [
+    {
+      "labelSelector": {
+        "matchLabels": {
+          "app.kubernetes.io/name": "world-realtime-gateway"
+        }
+      },
+      "maxSkew": 1,
+      "topologyKey": "topology.kubernetes.io/zone",
+      "whenUnsatisfiable": "ScheduleAnyway"
+    }
+  ],
+  "volumeMounts": [],
+  "volumes": []
+}

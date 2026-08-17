@@ -1,0 +1,331 @@
+{
+  "executionReady": false,
+  "frozenSource": {
+    "branch": "codex/wm09-sglang-platform-config-20260814",
+    "gitSha": "43c63ff4d0c456ae6a8496e12fbb369b5c321fe8"
+  },
+  "hardGate": "all required inputs must be resolved before deployment render",
+  "productionBaseline": {
+    "branch": "codex/minwm-lingbot2-dual-webui-opt-20260812",
+    "gitSha": "d8019542103c83047997cf6dc2e7014cba8565e3"
+  },
+  "requiredInputs": {
+    "clusterRegistration": {
+      "clusterName": "world-model",
+      "requiredField": "clusterId",
+      "state": "missing"
+    },
+    "imageBuildCallbacks": [
+      {
+        "deploymentImageSource": "callback.imageDigest",
+        "requiredAuditTag": "829115578968.dkr.ecr.us-east-2.amazonaws.com/leap-world/minwm-realtime:world-realtime-coordinator-43c63ff4d0c456ae6a8496e12fbb369b5c321fe8",
+        "requiredBranch": "codex/wm09-sglang-platform-config-20260814",
+        "requiredBuildEvidence": [
+          "buildId",
+          "buildUrl"
+        ],
+        "requiredImageDigestPattern": "sha256:<64-lowercase-hex>",
+        "requiredJenkinsJob": "loopit/world-model/world-realtime-coordinator",
+        "requiredOperator": "jenkins",
+        "requiredStatus": "success",
+        "serviceName": "world-realtime-coordinator",
+        "state": "missing"
+      },
+      {
+        "deploymentImageSource": "callback.imageDigest",
+        "requiredAuditTag": "829115578968.dkr.ecr.us-east-2.amazonaws.com/leap-world/minwm-realtime:minwm-vae-43c63ff4d0c456ae6a8496e12fbb369b5c321fe8",
+        "requiredBranch": "codex/wm09-sglang-platform-config-20260814",
+        "requiredBuildEvidence": [
+          "buildId",
+          "buildUrl"
+        ],
+        "requiredImageDigestPattern": "sha256:<64-lowercase-hex>",
+        "requiredJenkinsJob": "loopit/world-model/minwm-vae",
+        "requiredOperator": "jenkins",
+        "requiredStatus": "success",
+        "serviceName": "minwm-vae",
+        "state": "missing"
+      },
+      {
+        "deploymentImageSource": "callback.imageDigest",
+        "requiredAuditTag": "829115578968.dkr.ecr.us-east-2.amazonaws.com/leap-world/minwm-realtime:lingbot2-vae-43c63ff4d0c456ae6a8496e12fbb369b5c321fe8",
+        "requiredBranch": "codex/wm09-sglang-platform-config-20260814",
+        "requiredBuildEvidence": [
+          "buildId",
+          "buildUrl"
+        ],
+        "requiredImageDigestPattern": "sha256:<64-lowercase-hex>",
+        "requiredJenkinsJob": "loopit/world-model/lingbot2-vae",
+        "requiredOperator": "jenkins",
+        "requiredStatus": "success",
+        "serviceName": "lingbot2-vae",
+        "state": "missing"
+      },
+      {
+        "deploymentImageSource": "callback.imageDigest",
+        "requiredAuditTag": "829115578968.dkr.ecr.us-east-2.amazonaws.com/leap-world/minwm-realtime:minwm-denoiser-43c63ff4d0c456ae6a8496e12fbb369b5c321fe8",
+        "requiredBranch": "codex/wm09-sglang-platform-config-20260814",
+        "requiredBuildEvidence": [
+          "buildId",
+          "buildUrl"
+        ],
+        "requiredImageDigestPattern": "sha256:<64-lowercase-hex>",
+        "requiredJenkinsJob": "loopit/world-model/minwm-denoiser",
+        "requiredOperator": "jenkins",
+        "requiredStatus": "success",
+        "serviceName": "minwm-denoiser",
+        "state": "missing"
+      },
+      {
+        "deploymentImageSource": "callback.imageDigest",
+        "requiredAuditTag": "829115578968.dkr.ecr.us-east-2.amazonaws.com/leap-world/minwm-realtime:lingbot2-denoiser-43c63ff4d0c456ae6a8496e12fbb369b5c321fe8",
+        "requiredBranch": "codex/wm09-sglang-platform-config-20260814",
+        "requiredBuildEvidence": [
+          "buildId",
+          "buildUrl"
+        ],
+        "requiredImageDigestPattern": "sha256:<64-lowercase-hex>",
+        "requiredJenkinsJob": "loopit/world-model/lingbot2-denoiser",
+        "requiredOperator": "jenkins",
+        "requiredStatus": "success",
+        "serviceName": "lingbot2-denoiser",
+        "state": "missing"
+      },
+      {
+        "deploymentImageSource": "callback.imageDigest",
+        "requiredAuditTag": "829115578968.dkr.ecr.us-east-2.amazonaws.com/leap-world/minwm-realtime:world-realtime-gateway-43c63ff4d0c456ae6a8496e12fbb369b5c321fe8",
+        "requiredBranch": "codex/wm09-sglang-platform-config-20260814",
+        "requiredBuildEvidence": [
+          "buildId",
+          "buildUrl"
+        ],
+        "requiredImageDigestPattern": "sha256:<64-lowercase-hex>",
+        "requiredJenkinsJob": "loopit/world-model/world-realtime-gateway",
+        "requiredOperator": "jenkins",
+        "requiredStatus": "success",
+        "serviceName": "world-realtime-gateway",
+        "state": "missing"
+      },
+      {
+        "deploymentImageSource": "callback.imageDigest",
+        "requiredAuditTag": "829115578968.dkr.ecr.us-east-2.amazonaws.com/leap-world/minwm-realtime:world-studio-webui-43c63ff4d0c456ae6a8496e12fbb369b5c321fe8",
+        "requiredBranch": "codex/wm09-sglang-platform-config-20260814",
+        "requiredBuildEvidence": [
+          "buildId",
+          "buildUrl"
+        ],
+        "requiredImageDigestPattern": "sha256:<64-lowercase-hex>",
+        "requiredJenkinsJob": "loopit/world-model/world-studio-webui",
+        "requiredOperator": "jenkins",
+        "requiredStatus": "success",
+        "serviceName": "world-studio-webui",
+        "state": "missing"
+      },
+      {
+        "deploymentImageSource": "callback.imageDigest",
+        "requiredAuditTag": "829115578968.dkr.ecr.us-east-2.amazonaws.com/leap-world/minwm-realtime:model-artifact-publish-43c63ff4d0c456ae6a8496e12fbb369b5c321fe8",
+        "requiredBranch": "codex/wm09-sglang-platform-config-20260814",
+        "requiredBuildEvidence": [
+          "buildId",
+          "buildUrl"
+        ],
+        "requiredImageDigestPattern": "sha256:<64-lowercase-hex>",
+        "requiredJenkinsJob": "loopit/world-model/model-artifact-publish",
+        "requiredOperator": "jenkins",
+        "requiredStatus": "success",
+        "serviceName": "world-model-artifact-publisher",
+        "state": "missing"
+      }
+    ],
+    "networkPolicyPeers": [
+      {
+        "destinationId": "dynamodb-us-east-2",
+        "direction": "egress",
+        "port": 443,
+        "protocol": "TCP",
+        "requiredTypedPeer": "podSelector+namespaceSelector or approved ipBlock",
+        "serviceName": "world-realtime-coordinator",
+        "state": "missing"
+      },
+      {
+        "destinationId": "adot-collector-monitoring",
+        "direction": "egress",
+        "port": 4317,
+        "protocol": "TCP",
+        "requiredTypedPeer": "podSelector+namespaceSelector or approved ipBlock",
+        "serviceName": "world-realtime-coordinator",
+        "state": "missing"
+      },
+      {
+        "destinationId": "adot-collector-monitoring",
+        "direction": "egress",
+        "port": 4317,
+        "protocol": "TCP",
+        "requiredTypedPeer": "podSelector+namespaceSelector or approved ipBlock",
+        "serviceName": "minwm-vae",
+        "state": "missing"
+      },
+      {
+        "destinationId": "adot-collector-monitoring",
+        "direction": "egress",
+        "port": 4317,
+        "protocol": "TCP",
+        "requiredTypedPeer": "podSelector+namespaceSelector or approved ipBlock",
+        "serviceName": "lingbot2-vae",
+        "state": "missing"
+      },
+      {
+        "destinationId": "s3-us-east-2",
+        "direction": "egress",
+        "port": 443,
+        "protocol": "TCP",
+        "requiredTypedPeer": "podSelector+namespaceSelector or approved ipBlock",
+        "serviceName": "minwm-denoiser",
+        "state": "missing"
+      },
+      {
+        "destinationId": "adot-collector-monitoring",
+        "direction": "egress",
+        "port": 4317,
+        "protocol": "TCP",
+        "requiredTypedPeer": "podSelector+namespaceSelector or approved ipBlock",
+        "serviceName": "minwm-denoiser",
+        "state": "missing"
+      },
+      {
+        "destinationId": "s3-us-east-2",
+        "direction": "egress",
+        "port": 443,
+        "protocol": "TCP",
+        "requiredTypedPeer": "podSelector+namespaceSelector or approved ipBlock",
+        "serviceName": "lingbot2-denoiser",
+        "state": "missing"
+      },
+      {
+        "destinationId": "adot-collector-monitoring",
+        "direction": "egress",
+        "port": 4317,
+        "protocol": "TCP",
+        "requiredTypedPeer": "podSelector+namespaceSelector or approved ipBlock",
+        "serviceName": "lingbot2-denoiser",
+        "state": "missing"
+      },
+      {
+        "destinationId": "istio-ingressgateway",
+        "direction": "ingress",
+        "port": 18080,
+        "protocol": "TCP",
+        "requiredTypedPeer": "podSelector+namespaceSelector or approved ipBlock",
+        "serviceName": "world-realtime-gateway",
+        "state": "missing"
+      },
+      {
+        "destinationId": "cloudwatch-logs-us-east-2",
+        "direction": "egress",
+        "port": 443,
+        "protocol": "TCP",
+        "requiredTypedPeer": "podSelector+namespaceSelector or approved ipBlock",
+        "serviceName": "world-realtime-gateway",
+        "state": "missing"
+      },
+      {
+        "destinationId": "adot-collector-monitoring",
+        "direction": "egress",
+        "port": 4317,
+        "protocol": "TCP",
+        "requiredTypedPeer": "podSelector+namespaceSelector or approved ipBlock",
+        "serviceName": "world-realtime-gateway",
+        "state": "missing"
+      },
+      {
+        "destinationId": "istio-ingressgateway",
+        "direction": "ingress",
+        "port": 18080,
+        "protocol": "TCP",
+        "requiredTypedPeer": "podSelector+namespaceSelector or approved ipBlock",
+        "serviceName": "world-studio-webui",
+        "state": "missing"
+      },
+      {
+        "destinationId": "happyoyster-api",
+        "direction": "egress",
+        "port": 443,
+        "protocol": "TCP",
+        "requiredTypedPeer": "podSelector+namespaceSelector or approved ipBlock",
+        "serviceName": "world-studio-webui",
+        "state": "missing"
+      },
+      {
+        "destinationId": "google-vertex-ai",
+        "direction": "egress",
+        "port": 443,
+        "protocol": "TCP",
+        "requiredTypedPeer": "podSelector+namespaceSelector or approved ipBlock",
+        "serviceName": "world-studio-webui",
+        "state": "missing"
+      },
+      {
+        "destinationId": "s3-us-west-2-source",
+        "direction": "egress",
+        "port": 443,
+        "protocol": "TCP",
+        "requiredTypedPeer": "podSelector+namespaceSelector or approved ipBlock",
+        "serviceName": "world-model-artifact-publisher",
+        "state": "missing"
+      },
+      {
+        "destinationId": "s3-us-east-2-destination",
+        "direction": "egress",
+        "port": 443,
+        "protocol": "TCP",
+        "requiredTypedPeer": "podSelector+namespaceSelector or approved ipBlock",
+        "serviceName": "world-model-artifact-publisher",
+        "state": "missing"
+      }
+    ],
+    "publisherExecutionBundle": {
+      "reason": "the checked-in 26-object LingBot2 release spec predates the 23-object runtime allowlist and complete publisher bundle contract",
+      "requiredApprovalFields": [
+        "releaseSpecSha256",
+        "publisherBundleSha256",
+        "executionBundleSha256"
+      ],
+      "requiredExecuteArgs": [
+        "--confirm-release-id",
+        "--confirm-release-spec-sha256",
+        "--confirm-execution-bundle-sha256"
+      ],
+      "state": "missing"
+    },
+    "wm08BuildContract": {
+      "currentFrozenBranch": "codex/minwm-lingbot2-dual-webui-opt-20260812",
+      "currentFrozenGitSha": "d8019542103c83047997cf6dc2e7014cba8565e3",
+      "reason": "the production baseline does not contain the WM-09 release spec, CRT downloader compatibility, or publisher verifier",
+      "requiredBranch": "codex/wm09-sglang-platform-config-20260814",
+      "requiredCallbackDigestField": "imageDigest",
+      "requiredGitSha": "43c63ff4d0c456ae6a8496e12fbb369b5c321fe8",
+      "requiredTagFormat": "<service-tag-prefix>-<full-40-character-git-sha>",
+      "runtimeImageFormat": "<ecr-repository>@<callback.imageDigest>",
+      "state": "missing"
+    }
+  },
+  "resolvedInputs": {
+    "lingbot2Release": {
+      "bytes": 86068529220,
+      "controlRevisionField": "revision",
+      "manifestSha256": "6a790fd04daecfa66bede8cc71f18ed96dda617bc74cecda51e5ce72c4cf19af",
+      "objectCount": 23,
+      "releaseId": "20260814T054118Z-e0650875"
+    },
+    "s3MigrationBundle": {
+      "controlBytes": 8656,
+      "controlObjectCount": 6,
+      "payloadBytes": 110277729372,
+      "payloadObjectCount": 41,
+      "sha256": "944d828d3eb4c3db52f761847046c2910b8243a23579553fe6bee2defa8b29c7",
+      "totalBytes": 110277738028,
+      "totalObjectCount": 47
+    }
+  },
+  "schemaVersion": 1
+}
