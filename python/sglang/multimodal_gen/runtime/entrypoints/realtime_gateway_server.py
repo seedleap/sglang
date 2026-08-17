@@ -548,6 +548,16 @@ def create_app(
                 )
             await websocket.close(code=1013, reason=str(exc))
         except (OutputProtocolError, ProtocolViolation) as exc:
+            if route is not None:
+                _log_gateway_trace(
+                    route.trace_id,
+                    "gateway.output_rejected",
+                    session_id=session_id,
+                    generation_id=generation_id,
+                    reject_kind="protocol",
+                    reject_reason=str(exc),
+                    **route.queue_metrics(),
+                )
             await websocket.close(code=1008, reason=str(exc))
         finally:
             if route is not None:

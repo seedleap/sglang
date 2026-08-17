@@ -385,6 +385,7 @@ class GatewayOutputRoute:
     final_completion_forwarded: bool = field(default=False, init=False)
     final_completion_chunk: int | None = field(default=None, init=False)
     failure_reason: str | None = field(default=None, init=False)
+    failure_kind: str = field(default="", init=False)
     bound: bool = field(default=False, init=False)
     ever_bound: bool = field(default=False, init=False)
     closed: bool = field(default=False, init=False)
@@ -415,9 +416,10 @@ class GatewayOutputRoute:
         self.finite_request = finite_request
         self.expected_final_chunk = expected_final_chunk if finite_request else None
 
-    def fail_output(self, reason: str) -> None:
+    def fail_output(self, reason: str, *, kind: str = "backpressure") -> None:
         if self.failure_reason is None:
             self.failure_reason = reason
+            self.failure_kind = kind
             self._output_failed.set()
         self._output_state_changed.set()
         self._queue_ready.set()
@@ -425,6 +427,8 @@ class GatewayOutputRoute:
 
     def _raise_if_failed(self) -> None:
         if self.failure_reason is not None:
+            if self.failure_kind == "protocol":
+                raise OutputProtocolError(self.failure_reason)
             raise OutputBackpressureError(self.failure_reason)
 
     def bind_output(self) -> None:
@@ -475,6 +479,10 @@ class GatewayOutputRoute:
             if event.is_set():
                 return
             self._raise_if_failed()
+            if self.finite_request and self.closed:
+                raise OutputIncompleteError(
+                    f"Gateway output route closed before {description} was forwarded"
+                )
             if self.finite_request and self.ever_bound and not self.bound:
                 raise OutputIncompleteError(
                     f"Gateway output closed before {description} was forwarded"
@@ -483,6 +491,8 @@ class GatewayOutputRoute:
             if event.is_set():
                 return
             self._raise_if_failed()
+            if self.finite_request and self.closed:
+                continue
             if self.finite_request and self.ever_bound and not self.bound:
                 continue
             await self._output_state_changed.wait()
@@ -523,11 +533,11 @@ class GatewayOutputRoute:
                 raise OutputProtocolError("duplicate final media completion")
             if self.finite_request and self.expected_final_chunk is not None:
                 if is_final_chunk and chunk_index != self.expected_final_chunk:
-                    raise OutputProtocolError(
+                    self._reject_completion_protocol(
                         "final media completion has unexpected chunk index"
                     )
                 if chunk_index == self.expected_final_chunk and not is_final_chunk:
-                    raise OutputProtocolError(
+                    self._reject_completion_protocol(
                         "expected final chunk lacks final media marker"
                     )
             if self.finite_request and (
@@ -740,8 +750,14 @@ class GatewayOutputRoute:
                 else -1
             ),
             "gateway_output_failed": self.failure_reason is not None,
+            "gateway_output_failure_kind": self.failure_kind,
             "gateway_output_failure_reason": self.failure_reason or "",
         }
+
+    def _reject_completion_protocol(self, reason: str) -> None:
+        self.rejected_completions += 1
+        self.fail_output(reason, kind="protocol")
+        raise OutputProtocolError(reason)
 
     async def get_output(self) -> _QueuedOutput:
         while True:

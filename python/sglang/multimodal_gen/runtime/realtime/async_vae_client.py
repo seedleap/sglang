@@ -185,6 +185,9 @@ class GatewayOutputClient:
                     raw_response = await asyncio.wait_for(
                         self._ws.recv(), self.completion_ack_timeout_s
                     )
+                except asyncio.CancelledError:
+                    await asyncio.shield(self._invalidate_connection())
+                    raise
                 except TimeoutError:
                     await self._invalidate_connection()
                     raise RemoteVAEError(
