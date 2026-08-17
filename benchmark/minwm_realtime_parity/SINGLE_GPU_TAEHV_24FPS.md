@@ -128,8 +128,10 @@ kubectl --context <context> apply --dry-run=server -f <generated-yaml>
   exit nonzero after preserving results when that performance gate fails.
   The runner copies a non-empty local `RUN_COMPLETE` payload to the remote
   `SUCCESS` key only after all artifacts have been archived; it does not rely
-  on S3 CSI metadata-only `touch` semantics. Artifact archival recursively
-  copies file contents without preserving POSIX metadata, which Mountpoint S3
-  does not support. Recursive archival is attempted at most once; if it or a
-  later completion step fails, cleanup only publishes the non-empty `FAILED`
-  marker and never retries a partially uploaded tree.
+  on S3 CSI metadata-only `touch` semantics. Artifact archival creates
+  directories with `mkdir` and copies regular files individually without
+  requesting POSIX metadata preservation; directory trees are never passed to
+  `cp` because Mountpoint S3 rejects its permission and timestamp finalization.
+  Recursive archival is attempted at most once; if it or a later completion
+  step fails, cleanup only publishes the non-empty `FAILED` marker and never
+  retries a partially uploaded tree.

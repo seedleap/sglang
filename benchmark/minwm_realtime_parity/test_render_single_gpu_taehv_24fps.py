@@ -41,6 +41,141 @@ def _nsys_sqlite_analyzer() -> str:
     return runner.split(marker, 1)[1].split("\nPY\nfi", 1)[0]
 
 
+def _copy_tree_contents_function() -> str:
+    runner = RUNNER_PATH.read_text()
+    start = runner.index("copy_tree_contents() {")
+    end = runner.index("\n}\n\narchive_results()", start) + len("\n}")
+    return runner[start:end]
+
+
+def _run_copy_tree_contents(
+    tmp_path: Path,
+    source: Path,
+    destination: Path,
+    *,
+    command_override: str = "",
+) -> subprocess.CompletedProcess[str]:
+    local_root = tmp_path / "local-root"
+    local_root.mkdir(exist_ok=True)
+    cp_compat = ""
+    if sys.platform == "darwin":
+        cp_compat = """
+cp() {
+  local args=()
+  local arg=""
+  for arg in "$@"; do
+    if [[ "${arg}" != "--no-preserve=all" ]]; then
+      args+=("${arg}")
+    fi
+  done
+  command cp "${args[@]}"
+}
+"""
+    script = f"""
+set -u
+LOCAL_ROOT="$1"
+{_copy_tree_contents_function()}
+{cp_compat}
+{command_override}
+set +e
+copy_tree_contents "$2" "$3"
+status=$?
+exit "${{status}}"
+"""
+    return subprocess.run(
+        [
+            "bash",
+            "-c",
+            script,
+            "copy-tree-test",
+            str(local_root),
+            str(source),
+            str(destination),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_copy_tree_contents_copies_nested_and_hidden_regular_files(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    destination = tmp_path / "destination"
+    (source / "nested").mkdir(parents=True)
+    destination.mkdir()
+    (source / "nested" / "payload").write_bytes(b"nested-payload")
+    (source / ".hidden").write_bytes(b"hidden-payload")
+
+    result = _run_copy_tree_contents(tmp_path, source, destination)
+
+    assert result.returncode == 0, result.stderr
+    assert (destination / "nested" / "payload").read_bytes() == b"nested-payload"
+    assert (destination / ".hidden").read_bytes() == b"hidden-payload"
+
+
+def test_copy_tree_contents_rejects_special_paths_before_copy(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    destination = tmp_path / "destination"
+    source.mkdir()
+    destination.mkdir()
+    (source / "payload").write_bytes(b"payload")
+    (source / "link").symlink_to(source / "payload")
+    os.mkfifo(source / "fifo")
+
+    result = _run_copy_tree_contents(tmp_path, source, destination)
+
+    assert result.returncode != 0
+    assert "unsupported result path type" in result.stderr
+    assert list(destination.iterdir()) == []
+
+
+def test_copy_tree_contents_refuses_to_overwrite(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    destination = tmp_path / "destination"
+    (source / "nested").mkdir(parents=True)
+    (destination / "nested").mkdir(parents=True)
+    (source / "nested" / "payload").write_bytes(b"new")
+    target = destination / "nested" / "payload"
+    target.write_bytes(b"old")
+
+    result = _run_copy_tree_contents(tmp_path, source, destination)
+
+    assert result.returncode != 0
+    assert "refusing to overwrite result path" in result.stderr
+    assert target.read_bytes() == b"old"
+
+
+@pytest.mark.parametrize(
+    "command_override",
+    (
+        "find() { return 23; }",
+        'mkdir() { if [[ "$*" == *nested* ]]; then return 17; fi; command mkdir "$@"; }',
+        "cp() { return 19; }",
+    ),
+)
+def test_copy_tree_contents_propagates_command_failures_with_errexit_disabled(
+    tmp_path: Path,
+    command_override: str,
+) -> None:
+    source = tmp_path / "source"
+    destination = tmp_path / "destination"
+    source.mkdir()
+    destination.mkdir()
+    (source / "payload").write_bytes(b"payload")
+    (source / "nested").mkdir()
+
+    result = _run_copy_tree_contents(
+        tmp_path,
+        source,
+        destination,
+        command_override=command_override,
+    )
+
+    assert result.returncode != 0
+
+
 def _write_nsys_sqlite_fixture(
     path: Path,
     *,
@@ -285,7 +420,13 @@ def test_render_preserves_single_gpu_hardware_and_profile_contract(
     assert "export SGLANG_DIFFUSION_SYNC_STAGE_PROFILING=0" in runner
     assert "PERFORMANCE_PASS" in runner and "PERFORMANCE_FAIL" in runner
     assert '> "${LOCAL_RESULTS}/RUN_COMPLETE"' in runner
-    assert 'cp -R --no-preserve=all "${source}/." "${destination}/"' in runner
+    assert "cp -R --no-preserve=all" not in runner
+    assert 'find "${source}" -mindepth 1 -print0 > "${entry_list}"' in runner
+    assert 'entry_list="$(mktemp "${LOCAL_ROOT}/copy-tree.XXXXXX")"' in runner
+    assert "while IFS= read -r -d '' path; do" in runner
+    assert 'mkdir -p -- "${target}"' in runner
+    assert '( -e "${target}" || -L "${target}" )' in runner
+    assert 'cp --no-preserve=all -- "${path}" "${target}"' in runner
     assert 'cp -a "${LOCAL_RESULTS}/." "${REMOTE_RESULTS}/"' not in runner
     assert "archive_attempted=0" in runner
     assert "archive_attempted=1" in runner

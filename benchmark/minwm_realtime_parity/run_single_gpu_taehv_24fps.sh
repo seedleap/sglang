@@ -118,7 +118,64 @@ stop_server() {
 copy_tree_contents() {
   local source="$1"
   local destination="$2"
-  cp -R --no-preserve=all "${source}/." "${destination}/"
+  local entry_list=""
+  local path=""
+  local relative=""
+  local target=""
+  local rc=0
+
+  [[ ! -L "${source}" && -d "${source}" ]] || return 1
+  mkdir -p -- "${destination}" || return $?
+  entry_list="$(mktemp "${LOCAL_ROOT}/copy-tree.XXXXXX")" || return $?
+  if find "${source}" -mindepth 1 -print0 > "${entry_list}"; then
+    :
+  else
+    rc=$?
+    rm -f -- "${entry_list}"
+    return "${rc}"
+  fi
+
+  while IFS= read -r -d '' path; do
+    relative="${path#"${source}/"}"
+    target="${destination}/${relative}"
+    if [[ -L "${path}" || ( ! -d "${path}" && ! -f "${path}" ) ]]; then
+      printf 'unsupported result path type: %s\n' "${path}" >&2
+      rc=1
+    elif [[ -f "${path}" && ( -e "${target}" || -L "${target}" ) ]]; then
+      printf 'refusing to overwrite result path: %s\n' "${target}" >&2
+      rc=1
+    elif [[ -d "${path}" && ( -L "${target}" || ( -e "${target}" && ! -d "${target}" ) ) ]]; then
+      printf 'invalid result directory target: %s\n' "${target}" >&2
+      rc=1
+    fi
+  done < "${entry_list}"
+  if (( rc != 0 )); then
+    rm -f -- "${entry_list}"
+    return "${rc}"
+  fi
+
+  while IFS= read -r -d '' path; do
+    relative="${path#"${source}/"}"
+    target="${destination}/${relative}"
+    if [[ ! -L "${path}" && -d "${path}" ]]; then
+      mkdir -p -- "${target}" || rc=1
+    fi
+  done < "${entry_list}"
+
+  while IFS= read -r -d '' path; do
+    relative="${path#"${source}/"}"
+    target="${destination}/${relative}"
+    if [[ ! -L "${path}" && -f "${path}" ]]; then
+      if [[ -e "${target}" || -L "${target}" ]]; then
+        printf 'refusing to overwrite result path: %s\n' "${target}" >&2
+        rc=1
+      else
+        cp --no-preserve=all -- "${path}" "${target}" || rc=1
+      fi
+    fi
+  done < "${entry_list}"
+  rm -f -- "${entry_list}" || rc=1
+  return "${rc}"
 }
 
 archive_results() {
