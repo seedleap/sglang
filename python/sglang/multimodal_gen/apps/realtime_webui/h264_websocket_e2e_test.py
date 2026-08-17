@@ -91,6 +91,8 @@ async def _exercise_backend(port: int, backend: str) -> None:
     media = bytearray()
     saw_connected = False
     saw_media_batch = False
+    saw_encode_timing = False
+    saw_payload_timing = False
     first_media_chunk = None
     async with ClientSession() as client:
         async with client.ws_connect(
@@ -141,6 +143,13 @@ async def _exercise_backend(port: int, backend: str) -> None:
                         saw_media_batch = True
                         if first_media_chunk is None:
                             first_media_chunk = int(event.get("chunk_index") or 0)
+                    if event.get("type") == "media_encode_timing":
+                        saw_encode_timing = True
+                        assert float(event.get("bridge_encoder_feed_ms") or 0) >= 0
+                    if event.get("type") == "media_payload":
+                        saw_payload_timing = True
+                        assert int(event.get("num_bytes") or 0) > 0
+                        assert float(event.get("server_sent_epoch_ms") or 0) > 0
                 elif message.type == WSMsgType.BINARY:
                     media.extend(message.data)
                     if b"ftyp" in media and b"moof" in media and b"mdat" in media:
@@ -149,6 +158,8 @@ async def _exercise_backend(port: int, backend: str) -> None:
                     break
     assert saw_connected, f"{backend}: bridge never connected"
     assert saw_media_batch, f"{backend}: frame metadata was not emitted"
+    assert saw_encode_timing, f"{backend}: encoder timing was not emitted"
+    assert saw_payload_timing, f"{backend}: payload timing was not emitted"
     assert first_media_chunk == (1 if backend == "lingbot2" else 0)
     assert b"ftyp" in media, f"{backend}: MP4 init segment was not emitted"
     assert b"moof" in media and b"mdat" in media, f"{backend}: fMP4 media missing"

@@ -82,6 +82,8 @@
       this.expectedClose = false;
       this.appendQueue = [];
       this.appendQueueBytes = 0;
+      this.activeAppendItem = null;
+      this.pendingPayloadTimings = [];
       this.mediaBatches = [];
       this.presentedSequence = 0;
       this.lastPresentedEventId = 0;
@@ -138,6 +140,8 @@
       this.playbackAckEnabled = init.playback_ack_enabled === true;
       this.appendQueue = [];
       this.appendQueueBytes = 0;
+      this.activeAppendItem = null;
+      this.pendingPayloadTimings = [];
       this.mediaBatches = [];
       this.presentedSequence = 0;
       this.lastPresentedEventId = 0;
@@ -164,6 +168,7 @@
       this.sourceBuffer = sourceBuffer;
       sourceBuffer.addEventListener("updateend", () => {
         if (generation !== this.generation) return;
+        this._handleAppendEnd();
         this._maintainLiveEdge();
         this._appendNext();
       });
@@ -283,6 +288,8 @@
       this.objectUrl = "";
       this.appendQueue = [];
       this.appendQueueBytes = 0;
+      this.activeAppendItem = null;
+      this.pendingPayloadTimings = [];
       this.mediaBatches = [];
       this.controlSentEpochByEvent.clear();
       this.playable = false;
@@ -301,22 +308,53 @@
           ? value
           : null;
       if (!data?.byteLength) return;
+      const receivedAtMs = performance.now();
+      const payloadTiming = this.pendingPayloadTimings.shift() || {};
+      const serverSentEpochMs = Number(payloadTiming.serverSentEpochMs || 0);
+      const webSocketDownlinkMs = serverSentEpochMs
+        ? Math.max(
+            0,
+            Date.now() - serverSentEpochMs + this.lastBridgeClockOffsetMs,
+          )
+        : 0;
       this.bytesReceived += data.byteLength;
-      this.appendQueue.push(data);
+      this.appendQueue.push({
+        data,
+        receivedAtMs,
+        webSocketDownlinkMs,
+        payloadSequence: Number(payloadTiming.sequence || 0),
+      });
       this.appendQueueBytes += data.byteLength;
+      if (webSocketDownlinkMs > 0) {
+        this._emitStats({ lastWebSocketDownlinkMs: webSocketDownlinkMs });
+      }
       this._appendNext();
     }
 
     _appendNext() {
       const sourceBuffer = this.sourceBuffer;
       if (!sourceBuffer || sourceBuffer.updating || !this.appendQueue.length) return;
-      const data = this.appendQueue.shift();
-      this.appendQueueBytes -= data.byteLength;
+      const item = this.appendQueue.shift();
+      this.appendQueueBytes -= item.data.byteLength;
+      item.appendStartedAtMs = performance.now();
+      this.activeAppendItem = item;
       try {
-        sourceBuffer.appendBuffer(data);
+        sourceBuffer.appendBuffer(item.data);
       } catch (error) {
+        this.activeAppendItem = null;
         this._fail(error);
       }
+    }
+
+    _handleAppendEnd() {
+      const item = this.activeAppendItem;
+      if (!item) return;
+      this.activeAppendItem = null;
+      const completedAtMs = performance.now();
+      this._emitStats({
+        lastMseQueueMs: Math.max(0, item.appendStartedAtMs - item.receivedAtMs),
+        lastMseAppendMs: Math.max(0, completedAtMs - item.appendStartedAtMs),
+      });
     }
 
     _maintainLiveEdge() {
@@ -325,8 +363,11 @@
       const end = sourceBuffer.buffered.end(sourceBuffer.buffered.length - 1);
       const current = Number(this.video.currentTime || 0);
       const leadMs = Math.max(0, (end - current) * 1000);
+      let playbackBufferMs = leadMs;
       if (leadMs > this.liveEdgeSeekThresholdMs) {
-        this.video.currentTime = Math.max(0, end - this.liveEdgeTargetMs / 1000);
+        const liveEdge = Math.max(0, end - this.liveEdgeTargetMs / 1000);
+        this.video.currentTime = liveEdge;
+        playbackBufferMs = Math.max(0, (end - liveEdge) * 1000);
       }
       if (!sourceBuffer.updating && current > 6) {
         const removeEnd = current - 3;
@@ -336,7 +377,11 @@
       }
       void this.video.play?.().catch(() => {});
       this._markPlayable();
-      this._emitStats({ mseBufferMs: leadMs, appendQueueBytes: this.appendQueueBytes });
+      this._emitStats({
+        mseBufferMs: playbackBufferMs,
+        playbackBufferMs,
+        appendQueueBytes: this.appendQueueBytes,
+      });
     }
 
     _handleMetadata(event) {
@@ -360,6 +405,9 @@
           frameBatchIndex: Number(event.frame_batch_index || 0),
           isFinalFrameBatch: Boolean(event.is_final_frame_batch),
           bridgeEncodedEpochMs: Number(event.bridge_encoded_epoch_ms || 0),
+          bridgeEncodeStartedEpochMs: Number(
+            event.bridge_encode_started_epoch_ms || 0,
+          ),
           bridgeQueueMs: Number(event.bridge_queue_ms || 0),
           bridgeEncoderFeedMs: Number(event.bridge_encoder_feed_ms || 0),
           metadataReceivedAtMs: performance.now(),
@@ -374,6 +422,31 @@
           deliveryFps: this.deliverySamples.length,
           sourceFps: this.mediaFps,
         });
+      } else if (event.type === "media_encode_timing") {
+        const frameIndex = Number(event.first_frame_index || 0);
+        const metadata = this.mediaBatches.find(
+          (item) => Number(item.sourceFrameIndex || 0) === frameIndex,
+        );
+        if (metadata) {
+          metadata.bridgeEncodedEpochMs = Number(
+            event.bridge_encoded_epoch_ms || metadata.bridgeEncodedEpochMs || 0,
+          );
+          metadata.bridgeEncoderFeedMs = Number(
+            event.bridge_encoder_feed_ms || 0,
+          );
+        }
+        this._emitStats({
+          lastBridgeEncoderFeedMs: Number(event.bridge_encoder_feed_ms || 0),
+        });
+      } else if (event.type === "media_payload") {
+        this.pendingPayloadTimings.push({
+          sequence: Number(event.sequence || 0),
+          numBytes: Number(event.num_bytes || 0),
+          serverSentEpochMs: Number(event.server_sent_epoch_ms || 0),
+        });
+        if (this.pendingPayloadTimings.length > 1024) {
+          this.pendingPayloadTimings.shift();
+        }
       } else if (event.type === "chunk_telemetry") {
         this._emitStats({ chunkTelemetry: { ...event } });
       } else if (event.type === "control_ack") {
@@ -447,7 +520,7 @@
           lastPresentedMediaEventId: eventId,
           lastBridgeQueueMs: Number(metadata.bridgeQueueMs || 0),
           lastBridgeEncoderFeedMs: Number(metadata.bridgeEncoderFeedMs || 0),
-          lastPresentedTransportMs: metadata.bridgeEncodedEpochMs
+          lastEncodeToPresentMs: metadata.bridgeEncodedEpochMs
             ? Math.max(
                 0,
                 Date.now() - metadata.bridgeEncodedEpochMs + this.lastBridgeClockOffsetMs,
@@ -522,6 +595,8 @@
           bytes: this.bytesReceived,
           receiveMbps,
           bufferMs,
+          playbackBufferMs: bufferMs,
+          appendQueueBytes: this.appendQueueBytes,
           queueFrames: this.mediaBatches.length,
           renderFps: this.presentedSamples.length,
           sourceFps: this.mediaFps,

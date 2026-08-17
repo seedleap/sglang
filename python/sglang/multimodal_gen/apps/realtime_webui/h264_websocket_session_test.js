@@ -57,4 +57,44 @@ assert.equal(stats.at(-1).deliveryFps, 2);
 assert.equal(stats.at(-1).startupDroppedFrames, 0);
 assert.equal(stats.at(-2).startupDroppedFrames, 8);
 
+session._handleMetadata({
+  type: "media_batch",
+  first_frame_index: 7,
+  num_frames: 1,
+  bridge_encoder_feed_ms: 0,
+});
+session._handleMetadata({
+  type: "media_encode_timing",
+  first_frame_index: 7,
+  bridge_encoded_epoch_ms: Date.now(),
+  bridge_encoder_feed_ms: 6.5,
+});
+assert.equal(stats.at(-1).lastBridgeEncoderFeedMs, 6.5);
+assert.equal(
+  session.mediaBatches.find((item) => item.sourceFrameIndex === 7).bridgeEncoderFeedMs,
+  6.5,
+);
+
+session._handleMetadata({
+  type: "media_payload",
+  sequence: 3,
+  num_bytes: 4,
+  server_sent_epoch_ms: Date.now() - 20,
+});
+session._queueMedia(new Uint8Array([1, 2, 3, 4]));
+assert.equal(session.pendingPayloadTimings.length, 0);
+assert.equal(session.appendQueue.length, 1);
+assert.ok(stats.at(-1).lastWebSocketDownlinkMs >= 0);
+session.sourceBuffer = {
+  updating: false,
+  appendBuffer(data) { this.lastData = data; },
+};
+session._appendNext();
+assert.deepEqual(Array.from(session.sourceBuffer.lastData), [1, 2, 3, 4]);
+session.activeAppendItem.receivedAtMs -= 12;
+session.activeAppendItem.appendStartedAtMs -= 5;
+session._handleAppendEnd();
+assert.ok(stats.at(-1).lastMseQueueMs >= 7);
+assert.ok(stats.at(-1).lastMseAppendMs >= 5);
+
 console.log("h264_websocket_session_test: ok");

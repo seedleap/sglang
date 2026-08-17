@@ -219,9 +219,24 @@ def test_encoder_drains_frames_immediately_without_server_side_pacing():
             )
             await asyncio.sleep(0.02)
             assert session.ffmpeg.stdin.writes == frames
-            assert len(websocket.messages) == 2
+            media_batches = [
+                message
+                for message in websocket.messages
+                if message["type"] == "media_batch"
+            ]
+            encode_timings = [
+                message
+                for message in websocket.messages
+                if message["type"] == "media_encode_timing"
+            ]
+            assert len(media_batches) == 2
+            assert len(encode_timings) == 2
             assert all(
-                message["repeated_frame"] is False for message in websocket.messages
+                message["repeated_frame"] is False for message in media_batches
+            )
+            assert all(
+                message["bridge_encoder_feed_ms"] >= 0
+                for message in encode_timings
             )
         finally:
             encoder_task.cancel()

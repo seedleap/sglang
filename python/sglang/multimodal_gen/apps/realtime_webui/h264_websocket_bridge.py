@@ -136,6 +136,7 @@ class H264WebSocketSession:
     height: int = 0
     frames: int = 0
     media_bytes: int = 0
+    media_payload_sequence: int = 0
     minimum_event_id: int = 0
     pending_cutover_event_id: int = 0
     dropped_frames: int = 0
@@ -470,6 +471,7 @@ class H264WebSocketSession:
                     )
                 if self.ffmpeg is None or self.ffmpeg.stdin is None:
                     raise RuntimeError("H.264 encoder is unavailable")
+                frame_index = self.frames
                 encode_started_epoch_ms = time.time() * 1000
                 # Publish the frame mapping before feeding ffmpeg.  The stdout
                 # pump can then drain a large keyframe immediately without
@@ -482,7 +484,7 @@ class H264WebSocketSession:
                             "type": "media_batch",
                             "chunk_index": frame.chunk_index,
                             "event_id": frame.event_id,
-                            "first_frame_index": self.frames,
+                            "first_frame_index": frame_index,
                             "num_frames": 1,
                             "frame_batch_index": frame.frame_batch_index,
                             "num_frame_batches": frame.num_frame_batches,
@@ -506,6 +508,22 @@ class H264WebSocketSession:
                     )
                 self.ffmpeg.stdin.write(frame.rgb)
                 await self.ffmpeg.stdin.drain()
+                feed_completed_epoch_ms = time.time() * 1000
+                # stdin.drain() measures how long the bridge waited for FFmpeg
+                # to accept this frame.  Report it as a separate update: the
+                # media metadata must be sent before feeding FFmpeg so stdout
+                # can never deadlock behind the WebSocket send lock.
+                await self._send_json(
+                    {
+                        "type": "media_encode_timing",
+                        "first_frame_index": frame_index,
+                        "bridge_encoded_epoch_ms": feed_completed_epoch_ms,
+                        "bridge_encoder_feed_ms": max(
+                            0.0,
+                            feed_completed_epoch_ms - encode_started_epoch_ms,
+                        ),
+                    }
+                )
                 self.frames += 1
             finally:
                 self.frame_queue.task_done()
@@ -598,6 +616,21 @@ class H264WebSocketSession:
         while data := await process.stdout.read(64 * 1024):
             self.media_bytes += len(data)
             async with self.send_lock:
+                # Frame metadata is emitted before FFmpeg is fed, while this
+                # header is emitted at the actual WebSocket payload boundary.
+                # The browser can therefore measure wire/event-loop downlink
+                # independently from encoder and playback buffering latency.
+                payload_sent_epoch_ms = time.time() * 1000
+                payload_sequence = self.media_payload_sequence
+                self.media_payload_sequence += 1
+                await self.websocket.send_json(
+                    {
+                        "type": "media_payload",
+                        "sequence": payload_sequence,
+                        "num_bytes": len(data),
+                        "server_sent_epoch_ms": payload_sent_epoch_ms,
+                    }
+                )
                 await self.websocket.send_bytes(data)
 
     async def _log_stderr(self) -> None:

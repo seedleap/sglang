@@ -71,13 +71,25 @@ assert.match(html, /<span>FPS<b id="lingbot2RateText">-<\/b><\/span>/, "LingBot2
 assert.match(html, /<span>FPS<b id="minwmPerfFps">-<\/b><\/span>/, "MinWM should show stage FPS");
 assert.match(html, /<span>FPS<b id="lingbot2PerfFps">-<\/b><\/span>/, "LingBot2 should show stage FPS");
 assert.match(html, /下行带宽<b id="minwmPerfData">-<\/b>/, "Zing should show measured downlink bandwidth");
-assert.match(html, /H\.264 编码<b id="minwmPerfH264">-<\/b>/, "Zing should show H.264 timing separately");
-assert.match(html, /网络下行<b id="minwmPerfDownlink">-<\/b>/, "Zing should show downlink latency separately");
-assert.match(html, /H\.264 编码<b id="lingbot2PerfH264">-<\/b>/, "LingBot2 should show H.264 timing separately");
-assert.match(html, /网络下行<b id="lingbot2PerfDownlink">-<\/b>/, "LingBot2 should show downlink latency separately");
+assert.match(html, /H\.264 前队列<b id="minwmPerfH264Queue">-<\/b>/, "Zing should show encoder input queue latency");
+assert.match(html, /FFmpeg 写入<b id="minwmPerfH264Feed">-<\/b>/, "Zing should show FFmpeg feed latency");
+assert.match(html, /WS 下行<b id="minwmPerfDownlink">-<\/b>/, "Zing should show wire downlink latency separately");
+assert.match(html, /MSE 队列<b id="minwmPerfMseQueue">-<\/b>/, "Zing should show browser append queue latency");
+assert.match(html, /MSE 追加<b id="minwmPerfMseAppend">-<\/b>/, "Zing should show SourceBuffer append latency");
+assert.match(html, /播放缓冲<b id="minwmPerfPlaybackBuffer">-<\/b>/, "Zing should show playback lead");
+assert.match(html, /H\.264 前队列<b id="lingbot2PerfH264Queue">-<\/b>/, "LingBot2 should show encoder input queue latency");
+assert.match(html, /FFmpeg 写入<b id="lingbot2PerfH264Feed">-<\/b>/, "LingBot2 should show FFmpeg feed latency");
+assert.match(html, /WS 下行<b id="lingbot2PerfDownlink">-<\/b>/, "LingBot2 should show wire downlink latency separately");
+assert.match(html, /MSE 队列<b id="lingbot2PerfMseQueue">-<\/b>/, "LingBot2 should show browser append queue latency");
+assert.match(html, /MSE 追加<b id="lingbot2PerfMseAppend">-<\/b>/, "LingBot2 should show SourceBuffer append latency");
+assert.match(html, /播放缓冲<b id="lingbot2PerfPlaybackBuffer">-<\/b>/, "LingBot2 should show playback lead");
 assert.doesNotMatch(html, /H\.264\/下行/, "H.264 and downlink metrics must not share one field");
-assert.match(app, /\$\(`\$\{key\}PerfH264`\)\.textContent/);
+assert.match(app, /\$\(`\$\{key\}PerfH264Queue`\)\.textContent/);
+assert.match(app, /\$\(`\$\{key\}PerfH264Feed`\)\.textContent/);
 assert.match(app, /\$\(`\$\{key\}PerfDownlink`\)\.textContent/);
+assert.match(app, /\$\(`\$\{key\}PerfMseQueue`\)\.textContent/);
+assert.match(app, /\$\(`\$\{key\}PerfMseAppend`\)\.textContent/);
+assert.match(app, /\$\(`\$\{key\}PerfPlaybackBuffer`\)\.textContent/);
 assert.match(app, /activeH264Models\.has\("minwm"\)/, "H.264 stats should not be overwritten by WebP playback stats");
 assert.match(
   app,
@@ -141,10 +153,10 @@ for (const selector of ["model-slot-config", "stage-controls", "prompt-update-he
 assert.match(html, /playback_controller\.js\?v=realtime-playback-v34/);
 assert.match(html, /model_session\.js\?v=dual-h264-telemetry-v1/);
 assert.match(html, /dual_model_controller\.js\?v=dual-model-v6/);
-assert.match(html, /h264_websocket_session\.js\?v=lingbot-startup-v2/);
+assert.match(html, /h264_websocket_session\.js\?v=h264-stage-timing-v1/);
 assert.match(html, /prompt_rewrite_controller\.js\?v=prompt-rewrite-v2/);
 assert.match(html, /styles\.css\?v=fullscreen-focus-v1/);
-assert.match(html, /app\.js\?v=fullscreen-focus-v1/);
+assert.match(html, /app\.js\?v=h264-stage-timing-v1/);
 assert.match(html, /id="minwmH264Viewport"/);
 assert.match(html, /id="lingbot2H264Viewport"/);
 assert.match(html, /id="minwmPerfScheduler"/);

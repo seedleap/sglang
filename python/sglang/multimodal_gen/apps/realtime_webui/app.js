@@ -1972,9 +1972,13 @@ function renderProtocolPerformance(key, stats = {}) {
   );
   const h264FeedMs = Number(stats.lastBridgeEncoderFeedMs || 0);
   const bridgeQueueMs = Number(stats.lastBridgeQueueMs || 0);
-  const downlinkMs = Math.max(
-    Number(stats.lastPresentedTransportMs || 0),
-    Number(stats.lastDownlinkMs || 0),
+  const webSocketDownlinkMs = Number(
+    stats.lastWebSocketDownlinkMs || stats.lastDownlinkMs || 0,
+  );
+  const mseQueueMs = Number(stats.lastMseQueueMs || 0);
+  const mseAppendMs = Number(stats.lastMseAppendMs || 0);
+  const playbackBufferMs = Number(
+    stats.playbackBufferMs ?? stats.mseBufferMs ?? stats.bufferMs ?? 0,
   );
   const inputUplinkMs = Number(
     stats.lastInputUplinkMs || telemetry.input_uplink_ms,
@@ -2000,11 +2004,23 @@ function renderProtocolPerformance(key, stats = {}) {
   $(`${key}PerfVae`).textContent = vaeQueueMs > 0 || vaeDecodeMs > 0
     ? `q ${performanceMs(vaeQueueMs)} · dec ${performanceMs(vaeDecodeMs)}`
     : "-";
-  $(`${key}PerfH264`).textContent = h264FeedMs > 0 || bridgeQueueMs > 0
-    ? `编码 ${performanceMs(h264FeedMs)} · 排队 ${performanceMs(bridgeQueueMs)}`
+  $(`${key}PerfH264Queue`).textContent = bridgeQueueMs > 0
+    ? performanceMs(bridgeQueueMs)
     : "-";
-  $(`${key}PerfDownlink`).textContent = downlinkMs > 0
-    ? performanceMs(downlinkMs)
+  $(`${key}PerfH264Feed`).textContent = h264FeedMs > 0
+    ? performanceMs(h264FeedMs)
+    : "-";
+  $(`${key}PerfDownlink`).textContent = webSocketDownlinkMs > 0
+    ? performanceMs(webSocketDownlinkMs)
+    : "-";
+  $(`${key}PerfMseQueue`).textContent = mseQueueMs > 0
+    ? performanceMs(mseQueueMs)
+    : "-";
+  $(`${key}PerfMseAppend`).textContent = mseAppendMs > 0
+    ? performanceMs(mseAppendMs)
+    : "-";
+  $(`${key}PerfPlaybackBuffer`).textContent = playbackBufferMs > 0
+    ? performanceMs(playbackBufferMs)
     : "-";
   $(`${key}PerfE2E`).textContent = e2eMs > 0 ? performanceMs(e2eMs) : "-";
 }
