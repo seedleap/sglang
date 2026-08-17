@@ -949,6 +949,7 @@ def test_cpu_runtime_dependencies_are_fully_locked_at_image_build_time():
         "msgspec==",
         "opentelemetry-exporter-otlp-proto-http==",
         "opentelemetry-sdk==",
+        "prometheus-client==",
         "uvicorn==",
         "websockets==",
     ):
