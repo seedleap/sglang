@@ -2039,6 +2039,143 @@ def test_dynamodb_generation_fences_delayed_same_epoch_slot_publication():
         assert assignment.denoiser.slot_index == 0
 
 
+def test_dynamodb_epoch_change_partial_slot_publication_self_heals():
+    boto3 = pytest.importorskip("boto3")
+    moto = pytest.importorskip("moto")
+
+    with moto.mock_aws():
+        table_name = "minwm-epoch-heal-coordinator"
+        client = boto3.client("dynamodb", region_name="us-east-1")
+        _create_dynamodb_coordinator_table(client, table_name)
+        worker_id = "denoiser-epoch-heal"
+        slot_key = {
+            "pk": {"S": f"SLOT#denoiser#{worker_id}#0000"},
+            "sk": {"S": "LEASE"},
+        }
+        worker_key = {
+            "pk": {"S": f"WORKER#{worker_id}"},
+            "sk": {"S": "HEARTBEAT"},
+        }
+        epoch_a = _heartbeat(
+            worker_id,
+            "denoiser",
+            capacity=1,
+            worker_epoch="epoch-a",
+        )
+        base_store = DynamoDBCoordinatorStore(
+            table_name,
+            ttl_s=60,
+            worker_ttl_s=30,
+            wall_clock=lambda: 100,
+            client=client,
+        )
+        base_store._heartbeat_sync(epoch_a)
+        client.update_item(
+            TableName=table_name,
+            Key=slot_key,
+            UpdateExpression=(
+                "SET lease_token = :token, user_id = :user, "
+                "session_id = :session, generation_id = :generation, "
+                "lease_expires_at = :expires"
+            ),
+            ExpressionAttributeValues={
+                ":token": {"S": "active-token"},
+                ":user": {"S": "active-user"},
+                ":session": {"S": "active-session"},
+                ":generation": {"S": "active-generation"},
+                ":expires": {"N": "180"},
+            },
+        )
+
+        class RejectActiveSlotPublication:
+            def __init__(self):
+                self.rejected_attempts = 0
+
+            def __getattr__(self, name):
+                return getattr(client, name)
+
+            def transact_write_items(self, **kwargs):
+                is_slot_publication = any(
+                    "Update" in item
+                    and "SET item_type" in item["Update"]["UpdateExpression"]
+                    for item in kwargs["TransactItems"]
+                )
+                if is_slot_publication:
+                    self.rejected_attempts += 1
+                    raise client.exceptions.TransactionCanceledException(
+                        {
+                            "Error": {
+                                "Code": "TransactionCanceledException",
+                                "Message": "injected active slot publication failure",
+                            }
+                        },
+                        "TransactWriteItems",
+                    )
+                return client.transact_write_items(**kwargs)
+
+        rejecting_client = RejectActiveSlotPublication()
+        failed_epoch_change = DynamoDBCoordinatorStore(
+            table_name,
+            ttl_s=60,
+            worker_ttl_s=30,
+            wall_clock=lambda: 101,
+            client=rejecting_client,
+        )
+        epoch_b = _heartbeat(
+            worker_id,
+            "denoiser",
+            capacity=1,
+            worker_epoch="epoch-b",
+        )
+        with pytest.raises(client.exceptions.TransactionCanceledException):
+            failed_epoch_change._heartbeat_sync(epoch_b)
+        assert rejecting_client.rejected_attempts == 3
+
+        partial_worker = client.get_item(
+            TableName=table_name,
+            Key=worker_key,
+            ConsistentRead=True,
+        )["Item"]
+        partial_slot = client.get_item(
+            TableName=table_name,
+            Key=slot_key,
+            ConsistentRead=True,
+        )["Item"]
+        assert partial_worker["worker_epoch"] == {"S": "epoch-b"}
+        assert partial_slot["worker_epoch"] == {"S": "epoch-a"}
+        assert (
+            partial_worker["heartbeat_generation"]
+            != partial_slot["heartbeat_generation"]
+        )
+        assert partial_slot["lease_token"] == {"S": "active-token"}
+
+        healing_store = DynamoDBCoordinatorStore(
+            table_name,
+            ttl_s=60,
+            worker_ttl_s=30,
+            wall_clock=lambda: 102,
+            client=client,
+        )
+        healing_store._heartbeat_sync(epoch_b)
+        healed_worker = client.get_item(
+            TableName=table_name,
+            Key=worker_key,
+            ConsistentRead=True,
+        )["Item"]
+        healed_slot = client.get_item(
+            TableName=table_name,
+            Key=slot_key,
+            ConsistentRead=True,
+        )["Item"]
+        assert healed_slot["worker_epoch"] == {"S": "epoch-b"}
+        assert (
+            healed_slot["heartbeat_generation"] == healed_worker["heartbeat_generation"]
+        )
+        assert healed_slot["lease_token"] == {"S": "active-token"}
+        assert healed_slot["lifecycle"] == {"S": "ready"}
+        assert healed_slot["allocation_key"] == {"S": "DENOISER#minwm-r1"}
+
+
 def test_dynamodb_renew_condition_checks_current_worker_epochs_and_expiry():
     class TransactionCanceledException(Exception):
         pass

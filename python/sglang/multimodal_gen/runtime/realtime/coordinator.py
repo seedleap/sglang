@@ -898,9 +898,9 @@ class DynamoDBCoordinatorStore:
             model_revision=heartbeat.model_revision,
             vae_fingerprint=heartbeat.vae_fingerprint,
         )
-        # Bind each slot write to the exact worker publication. A delayed slot
-        # transaction from an older heartbeat then fails after any newer worker
-        # publication (including a shrink), even when worker_epoch is unchanged.
+        # Bind each slot write to the exact worker publication. That worker fence
+        # makes the current publication authoritative over any stale slot epoch,
+        # while a delayed transaction fails after any newer worker publication.
         slot_updates = []
         for slot_index in range(heartbeat.capacity):
             update = {
@@ -935,11 +935,6 @@ class DynamoDBCoordinatorStore:
                     "#role": "role",
                     "#ttl": "ttl",
                 },
-                "ConditionExpression": (
-                    "attribute_not_exists(worker_epoch) OR "
-                    "worker_epoch = :previous_worker_epoch OR "
-                    "(worker_epoch = :worker_epoch AND #capacity = :capacity)"
-                ),
                 "ExpressionAttributeValues": {
                     ":item_type": {"S": "worker_slot"},
                     ":role": {"S": heartbeat.role},
@@ -951,7 +946,6 @@ class DynamoDBCoordinatorStore:
                     ":vae_fingerprint": {"S": heartbeat.vae_fingerprint},
                     ":worker_epoch": {"S": heartbeat.worker_epoch},
                     ":heartbeat_generation": {"S": heartbeat_generation},
-                    ":previous_worker_epoch": {"S": previous_worker_epoch},
                     ":lifecycle": {"S": heartbeat.lifecycle},
                     ":capacity": {"N": str(heartbeat.capacity)},
                     ":active_sessions": {"N": str(heartbeat.active_sessions)},
