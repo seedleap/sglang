@@ -48,11 +48,11 @@ from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import (
     BatchMetricsWindow,
     OutputBatch,
 )
-from sglang.multimodal_gen.runtime.realtime.critical_path_metrics import (
-    observe_stage_seconds,
-)
 from sglang.multimodal_gen.runtime.post_training.scheduler_post_training_mixin import (
     SchedulerPostTrainingMixin,
+)
+from sglang.multimodal_gen.runtime.realtime.critical_path_metrics import (
+    observe_stage_seconds,
 )
 from sglang.multimodal_gen.runtime.server_args import (
     PortArgs,
@@ -66,11 +66,11 @@ from sglang.multimodal_gen.runtime.server_warmup import (
     should_return_warmup_result,
 )
 from sglang.multimodal_gen.runtime.utils.common import get_zmq_socket
+from sglang.multimodal_gen.runtime.utils.distributed import broadcast_pyobj
+from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 from sglang.multimodal_gen.runtime.utils.realtime_video import (
     cancel_async_raw_rgb_frame_reference,
 )
-from sglang.multimodal_gen.runtime.utils.distributed import broadcast_pyobj
-from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 from sglang.multimodal_gen.runtime.utils.trace_wrapper import DiffStage, trace_slice
 
 logger = init_logger(__name__)

@@ -66,14 +66,14 @@ from sglang.multimodal_gen.runtime.realtime_vae_config import (
 from sglang.multimodal_gen.runtime.scheduler_client import async_scheduler_client
 from sglang.multimodal_gen.runtime.server_args import get_global_server_args
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
-from sglang.multimodal_gen.runtime.utils.realtime_video import (
-    cancel_async_raw_rgb_frame_reference,
-)
 from sglang.multimodal_gen.runtime.utils.realtime_trace import (
     calculate_overlap_ms,
     calculate_overlap_ratio,
     log_realtime_trace,
     normalize_trace_id,
+)
+from sglang.multimodal_gen.runtime.utils.realtime_video import (
+    cancel_async_raw_rgb_frame_reference,
 )
 
 if TYPE_CHECKING:
