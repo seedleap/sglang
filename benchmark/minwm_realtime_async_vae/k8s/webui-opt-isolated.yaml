@@ -3,6 +3,8 @@ kind: Deployment
 metadata:
   name: minwm-dual-webui-opt-20260812
   namespace: minwm-realtime
+  annotations:
+    kubernetes.io/change-cause: "Deploy a5293fbc25: sync dual WebUI world rules"
   labels:
     app.kubernetes.io/name: minwm-dual-webui-opt-20260812
     app.kubernetes.io/part-of: minwm-realtime
