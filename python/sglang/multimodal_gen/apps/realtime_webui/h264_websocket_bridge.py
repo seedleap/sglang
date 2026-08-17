@@ -148,6 +148,8 @@ class H264WebSocketSession:
     dropped_frames: int = 0
     latency_dropped_frames: int = 0
     repeated_frames: int = 0
+    final_completion: dict[str, Any] | None = None
+    finite_request: bool = field(init=False)
     startup_drop_frames: int = field(init=False)
     startup_drop_remaining: int = field(init=False)
     startup_dropped_frames: int = 0
@@ -163,6 +165,29 @@ class H264WebSocketSession:
     def __post_init__(self) -> None:
         self.frame_queue = asyncio.Queue(maxsize=self.manager.max_queued_frames)
         self.encoder_start_times_s = deque(maxlen=4096)
+        max_chunks = _bounded_int(
+            self.init.get("max_chunks"),
+            default=0,
+            minimum=0,
+            maximum=1_000_000,
+        )
+        num_frames = _bounded_int(
+            self.init.get("num_frames"),
+            default=0,
+            minimum=0,
+            maximum=1_000_000,
+        )
+        generation_mode = str(
+            self.init.get("generation_mode")
+            or ("i2v" if self.init.get("first_frame") else "t2v")
+        ).lower()
+        # I2V uses num_frames as its per-chunk shape even for the default
+        # open-ended stream. max_chunks is its actual terminal boundary. T2V
+        # instead derives a finite max_chunks from num_frames in the adapter,
+        # after this bridge has already forwarded the init request.
+        self.finite_request = max_chunks > 0 or (
+            generation_mode == "t2v" and num_frames > 0
+        )
         requested_preset = str(
             self.init.get("h264_preset") or self.manager.preset
         ).lower()
@@ -261,25 +286,36 @@ class H264WebSocketSession:
                 self.encoder_task = asyncio.create_task(
                     self._encode_frames(), name=f"h264ws-encoder-{self.session_id}"
                 )
-                tasks = [
-                    asyncio.create_task(
-                        self._receive_upstream(),
-                        name=f"h264ws-upstream-{self.session_id}",
-                    ),
-                    asyncio.create_task(
-                        self._receive_controls(),
-                        name=f"h264ws-control-{self.session_id}",
-                    ),
-                    self.encoder_task,
-                ]
-                done, pending = await asyncio.wait(
-                    tasks, return_when=asyncio.FIRST_COMPLETED
+                upstream_task = asyncio.create_task(
+                    self._receive_upstream(),
+                    name=f"h264ws-upstream-{self.session_id}",
                 )
-                for task in pending:
-                    task.cancel()
-                await asyncio.gather(*pending, return_exceptions=True)
-                for task in done:
-                    task.result()
+                control_task = asyncio.create_task(
+                    self._receive_controls(),
+                    name=f"h264ws-control-{self.session_id}",
+                )
+                tasks = [upstream_task, control_task, self.encoder_task]
+                done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+                if self.encoder_task in done:
+                    # The encoder is intentionally an open-ended consumer.  It
+                    # can only finish by itself when FFmpeg or the browser send
+                    # path failed, so never mistake that for graceful EOS.
+                    self.encoder_task.result()
+                    raise RuntimeError("H.264 encoder stopped before stream end")
+                if control_task in done:
+                    # The browser disconnected.  Do not spend time encoding a
+                    # tail that no longer has a consumer.
+                    control_task.result()
+                    return
+
+                close_code = upstream_task.result()
+                if self.pending_header is not None:
+                    raise RuntimeError("upstream closed before raw frame payload")
+                if self.final_completion is None and close_code not in {1000, 1001}:
+                    raise RuntimeError(
+                        f"upstream H.264 source closed unexpectedly ({close_code})"
+                    )
+                await self._finish_graceful_stream(abort_task=control_task)
         except asyncio.CancelledError:
             raise
         except Exception as error:
@@ -294,14 +330,23 @@ class H264WebSocketSession:
             await asyncio.gather(*tasks, return_exceptions=True)
             await self._stop_ffmpeg()
 
-    async def _receive_upstream(self) -> None:
+    async def _receive_upstream(self) -> int | None:
         async for message in self.upstream:
             if message.type == WSMsgType.BINARY:
                 await self._receive_binary(bytes(message.data))
+                if self.final_completion is not None:
+                    # The final media marker is ordered after the last frame
+                    # batch.  Start draining immediately instead of depending
+                    # on a second, transport-level close handshake.
+                    return 1000
             elif message.type == WSMsgType.TEXT:
                 await self._send_json({"type": "upstream", "data": message.data})
-            elif message.type in {WSMsgType.CLOSE, WSMsgType.CLOSED, WSMsgType.ERROR}:
+            elif message.type == WSMsgType.ERROR:
+                error = self.upstream.exception()
+                raise RuntimeError(f"upstream WebSocket error: {error or 'unknown'}")
+            elif message.type in {WSMsgType.CLOSE, WSMsgType.CLOSED}:
                 break
+        return self.upstream.close_code
 
     async def _receive_controls(self) -> None:
         async for message in self.websocket:
@@ -375,6 +420,8 @@ class H264WebSocketSession:
             await self._send_json(message)
             return
         if message_type == "media_chunk_complete":
+            if message.get("is_final_chunk") is True:
+                self.final_completion = dict(message)
             return
         if message_type not in {"frame_batch", "frame_batch_header"}:
             return
@@ -445,21 +492,29 @@ class H264WebSocketSession:
                 bridge_received_epoch_ms=received_epoch_ms,
                 server_sent_epoch_ms=float(header.get("server_sent_epoch_ms") or 0),
             )
-            if self.frame_queue.full():
-                dropped = self.frame_queue.get_nowait()
-                self.frame_queue.task_done()
-                self.dropped_frames += 1
-                observe_stage_seconds(
-                    "h264_pre_encode_queue",
-                    max(0.0, time.time() * 1000 - dropped.bridge_received_epoch_ms)
-                    / 1000.0,
-                    service="world-studio-webui",
-                    model=self.backend,
-                    result="cancelled",
-                    codec="h264",
-                    scope="frame",
-                )
-            self.frame_queue.put_nowait(queued)
+            if self.finite_request:
+                # A finite render promises a complete timeline.  Backpressure
+                # the upstream reader instead of silently replacing its tail.
+                await self.frame_queue.put(queued)
+            else:
+                if self.frame_queue.full():
+                    dropped = self.frame_queue.get_nowait()
+                    self.frame_queue.task_done()
+                    self.dropped_frames += 1
+                    observe_stage_seconds(
+                        "h264_pre_encode_queue",
+                        max(
+                            0.0,
+                            time.time() * 1000 - dropped.bridge_received_epoch_ms,
+                        )
+                        / 1000.0,
+                        service="world-studio-webui",
+                        model=self.backend,
+                        result="cancelled",
+                        codec="h264",
+                        scope="frame",
+                    )
+                self.frame_queue.put_nowait(queued)
 
     async def _encode_frames(self) -> None:
         # Drain decoded frames as soon as FFmpeg can accept them.  The FPS in
@@ -472,7 +527,8 @@ class H264WebSocketSession:
                     0.0, time.time() * 1000 - frame.bridge_received_epoch_ms
                 )
                 if (
-                    queue_age_ms > self.manager.max_frame_age_ms
+                    not self.finite_request
+                    and queue_age_ms > self.manager.max_frame_age_ms
                     and self.frame_queue.qsize() > self.manager.live_edge_frames
                 ):
                     self.dropped_frames += 1
@@ -592,17 +648,72 @@ class H264WebSocketSession:
             finally:
                 self.frame_queue.task_done()
 
+    async def _finish_graceful_stream(
+        self, *, abort_task: asyncio.Task | None = None
+    ) -> None:
+        """Drain every accepted frame, flush fMP4, then publish terminal EOS."""
+
+        if self.encoder_task is None:
+            raise RuntimeError("H.264 encoder task is unavailable")
+        queue_drained = asyncio.create_task(
+            self.frame_queue.join(), name=f"h264ws-drain-{self.session_id}"
+        )
+        waiters: set[asyncio.Task] = {queue_drained, self.encoder_task}
+        if abort_task is not None:
+            waiters.add(abort_task)
+        try:
+            done, _ = await asyncio.wait(
+                waiters,
+                timeout=self.manager.drain_timeout_ms / 1000.0,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if not done:
+                raise TimeoutError("H.264 frame queue drain timed out")
+            if self.encoder_task in done:
+                self.encoder_task.result()
+                raise RuntimeError("H.264 encoder stopped before queue drain")
+            if abort_task is not None and abort_task in done:
+                abort_task.result()
+                raise ConnectionError("browser disconnected during H.264 drain")
+            if queue_drained not in done:
+                raise RuntimeError("H.264 queue drain stopped unexpectedly")
+            await queue_drained
+        finally:
+            if not queue_drained.done():
+                queue_drained.cancel()
+            await asyncio.gather(queue_drained, return_exceptions=True)
+
+        self.encoder_task.cancel()
+        await asyncio.gather(self.encoder_task, return_exceptions=True)
+        await self._stop_ffmpeg(flush_output=True)
+        if self.final_completion is None or self.websocket.closed:
+            return
+        await self._send_json(
+            {
+                "type": "stream_complete",
+                "chunk_index": int(self.final_completion.get("chunk_index") or 0),
+                "event_id": int(self.final_completion.get("event_id") or 0),
+                "num_frames": int(self.final_completion.get("num_frames") or 0),
+                "encoded_frames": self.frames,
+                "dropped_frames": self.dropped_frames,
+                "media_bytes": self.media_bytes,
+            }
+        )
+
     async def _start_ffmpeg(self, width: int, height: int) -> None:
         fps = _bounded_int(self.init.get("fps"), default=24, minimum=1, maximum=60)
         gop = max(4, fps * self.encoder_gop_seconds)
+        # FFmpeg's input-side nobuffer flag sheds one raw-video boundary frame
+        # in a finite pipe. Keep the existing live-edge behavior for open-ended
+        # sessions, but require exact input accounting for finite renders.
+        input_buffering_args = [] if self.finite_request else ["-fflags", "nobuffer"]
         command = [
             self.manager.ffmpeg_bin,
             "-hide_banner",
             "-loglevel",
             "warning",
             "-nostdin",
-            "-fflags",
-            "nobuffer",
+            *input_buffering_args,
             "-flags",
             "low_delay",
             "-f",
@@ -670,11 +781,14 @@ class H264WebSocketSession:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        self.stdout_task = asyncio.create_task(self._pump_stdout())
-        self.stderr_task = asyncio.create_task(self._log_stderr())
-
-    async def _pump_stdout(self) -> None:
         process = self.ffmpeg
+        self.stdout_task = asyncio.create_task(self._pump_stdout(process))
+        self.stderr_task = asyncio.create_task(self._log_stderr(process))
+
+    async def _pump_stdout(
+        self, process: asyncio.subprocess.Process | None = None
+    ) -> None:
+        process = process or self.ffmpeg
         if process is None or process.stdout is None:
             return
         while data := await process.stdout.read(64 * 1024):
@@ -730,8 +844,10 @@ class H264WebSocketSession:
                     scope="frame",
                 )
 
-    async def _log_stderr(self) -> None:
-        process = self.ffmpeg
+    async def _log_stderr(
+        self, process: asyncio.subprocess.Process | None = None
+    ) -> None:
+        process = process or self.ffmpeg
         if process is None or process.stderr is None:
             return
         while line := await process.stderr.readline():
@@ -778,9 +894,72 @@ class H264WebSocketSession:
                 model=self.backend,
             )
 
-    async def _stop_ffmpeg(self) -> None:
+    async def _stop_ffmpeg(self, *, flush_output: bool = False) -> None:
         process = self.ffmpeg
         self.ffmpeg = None
+        process_timed_out = False
+        kill_wait_timed_out = False
+        io_timed_out = False
+        timeout_seconds = self.manager.drain_timeout_ms / 1000.0
+        io_tasks = [
+            task for task in (self.stdout_task, self.stderr_task) if task is not None
+        ]
+
+        async def cancel_and_settle(
+            tasks: list[asyncio.Task] | set[asyncio.Task],
+        ) -> set[asyncio.Task]:
+            pending = {task for task in tasks if not task.done()}
+            for task in pending:
+                task.cancel()
+            if not pending:
+                return set()
+            _, still_pending = await asyncio.wait(pending, timeout=timeout_seconds)
+            return still_pending
+
+        if process is not None:
+            if process.stdin is not None:
+                with contextlib.suppress(Exception):
+                    process.stdin.close()
+            try:
+                await asyncio.wait_for(process.wait(), timeout=timeout_seconds)
+            except TimeoutError:
+                process_timed_out = True
+                # stdout can be blocked in websocket.send_bytes while FFmpeg is
+                # blocked on its full output pipe. Cancel those pumps before
+                # killing the process, and keep both cancellation and reap
+                # waits bounded so graceful shutdown can never deadlock.
+                pending_io = await cancel_and_settle(io_tasks)
+                with contextlib.suppress(ProcessLookupError):
+                    process.kill()
+                try:
+                    await asyncio.wait_for(process.wait(), timeout=timeout_seconds)
+                except TimeoutError:
+                    kill_wait_timed_out = True
+                if pending_io:
+                    _, pending_io = await asyncio.wait(
+                        pending_io, timeout=timeout_seconds
+                    )
+                    io_timed_out = bool(pending_io)
+
+        if not process_timed_out and io_tasks:
+            _, pending_io = await asyncio.wait(io_tasks, timeout=timeout_seconds)
+            if pending_io:
+                io_timed_out = True
+                await cancel_and_settle(pending_io)
+
+        io_errors: list[BaseException] = []
+        for task in io_tasks:
+            if not task.done() or task.cancelled():
+                continue
+            with contextlib.suppress(asyncio.CancelledError):
+                error = task.exception()
+                if error is not None:
+                    io_errors.append(error)
+        self.stdout_task = None
+        self.stderr_task = None
+        # Give the stdout pump the entire graceful-flush window to match
+        # accepted frames with emitted fMP4 payloads. Only work that remains
+        # after the pump has settled is genuinely cancelled.
         cancelled_at = time.perf_counter()
         while self.encoder_start_times_s:
             observe_stage_seconds(
@@ -792,28 +971,14 @@ class H264WebSocketSession:
                 codec="h264",
                 scope="frame",
             )
-        if process is not None:
-            if process.stdin is not None:
-                with contextlib.suppress(Exception):
-                    process.stdin.close()
-            try:
-                await asyncio.wait_for(process.wait(), timeout=2)
-            except TimeoutError:
-                process.kill()
-                await process.wait()
-        for task in (self.stdout_task, self.stderr_task):
-            if task is not None and not task.done():
-                task.cancel()
-        await asyncio.gather(
-            *(
-                task
-                for task in (self.stdout_task, self.stderr_task)
-                if task is not None
-            ),
-            return_exceptions=True,
-        )
-        self.stdout_task = None
-        self.stderr_task = None
+        if not flush_output:
+            return
+        if process_timed_out or kill_wait_timed_out or io_timed_out:
+            raise TimeoutError("H.264 FFmpeg output flush timed out")
+        if process is not None and process.returncode not in {0, None}:
+            raise RuntimeError(f"H.264 FFmpeg exited with code {process.returncode}")
+        if io_errors:
+            raise io_errors[0]
 
 
 class H264WebSocketBridgeManager:
@@ -870,6 +1035,12 @@ class H264WebSocketBridgeManager:
             default=6,
             minimum=1,
             maximum=self.max_queued_frames,
+        )
+        self.drain_timeout_ms = _bounded_int(
+            os.environ.get("H264_WS_DRAIN_TIMEOUT_MS"),
+            default=5000,
+            minimum=100,
+            maximum=30000,
         )
         self.max_sessions = _bounded_int(
             os.environ.get("H264_WS_MAX_SESSIONS"),

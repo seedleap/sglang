@@ -1845,6 +1845,7 @@ body.world-studio {
 .world-studio .model-player[data-session-state="preparing"] .connection-chip,
 .world-studio .model-player[data-session-state="ready"] .connection-chip,
 .world-studio .model-player[data-session-state="connecting"] .connection-chip,
+.world-studio .model-player[data-session-state="draining"] .connection-chip,
 .world-studio .model-player[data-session-state="error"] .connection-chip { display: inline-flex; }
 .world-studio .model-player[data-session-state="error"] .connection-chip { color: var(--danger); border-color: rgba(244, 126, 104, 0.35); }
 .world-studio .telemetry-detail { display: none !important; }

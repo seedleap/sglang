@@ -30,6 +30,28 @@ def _rgb_frame(index: int) -> bytes:
     return bytes((red, green, blue)) * (WIDTH * HEIGHT)
 
 
+async def _count_decodable_frames(media: bytes) -> int:
+    process = await asyncio.create_subprocess_exec(
+        "ffprobe",
+        "-v",
+        "error",
+        "-count_frames",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "stream=nb_read_frames",
+        "-of",
+        "default=noprint_wrappers=1:nokey=1",
+        "pipe:0",
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await process.communicate(media)
+    assert process.returncode == 0, stderr.decode("utf-8", "replace")
+    return int(stdout.decode("utf-8", "replace").strip())
+
+
 async def _fake_realtime(request: web.Request) -> web.WebSocketResponse:
     websocket = web.WebSocketResponse(max_msg_size=0)
     await websocket.prepare(request)
@@ -57,6 +79,20 @@ async def _fake_realtime(request: web.Request) -> web.WebSocketResponse:
             }
             await websocket.send_bytes(msgspec.msgpack.encode(header))
             await asyncio.sleep(1 / FPS)
+        await websocket.send_bytes(
+            msgspec.msgpack.encode(
+                {
+                    "type": "media_chunk_complete",
+                    "session_id": "fake-session",
+                    "generation_id": "fake-generation",
+                    "request_id": "fake-request",
+                    "chunk_index": 5,
+                    "event_id": 1,
+                    "num_frames": 36,
+                    "is_final_chunk": True,
+                }
+            )
+        )
         await asyncio.sleep(0.25)
         await websocket.close()
 
@@ -91,8 +127,10 @@ async def _exercise_backend(port: int, backend: str) -> None:
     saw_media_batch = False
     saw_encode_timing = False
     saw_payload_timing = False
+    stream_complete = None
+    media_batch_count = 0
     first_media_chunk = None
-    async with ClientSession() as client:
+    async with ClientSession() as client:  # noqa: SIM117
         async with client.ws_connect(
             f"http://127.0.0.1:{port}/api/h264ws/{backend}",
             max_msg_size=0,
@@ -108,6 +146,7 @@ async def _exercise_backend(port: int, backend: str) -> None:
                     "h264_profile": "main",
                     "h264_gop_seconds": 2,
                     "h264_vbv_buffer_ms": 250,
+                    "max_chunks": 6,
                     "first_frame": f"data:application/octet-stream;base64,{init_frame}",
                 }
             )
@@ -142,6 +181,7 @@ async def _exercise_backend(port: int, backend: str) -> None:
                         )
                     if event.get("type") == "media_batch":
                         saw_media_batch = True
+                        media_batch_count += int(event.get("num_frames") or 0)
                         if first_media_chunk is None:
                             first_media_chunk = int(event.get("chunk_index") or 0)
                     if event.get("type") == "media_encode_timing":
@@ -151,10 +191,11 @@ async def _exercise_backend(port: int, backend: str) -> None:
                         saw_payload_timing = True
                         assert int(event.get("num_bytes") or 0) > 0
                         assert float(event.get("server_sent_epoch_ms") or 0) > 0
+                    if event.get("type") == "stream_complete":
+                        stream_complete = event
+                        break
                 elif message.type == WSMsgType.BINARY:
                     media.extend(message.data)
-                    if b"ftyp" in media and b"moof" in media and b"mdat" in media:
-                        break
                 elif message.type in {
                     WSMsgType.CLOSE,
                     WSMsgType.CLOSED,
@@ -166,8 +207,23 @@ async def _exercise_backend(port: int, backend: str) -> None:
     assert saw_encode_timing, f"{backend}: encoder timing was not emitted"
     assert saw_payload_timing, f"{backend}: payload timing was not emitted"
     assert first_media_chunk == (1 if backend == "lingbot2" else 0)
+    # The fake emits six frames per chunk. LingBot2 drops all of chunk zero,
+    # then treats chunk one as the first stable boundary instead of dropping
+    # two more frames from that stable chunk.
+    expected_frames = 30 if backend == "lingbot2" else 36
+    assert (
+        media_batch_count == expected_frames
+    ), f"{backend}: encoded {media_batch_count} of {expected_frames} frames"
+    assert stream_complete is not None, f"{backend}: terminal stream marker missing"
+    assert stream_complete["encoded_frames"] == expected_frames
+    assert stream_complete["dropped_frames"] == (6 if backend == "lingbot2" else 0)
     assert b"ftyp" in media, f"{backend}: MP4 init segment was not emitted"
     assert b"moof" in media and b"mdat" in media, f"{backend}: fMP4 media missing"
+    decoded_frames = await _count_decodable_frames(bytes(media))
+    assert decoded_frames == expected_frames, (
+        f"{backend}: flushed fMP4 contains {decoded_frames} of {expected_frames} "
+        "accepted frames"
+    )
 
 
 async def main() -> None:
