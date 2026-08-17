@@ -52,6 +52,33 @@ def _heartbeat(
     )
 
 
+def _create_dynamodb_coordinator_table(client, table_name):
+    client.create_table(
+        TableName=table_name,
+        KeySchema=[
+            {"AttributeName": "pk", "KeyType": "HASH"},
+            {"AttributeName": "sk", "KeyType": "RANGE"},
+        ],
+        AttributeDefinitions=[
+            {"AttributeName": "pk", "AttributeType": "S"},
+            {"AttributeName": "sk", "AttributeType": "S"},
+            {"AttributeName": "allocation_key", "AttributeType": "S"},
+            {"AttributeName": "allocation_sort", "AttributeType": "S"},
+        ],
+        GlobalSecondaryIndexes=[
+            {
+                "IndexName": "allocation-index",
+                "KeySchema": [
+                    {"AttributeName": "allocation_key", "KeyType": "HASH"},
+                    {"AttributeName": "allocation_sort", "KeyType": "RANGE"},
+                ],
+                "Projection": {"ProjectionType": "ALL"},
+            }
+        ],
+        BillingMode="PAY_PER_REQUEST",
+    )
+
+
 def test_coordinator_atomically_pairs_compatible_worker_slots():
     async def run():
         store = InMemoryCoordinatorStore(ttl_s=60, worker_ttl_s=30)
@@ -1034,10 +1061,12 @@ def test_dynamodb_heartbeat_retries_a_transient_transaction_conflict():
         def put_item(self, **kwargs):
             return None
 
-        def update_item(self, **kwargs):
+        def transact_write_items(self, *, TransactItems):
             self.slot_updates += 1
             if self.slot_updates == 1:
                 raise TransactionConflictException("transaction in progress")
+            assert any("ConditionCheck" in item for item in TransactItems)
+            assert any("Update" in item for item in TransactItems)
 
     client = FakeClient()
     store = DynamoDBCoordinatorStore(
@@ -1071,8 +1100,10 @@ def test_dynamodb_heartbeat_clamps_advertised_denoiser_capacity():
         def put_item(self, *, Item, **_kwargs):
             self.worker_item = Item
 
-        def update_item(self, **kwargs):
-            self.slot_updates.append(kwargs)
+        def transact_write_items(self, *, TransactItems):
+            self.slot_updates.extend(
+                item["Update"] for item in TransactItems if "Update" in item
+            )
 
     client = FakeClient()
     store = DynamoDBCoordinatorStore(
@@ -1111,8 +1142,10 @@ def test_dynamodb_heartbeat_allows_four_sessions_per_denoiser_gpu():
         def put_item(self, *, Item, **_kwargs):
             self.worker_item = Item
 
-        def update_item(self, **kwargs):
-            self.slot_updates.append(kwargs)
+        def transact_write_items(self, *, TransactItems):
+            self.slot_updates.extend(
+                item["Update"] for item in TransactItems if "Update" in item
+            )
 
     client = FakeClient()
     store = DynamoDBCoordinatorStore(
@@ -1152,8 +1185,10 @@ def test_dynamodb_heartbeat_persists_epoch_lifecycle_and_worker_load():
         def put_item(self, **kwargs):
             self.worker_item = kwargs["Item"]
 
-        def update_item(self, **kwargs):
-            self.slot_update = kwargs
+        def transact_write_items(self, *, TransactItems):
+            self.slot_update = next(
+                item["Update"] for item in TransactItems if "Update" in item
+            )
 
     client = FakeClient()
     store = DynamoDBCoordinatorStore(
@@ -1180,11 +1215,12 @@ def test_dynamodb_heartbeat_persists_epoch_lifecycle_and_worker_load():
     assert names["#capacity"] == "capacity"
     assert "#capacity = :capacity" in client.slot_update["UpdateExpression"]
     assert values[":worker_epoch"] == {"S": "epoch-a"}
+    assert values[":heartbeat_generation"] == client.worker_item["heartbeat_generation"]
     assert values[":queue_depth"] == {"N": "3"}
     assert values[":service_time_ms"] == {"N": "12.5"}
 
 
-def test_dynamodb_capacity_shrink_retires_stale_slots_before_publish_and_grows():
+def test_dynamodb_capacity_shrink_atomically_retires_slots_and_grows():
     class TransactionCanceledException(Exception):
         pass
 
@@ -1318,6 +1354,15 @@ def test_dynamodb_capacity_shrink_retires_stale_slots_before_publish_and_grows()
                         and current.get("worker_epoch")
                         != values[":previous_worker_epoch"]
                     )
+                    or (
+                        ":previous_heartbeat_generation" in values
+                        and current.get("heartbeat_generation")
+                        != values[":previous_heartbeat_generation"]
+                    )
+                    or (
+                        ":previous_heartbeat_generation" not in values
+                        and "heartbeat_generation" in current
+                    )
                 ):
                     raise ConditionalCheckFailedException("stale worker snapshot")
             self.workers[worker_id] = dict(Item)
@@ -1354,6 +1399,7 @@ def test_dynamodb_capacity_shrink_retires_stale_slots_before_publish_and_grows()
                 "model_revision": ":model_revision",
                 "vae_fingerprint": ":vae_fingerprint",
                 "worker_epoch": ":worker_epoch",
+                "heartbeat_generation": ":heartbeat_generation",
                 "lifecycle": ":lifecycle",
                 "capacity": ":capacity",
                 "active_sessions": ":active_sessions",
@@ -1378,18 +1424,21 @@ def test_dynamodb_capacity_shrink_retires_stale_slots_before_publish_and_grows()
                 if "Update" in entry
                 and "REMOVE allocation_key" in entry["Update"]["UpdateExpression"]
             ]
+            worker_puts = [
+                entry["Put"]
+                for entry in TransactItems
+                if "Put" in entry
+                and entry["Put"]["Item"]["pk"]["S"].startswith("WORKER#")
+            ]
             is_retirement = (
                 bool(retirement_updates)
-                and len(retirement_updates) == len(TransactItems) - 1
+                and len(worker_puts) == 1
+                and len(retirement_updates) + 1 == len(TransactItems)
             )
             if is_retirement:
-                snapshot_check = next(
-                    entry["ConditionCheck"]
-                    for entry in TransactItems
-                    if "ConditionCheck" in entry
-                )
-                snapshot_values = snapshot_check["ExpressionAttributeValues"]
-                worker_id = snapshot_check["Key"]["pk"]["S"].removeprefix("WORKER#")
+                worker_put = worker_puts[0]
+                snapshot_values = worker_put["ExpressionAttributeValues"]
+                worker_id = worker_put["Item"]["pk"]["S"].removeprefix("WORKER#")
                 current_worker = self.workers[worker_id]
                 if (
                     (
@@ -1403,22 +1452,57 @@ def test_dynamodb_capacity_shrink_retires_stale_slots_before_publish_and_grows()
                     )
                     or current_worker["capacity"]
                     != snapshot_values[":previous_capacity"]
+                    or current_worker["role"] != snapshot_values[":previous_role"]
+                    or (
+                        ":previous_heartbeat_generation" in snapshot_values
+                        and current_worker.get("heartbeat_generation")
+                        != snapshot_values[":previous_heartbeat_generation"]
+                    )
+                    or (
+                        ":previous_heartbeat_generation" not in snapshot_values
+                        and "heartbeat_generation" in current_worker
+                    )
                 ):
                     raise TransactionCanceledException("stale worker snapshot")
+                for update in retirement_updates:
+                    item = self.slots[update["Key"]["pk"]["S"]]
+                    values = update["ExpressionAttributeValues"]
+                    expected_epoch = values.get(":previous_worker_epoch")
+                    if (expected_epoch is None and "worker_epoch" in item) or (
+                        expected_epoch is not None
+                        and item.get("worker_epoch") not in (None, expected_epoch)
+                    ):
+                        raise TransactionCanceledException("stale slot epoch")
+                    already_retired = (
+                        item.get("capacity") == values[":capacity"]
+                        and item.get("lifecycle") == values[":failed"]
+                        and "allocation_key" not in item
+                        and "allocation_sort" not in item
+                    )
+                    if (
+                        "capacity" in item
+                        and item["capacity"] != values[":previous_capacity"]
+                        and not already_retired
+                    ):
+                        raise TransactionCanceledException("stale slot capacity")
                 self.retire_attempts += 1
                 self.order.append("retire-attempt")
                 if self.retire_attempts <= self.retire_failures:
                     raise TransactionCanceledException("transient conflict")
+                self.workers[worker_id] = dict(worker_put["Item"])
                 for update in retirement_updates:
                     item = self.slots[update["Key"]["pk"]["S"]]
                     values = update["ExpressionAttributeValues"]
                     item["lifecycle"] = values[":failed"]
                     item["heartbeat_expires_at"] = values[":now"]
+                    item["heartbeat_generation"] = values[":heartbeat_generation"]
                     item["capacity"] = values[":capacity"]
                     item["ttl"] = values[":ttl"]
                     item.pop("allocation_key", None)
                     item.pop("allocation_sort", None)
-                self.order.append("retire-commit")
+                self.order.append(
+                    f"atomic-put:{worker_put['Item']['capacity']['N']}+retire"
+                )
                 return
 
             checks = [
@@ -1426,6 +1510,26 @@ def test_dynamodb_capacity_shrink_retires_stale_slots_before_publish_and_grows()
                 for entry in TransactItems
                 if "ConditionCheck" in entry
             ]
+            publication_updates = [
+                entry["Update"]
+                for entry in TransactItems
+                if "Update" in entry
+                and "SET item_type" in entry["Update"]["UpdateExpression"]
+            ]
+            if len(checks) == 1 and publication_updates:
+                check = checks[0]
+                worker_id = check["Key"]["pk"]["S"].removeprefix("WORKER#")
+                expected_generation = check["ExpressionAttributeValues"][
+                    ":heartbeat_generation"
+                ]
+                if (
+                    self.workers[worker_id].get("heartbeat_generation")
+                    != expected_generation
+                ):
+                    raise TransactionCanceledException("stale heartbeat publication")
+                for publication_update in publication_updates:
+                    self.update_item(**publication_update)
+                return
             if checks:
                 self.acquire_transaction = TransactItems
                 for check in checks:
@@ -1469,12 +1573,12 @@ def test_dynamodb_capacity_shrink_retires_stale_slots_before_publish_and_grows()
 
     retired = client.slots["SLOT#denoiser#denoiser-a#0001"]
     assert client.retire_attempts == 2
-    assert client.order[:4] == [
+    assert client.order[:3] == [
         "retire-attempt",
         "retire-attempt",
-        "retire-commit",
-        "put:1",
+        "atomic-put:1+retire",
     ]
+    assert client.workers["denoiser-a"]["capacity"] == {"N": "1"}
     assert retired["lifecycle"] == {"S": "failed"}
     assert retired["heartbeat_expires_at"] == {"N": "100"}
     assert retired["capacity"] == {"N": "1"}
@@ -1503,6 +1607,10 @@ def test_dynamodb_capacity_shrink_retires_stale_slots_before_publish_and_grows()
         == "WORKER#denoiser-a"
     )
     assert "#capacity > :slot_index" in denoiser_check["ConditionExpression"]
+    assert (
+        "heartbeat_generation = :heartbeat_generation"
+        in denoiser_check["ConditionExpression"]
+    )
 
     assignment = SessionAssignment(
         user_id="user-a",
@@ -1541,6 +1649,26 @@ def test_dynamodb_capacity_shrink_retires_stale_slots_before_publish_and_grows()
         if pk.startswith("SLOT#denoiser#")
     )
 
+    # Recover the exact state left by the previous two-phase implementation if
+    # it crashed after retiring slots but before publishing the worker record.
+    crash_recovery = FakeClient(retire_failures=0)
+    partially_retired = crash_recovery.slots["SLOT#denoiser#denoiser-a#0001"]
+    partially_retired["lifecycle"] = {"S": "failed"}
+    partially_retired["heartbeat_expires_at"] = {"N": "100"}
+    partially_retired["capacity"] = {"N": "1"}
+    partially_retired.pop("allocation_key")
+    partially_retired.pop("allocation_sort")
+    recovery_store = DynamoDBCoordinatorStore(
+        "minwm-realtime-coordinator",
+        ttl_s=60,
+        worker_ttl_s=30,
+        wall_clock=lambda: 100,
+        client=crash_recovery,
+    )
+    recovery_store._heartbeat_sync(_heartbeat("denoiser-a", "denoiser", capacity=1))
+    assert crash_recovery.workers["denoiser-a"]["capacity"] == {"N": "1"}
+    assert partially_retired["lifecycle"] == {"S": "failed"}
+
     # Legacy records written before worker_epoch was introduced migrate on the
     # first shrinking heartbeat instead of becoming permanently unshrinkable.
     legacy = FakeClient(retire_failures=0)
@@ -1572,12 +1700,17 @@ def test_dynamodb_capacity_shrink_retires_stale_slots_before_publish_and_grows()
             self.store = None
             self.injected_new_epoch = False
 
-        def put_item(self, *, Item, **kwargs):
-            if (
-                Item.get("worker_epoch") == {"S": "epoch-a"}
-                and Item.get("capacity") == {"N": "1"}
-                and not self.injected_new_epoch
-            ):
+        def transact_write_items(self, *, TransactItems):
+            shrinking_worker = next(
+                (
+                    entry["Put"]["Item"]
+                    for entry in TransactItems
+                    if "Put" in entry
+                    and entry["Put"]["Item"].get("capacity") == {"N": "1"}
+                ),
+                None,
+            )
+            if shrinking_worker is not None and not self.injected_new_epoch:
                 self.injected_new_epoch = True
                 self.store._heartbeat_sync(
                     _heartbeat(
@@ -1587,7 +1720,7 @@ def test_dynamodb_capacity_shrink_retires_stale_slots_before_publish_and_grows()
                         worker_epoch="epoch-b",
                     )
                 )
-            return super().put_item(Item=Item, **kwargs)
+            return super().transact_write_items(TransactItems=TransactItems)
 
     racing = RacingClient()
     racing_store = DynamoDBCoordinatorStore(
@@ -1599,7 +1732,7 @@ def test_dynamodb_capacity_shrink_retires_stale_slots_before_publish_and_grows()
     )
     racing.store = racing_store
 
-    with pytest.raises(ConditionalCheckFailedException, match="stale worker"):
+    with pytest.raises(TransactionCanceledException, match="stale worker"):
         racing_store._heartbeat_sync(
             _heartbeat(
                 "denoiser-a",
@@ -1621,6 +1754,289 @@ def test_dynamodb_capacity_shrink_retires_stale_slots_before_publish_and_grows()
         )
         for index in range(3)
     } == {("epoch-b", "3", "ready")}
+
+
+def test_dynamodb_atomic_shrink_recovers_partial_retire_and_fences_racing_grow():
+    boto3 = pytest.importorskip("boto3")
+    moto = pytest.importorskip("moto")
+
+    with moto.mock_aws():
+        table_name = "minwm-realtime-coordinator"
+        client = boto3.client("dynamodb", region_name="us-east-1")
+        _create_dynamodb_coordinator_table(client, table_name)
+
+        store = DynamoDBCoordinatorStore(
+            table_name,
+            ttl_s=60,
+            worker_ttl_s=30,
+            wall_clock=lambda: 100,
+            client=client,
+        )
+        store._heartbeat_sync(_heartbeat("denoiser-partial", "denoiser", capacity=2))
+
+        worker_key = {
+            "pk": {"S": "WORKER#denoiser-partial"},
+            "sk": {"S": "HEARTBEAT"},
+        }
+        client.update_item(
+            TableName=table_name,
+            Key=worker_key,
+            UpdateExpression="REMOVE heartbeat_generation",
+        )
+        for slot_index in range(2):
+            client.update_item(
+                TableName=table_name,
+                Key={
+                    "pk": {"S": f"SLOT#denoiser#denoiser-partial#{slot_index:04d}"},
+                    "sk": {"S": "LEASE"},
+                },
+                UpdateExpression="REMOVE heartbeat_generation",
+            )
+
+        partial_slot_key = {
+            "pk": {"S": "SLOT#denoiser#denoiser-partial#0001"},
+            "sk": {"S": "LEASE"},
+        }
+        client.update_item(
+            TableName=table_name,
+            Key=partial_slot_key,
+            UpdateExpression=(
+                "SET #lifecycle = :failed, heartbeat_expires_at = :now, "
+                "#capacity = :capacity, #ttl = :ttl "
+                "REMOVE allocation_key, allocation_sort"
+            ),
+            ExpressionAttributeNames={
+                "#capacity": "capacity",
+                "#lifecycle": "lifecycle",
+                "#ttl": "ttl",
+            },
+            ExpressionAttributeValues={
+                ":failed": {"S": "failed"},
+                ":now": {"N": "100"},
+                ":capacity": {"N": "1"},
+                ":ttl": {"N": "86500"},
+            },
+        )
+
+        # This is the old two-phase crash state: the slot retirement committed,
+        # but the worker heartbeat still advertises the previous capacity.
+        assert client.get_item(
+            TableName=table_name,
+            Key=worker_key,
+            ConsistentRead=True,
+        )["Item"]["capacity"] == {"N": "2"}
+
+        store._heartbeat_sync(_heartbeat("denoiser-partial", "denoiser", capacity=1))
+        recovered_worker = client.get_item(
+            TableName=table_name,
+            Key=worker_key,
+            ConsistentRead=True,
+        )["Item"]
+        recovered_slot = client.get_item(
+            TableName=table_name,
+            Key=partial_slot_key,
+            ConsistentRead=True,
+        )["Item"]
+        assert recovered_worker["capacity"] == {"N": "1"}
+        assert recovered_slot["capacity"] == {"N": "1"}
+        assert recovered_slot["lifecycle"] == {"S": "failed"}
+        assert (
+            recovered_slot["heartbeat_generation"]
+            == recovered_worker["heartbeat_generation"]
+        )
+        assert "allocation_key" not in recovered_slot
+        assert "allocation_sort" not in recovered_slot
+
+        base_racing_store = DynamoDBCoordinatorStore(
+            table_name,
+            ttl_s=60,
+            worker_ttl_s=30,
+            wall_clock=lambda: 100,
+            client=client,
+        )
+        base_racing_store._heartbeat_sync(
+            _heartbeat("denoiser-race", "denoiser", capacity=2)
+        )
+
+        class GrowBeforeShrinkTransaction:
+            def __init__(self):
+                self.injected = False
+
+            def __getattr__(self, name):
+                return getattr(client, name)
+
+            def transact_write_items(self, **kwargs):
+                if not self.injected:
+                    self.injected = True
+                    base_racing_store._heartbeat_sync(
+                        _heartbeat(
+                            "denoiser-race",
+                            "denoiser",
+                            capacity=3,
+                            worker_epoch="epoch-b",
+                        )
+                    )
+                return client.transact_write_items(**kwargs)
+
+        racing_client = GrowBeforeShrinkTransaction()
+        stale_shrink_store = DynamoDBCoordinatorStore(
+            table_name,
+            ttl_s=60,
+            worker_ttl_s=30,
+            wall_clock=lambda: 100,
+            client=racing_client,
+        )
+        with pytest.raises(client.exceptions.TransactionCanceledException):
+            stale_shrink_store._heartbeat_sync(
+                _heartbeat("denoiser-race", "denoiser", capacity=1)
+            )
+
+        raced_worker = client.get_item(
+            TableName=table_name,
+            Key={
+                "pk": {"S": "WORKER#denoiser-race"},
+                "sk": {"S": "HEARTBEAT"},
+            },
+            ConsistentRead=True,
+        )["Item"]
+        assert raced_worker["worker_epoch"] == {"S": "epoch-b"}
+        assert raced_worker["capacity"] == {"N": "3"}
+        for slot_index in range(3):
+            raced_slot = client.get_item(
+                TableName=table_name,
+                Key={
+                    "pk": {"S": f"SLOT#denoiser#denoiser-race#{slot_index:04d}"},
+                    "sk": {"S": "LEASE"},
+                },
+                ConsistentRead=True,
+            )["Item"]
+            assert raced_slot["worker_epoch"] == {"S": "epoch-b"}
+            assert raced_slot["capacity"] == {"N": "3"}
+            assert raced_slot["lifecycle"] == {"S": "ready"}
+            assert raced_slot["allocation_key"] == {"S": "DENOISER#minwm-r1"}
+
+
+def test_dynamodb_generation_fences_delayed_same_epoch_slot_publication():
+    boto3 = pytest.importorskip("boto3")
+    moto = pytest.importorskip("moto")
+
+    with moto.mock_aws():
+        table_name = "minwm-delayed-heartbeat-coordinator"
+        client = boto3.client("dynamodb", region_name="us-east-1")
+        _create_dynamodb_coordinator_table(client, table_name)
+        base_store = DynamoDBCoordinatorStore(
+            table_name,
+            ttl_s=60,
+            worker_ttl_s=30,
+            wall_clock=lambda: 100,
+            client=client,
+        )
+        heartbeat = _heartbeat("denoiser-delayed", "denoiser", capacity=2)
+        base_store._heartbeat_sync(heartbeat)
+
+        class DelaySecondSlotPublication:
+            def __init__(self):
+                self.delayed_transaction = None
+
+            def __getattr__(self, name):
+                return getattr(client, name)
+
+            def transact_write_items(self, **kwargs):
+                slot_updates = [
+                    item["Update"]
+                    for item in kwargs["TransactItems"]
+                    if "Update" in item
+                    and "SET item_type" in item["Update"]["UpdateExpression"]
+                ]
+                if self.delayed_transaction is None and any(
+                    update["Key"]["pk"]["S"].endswith("#0001")
+                    for update in slot_updates
+                ):
+                    self.delayed_transaction = kwargs
+                    return {}
+                return client.transact_write_items(**kwargs)
+
+        delaying_client = DelaySecondSlotPublication()
+        delayed_store = DynamoDBCoordinatorStore(
+            table_name,
+            ttl_s=60,
+            worker_ttl_s=30,
+            wall_clock=lambda: 101,
+            client=delaying_client,
+        )
+        delayed_store._heartbeat_sync(heartbeat)
+        assert delaying_client.delayed_transaction is not None
+        delayed_generation = next(
+            item["ConditionCheck"]["ExpressionAttributeValues"][
+                ":heartbeat_generation"
+            ]["S"]
+            for item in delaying_client.delayed_transaction["TransactItems"]
+            if "ConditionCheck" in item
+        )
+
+        shrink_store = DynamoDBCoordinatorStore(
+            table_name,
+            ttl_s=60,
+            worker_ttl_s=30,
+            wall_clock=lambda: 102,
+            client=client,
+        )
+        shrink_store._heartbeat_sync(
+            _heartbeat("denoiser-delayed", "denoiser", capacity=1)
+        )
+        current_worker = client.get_item(
+            TableName=table_name,
+            Key={
+                "pk": {"S": "WORKER#denoiser-delayed"},
+                "sk": {"S": "HEARTBEAT"},
+            },
+            ConsistentRead=True,
+        )["Item"]
+        assert current_worker["capacity"] == {"N": "1"}
+        assert current_worker["heartbeat_generation"]["S"] != delayed_generation
+
+        with pytest.raises(client.exceptions.TransactionCanceledException):
+            client.transact_write_items(**delaying_client.delayed_transaction)
+
+        retired_slot = client.get_item(
+            TableName=table_name,
+            Key={
+                "pk": {"S": "SLOT#denoiser#denoiser-delayed#0001"},
+                "sk": {"S": "LEASE"},
+            },
+            ConsistentRead=True,
+        )["Item"]
+        assert retired_slot["capacity"] == {"N": "1"}
+        assert retired_slot["lifecycle"] == {"S": "failed"}
+        assert (
+            retired_slot["heartbeat_generation"]
+            == current_worker["heartbeat_generation"]
+        )
+        assert "allocation_key" not in retired_slot
+        assert "allocation_sort" not in retired_slot
+
+        allocatable = client.query(
+            TableName=table_name,
+            IndexName="allocation-index",
+            KeyConditionExpression="allocation_key = :allocation",
+            ExpressionAttributeValues={":allocation": {"S": "DENOISER#minwm-r1"}},
+        )["Items"]
+        assert {
+            item["slot_index"]["N"]
+            for item in allocatable
+            if item.get("worker_id") == {"S": "denoiser-delayed"}
+        } == {"0"}
+
+        shrink_store._heartbeat_sync(_heartbeat("vae-delayed", "vae", capacity=1))
+        assignment = shrink_store._acquire_sync(
+            user_id="user-delayed",
+            session_id="session-delayed",
+            generation_id="generation-delayed",
+            model_revision="minwm-r1",
+            vae_fingerprint="taew2_2",
+        )
+        assert assignment.denoiser.worker_id == "denoiser-delayed"
+        assert assignment.denoiser.slot_index == 0
 
 
 def test_dynamodb_renew_condition_checks_current_worker_epochs_and_expiry():
