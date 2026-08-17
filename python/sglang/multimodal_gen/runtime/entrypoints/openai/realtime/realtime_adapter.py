@@ -112,7 +112,7 @@ def build_realtime_sampling_params(
         enable_teacache=request.enable_teacache,
         # The negotiated remote media profile owns streaming interpolation.
         # Never invoke the legacy offline post-process (which may resolve a
-        # model repository) for the strict `rife2x_v1` path.
+        # model repository) for strict negotiated realtime RIFE profiles.
         enable_frame_interpolation=(
             request.enable_frame_interpolation
             if request.realtime_media_profile == "native_v1"

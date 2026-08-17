@@ -55,11 +55,39 @@ def run_meets_slo(
     )
 
 
+def run_meets_output_slo(
+    run: dict,
+    *,
+    min_output_wall_fps: float = 24.0,
+    max_error_rate: float = 0.0,
+) -> bool:
+    """Gate measured output delivery without consulting timeline metadata.
+
+    ``output_timeline_fps`` is a media timebase (for example 72 for 3x at a
+    24 FPS source), not evidence that the service delivered 72 frames per wall
+    second. Older result files use ``min_session_fps`` for the same measured
+    output-wall quantity, so retain that fallback for report compatibility.
+    """
+
+    min_session_output_wall_fps = run.get("min_session_output_wall_fps")
+    if min_session_output_wall_fps is None:
+        min_session_output_wall_fps = run.get("min_session_fps")
+    if min_session_output_wall_fps is None:
+        # Aggregate throughput cannot prove the slowest user met the UX gate.
+        # Missing per-session evidence therefore fails closed.
+        return False
+    return bool(
+        float(min_session_output_wall_fps) >= min_output_wall_fps
+        and float(run.get("error_rate") or 0.0) <= max_error_rate
+    )
+
+
 def summarize_runs(
     runs: list[dict],
     *,
     action_p95_slo_ms: float = 1000.0,
     min_fps: float = 16.0,
+    min_output_wall_fps: float = 24.0,
 ) -> dict:
     ordered = sorted(runs, key=lambda item: int(item["concurrency"]))
     supported = [
@@ -71,12 +99,24 @@ def summarize_runs(
             min_fps=min_fps,
         )
     ]
+    output_supported = [
+        run
+        for run in ordered
+        if run_meets_output_slo(
+            run,
+            min_output_wall_fps=min_output_wall_fps,
+        )
+    ]
     return {
         "max_supported_concurrency": (
             int(supported[-1]["concurrency"]) if supported else 0
         ),
+        "max_supported_output_concurrency": (
+            int(output_supported[-1]["concurrency"]) if output_supported else 0
+        ),
         "action_p95_slo_ms": action_p95_slo_ms,
         "min_fps": min_fps,
+        "min_output_wall_fps": min_output_wall_fps,
         "runs": ordered,
     }
 
@@ -156,11 +196,22 @@ def _increase_pct(baseline: float, current: float) -> float:
     return (current - baseline) / baseline * 100.0 if baseline else 0.0
 
 
-def build_report(baseline: dict, asynchronous: dict) -> dict:
+def build_report(
+    baseline: dict,
+    asynchronous: dict,
+    *,
+    min_output_wall_fps: float = 24.0,
+) -> dict:
     return {
         "schema_version": "minwm-async-vae-report/v1",
-        "baseline": summarize_runs(baseline["runs"]),
-        "async": summarize_runs(asynchronous["runs"]),
+        "baseline": summarize_runs(
+            baseline["runs"],
+            min_output_wall_fps=min_output_wall_fps,
+        ),
+        "async": summarize_runs(
+            asynchronous["runs"],
+            min_output_wall_fps=min_output_wall_fps,
+        ),
         "comparison": compare_profiles(baseline, asynchronous),
         "hardware": {
             "baseline": baseline.get("hardware", {}),
@@ -186,9 +237,27 @@ def render_markdown(report: dict) -> str:
         "",
         f"- 同步基线最高稳定并发：{report['baseline']['max_supported_concurrency']}",
         f"- 异步 VAE 最高稳定并发：{report['async']['max_supported_concurrency']}",
-        f"- 并发 {comparison['comparison_concurrency']} 下 P95："
-        f"{comparison['baseline_p95_ms']:.1f} ms → {comparison['async_p95_ms']:.1f} ms",
+        (
+            "- 同步基线实测输出/wall ≥"
+            f"{report['baseline']['min_output_wall_fps']:.1f} FPS 最高并发："
+            f"{report['baseline']['max_supported_output_concurrency']}"
+        ),
+        (
+            "- 异步 VAE 实测输出/wall ≥"
+            f"{report['async']['min_output_wall_fps']:.1f} FPS 最高并发："
+            f"{report['async']['max_supported_output_concurrency']}"
+        ),
+        (
+            f"- 并发 {comparison['comparison_concurrency']} 下 P95："
+            f"{comparison['baseline_p95_ms']:.1f} ms → "
+            f"{comparison['async_p95_ms']:.1f} ms"
+        ),
         f"- 端到端 P95 改善：{comparison['async_improvement_pct']:.2f}%",
+        (
+            "- 判定口径：3x output realtime factor = output/wall ÷ 72；"
+            "该比值小于 1 不等于未达到 24 FPS，发布门槛独立使用最低单会话"
+            " output/wall，浏览器另验 presented FPS rolling p5。"
+        ),
         "",
         "## 硬件与部署",
         "",
@@ -199,19 +268,34 @@ def render_markdown(report: dict) -> str:
         "",
         "## 并发压测",
         "",
-        "| 模式 | 并发 | P95 action→首帧 (ms) | P95 chunk (ms) | "
-        "最低单会话源帧 FPS | 集群源帧 FPS | 错误率 |",
-        "|---|---:|---:|---:|---:|---:|---:|",
+        (
+            "| 模式 | 并发 | P95 action→首帧 (ms) | P95 chunk (ms) | "
+            "最低单会话源帧 FPS | 最低单会话输出/wall FPS | "
+            "集群源帧 FPS | 错误率 |"
+        ),
+        "|---|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for profile_name in ("baseline", "async"):
         for run in report[profile_name]["runs"]:
             e2e = run.get("action_to_first_frame_ms") or run.get("chunk_total_ms", {})
+            min_source_wall_fps = float(
+                run.get("min_session_source_fps") or run.get("min_session_fps") or 0
+            )
+            min_output_wall_fps = float(
+                run.get("min_session_output_wall_fps")
+                or run.get("min_session_fps")
+                or 0
+            )
+            aggregate_source_wall_fps = float(
+                run.get("aggregate_source_fps") or run.get("aggregate_fps") or 0
+            )
             lines.append(
                 f"| {profile_name} | {run['concurrency']} | "
                 f"{float(e2e.get('p95') or 0):.1f} | "
                 f"{float((run.get('chunk_total_ms') or {}).get('p95') or 0):.1f} | "
-                f"{float(run.get('min_session_source_fps') or run.get('min_session_fps') or 0):.2f} | "
-                f"{float(run.get('aggregate_source_fps') or run.get('aggregate_fps') or 0):.2f} | "
+                f"{min_source_wall_fps:.2f} | "
+                f"{min_output_wall_fps:.2f} | "
+                f"{aggregate_source_wall_fps:.2f} | "
                 f"{float(run.get('error_rate') or 0) * 100:.2f}% |"
             )
     lines.extend(
@@ -264,6 +348,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--async-profile", required=True, type=Path)
     parser.add_argument("--output-json", required=True, type=Path)
     parser.add_argument("--output-md", required=True, type=Path)
+    parser.add_argument("--min-output-wall-fps", type=float, default=24.0)
     return parser.parse_args()
 
 
@@ -271,7 +356,11 @@ def main() -> None:
     args = parse_args()
     baseline = json.loads(args.baseline.read_text())
     asynchronous = json.loads(args.async_profile.read_text())
-    report = build_report(baseline, asynchronous)
+    report = build_report(
+        baseline,
+        asynchronous,
+        min_output_wall_fps=args.min_output_wall_fps,
+    )
     args.output_json.parent.mkdir(parents=True, exist_ok=True)
     args.output_json.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
     args.output_md.write_text(render_markdown(report))

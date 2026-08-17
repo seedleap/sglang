@@ -172,7 +172,7 @@ assert.match(
 assert.match(html, /prompt_rewrite_controller\.js\?v=prompt-rewrite-v3/);
 assert.match(html, /world_rules_controller\.js\?v=world-rules-v3/);
 assert.match(html, /styles\.css\?v=world-studio-h264-rules-v6/);
-assert.match(html, /app\.js\?v=world-studio-rife-h264-smooth-timeline-v1/);
+assert.match(html, /app\.js\?v=world-studio-rife3-h264-smooth-timeline-v2/);
 assert.match(html, /id="minwmH264Viewport"/);
 assert.match(html, /id="lingbot2H264Viewport"/);
 assert.match(html, /id="minwmPerfScheduler"/);

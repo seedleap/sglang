@@ -1,4 +1,10 @@
-from summarize import build_report, latency_summary, render_markdown, summarize_runs
+from summarize import (
+    build_report,
+    latency_summary,
+    render_markdown,
+    run_meets_output_slo,
+    summarize_runs,
+)
 
 
 def _run(concurrency, p95, fps, error_rate=0.0):
@@ -44,6 +50,39 @@ def test_rife_slo_uses_source_fps_instead_of_interpolated_output_fps():
     assert report["max_supported_concurrency"] == 0
 
 
+def test_output_ux_gate_uses_measured_wall_fps_not_timeline_72():
+    slow_delivery = _run(2, p95=800, fps=23.9)
+    slow_delivery["min_session_source_fps"] = 12.0
+    slow_delivery["min_session_output_wall_fps"] = 23.9
+    slow_delivery["media_profile_acceptance"] = [
+        {
+            "source_timeline_fps": 24,
+            "output_timeline_fps": 72,
+        }
+    ]
+    assert run_meets_output_slo(slow_delivery) is False
+
+    sustained_delivery = _run(4, p95=1200, fps=24.1)
+    sustained_delivery["min_session_source_fps"] = 8.1
+    sustained_delivery["min_session_output_wall_fps"] = 24.1
+    report = summarize_runs([slow_delivery, sustained_delivery])
+
+    # Model/source and output UX capacities are intentionally independent.
+    assert report["max_supported_concurrency"] == 0
+    assert report["max_supported_output_concurrency"] == 4
+    assert report["min_output_wall_fps"] == 24.0
+
+
+def test_output_ux_gate_fails_closed_without_per_session_wall_evidence():
+    aggregate_only = {
+        "aggregate_output_wall_fps": 96.0,
+        "output_timeline_fps": 72.0,
+        "error_rate": 0.0,
+    }
+
+    assert run_meets_output_slo(aggregate_only) is False
+
+
 def test_report_calculates_async_improvement_at_common_concurrency():
     report = build_report(
         {"runs": [_run(1, p95=800, fps=16)]},
@@ -84,6 +123,8 @@ def test_markdown_contains_hardware_stages_and_per_level_improvement():
     assert "## 异步收益" in markdown
     assert "远端 TAEHV decode：30.0 ms" in markdown
     assert "| 1 | 25.00% | 25.00% | 12.50% |" in markdown
+    assert "output realtime factor = output/wall ÷ 72" in markdown
+    assert "presented FPS rolling p5" in markdown
 
 
 def test_latency_summary_uses_nearest_rank_percentiles():

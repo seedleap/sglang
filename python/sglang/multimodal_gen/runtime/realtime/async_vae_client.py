@@ -315,7 +315,7 @@ class RealtimeVAEClient:
         self._closed = False
         self.decoder_backend: str | None = None
         self.media_profile_acceptance: MediaProfileAcceptance | None = None
-        self._rife_media_started = False
+        self._interpolated_media_started = False
 
     async def open(
         self,
@@ -341,7 +341,7 @@ class RealtimeVAEClient:
         requested_media_profile = parse_media_profile(media_profile)
         source_timeline_fps = (
             validate_source_timeline_fps(source_timeline_fps)
-            if requested_media_profile is RealtimeMediaProfile.RIFE2X_V1
+            if requested_media_profile.interpolation_enabled
             else float(source_timeline_fps)
         )
         self.decoder_backend = decoder_backend
@@ -372,7 +372,7 @@ class RealtimeVAEClient:
             "coordinator_token": coordinator_token,
             "worker_epoch": worker_epoch,
         }
-        if requested_media_profile is RealtimeMediaProfile.RIFE2X_V1:
+        if requested_media_profile.interpolation_enabled:
             open_fields.update(
                 media_profile=requested_media_profile.value,
                 source_timeline_fps=source_timeline_fps,
@@ -451,7 +451,7 @@ class RealtimeVAEClient:
             ):
                 raise ProtocolViolation("VAE worker output fps mismatch")
             weights_sha256 = response.get("media_weights_sha256")
-        if requested_media_profile is RealtimeMediaProfile.RIFE2X_V1:
+        if requested_media_profile.interpolation_enabled:
             if (
                 not isinstance(weights_sha256, str)
                 or len(weights_sha256) != 64
@@ -699,6 +699,7 @@ class RealtimeVAEClient:
         self,
         source_num_frames: int,
         output_num_frames: int,
+        media_profile: RealtimeMediaProfile,
     ) -> None:
         if source_num_frames < 0 or output_num_frames < 0:
             raise ProtocolViolation("remote completion RIFE frame counts are invalid")
@@ -708,13 +709,18 @@ class RealtimeVAEClient:
                     "remote completion RIFE empty chunk must have zero output"
                 )
             return
-        expected_output = source_num_frames * 2 - (0 if self._rife_media_started else 1)
+        multiplier = media_profile.output_timeline_fps_multiplier
+        if multiplier <= 1:
+            raise ProtocolViolation("native media cannot carry RIFE frame counts")
+        expected_output = source_num_frames * multiplier - (
+            0 if self._interpolated_media_started else multiplier - 1
+        )
         if output_num_frames != expected_output:
             raise ProtocolViolation(
                 "remote completion RIFE frame-count mismatch: "
                 f"expected {expected_output}, got {output_num_frames}"
             )
-        self._rife_media_started = True
+        self._interpolated_media_started = True
 
     def _decode_frame_batch(
         self,
@@ -807,7 +813,7 @@ class RealtimeVAEClient:
                 self._validated_media_fields(message, response_kind="completion")
             )
             num_frames = int(message.get("num_frames") or 0)
-            if media_profile is RealtimeMediaProfile.RIFE2X_V1:
+            if media_profile.interpolation_enabled:
                 required = (
                     "source_num_frames",
                     "output_num_frames",
@@ -837,6 +843,7 @@ class RealtimeVAEClient:
                 self._validate_rife_frame_counts(
                     source_num_frames,
                     output_num_frames,
+                    media_profile,
                 )
             else:
                 source_num_frames = int(message.get("source_num_frames") or num_frames)
@@ -922,4 +929,4 @@ class RealtimeVAEClient:
         self._ws = None
         self._callback_tail = None
         self.media_profile_acceptance = None
-        self._rife_media_started = False
+        self._interpolated_media_started = False

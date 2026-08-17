@@ -151,8 +151,8 @@ def test_realtime_webui_presets_do_not_emit_camera_scripts():
     assert "Info" not in index_html
     assert 'id="steps" type="number" value="4"' in index_html
     assert 'id="guidance" type="number" value="1"' in index_html
-    assert "styles.css?v=realtime-t2v-dump-trace-v1" in index_html
-    assert "app.js?v=realtime-production-gateway-v17" in index_html
+    assert "styles.css?v=world-studio-h264-rules-v6" in index_html
+    assert "app.js?v=world-studio-rife3-h264-smooth-timeline-v2" in index_html
     assert (
         'const DECODER_WORKER_URL = "./decoder_worker.js?v=rgb-worker-v10";' in app_js
     )
@@ -168,6 +168,7 @@ def test_realtime_webui_presets_do_not_emit_camera_scripts():
     assert "function previewMaxWidthForSize(baseSize)" in app_js
     assert 'const NATIVE_MEDIA_PROFILE = "native_v1";' in app_js
     assert 'const RIFE2X_MEDIA_PROFILE = "rife2x_v1";' in app_js
+    assert 'const RIFE3X_MEDIA_PROFILE = "rife3x_v1";' in app_js
     assert "const DEFAULT_UPSCALING_SCALE = 2;" in app_js
     assert "const DEFAULT_PREVIEW_SCALE = 100;" in app_js
     assert 'setPreviewState("waiting")' in app_js
@@ -177,7 +178,7 @@ def test_realtime_webui_presets_do_not_emit_camera_scripts():
     assert 'document.querySelector(".model-player-grid")' in app_js
     assert 'previewFrame.style.setProperty("--preview-scale"' in app_js
     assert "cancelAnimationFrame(previewScaleFrame)" in app_js
-    assert "realtime_media_profile: RIFE2X_MEDIA_PROFILE" in app_js
+    assert "realtime_media_profile: RIFE3X_MEDIA_PROFILE" in app_js
     assert "mediaProfileNegotiated" in app_js
     assert 'message.type === "session_ready"' in app_js
     assert "enable_frame_interpolation: true" not in app_js

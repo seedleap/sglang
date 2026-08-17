@@ -16,6 +16,21 @@ from uuid import uuid4
 import msgspec.msgpack
 from summarize import latency_summary
 
+MEDIA_PROFILE_MULTIPLIERS = {
+    "native_v1": 1,
+    "rife2x_v1": 2,
+    "rife3x_v1": 3,
+}
+
+
+def media_profile_multiplier(media_profile: str) -> int:
+    try:
+        return MEDIA_PROFILE_MULTIPLIERS[media_profile]
+    except KeyError as exc:
+        raise RuntimeError(
+            f"unsupported realtime media profile {media_profile!r}"
+        ) from exc
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -41,13 +56,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fps", type=int, default=24)
     parser.add_argument(
         "--realtime-media-profile",
-        choices=("native_v1", "rife2x_v1"),
+        choices=tuple(MEDIA_PROFILE_MULTIPLIERS),
         default="native_v1",
-        help="Request native frames or the negotiated remote-VAE RIFE 2x profile.",
+        help="Request native frames or an exact negotiated remote-VAE RIFE profile.",
     )
     parser.add_argument(
         "--expected-media-weights-sha256",
-        help="Required exact 64-hex RIFE weights digest for rife2x_v1 runs.",
+        help="Required exact 64-hex RIFE weights digest for interpolated runs.",
     )
     parser.add_argument("--sink", type=int, default=9)
     parser.add_argument("--window", type=int, default=18)
@@ -415,15 +430,14 @@ def validate_media_profile_contract(
 ) -> dict:
     """Validate negotiated RIFE timing and exact source/output frame counts."""
 
-    if media_profile == "native_v1":
+    multiplier = media_profile_multiplier(media_profile)
+    if multiplier == 1:
         total = sum(frame_counts.get(chunk, 0) for chunk in expected_chunks)
         return {
             "source_frames": total,
             "output_frames": total,
             "acceptance": None,
         }
-    if media_profile != "rife2x_v1":
-        raise RuntimeError(f"unsupported realtime media profile {media_profile!r}")
     if session_ready is None:
         raise RuntimeError("RIFE session omitted the required session_ready receipt")
     if (
@@ -440,10 +454,11 @@ def validate_media_profile_contract(
             "RIFE source timeline does not match the request: "
             f"{source_timeline_fps} != {requested_fps}"
         )
-    if abs(output_timeline_fps - requested_fps * 2.0) > 1e-6:
+    expected_output_timeline_fps = requested_fps * multiplier
+    if abs(output_timeline_fps - expected_output_timeline_fps) > 1e-6:
         raise RuntimeError(
-            "RIFE output timeline is not 2x the source: "
-            f"{output_timeline_fps} != {requested_fps * 2.0}"
+            f"RIFE output timeline is not {multiplier}x the source: "
+            f"{output_timeline_fps} != {expected_output_timeline_fps}"
         )
     expected_digest = (expected_media_weights_sha256 or "").lower()
     actual_digest = str(session_ready.get("media_weights_sha256") or "").lower()
@@ -489,13 +504,13 @@ def validate_media_profile_contract(
             raise RuntimeError(f"chunk {chunk} completion timeline drifted")
         expected_output = 0
         if source_frames > 0:
-            expected_output = (
-                source_frames * 2 if has_source_history else source_frames * 2 - 1
+            expected_output = source_frames * multiplier - (
+                0 if has_source_history else multiplier - 1
             )
             has_source_history = True
         if output_frames != expected_output:
             raise RuntimeError(
-                f"chunk {chunk} violated RIFE 2x cadence: "
+                f"chunk {chunk} violated RIFE {multiplier}x cadence: "
                 f"source={source_frames} output={output_frames} "
                 f"expected={expected_output}"
             )
@@ -804,7 +819,7 @@ async def run_session(args: argparse.Namespace, concurrency: int, index: int) ->
                     chunk = int(message.get("chunk_index") or 0)
                     observed_at = time.perf_counter()
                     record_frame_batch(message, frame_counts=frame_counts)
-                    if media_profile == "rife2x_v1":
+                    if media_profile_multiplier(media_profile) > 1:
                         frame_messages[chunk].append(
                             frame_batch_contract_metadata(message)
                         )
@@ -904,7 +919,7 @@ async def run_session(args: argparse.Namespace, concurrency: int, index: int) ->
     chunk_total = [float(item["chunk_total_ms"]) for item in measured]
     measured_chunk_indexes = set(range(args.warmup_chunks, total_chunks))
     frame_count = sum(frame_counts.get(index, 0) for index in measured_chunk_indexes)
-    if media_profile == "rife2x_v1":
+    if media_profile_multiplier(media_profile) > 1:
         source_frame_count = sum(
             int(completion_metadata[index]["source_num_frames"])
             for index in measured_chunk_indexes
@@ -988,6 +1003,14 @@ async def run_level(args: argparse.Namespace, concurrency: int) -> dict:
         for session in sessions
         if session["measured_seconds"]
     ]
+    aggregate_output_wall_fps = total_frames / wall_seconds if wall_seconds else 0.0
+    aggregate_source_wall_fps = (
+        total_source_frames / wall_seconds if wall_seconds else 0.0
+    )
+    output_wall_summary = latency_summary(session_fps)
+    source_wall_summary = latency_summary(source_session_fps)
+    min_output_wall_fps = min(session_fps, default=0.0)
+    min_source_wall_fps = min(source_session_fps, default=0.0)
     return {
         "concurrency": concurrency,
         "successful_sessions": len(sessions),
@@ -1000,15 +1023,22 @@ async def run_level(args: argparse.Namespace, concurrency: int) -> dict:
         "client_observed_action_to_first_frame_ms": latency_summary(
             client_observed_action
         ),
-        "aggregate_fps": total_frames / wall_seconds if wall_seconds else 0.0,
-        "aggregate_source_fps": (
-            total_source_frames / wall_seconds if wall_seconds else 0.0
-        ),
+        # Keep the historical keys for result-reader compatibility. The
+        # explicit aliases make clear these are measured wall-clock delivery
+        # rates, never the negotiated output_timeline_fps timebase.
+        "aggregate_fps": aggregate_output_wall_fps,
+        "aggregate_output_wall_fps": aggregate_output_wall_fps,
+        "aggregate_source_fps": aggregate_source_wall_fps,
+        "aggregate_source_wall_fps": aggregate_source_wall_fps,
         "measurement_wall_seconds": wall_seconds,
-        "per_session_fps": latency_summary(session_fps),
-        "per_session_source_fps": latency_summary(source_session_fps),
-        "min_session_fps": min(session_fps, default=0.0),
-        "min_session_source_fps": min(source_session_fps, default=0.0),
+        "per_session_fps": output_wall_summary,
+        "per_session_output_wall_fps": output_wall_summary,
+        "per_session_source_fps": source_wall_summary,
+        "per_session_source_wall_fps": source_wall_summary,
+        "min_session_fps": min_output_wall_fps,
+        "min_session_output_wall_fps": min_output_wall_fps,
+        "min_session_source_fps": min_source_wall_fps,
+        "min_session_source_wall_fps": min_source_wall_fps,
         "media_profile_acceptance": [
             session["media_profile_acceptance"] for session in sessions
         ],
@@ -1024,14 +1054,14 @@ async def async_main(args: argparse.Namespace) -> None:
     levels = [int(value) for value in args.concurrency.split(",") if value.strip()]
     if not levels or any(value < 1 for value in levels):
         raise ValueError("concurrency levels must be positive")
-    if args.realtime_media_profile == "rife2x_v1":
+    if media_profile_multiplier(args.realtime_media_profile) > 1:
         expected_digest = (args.expected_media_weights_sha256 or "").lower()
         if len(expected_digest) != 64 or any(
             character not in "0123456789abcdef" for character in expected_digest
         ):
             raise ValueError(
                 "--expected-media-weights-sha256 must be an exact 64-hex digest "
-                "for rife2x_v1"
+                "for an interpolated media profile"
             )
         args.expected_media_weights_sha256 = expected_digest
     if args.generation_mode == "i2v":

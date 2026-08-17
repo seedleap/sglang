@@ -23,10 +23,19 @@ class RealtimeMediaProfile(str, Enum):
 
     NATIVE_V1 = "native_v1"
     RIFE2X_V1 = "rife2x_v1"
+    RIFE3X_V1 = "rife3x_v1"
 
     @property
     def output_timeline_fps_multiplier(self) -> int:
-        return 2 if self is RealtimeMediaProfile.RIFE2X_V1 else 1
+        return {
+            RealtimeMediaProfile.NATIVE_V1: 1,
+            RealtimeMediaProfile.RIFE2X_V1: 2,
+            RealtimeMediaProfile.RIFE3X_V1: 3,
+        }[self]
+
+    @property
+    def interpolation_enabled(self) -> bool:
+        return self.output_timeline_fps_multiplier > 1
 
 
 def parse_media_profile(value: object) -> RealtimeMediaProfile:
@@ -69,9 +78,9 @@ def resolve_remote_media_profile(
         # old flag would therefore desynchronize either framing or playback.
         raise ProtocolViolation(
             "remote enable_frame_interpolation is no longer supported; "
-            "upgrade the client and request realtime_media_profile=rife2x_v1"
+            "upgrade the client and request an explicit realtime_media_profile"
         )
-    if requested is RealtimeMediaProfile.RIFE2X_V1:
+    if requested.interpolation_enabled:
         if legacy_model_path not in (None, ""):
             raise ProtocolViolation(
                 "remote RIFE weights are configured only by the VAE worker"
@@ -83,7 +92,8 @@ def resolve_remote_media_profile(
                 raise ProtocolViolation("remote RIFE exp must be numeric") from exc
             if not math.isfinite(exp) or exp != 1.0:
                 raise ProtocolViolation(
-                    "remote RIFE supports only 2x interpolation (exp=1)"
+                    "remote RIFE exp is fixed by the negotiated media profile; "
+                    "legacy exp=1 is the only accepted dormant value"
                 )
         if legacy_scale is not None:
             try:
@@ -113,4 +123,4 @@ class MediaProfileAcceptance:
 
     @property
     def interpolation_enabled(self) -> bool:
-        return self.effective is RealtimeMediaProfile.RIFE2X_V1
+        return self.effective.interpolation_enabled
