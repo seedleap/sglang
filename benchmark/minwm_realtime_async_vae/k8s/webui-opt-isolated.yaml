@@ -1,0 +1,194 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: minwm-dual-webui-opt-20260812
+  namespace: minwm-realtime
+  annotations:
+    kubernetes.io/change-cause: "Deploy a5293fbc25: sync dual WebUI world rules"
+  labels:
+    app.kubernetes.io/name: minwm-dual-webui-opt-20260812
+    app.kubernetes.io/part-of: minwm-realtime
+    seedleap.ai/environment: production
+spec:
+  replicas: 1
+  revisionHistoryLimit: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: minwm-dual-webui-opt-20260812
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: minwm-dual-webui-opt-20260812
+        app.kubernetes.io/part-of: minwm-realtime
+        seedleap.ai/environment: production
+      annotations:
+        seedleap.ai/code-git-ref: a5293fbc25455af3fb740baa8c9dcca444a84606
+        seedleap.ai/revision: world-rules-20260817-v1
+        seedleap.ai/webui-build: world-rules-20260817-v1
+        seedleap.ai/webui-profile: happyoyster-sbs-smooth-timeline
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 10
+      nodeSelector:
+        karpenter.sh/nodepool: minwm-realtime-cpu
+      tolerations:
+        - key: seedleap.ai/task
+          operator: Equal
+          value: minwm-realtime-cpu
+          effect: NoSchedule
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        fsGroupChangePolicy: OnRootMismatch
+      containers:
+        - name: webui
+          image: 829115578968.dkr.ecr.us-east-2.amazonaws.com/leap-world/minwm-realtime@sha256:6b8b450ff3a4958b36cf364ee8c7c54fb82dbbe7ec7174c24eac5a91be1ae126
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: HAPPYOYSTER_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: minwm-dual-webui-opt-secrets-20260812
+                  key: happyoyster-api-key
+            - name: HAPPYOYSTER_API_BASE_URL
+              value: https://llm-0jcmcer24vyvd7rr.cn-beijing.maas.aliyuncs.com/api/v2/apps/happyoyster-1.0/
+            - name: HAPPYOYSTER_TOKEN_BASE_URL
+              value: https://llm-0jcmcer24vyvd7rr.cn-beijing.maas.aliyuncs.com
+            - name: HAPPYOYSTER_PUBLIC_IMAGE_BASE_URL
+              value: https://zing-world-studio.loopit.me
+            - name: REALTIME_UPSTREAM_HTTP
+              value: http://minwm-webui-opt-gateway-20260813
+            - name: REALTIME_UPSTREAM_WS
+              value: ws://minwm-webui-opt-gateway-20260813
+            - name: MINWM_UPSTREAM_HTTP
+              value: http://minwm-webui-opt-gateway-20260813/backends/minwm
+            - name: MINWM_UPSTREAM_WS
+              value: ws://minwm-webui-opt-gateway-20260813/backends/minwm
+            - name: LINGBOT2_UPSTREAM_HTTP
+              value: http://minwm-webui-opt-gateway-20260813/backends/lingbot2
+            - name: LINGBOT2_UPSTREAM_WS
+              value: ws://minwm-webui-opt-gateway-20260813/backends/lingbot2
+            - name: H264_WS_PRESET
+              value: fast
+            - name: H264_WS_PROFILE
+              value: main
+            - name: H264_WS_CRF
+              value: "20"
+            - name: H264_WS_BITRATE_KBPS
+              value: "3000"
+            - name: H264_WS_VBV_BUFFER_MS
+              value: "250"
+            - name: H264_WS_GOP_SECONDS
+              value: "2"
+            - name: H264_WS_MAX_SESSIONS
+              value: "8"
+            - name: H264_WS_MAX_QUEUED_FRAMES
+              value: "24"
+            - name: H264_WS_MAX_FRAME_AGE_MS
+              value: "250"
+            - name: H264_WS_LIVE_EDGE_FRAMES
+              value: "6"
+            - name: H264_WS_RAW_CHANNEL_ORDER
+              value: rgb
+            - name: REALTIME_UI_CONFIG_JSON
+              value: '{"generationModes":["i2v","t2v"],"defaultGenerationMode":"i2v","t2vFrameStep":4,"t2vDefaultNumFrames":121,"sessionMaxLifetimeSeconds":70,"playbackAckEnabled":false,"h264WebSocketEnabled":true,"h264CompressedBitrateKbps":3000,"h264CompressedCrf":20,"h264CompressedPreset":"fast","h264CompressedGopSeconds":2,"h264CompressedVbvBufferMs":250,"h264WebSocketLiveEdgeTargetMs":80,"h264WebSocketSeekThresholdMs":260,"secureBaseUrl":"https://zing-world-studio.loopit.me","singleExperience":false,"smoothCatchupRateMax":1.1,"dualModels":{"minwm":{"label":"Zing","sinkSize":8,"windowFrames":32,"h264StartupDropFrames":0},"lingbot2":{"label":"LingBot2","targetFps":16,"sinkSize":9,"windowFrames":18,"h264StartupDropFrames":8}}}'
+            - name: VIDEO_PROMPT_REWRITE_CREDENTIALS
+              value: /run/secrets/realtime-webui/prompt-rewriter-vertex.json
+            - name: CREATE_WORLD_IMAGE_CONFIG
+              value: /run/secrets/realtime-webui/world-image-model-config.json
+          ports:
+            - name: http
+              containerPort: 18080
+          startupProbe:
+            httpGet:
+              path: /runtime-config.js
+              port: http
+            periodSeconds: 2
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /runtime-config.js
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            periodSeconds: 15
+            timeoutSeconds: 2
+          resources:
+            requests:
+              cpu: "2"
+              memory: 4Gi
+            limits:
+              cpu: "8"
+              memory: 8Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: realtime-webui-secrets
+              mountPath: /run/secrets/realtime-webui
+              readOnly: true
+            - name: generated-images
+              mountPath: /opt/sglang/python/sglang/multimodal_gen/apps/realtime_webui_generated
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: realtime-webui-secrets
+          secret:
+            secretName: minwm-dual-webui-opt-secrets-20260812
+            items:
+              - key: prompt-rewriter-vertex.json
+                path: prompt-rewriter-vertex.json
+              - key: world-image-model-config.json
+                path: world-image-model-config.json
+        - name: generated-images
+          emptyDir:
+            sizeLimit: 1Gi
+        - name: tmp
+          emptyDir:
+            sizeLimit: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: minwm-dual-webui-opt-public
+  namespace: minwm-realtime
+  labels:
+    app.kubernetes.io/name: minwm-dual-webui-opt-20260812
+    app.kubernetes.io/part-of: minwm-realtime
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing
+    service.beta.kubernetes.io/aws-load-balancer-type: external
+    service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: ip
+    service.beta.kubernetes.io/aws-load-balancer-ssl-cert: arn:aws:acm:us-east-2:829115578968:certificate/7fe96909-ace5-42a8-bdc6-1d08429185db,arn:aws:acm:us-east-2:829115578968:certificate/68db2049-72b6-4a0d-9843-8add8c729146
+    service.beta.kubernetes.io/aws-load-balancer-ssl-ports: https
+    service.beta.kubernetes.io/aws-load-balancer-cross-zone-load-balancing-enabled: "true"
+    service.beta.kubernetes.io/aws-load-balancer-healthcheck-protocol: HTTP
+    service.beta.kubernetes.io/aws-load-balancer-healthcheck-port: "18080"
+    service.beta.kubernetes.io/aws-load-balancer-healthcheck-path: /
+spec:
+  type: LoadBalancer
+  loadBalancerClass: service.k8s.aws/nlb
+  allocateLoadBalancerNodePorts: false
+  selector:
+    app.kubernetes.io/name: minwm-dual-webui-opt-20260812
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+    - name: https
+      port: 443
+      targetPort: http

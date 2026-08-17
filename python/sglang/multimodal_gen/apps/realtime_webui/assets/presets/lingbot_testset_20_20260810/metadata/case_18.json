@@ -1,0 +1,300 @@
+{
+  "case_id": "case_18",
+  "category": "nonhuman_mechanical",
+  "human_or_nonhuman": "nonhuman",
+  "human_hands_visible": false,
+  "source_family": "ijkl",
+  "source_batch": "batch_051",
+  "sample_id": "lbd_b7b38628bcd6ce61003b5018",
+  "first_frame": "images/case_18_lbd_b7b38628bcd6ce61003b5018.png",
+  "prompt_file": "prompts/case_18.txt",
+  "metadata_file": "metadata/case_18.json",
+  "prompt": "Continuous first-person gameplay from the viewpoint of a six-wheel Mars survey rover. A broad compacted regolith track leads through a shallow ochre crater between low basalt outcrops toward a pale layered escarpment, with wheel-safe terrain and a straight central approach. A dusty white instrument mast base and angular solar-panel corners remain visible along the lower frame. The visual style is screen-printed science illustration. At 24 FPS, tilt the view downward for 13 frames, hold a steady view for 96 frames, then turn the view right for 20 frames. Spatial layout, lighting, viewpoint identity, and visible viewpoint anchors remain continuous throughout the sequence.",
+  "subject_primary": "vehicle",
+  "subject_detail": "vehicle/mars rover/six-wheel survey rover",
+  "subject_visible": true,
+  "visible_parts": [
+    "dusty white instrument mast base and two angular solar-panel corners at the lower frame edge"
+  ],
+  "body_plan": "six-wheel articulated rover chassis",
+  "locomotion_mode": "wheeled planetary traversal",
+  "scene_primary": "extraterrestrial",
+  "scene_description": "A broad compacted regolith track leads through a shallow ochre crater between low basalt outcrops toward a pale layered escarpment, with wheel-safe terrain and a straight central approach.",
+  "art_style_primary": "stylized",
+  "trajectory_id": "combo_k-l_13-20_stop96after1",
+  "action_family_pattern": "ijkl",
+  "action_segments": [
+    {
+      "kind": "movement",
+      "key": "k",
+      "start_frame": 0,
+      "end_frame": 12,
+      "num_frames": 13
+    },
+    {
+      "kind": "noop",
+      "key": null,
+      "start_frame": 13,
+      "end_frame": 108,
+      "num_frames": 96
+    },
+    {
+      "kind": "movement",
+      "key": "l",
+      "start_frame": 109,
+      "end_frame": 128,
+      "num_frames": 20
+    }
+  ],
+  "width": 1672,
+  "height": 941,
+  "image_sha256": "26877ecaefb2c769d5500f9b616e0f219e1acc047cdc486875e19ffbb8d88aaf",
+  "source_image_uri": "s3://leap-world-us-east-2/world-model/generation/lingbot_first_person_ijkl_noop_20260725/batch_051/images/lbd_b7b38628bcd6ce61003b5018.png",
+  "visual_qa": "passed",
+  "prompt_policy": "positive_scene_motion_only_v1",
+  "action": {
+    "traj_id": "combo_k-l_13-20_stop96after1",
+    "fps": 24,
+    "num_frames": 129,
+    "traj_type": "2_action_segments",
+    "condition_inputs": {
+      "camera_actions": [
+        [
+          "k"
+        ],
+        [
+          "k"
+        ],
+        [
+          "k"
+        ],
+        [
+          "k"
+        ],
+        [
+          "k"
+        ],
+        [
+          "k"
+        ],
+        [
+          "k"
+        ],
+        [
+          "k"
+        ],
+        [
+          "k"
+        ],
+        [
+          "k"
+        ],
+        [
+          "k"
+        ],
+        [
+          "k"
+        ],
+        [
+          "k"
+        ],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [
+          "l"
+        ],
+        [
+          "l"
+        ],
+        [
+          "l"
+        ],
+        [
+          "l"
+        ],
+        [
+          "l"
+        ],
+        [
+          "l"
+        ],
+        [
+          "l"
+        ],
+        [
+          "l"
+        ],
+        [
+          "l"
+        ],
+        [
+          "l"
+        ],
+        [
+          "l"
+        ],
+        [
+          "l"
+        ],
+        [
+          "l"
+        ],
+        [
+          "l"
+        ],
+        [
+          "l"
+        ],
+        [
+          "l"
+        ],
+        [
+          "l"
+        ],
+        [
+          "l"
+        ],
+        [
+          "l"
+        ],
+        [
+          "l"
+        ]
+      ]
+    },
+    "segments": [
+      {
+        "kind": "movement",
+        "key": "k",
+        "start_frame": 0,
+        "end_frame": 12,
+        "num_frames": 13
+      },
+      {
+        "kind": "noop",
+        "key": null,
+        "start_frame": 13,
+        "end_frame": 108,
+        "num_frames": 96
+      },
+      {
+        "kind": "movement",
+        "key": "l",
+        "start_frame": 109,
+        "end_frame": 128,
+        "num_frames": 20
+      }
+    ],
+    "movement_key": "k",
+    "ending_movement_key": "l",
+    "movement_pair": "k+l",
+    "camera_key": "",
+    "action_pattern": "api:combo:k-l:13-20:stop96after1",
+    "has_stop": true,
+    "stop_frames": 96,
+    "stop_after_action_index": 0,
+    "stop_position": "after_action_1",
+    "key_sequence": [
+      "k",
+      "l"
+    ],
+    "movement_durations": [
+      13,
+      20
+    ]
+  }
+}

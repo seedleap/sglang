@@ -25,17 +25,18 @@ def _init_container(workload, name):
 
 
 def _gpu_workload(documents, name):
-    kind = "StatefulSet" if name == "minwm-async-denoiser" else "Deployment"
+    kind = "StatefulSet" if name.endswith("-denoiser") else "Deployment"
     return find(documents, kind, name)
 
 
-def test_gpu_nodepools_are_spot_only_and_bounded():
+def test_gpu_nodepools_are_capacity_bounded():
     documents = load_documents()
     validate(documents)
     for pool_name in (
         "minwm-async-denoiser-h100",
         "minwm-async-denoiser-h100-8x",
         "minwm-async-vae-l4",
+        "minwm-async-vae-l4-spot",
     ):
         node_pool = find(documents, "NodePool", pool_name)
         assert node_pool["spec"]["template"]["spec"]["taints"] == [
@@ -45,6 +46,37 @@ def test_gpu_nodepools_are_spot_only_and_bounded():
                 "effect": "NoSchedule",
             }
         ]
+
+
+def test_production_gpu_workloads_cannot_be_scaled_to_zero_or_deleted():
+    documents = load_documents(("gpu-replica-safety.yaml",))
+    policy = find(
+        documents,
+        "ValidatingAdmissionPolicy",
+        "minwm-production-gpu-min-replicas",
+    )
+    binding = find(
+        documents,
+        "ValidatingAdmissionPolicyBinding",
+        "minwm-production-gpu-min-replicas",
+    )
+    expressions = " ".join(
+        validation["expression"] for validation in policy["spec"]["validations"]
+    )
+    for workload in (
+        "minwm-async-denoiser",
+        "lingbot2-async-denoiser",
+        "minwm-async-vae",
+        "lingbot2-async-vae",
+    ):
+        assert workload in expressions
+        assert (
+            find(documents, "PodDisruptionBudget", workload)["spec"]["minAvailable"]
+            == 1
+        )
+    assert "has(object.spec.replicas) && object.spec.replicas >= 1" in expressions
+    assert "request.operation != 'DELETE'" in expressions
+    assert binding["spec"]["validationActions"] == ["Deny"]
 
 
 def test_kustomize_does_not_namespace_cluster_scoped_resources():
@@ -58,18 +90,33 @@ def test_kustomize_does_not_namespace_cluster_scoped_resources():
         assert "namespace" not in nodepool["metadata"]
 
 
-def test_h100_pool_uses_one_fully_utilized_eight_gpu_node():
-    documents = load_documents(("h100-denoiser.yaml",))
+def test_h100_pool_uses_one_fully_utilized_spot_node():
+    documents = load_documents(("8gpu-nodeclass.yaml", "h100-denoiser.yaml"))
     single = find(documents, "NodePool", "minwm-async-denoiser-h100")
     packed = find(documents, "NodePool", "minwm-async-denoiser-h100-8x")
     deployment = find(documents, "StatefulSet", "minwm-async-denoiser")
 
     assert requirement_values(single, "node.kubernetes.io/instance-type") == [
-        "p5.48xlarge"
+        "p5.48xlarge",
     ]
     assert requirement_values(packed, "node.kubernetes.io/instance-type") == [
-        "p5.48xlarge"
+        "p5.48xlarge",
     ]
+    nodeclass = find(documents, "EC2NodeClass", "minwm-async-denoiser-8gpu-nvme-ec2")
+    assert packed["spec"]["template"]["spec"]["nodeClassRef"]["name"] == (
+        "minwm-async-denoiser-8gpu-nvme-ec2"
+    )
+    assert single["spec"]["template"]["spec"]["nodeClassRef"]["name"] == (
+        "minwm-async-denoiser-8gpu-nvme-ec2"
+    )
+    assert nodeclass["spec"]["instanceStorePolicy"] == "RAID0"
+    assert nodeclass["metadata"]["labels"]["seedleap.ai/environment"] == "production"
+    assert "seedleap.ai/ttl-after-test" not in nodeclass["metadata"]["labels"]
+    assert nodeclass["spec"]["blockDeviceMappings"][0]["ebs"]["volumeSize"] == ("100Gi")
+    assert [
+        interface["networkCardIndex"]
+        for interface in nodeclass["spec"]["networkInterfaces"]
+    ] == list(range(8))
     assert requirement_values(packed, "topology.kubernetes.io/zone") == [
         "us-east-2a",
         "us-east-2b",
@@ -77,12 +124,25 @@ def test_h100_pool_uses_one_fully_utilized_eight_gpu_node():
     ]
     assert int(single["spec"]["limits"]["cpu"]) >= 192
     assert int(packed["spec"]["limits"]["cpu"]) >= 192
+    assert int(packed["spec"]["limits"]["nvidia.com/gpu"]) == 8
+    assert requirement_values(packed, "karpenter.sh/capacity-type") == ["spot"]
     assert deployment["spec"]["replicas"] == "REPLACE_WITH_DENOISER_BASE_REPLICAS"
     selector = deployment["spec"]["template"]["spec"]["nodeSelector"]
     assert selector == {
         "karpenter.sh/nodepool": "REPLACE_WITH_DENOISER_NODEPOOL",
         "karpenter.sh/capacity-type": "spot",
+        "seedleap.ai/model-cache-storage": "local-nvme",
     }
+    assert "topologySpreadConstraints" not in deployment["spec"]["template"]["spec"]
+    assert deployment["spec"]["ordinals"]["start"] == 2
+    denoiser = _container(deployment, "denoiser")
+    command = " ".join(denoiser["args"])
+    assert denoiser["resources"]["requests"]["nvidia.com/gpu"] == "2"
+    assert denoiser["resources"]["limits"]["nvidia.com/gpu"] == "2"
+    assert "--num-gpus 2" in command
+    assert "--sp-degree 2" in command
+    assert "--ulysses-degree 2" in command
+    assert "--enable-cuda-graph" in command
 
 
 def test_denoiser_restarts_all_gpu_pods_as_one_parallel_batch():
@@ -116,9 +176,17 @@ def test_vae_deployment_can_land_on_either_l4_or_l40s_pool():
     selector = deployment["spec"]["template"]["spec"]["nodeSelector"]
     assert selector["seedleap.ai/vae-worker"] == "true"
     assert "karpenter.sh/nodepool" not in selector
+    assert "karpenter.sh/capacity-type" not in selector
+
+    l4_pool = find(base_documents, "NodePool", "minwm-async-vae-l4")
+    l4_spot_pool = find(base_documents, "NodePool", "minwm-async-vae-l4-spot")
+    assert requirement_values(l4_pool, "karpenter.sh/capacity-type") == ["on-demand"]
+    assert requirement_values(l4_spot_pool, "karpenter.sh/capacity-type") == ["spot"]
+    assert l4_pool["spec"]["weight"] > l4_spot_pool["spec"]["weight"]
 
     for documents, name in (
         (base_documents, "minwm-async-vae-l4"),
+        (base_documents, "minwm-async-vae-l4-spot"),
         (l40s_documents, "minwm-async-vae-l40s"),
     ):
         nodepool = find(documents, "NodePool", name)
@@ -131,6 +199,88 @@ def test_vae_pipeline_keeps_one_waiting_latent_and_sends_low_latency_batches():
     args = _container(deployment, "vae")["args"]
     assert "--queue-depth-per-session=1" in args
     assert "--encoded-frames-per-batch=1" in args
+
+
+def test_each_production_model_has_a_dedicated_l4_vae_worker():
+    documents = load_documents(("l4-vae.yaml",))
+    minwm = find(documents, "Deployment", "minwm-async-vae")
+    lingbot2 = find(documents, "Deployment", "lingbot2-async-vae")
+    nodepool = find(documents, "NodePool", "minwm-async-vae-l4")
+
+    assert sum(int(workload["spec"]["replicas"]) for workload in (minwm, lingbot2)) == 2
+    assert requirement_values(nodepool, "node.kubernetes.io/instance-type") == [
+        "g6.2xlarge"
+    ]
+    assert "taew2_2.pth" in " ".join(_container(minwm, "vae")["args"])
+    assert "taew2_1.pth" in " ".join(_container(lingbot2, "vae")["args"])
+    assert "--vae-fingerprint=taew2_1-d26151e7" in " ".join(
+        _init_container(lingbot2, "vae-heartbeat")["args"]
+    )
+
+
+def test_tianpeng_direct_api_is_sp2_without_session_timeout():
+    documents = load_documents(("tianpeng-direct.yaml",))
+    workload = find(documents, "StatefulSet", "tianpeng-direct-async-denoiser")
+    denoiser = _container(workload, "denoiser")
+    command = " ".join(denoiser["args"])
+    heartbeat = " ".join(_init_container(workload, "denoiser-heartbeat")["args"])
+
+    assert workload["spec"]["replicas"] == 1
+    assert denoiser["resources"]["requests"]["nvidia.com/gpu"] == "2"
+    assert "--num-gpus 2" in command
+    assert "--sp-degree 2" in command
+    assert "--ulysses-degree 2" in command
+    assert "--enable-cuda-graph" not in command
+    assert "--batching-max-size 1" in command
+    assert "--realtime-session-idle-timeout-s 0" in command
+    assert "--realtime-session-max-lifetime-s 0" in command
+    assert "--capacity=4" in heartbeat
+    assert "--vae-fingerprint=taew2_2-product-direct-d053e216" in heartbeat
+
+    gateway = find(documents, "Deployment", "tianpeng-direct-realtime-gateway")
+    gateway_command = " ".join(_container(gateway, "gateway")["args"])
+    assert (
+        "--model-revision=wan22-5b-varlen-product-ws1-720p-0810-5bfc5d2-gs1500-direct"
+        in gateway_command
+    )
+    service = find(documents, "Service", "tianpeng-direct-public")
+    assert service["spec"]["type"] == "LoadBalancer"
+
+
+def test_lingbot_denoiser_is_coordinator_managed_sp4_with_remote_vae():
+    documents = load_documents(("lingbot2-h100-denoiser.yaml",))
+    workload = find(documents, "StatefulSet", "lingbot2-async-denoiser")
+    denoiser = _container(workload, "denoiser")
+    command = " ".join(denoiser["args"])
+    heartbeat = " ".join(_init_container(workload, "denoiser-heartbeat")["args"])
+
+    assert workload["spec"]["replicas"] == 1
+    assert workload["spec"]["ordinals"]["start"] == 1
+    assert workload["spec"]["updateStrategy"]["type"] == "OnDelete"
+    assert "affinity" not in workload["spec"]["template"]["spec"]
+    assert denoiser["resources"]["requests"]["nvidia.com/gpu"] == 4
+    assert denoiser["resources"]["limits"]["nvidia.com/gpu"] == 4
+    assert "--num-gpus 4" in command
+    assert "--sp-degree 4" in command
+    assert "--ulysses-degree 4" in command
+    assert "--ring-degree 1" in command
+    assert "--realtime-remote-vae-enabled" in command
+    assert "--realtime-session-max-lifetime-s 70" in command
+    lingbot_env = {item["name"]: item.get("value") for item in denoiser.get("env", [])}
+    assert lingbot_env["SGLANG_LINGBOT_LAZY_VAE_ENCODE_BLACK_FRAMES"] == "0"
+    assert "--role=denoiser" in heartbeat
+    assert (
+        "--model-revision=robbyant/lingbot-world-v2-14b-causal-fast-diffusers"
+        in heartbeat
+    )
+    assert "--vae-fingerprint=taew2_1-d26151e7" in heartbeat
+    assert "python3 -m sglang.multimodal_gen.runtime.launch_server" in command
+    assert "startup_warmup.py" in command
+    assert "--allow-empty-complete" in command
+    assert "child=$!" in command
+    assert workload["spec"]["template"]["spec"]["containers"][0]["readinessProbe"][
+        "httpGet"
+    ] == {"path": "/health", "port": "api"}
 
 
 def test_gpu_workers_publish_epoch_state_and_drain_before_termination():
@@ -148,6 +298,27 @@ def test_gpu_workers_publish_epoch_state_and_drain_before_termination():
             "vae",
             "vae-heartbeat",
             18081,
+        ),
+        (
+            "lingbot2-h100-denoiser.yaml",
+            "lingbot2-async-denoiser",
+            "denoiser",
+            "denoiser-heartbeat",
+            30000,
+        ),
+        (
+            "l4-vae.yaml",
+            "lingbot2-async-vae",
+            "vae",
+            "vae-heartbeat",
+            18081,
+        ),
+        (
+            "tianpeng-direct.yaml",
+            "tianpeng-direct-async-denoiser",
+            "denoiser",
+            "denoiser-heartbeat",
+            30000,
         ),
     ):
         workload = _gpu_workload(load_documents((filename,)), workload_name)
@@ -185,6 +356,7 @@ def test_gpu_workers_publish_epoch_state_and_drain_before_termination():
         for container in (worker, heartbeat):
             mounts = {mount["name"]: mount for mount in container["volumeMounts"]}
             assert mounts["worker-epoch"]["mountPath"] == "/var/run/minwm-worker"
+            assert mounts["worker-epoch"].get("readOnly") is not True
 
 
 def test_denoiser_enables_dynamic_remote_vae_handoff_without_a_static_worker_url():
@@ -207,11 +379,100 @@ def test_denoiser_enables_dynamic_remote_vae_handoff_without_a_static_worker_url
     assert "--decoder-backend=taehv" in vae_args
 
 
-def test_wan22_5b_uses_the_matching_taehv_checkpoint():
-    for filename in ("h100-denoiser.yaml", "l4-vae.yaml"):
-        manifest = (Path(__file__).parent / filename).read_text()
-        assert "taew2_2.pth" in manifest
-        assert "taew2_1.pth" not in manifest
+def test_realtime_sessions_have_a_70_second_hard_lifetime():
+    workload = find(
+        load_documents(("h100-denoiser.yaml",)),
+        "StatefulSet",
+        "minwm-async-denoiser",
+    )
+    command = " ".join(_container(workload, "denoiser")["args"])
+
+    assert "--realtime-session-max-lifetime-s 70" in command
+
+
+def test_optimized_webui_uses_an_isolated_ack_aware_gateway():
+    documents = load_documents(("webui-opt-gateway-isolated.yaml",))
+    service = find(documents, "Service", "minwm-webui-opt-gateway-20260813")
+    gateway = find(documents, "Deployment", "minwm-webui-opt-gateway-20260813")
+    command = " ".join(_container(gateway, "gateway")["args"])
+
+    assert service["spec"].get("type", "ClusterIP") == "ClusterIP"
+    assert gateway["spec"]["replicas"] == 2
+    assert "--output-queue-depth=64" in command
+    assert "--output-enqueue-timeout-s=0" in command
+
+    webui = find(
+        load_documents(("webui-opt-isolated.yaml",)),
+        "Deployment",
+        "minwm-dual-webui-opt-20260812",
+    )
+    env = {
+        item["name"]: item.get("value")
+        for item in _container(webui, "webui").get("env", [])
+    }
+    assert env["REALTIME_UPSTREAM_HTTP"] == "http://minwm-webui-opt-gateway-20260813"
+    assert env["REALTIME_UPSTREAM_WS"] == "ws://minwm-webui-opt-gateway-20260813"
+    assert env["HAPPYOYSTER_PUBLIC_IMAGE_BASE_URL"] == (
+        "https://zing-world-studio.loopit.me"
+    )
+    assert '"sessionMaxLifetimeSeconds":70' in env["REALTIME_UI_CONFIG_JSON"]
+    assert '"singleExperience":false' in env["REALTIME_UI_CONFIG_JSON"]
+    assert "singleExperienceUserIds" not in env["REALTIME_UI_CONFIG_JSON"]
+    assert (
+        '"minwm":{"label":"Zing","sinkSize":8,"windowFrames":32,"h264StartupDropFrames":0}'
+        in (env["REALTIME_UI_CONFIG_JSON"])
+    )
+    assert (
+        '"lingbot2":{"label":"LingBot2","targetFps":16,"sinkSize":9,"windowFrames":18,"h264StartupDropFrames":8}'
+        in env["REALTIME_UI_CONFIG_JSON"]
+    )
+    assert (
+        '"secureBaseUrl":"https://zing-world-studio.loopit.me"'
+        in env["REALTIME_UI_CONFIG_JSON"]
+    )
+
+    service = find(
+        load_documents(("webui-opt-isolated.yaml",)),
+        "Service",
+        "minwm-dual-webui-opt-public",
+    )
+    certificate_arns = service["metadata"]["annotations"][
+        "service.beta.kubernetes.io/aws-load-balancer-ssl-cert"
+    ].split(",")
+    assert certificate_arns == [
+        "arn:aws:acm:us-east-2:829115578968:certificate/7fe96909-ace5-42a8-bdc6-1d08429185db",
+        "arn:aws:acm:us-east-2:829115578968:certificate/68db2049-72b6-4a0d-9843-8add8c729146",
+    ]
+
+
+def test_public_gateway_uses_the_new_zing_lingbot_domain_service():
+    service = find(
+        load_documents(("gateway-service.yaml",)),
+        "Service",
+        "zing-lingbot-public",
+    )
+
+    assert service["spec"]["type"] == "LoadBalancer"
+    assert service["spec"]["selector"] == {
+        "app.kubernetes.io/name": "minwm-realtime-gateway"
+    }
+
+
+def test_each_model_uses_the_matching_taehv_checkpoint():
+    denoiser_manifest = (Path(__file__).parent / "h100-denoiser.yaml").read_text()
+    assert "taew2_2.pth" in denoiser_manifest
+    assert "taew2_1.pth" not in denoiser_manifest
+
+    documents = load_documents(("l4-vae.yaml",))
+    minwm = find(documents, "Deployment", "minwm-async-vae")
+    minwm_command = " ".join(_container(minwm, "vae")["args"])
+    assert "taew2_2.pth" in minwm_command
+    assert "taew2_1.pth" not in minwm_command
+
+    lingbot2 = find(documents, "Deployment", "lingbot2-async-vae")
+    lingbot2_command = " ".join(_container(lingbot2, "vae")["args"])
+    assert "taew2_1.pth" in lingbot2_command
+    assert "taew2_2.pth" not in lingbot2_command
 
 
 def test_webui_enables_i2v_and_t2v_in_production_manifest():
@@ -225,17 +486,19 @@ def test_webui_enables_i2v_and_t2v_in_production_manifest():
 
     assert '"generationModes":["i2v","t2v"]' in env["REALTIME_UI_CONFIG_JSON"]
     assert '"t2vDefaultNumFrames":121' in env["REALTIME_UI_CONFIG_JSON"]
+    assert '"sessionMaxLifetimeSeconds":90' in env["REALTIME_UI_CONFIG_JSON"]
     assert env["AWS_REGION"] == "REPLACE_WITH_AWS_REGION"
     assert env["AWS_DEFAULT_REGION"] == "REPLACE_WITH_AWS_REGION"
 
 
-def test_west_model_artifact_uses_a_matching_read_only_s3_mount():
+def test_east2_model_artifact_uses_a_matching_read_only_s3_mount():
     documents = load_documents()
-    volume = find(documents, "PersistentVolume", "minwm-async-west-s3-pv")
+    volume = find(documents, "PersistentVolume", "minwm-model-serving-east2-s3-pv")
     assert volume["spec"]["csi"]["volumeAttributes"]["bucketName"] == (
-        "leap-world-us-west-2"
+        "leap-world-model-serving-829115578968-us-east-2"
     )
     assert volume["spec"]["accessModes"] == ["ReadOnlyMany"]
+    assert "region us-east-2" in volume["spec"]["mountOptions"]
 
     deployment = find(documents, "StatefulSet", "minwm-async-denoiser")
     pod_spec = deployment["spec"]["template"]["spec"]
@@ -255,7 +518,7 @@ def test_west_model_artifact_uses_a_matching_read_only_s3_mount():
     )
     assert any(
         item["name"] == "checkpoint-archive"
-        and item["persistentVolumeClaim"]["claimName"] == "minwm-async-west-s3"
+        and item["persistentVolumeClaim"]["claimName"] == "minwm-model-serving-east2-s3"
         and item["persistentVolumeClaim"]["readOnly"]
         for item in pod_spec["volumes"]
     )
@@ -285,7 +548,7 @@ def test_runtime_uses_one_owned_read_only_s3_claim_and_preconverted_model():
         for volume in pod_spec["volumes"]
         if "persistentVolumeClaim" in volume
     }
-    assert claims == {"minwm-async-west-s3"}
+    assert claims == {"minwm-model-serving-east2-s3"}
     assert all(mount["name"] != "s3" for mount in container["volumeMounts"])
 
 
@@ -311,7 +574,27 @@ def test_model_is_staged_once_per_spot_node_before_workers_mmap_it():
         volume for volume in pod_spec["volumes"] if volume["name"] == "model-cache"
     )
     assert cache["hostPath"] == {
-        "path": "/var/lib/minwm-model-cache",
+        "path": "/mnt/k8s-disks/0/minwm-model-cache",
+        "type": "DirectoryOrCreate",
+    }
+
+
+def test_tianpeng_direct_h100_cache_uses_nvme_when_enabled():
+    workload = find(
+        load_documents(("tianpeng-direct.yaml",)),
+        "StatefulSet",
+        "tianpeng-direct-async-denoiser",
+    )
+    pod_spec = workload["spec"]["template"]["spec"]
+    assert pod_spec["nodeSelector"]["karpenter.sh/nodepool"] == (
+        "minwm-async-denoiser-h100-8x"
+    )
+    assert pod_spec["nodeSelector"]["seedleap.ai/model-cache-storage"] == ("local-nvme")
+    cache = next(
+        volume for volume in pod_spec["volumes"] if volume["name"] == "model-cache"
+    )
+    assert cache["hostPath"] == {
+        "path": "/mnt/k8s-disks/0/minwm-model-cache",
         "type": "DirectoryOrCreate",
     }
 
@@ -328,7 +611,10 @@ def test_production_resources_are_isolated_in_a_dedicated_namespace():
         "PersistentVolume",
         "ClusterRole",
         "ClusterRoleBinding",
+        "EC2NodeClass",
         "NodePool",
+        "ValidatingAdmissionPolicy",
+        "ValidatingAdmissionPolicyBinding",
     }
     for document in documents:
         if document["kind"] not in cluster_scoped:
@@ -402,10 +688,45 @@ def test_denoiser_restarts_as_one_batch_with_two_bounded_cold_load_slots():
     }
 
 
+def test_one_node_model_startup_is_serialized_across_all_three_denoisers():
+    workloads = (
+        find(
+            load_documents(("h100-denoiser.yaml",)),
+            "StatefulSet",
+            "minwm-async-denoiser",
+        ),
+        find(
+            load_documents(("tianpeng-direct.yaml",)),
+            "StatefulSet",
+            "tianpeng-direct-async-denoiser",
+        ),
+        find(
+            load_documents(("lingbot2-h100-denoiser.yaml",)),
+            "StatefulSet",
+            "lingbot2-async-denoiser",
+        ),
+    )
+
+    for workload in workloads:
+        pod_spec = workload["spec"]["template"]["spec"]
+        denoiser = _container(workload, "denoiser")
+        command = " ".join(denoiser["args"])
+        assert "denoiser-" in command
+        assert "flock -x 9" in command
+        assert "flock -u 9" in command
+        assert any(
+            mount["name"] == "startup-lock" for mount in denoiser["volumeMounts"]
+        )
+        lock_volume = next(
+            volume for volume in pod_spec["volumes"] if volume["name"] == "startup-lock"
+        )
+        assert lock_volume["hostPath"]["path"] == "/var/run/minwm-startup-lock"
+
+
 def test_public_nlb_selects_only_the_gateway_control_plane():
     documents = load_documents(("gateway.yaml", "gateway-service.yaml"))
     gateway = find(documents, "Deployment", "minwm-realtime-gateway")
-    service = find(documents, "Service", "minwm-realtime-public")
+    service = find(documents, "Service", "zing-lingbot-public")
 
     assert gateway["spec"]["replicas"] == 2
     assert service["spec"]["type"] == "LoadBalancer"
@@ -498,8 +819,8 @@ def test_gpu_pools_have_independent_bounded_scheduled_elasticity():
     )
     assert "--denoiser-replicas=REPLACE_WITH_DENOISER_PEAK_REPLICAS" in up_command
     assert "--vae-replicas=REPLACE_WITH_VAE_PEAK_REPLICAS" in up_command
-    assert "--denoiser-replicas=0" in down_command
-    assert "--vae-replicas=0" in down_command
+    assert "--denoiser-replicas=REPLACE_WITH_DENOISER_BASE_REPLICAS" in down_command
+    assert "--vae-replicas=REPLACE_WITH_VAE_BASE_REPLICAS" in down_command
 
     deploy_script = (ROOT.parent / "deploy_production.sh").read_text()
     for variable in (
@@ -529,6 +850,7 @@ def test_capacity_scaler_uses_the_shared_coordinator_snapshot():
     assert "--denoiser-min-replicas=REPLACE_WITH_DENOISER_BASE_REPLICAS" in args
     assert "--vae-min-replicas=REPLACE_WITH_VAE_BASE_REPLICAS" in args
     assert "--denoiser-max-replicas=REPLACE_WITH_DENOISER_PEAK_REPLICAS" in args
+    assert "--denoiser-sessions-per-replica=1" in args
     assert "--vae-max-replicas=REPLACE_WITH_VAE_PEAK_REPLICAS" in args
     assert "--idle-observations-before-scale-down=24" in args
     assert container["image"] == "REPLACE_WITH_GATEWAY_IMAGE_DIGEST"
@@ -536,6 +858,9 @@ def test_capacity_scaler_uses_the_shared_coordinator_snapshot():
     deploy_script = (ROOT.parent / "deploy_production.sh").read_text()
     assert "GPU_EVENT_SCALER_SUSPEND" in deploy_script
     assert "GPU_EVENT_SCALER_REPLICAS" in deploy_script
+    assert 'DENOISER_BASE_REPLICAS="${DENOISER_BASE_REPLICAS:-2}"' in deploy_script
+    assert 'DENOISER_PEAK_REPLICAS="${DENOISER_PEAK_REPLICAS:-2}"' in deploy_script
+    assert "leap-world-model-serving-829115578968-us-east-2" in deploy_script
 
 
 def test_all_runtime_images_are_role_specific_and_immutable():
@@ -713,12 +1038,25 @@ def test_gpu_workers_register_only_internal_pod_endpoints():
     ]
 
 
+def test_gpu_node_pools_do_not_expire_healthy_nodes_by_age():
+    documents = load_documents(("h100-denoiser.yaml", "l4-vae.yaml"))
+    node_pools = [
+        document for document in documents if document.get("kind") == "NodePool"
+    ]
+
+    assert node_pools
+    for node_pool in node_pools:
+        assert node_pool["spec"]["template"]["spec"]["expireAfter"] == "Never"
+
+
 def test_internal_worker_ports_are_restricted_by_network_policy():
     documents = load_documents(("network-policy.yaml",))
     expected = {
         "minwm-realtime-coordinator": 18081,
         "minwm-async-denoiser": 30000,
+        "lingbot2-async-denoiser": 30000,
         "minwm-async-vae": 18081,
+        "lingbot2-async-vae": 18081,
         "minwm-realtime-adot": 4317,
     }
     for name, port in expected.items():
@@ -729,19 +1067,34 @@ def test_internal_worker_ports_are_restricted_by_network_policy():
 
     denoiser = find(documents, "NetworkPolicy", "minwm-async-denoiser")
     assert denoiser["spec"]["ingress"][0]["from"][0]["podSelector"] == {
-        "matchLabels": {"app.kubernetes.io/name": "minwm-realtime-gateway"}
+        "matchExpressions": [
+            {
+                "key": "app.kubernetes.io/name",
+                "operator": "In",
+                "values": [
+                    "minwm-realtime-gateway",
+                    "minwm-webui-opt-gateway-20260813",
+                ],
+            }
+        ]
     }
     vae = find(documents, "NetworkPolicy", "minwm-async-vae")
     assert vae["spec"]["ingress"][0]["from"][0]["podSelector"] == {
         "matchLabels": {"app.kubernetes.io/name": "minwm-async-denoiser"}
     }
+    lingbot2_vae = find(documents, "NetworkPolicy", "lingbot2-async-vae")
+    assert lingbot2_vae["spec"]["ingress"][0]["from"][0]["podSelector"] == {
+        "matchLabels": {"app.kubernetes.io/name": "lingbot2-async-denoiser"}
+    }
 
 
 def test_gateway_output_queue_absorbs_one_complete_frame_burst():
     gateway = (ROOT / "gateway.yaml").read_text()
+    b300 = (ROOT / "aws03-b300-capacity-block.yaml").read_text()
 
-    assert "--output-queue-depth=128" in gateway
-    assert "--output-enqueue-timeout-s=5" in gateway
+    assert "--output-queue-depth=64" in gateway
+    assert "--output-queue-depth=64" in b300
+    assert "--output-enqueue-timeout-s=0" in gateway
     assert "--output-drain-timeout-s=90" in gateway
 
 
@@ -790,8 +1143,11 @@ def test_production_deploy_waits_for_every_rollout_and_restores_exact_snapshot()
     deploy_script = (ROOT.parent / "deploy_production.sh").read_text()
 
     assert "restart_statefulset_in_batches" in deploy_script
+    assert "wait_for_statefulset_ready_replicas" in deploy_script
+    assert "verify_denoiser_nvme_cache" in deploy_script
+    assert '[[ "${source}" == /dev/md* ]]' in deploy_script
     assert (
-        'DENOISER_RESTART_BATCH_SIZE="${DENOISER_RESTART_BATCH_SIZE:-2}"'
+        'DENOISER_RESTART_BATCH_SIZE="${DENOISER_RESTART_BATCH_SIZE:-1}"'
         in deploy_script
     )
     assert "kubectl delete --namespace" in deploy_script
@@ -814,9 +1170,10 @@ def test_production_deploy_waits_for_every_rollout_and_restores_exact_snapshot()
         "deployment/minwm-async-vae",
     ):
         assert f'wait_for_rollout "{workload}"' in deploy_script
-    assert "LEGACY_DENOISER_REPLICAS" in deploy_script
-    assert "kubectl scale deployment/minwm-async-denoiser" in deploy_script
-    assert "kubectl delete deployment/minwm-async-denoiser" in deploy_script
+    assert "Refusing to scale a legacy GPU Deployment to zero" in deploy_script
+    assert "Refusing an in-place StatefulSet controller recreation" in deploy_script
+    assert "kubectl scale deployment/minwm-async-denoiser" not in deploy_script
+    assert "kubectl delete deployment/minwm-async-denoiser" not in deploy_script
     assert "prepare_kubernetes_snapshot.py" in deploy_script
     assert "kubectl apply --server-side --force-conflicts" in deploy_script
     assert "kubectl replace --force" not in deploy_script

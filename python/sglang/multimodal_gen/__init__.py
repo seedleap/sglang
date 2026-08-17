@@ -4,7 +4,9 @@ import os
 if os.environ.get("SGLANG_LIGHTWEIGHT_RUNTIME") != "1":
     from sglang.multimodal_gen.configs.pipeline_configs import PipelineConfig
     from sglang.multimodal_gen.configs.sample import SamplingParams
-    from sglang.multimodal_gen.runtime.entrypoints.diffusion_generator import DiffGenerator
+    from sglang.multimodal_gen.runtime.entrypoints.diffusion_generator import (
+        DiffGenerator,
+    )
 
     __all__ = ["DiffGenerator", "PipelineConfig", "SamplingParams"]
 else:

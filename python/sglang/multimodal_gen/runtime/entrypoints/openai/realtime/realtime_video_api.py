@@ -348,14 +348,25 @@ async def _session_watchdog(
     idle_timeout_s: float,
     max_lifetime_s: float,
     lease_ttl_s: float,
+    enforce_max_lifetime: bool = True,
 ) -> str:
     interval_s = min(5.0, max(0.1, lease_ttl_s / 3.0))
     while True:
         await asyncio.sleep(interval_s)
         now = time.monotonic()
-        if now - session.created_at >= max_lifetime_s:
+        internal_startup_warmup = str(session.trace_id).startswith("startup-warmup-")
+        if (
+            enforce_max_lifetime
+            and not internal_startup_warmup
+            and max_lifetime_s > 0
+            and session.playable_at is not None
+            and now - session.playable_at >= max_lifetime_s
+        ):
             return "maximum session lifetime reached"
-        if now - session.last_client_activity_at >= idle_timeout_s:
+        if (
+            idle_timeout_s > 0
+            and now - session.last_client_activity_at >= idle_timeout_s
+        ):
             return "session idle timeout"
         try:
             await controller.renew(lease)
@@ -465,6 +476,68 @@ def _emit_realtime_result_stage_traces(
                 duration_ms=round(duration_ms, 3),
                 source="scheduler_result_metrics",
             )
+
+
+def _collect_realtime_result_stage_metrics(result: Any) -> dict[str, float]:
+    collected: dict[str, float] = {}
+    for stage_name, duration_ms, _ in _iter_realtime_result_stage_metrics(result):
+        event_name = _realtime_stage_event_name(stage_name)
+        if event_name == "server.model_denoise_complete":
+            collected["model_denoise_ms"] = round(duration_ms, 3)
+        elif event_name == "server.vae_encode_complete":
+            collected["model_vae_encode_ms"] = round(duration_ms, 3)
+        elif event_name == "server.vae_decode_complete":
+            collected["model_vae_decode_ms"] = round(duration_ms, 3)
+        elif event_name == "server.post_decode_complete":
+            collected["model_post_decode_ms"] = round(duration_ms, 3)
+    return collected
+
+
+async def _send_chunk_telemetry(
+    ws: WebSocket,
+    session: GenerateSession,
+    chunk: RealtimeChunkContext,
+    batch: "Req",
+    *,
+    request_prepare_ms: float,
+    scheduler_forward_ms: float,
+    chunk_total_ms: float,
+    send_stats: RealtimeFrameSendStats,
+    stage_metrics: dict[str, float] | None = None,
+    remote_result: Any | None = None,
+) -> None:
+    event_id = getattr(batch, "realtime_event_id", None)
+    telemetry: dict[str, Any] = {
+        "type": "chunk_telemetry",
+        "trace_id": session.trace_id,
+        "request_id": chunk.request_id,
+        "chunk_index": chunk.index,
+        "event_id": event_id,
+        "request_prepare_ms": round(request_prepare_ms, 3),
+        "scheduler_forward_ms": round(scheduler_forward_ms, 3),
+        "chunk_total_ms": round(chunk_total_ms, 3),
+        "output_pace_ms": round(send_stats["pace_wait_ms"], 3),
+        "transport_encode_ms": round(send_stats["raw_payload_build_ms"], 3),
+        "transport_write_ms": round(send_stats["ws_write_ms"], 3),
+        "raw_bytes": int(send_stats["raw_bytes"]),
+        "transport_bytes": int(send_stats["ws_payload_bytes"]),
+        "num_frames": int(send_stats["num_frames"]),
+        "content_type": send_stats["content_type"],
+        "server_completed_epoch_ms": time.time() * 1000,
+        **(session.consume_input_timing(event_id) or {}),
+        **(stage_metrics or {}),
+    }
+    if remote_result is not None:
+        telemetry.update(
+            vae_queue_wait_ms=round(remote_result.queue_wait_ms, 3),
+            vae_decode_ms=round(remote_result.decode_ms, 3),
+            vae_encode_ms=round(remote_result.encode_ms, 3),
+            vae_transfer_ms=round(remote_result.transfer_ms, 3),
+            latent_serialize_ms=round(remote_result.serialize_ms, 3),
+            latent_send_ms=round(remote_result.latent_send_ms, 3),
+            vae_credit_wait_ms=round(remote_result.credit_wait_ms, 3),
+        )
+    await ws.send_bytes(msgspec.msgpack.encode(telemetry))
 
 
 def _log_realtime_chunk_timing(
@@ -650,6 +723,7 @@ async def _complete_remote_chunk(
     scheduler_forward_ms: float,
     chunk_started: float,
     vae_started: float,
+    stage_metrics: dict[str, float],
 ) -> None:
     remote_result = await handle.wait()
     vae_completed = remote_result.completed_at
@@ -742,6 +816,18 @@ async def _complete_remote_chunk(
         chunk_total_ms,
         send_stats,
     )
+    await _send_chunk_telemetry(
+        ws,
+        session,
+        chunk,
+        batch,
+        request_prepare_ms=request_prepare_ms,
+        scheduler_forward_ms=scheduler_forward_ms,
+        chunk_total_ms=chunk_total_ms,
+        send_stats=send_stats,
+        stage_metrics=stage_metrics,
+        remote_result=remote_result,
+    )
     session.generate_chunk_completed(chunk)
 
 
@@ -829,6 +915,7 @@ async def _generate_loop_async_vae(ws, session: GenerateSession, server_args):
             )
             scheduler_forward_ms = timer.mark_ms()
             _emit_realtime_result_stage_traces(session, chunk, batch, result)
+            stage_metrics = _collect_realtime_result_stage_metrics(result)
             if result.realtime_latents is None or result.realtime_handoff is None:
                 raise RuntimeError("remote VAE path received no latent handoff")
 
@@ -872,6 +959,7 @@ async def _generate_loop_async_vae(ws, session: GenerateSession, server_args):
                     scheduler_forward_ms,
                     chunk_started,
                     vae_started,
+                    stage_metrics,
                 )
             )
         await coordinator.finish()
@@ -901,8 +989,16 @@ async def _generate_loop_local(ws: WebSocket, session: GenerateSession):
         raise ValueError("realtime adapter is not initialized")
 
     pending_send_task = None
+    pending_event_version = None
     while not session.reached_max_chunks():
         try:
+            pending_send_task = await _wait_for_realtime_interactive_event_window(
+                session,
+                pending_send_task,
+                pending_event_version,
+            )
+            if pending_send_task is None:
+                pending_event_version = None
             if pending_send_task is not None and pending_send_task.done():
                 await pending_send_task
                 pending_send_task = None
@@ -932,6 +1028,7 @@ async def _generate_loop_local(ws: WebSocket, session: GenerateSession):
                 request_id=chunk.request_id,
                 chunk_index=chunk.index,
             )
+            scheduled_event_version = session.interactive_event_version
             batch = adapter.prepare_next_request(
                 session,
                 server_args,
@@ -971,6 +1068,7 @@ async def _generate_loop_local(ws: WebSocket, session: GenerateSession):
                 scheduler_forward_ms=round(scheduler_forward_ms, 3),
             )
             _emit_realtime_result_stage_traces(session, chunk, batch, result)
+            stage_metrics = _collect_realtime_result_stage_metrics(result)
 
             # finish
             adapter.on_chunk_complete(session, result)
@@ -986,8 +1084,10 @@ async def _generate_loop_local(ws: WebSocket, session: GenerateSession):
                     request_prepare_ms,
                     scheduler_forward_ms,
                     chunk_started,
+                    stage_metrics,
                 )
             )
+            pending_event_version = scheduled_event_version
 
         except asyncio.CancelledError:
             if pending_send_task is not None:
@@ -1036,6 +1136,7 @@ async def _send_output_and_log(
     request_prepare_ms: float,
     scheduler_forward_ms: float,
     chunk_started: float,
+    stage_metrics: dict[str, float],
 ) -> RealtimeFrameSendStats:
     if session.adapter is None:
         raise ValueError("realtime adapter is not initialized")
@@ -1057,6 +1158,11 @@ async def _send_output_and_log(
             result,
             batch,
         )
+        # ACK-aware clients start their lifetime only after a frame is
+        # actually rendered. Legacy clients keep the historical first-send
+        # fallback so this protocol extension is backwards compatible.
+        if not session.playback_ack_enabled:
+            session.mark_playable()
         send_stats["pace_wait_ms"] = pace_wait_ms
         chunk_total_ms = (time.perf_counter() - chunk_started) * 1000
         _log_realtime_chunk_timing(
@@ -1068,7 +1174,53 @@ async def _send_output_and_log(
             chunk_total_ms,
             send_stats,
         )
+        await _send_chunk_telemetry(
+            ws,
+            session,
+            chunk,
+            batch,
+            request_prepare_ms=request_prepare_ms,
+            scheduler_forward_ms=scheduler_forward_ms,
+            chunk_total_ms=chunk_total_ms,
+            send_stats=send_stats,
+            stage_metrics=stage_metrics,
+        )
     return send_stats
+
+
+async def _wait_for_realtime_interactive_event_window(
+    session: GenerateSession,
+    pending_send_task: asyncio.Task | None,
+    pending_event_version: int | None = None,
+) -> asyncio.Task | None:
+    request = getattr(session, "request", None)
+    grace_ms = int(getattr(request, "realtime_interactive_event_grace_ms", 0) or 0)
+    if pending_send_task is None or grace_ms <= 0:
+        return pending_send_task
+
+    if pending_event_version is None:
+        pending_event_version = getattr(session, "interactive_event_version", None)
+    await pending_send_task
+    wait_started = time.perf_counter()
+    wait_for_event = getattr(session, "wait_for_interactive_event_after", None)
+    woke_by_event = False
+    if pending_event_version is not None and wait_for_event is not None:
+        woke_by_event = await wait_for_event(
+            pending_event_version,
+            grace_ms / 1000.0,
+        )
+    else:
+        await asyncio.sleep(grace_ms / 1000.0)
+    duration_ms = (time.perf_counter() - wait_started) * 1000
+    log_realtime_trace(
+        logger,
+        session,
+        "server.interactive_event_grace_complete",
+        duration_ms=round(duration_ms, 3),
+        configured_grace_ms=grace_ms,
+        woke_by_event=woke_by_event,
+    )
+    return None
 
 
 async def _wait_for_realtime_output_slot(
@@ -1208,8 +1360,23 @@ async def _listen_events(ws: WebSocket, session: GenerateSession):
             if realtime_event.kind == "heartbeat":
                 session.mark_client_activity()
                 continue
+            if realtime_event.kind == "playback_ack":
+                if session.playback_ack_enabled:
+                    session.apply_playback_ack(realtime_event.payload)
+                session.mark_client_activity()
+                log_realtime_trace(
+                    logger,
+                    session,
+                    "server.playback_ack_received",
+                    last_received_chunk=session.last_received_chunk,
+                    last_rendered_chunk=session.last_rendered_chunk,
+                    last_rendered_event_id=session.last_rendered_event_id,
+                    playable=session.playable_at is not None,
+                )
+                continue
             if session.adapter is None:
                 raise ValueError("realtime adapter is not initialized")
+            server_received_epoch_ms = time.time() * 1000
             log_realtime_trace(
                 logger,
                 session,
@@ -1220,9 +1387,29 @@ async def _listen_events(ws: WebSocket, session: GenerateSession):
                 client_sent_epoch_ms=realtime_event.client_sent_epoch_ms,
                 payload_bytes=_safe_len(message),
             )
+            if realtime_event.kind in {"camera_actions", "prompt", "scene_cut"}:
+                session.record_input_event(
+                    realtime_event.event_id,
+                    realtime_event.client_sent_epoch_ms,
+                    server_received_epoch_ms,
+                )
             event_log = session.adapter.ingest_event(session, realtime_event)
             session.mark_event_version(realtime_event.kind)
             session.mark_client_activity()
+            if realtime_event.kind in {"camera_actions", "prompt", "scene_cut"}:
+                await ws.send_bytes(
+                    msgspec.msgpack.encode(
+                        {
+                            "type": "control_ack",
+                            "stage": "worker",
+                            "kind": realtime_event.kind,
+                            "event_id": realtime_event.event_id,
+                            "client_sent_epoch_ms": realtime_event.client_sent_epoch_ms,
+                            "server_received_epoch_ms": server_received_epoch_ms,
+                            "server_sent_epoch_ms": time.time() * 1000,
+                        }
+                    )
+                )
             _schedule_queued_control_refresh(
                 session, realtime_event.kind, realtime_event.event_id
             )
@@ -1508,6 +1695,9 @@ async def generate(websocket: WebSocket):
                     idle_timeout_s=server_args.realtime_session_idle_timeout_s,
                     max_lifetime_s=server_args.realtime_session_max_lifetime_s,
                     lease_ttl_s=server_args.realtime_session_lease_ttl_s,
+                    enforce_max_lifetime=not session.trace_id.startswith(
+                        "startup-warmup-"
+                    ),
                 )
             )
         log_realtime_trace(

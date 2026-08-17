@@ -13,7 +13,6 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from uuid import uuid4
 
 import msgspec.msgpack
-
 from summarize import latency_summary
 
 
@@ -27,8 +26,29 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--measured-chunks", type=int, default=6)
     parser.add_argument("--model", default="/work/model")
     parser.add_argument("--prompt", default="A cinematic forward-moving landscape")
+    parser.add_argument(
+        "--generation-mode",
+        choices=("i2v", "t2v"),
+        default="t2v",
+    )
+    parser.add_argument(
+        "--first-frame",
+        type=Path,
+        help="Reference image used when --generation-mode=i2v",
+    )
     parser.add_argument("--size", default="832x480")
     parser.add_argument("--fps", type=int, default=24)
+    parser.add_argument("--sink", type=int, default=9)
+    parser.add_argument("--window", type=int, default=18)
+    parser.add_argument(
+        "--completion-signal",
+        choices=("final-frame", "chunk-stats"),
+        default="final-frame",
+        help=(
+            "Use chunk-stats only for monolithic backends that send frames and "
+            "stats in-order on the same WebSocket."
+        ),
+    )
     parser.add_argument("--timeout-s", type=float, default=300.0)
     parser.add_argument(
         "--trace-http-url",
@@ -44,7 +64,9 @@ def with_identity(url: str, *, user_id: str, trace_id: str) -> str:
     parts = urlsplit(url)
     query = dict(parse_qsl(parts.query, keep_blank_values=True))
     query.update(user_id=user_id, trace_id=trace_id)
-    return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
+    return urlunsplit(
+        (parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment)
+    )
 
 
 def derive_trace_http_url(ws_url: str) -> str:
@@ -75,9 +97,7 @@ async def collect_trace_events(
         raise ValueError("stable_polls must be positive")
     if expected_chunks is not None and expected_chunks < 1:
         raise ValueError("expected_chunks must be positive")
-    endpoint = (
-        f"{http_origin.rstrip('/')}/v1/realtime_video/traces/{trace_id}"
-    )
+    endpoint = f"{http_origin.rstrip('/')}/v1/realtime_video/traces/{trace_id}"
     owns_client = client is None
     if client is None:
         client = httpx.AsyncClient(timeout=min(10.0, timeout_s))
@@ -155,23 +175,21 @@ def action_event(event_id: int, actions: list[str]) -> bytes:
             "client_sent_epoch_ms": now_ms,
             "payload": {
                 "mode": "state",
-                "transitions": [
-                    {"actions": actions, "client_ts_ms": int(now_ms)}
-                ],
+                "transitions": [{"actions": actions, "client_ts_ms": int(now_ms)}],
             },
         }
     )
 
 
 def init_request(args: argparse.Namespace, *, total_chunks: int, trace_id: str) -> dict:
-    return {
+    generation_mode = getattr(args, "generation_mode", "t2v")
+    request = {
         "type": "init",
-        "generation_mode": "t2v",
+        "generation_mode": generation_mode,
         "model": args.model,
         "prompt": args.prompt,
         "size": args.size,
         "fps": args.fps,
-        "num_frames": 1 + (total_chunks - 1) * 16,
         "seed": 42,
         "generator_device": "cuda",
         "num_inference_steps": 4,
@@ -181,8 +199,18 @@ def init_request(args: argparse.Namespace, *, total_chunks: int, trace_id: str) 
         "realtime_preview_max_width": 560,
         "realtime_output_pacing": False,
         "output_compression": 55,
+        "realtime_causal_sink_size": getattr(args, "sink", 9),
+        "realtime_causal_kv_cache_num_frames": getattr(args, "window", 18),
         "trace_id": trace_id,
     }
+    if generation_mode == "i2v":
+        first_frame = getattr(args, "first_frame_bytes", None)
+        if not first_frame:
+            raise ValueError("i2v benchmark requires first_frame_bytes")
+        request["first_frame"] = first_frame
+    else:
+        request["num_frames"] = 1 + (total_chunks - 1) * 16
+    return request
 
 
 def stage_values(
@@ -280,9 +308,7 @@ def record_action_latency(
         action_sent_at.pop(event_id, None)
 
 
-def record_frame_batch(
-    message: dict, *, frame_counts: dict[int, int]
-) -> None:
+def record_frame_batch(message: dict, *, frame_counts: dict[int, int]) -> None:
     chunk_index = int(message.get("chunk_index") or 0)
     num_frames = int(message.get("num_frames") or 0)
     if chunk_index < 0 or num_frames <= 0:
@@ -301,6 +327,23 @@ def final_frame_batch_chunk(message: dict) -> int | None:
         return None
     chunk_index = int(message.get("chunk_index", -1))
     return chunk_index if chunk_index >= 0 else None
+
+
+def completion_chunk(
+    message: dict,
+    *,
+    completion_signal: str,
+    frame_counts: dict[int, int],
+) -> int | None:
+    chunk_index = final_frame_batch_chunk(message)
+    if chunk_index is not None or completion_signal != "chunk-stats":
+        return chunk_index
+    if message.get("type") != "chunk_stats":
+        return None
+    chunk_index = int(message.get("chunk_index", -1))
+    if chunk_index < 0 or frame_counts.get(chunk_index, 0) <= 0:
+        return None
+    return chunk_index
 
 
 def chunk_stats_from_trace(trace_events: list[dict]) -> dict[int, dict]:
@@ -360,7 +403,9 @@ def server_action_latencies(
             or marker_elapsed_ms is None
         ):
             continue
-        eligible = [event_id for event_id in received if event_id <= int(marker_event_id)]
+        eligible = [
+            event_id for event_id in received if event_id <= int(marker_event_id)
+        ]
         if not eligible:
             continue
         client_epoch_ms, received_elapsed_ms = received[max(eligible)]
@@ -456,7 +501,11 @@ async def run_session(args: argparse.Namespace, concurrency: int, index: int) ->
 
     def mark_chunk_complete(message: dict, observed_at: float) -> None:
         nonlocal measured_started_at, measured_completed_at
-        chunk = final_frame_batch_chunk(message)
+        chunk = completion_chunk(
+            message,
+            completion_signal=getattr(args, "completion_signal", "final-frame"),
+            frame_counts=frame_counts,
+        )
         if chunk is None or chunk in completed_chunk_at:
             return
         completed_chunk_at[chunk] = observed_at
@@ -541,6 +590,7 @@ async def run_session(args: argparse.Namespace, concurrency: int, index: int) ->
                 chunk = int(message["chunk_index"])
                 observed_at = time.perf_counter()
                 stats[chunk] = dict(message)
+                mark_chunk_complete(message, observed_at)
                 record_action_latency(
                     message,
                     first_frame_at=first_frame_at,
@@ -597,8 +647,7 @@ async def run_session(args: argparse.Namespace, concurrency: int, index: int) ->
     measured = [stats[index] for index in range(args.warmup_chunks, total_chunks)]
     chunk_total = [float(item["chunk_total_ms"]) for item in measured]
     frame_count = sum(
-        frame_counts.get(index, 0)
-        for index in range(args.warmup_chunks, total_chunks)
+        frame_counts.get(index, 0) for index in range(args.warmup_chunks, total_chunks)
     )
     measured_seconds = (
         max(0.0, measured_completed_at - measured_started_at)
@@ -614,9 +663,7 @@ async def run_session(args: argparse.Namespace, concurrency: int, index: int) ->
         "trace_id": trace_id,
         "timing_source": timing_source,
         "chunk_total_ms": chunk_total,
-        "action_to_first_frame_ms": server_action[
-            "action_to_server_first_frame_ms"
-        ],
+        "action_to_first_frame_ms": server_action["action_to_server_first_frame_ms"],
         "action_ingress_to_first_frame_ms": server_action[
             "action_ingress_to_server_first_frame_ms"
         ],
@@ -625,13 +672,9 @@ async def run_session(args: argparse.Namespace, concurrency: int, index: int) ->
         "measured_seconds": measured_seconds,
         "measured_started_at": measured_started_at,
         "measured_completed_at": measured_completed_at,
-        "stage_values": stage_values(
-            trace_events, min_chunk_index=args.warmup_chunks
-        ),
+        "stage_values": stage_values(trace_events, min_chunk_index=args.warmup_chunks),
         "trace_event_names": trace_contract["event_names"],
-        "direct_vae_frame_batches": trace_contract[
-            "direct_vae_frame_batches"
-        ],
+        "direct_vae_frame_batches": trace_contract["direct_vae_frame_batches"],
     }
 
 
@@ -661,11 +704,7 @@ async def run_level(args: argparse.Namespace, concurrency: int) -> dict:
         for name, values in session["stage_values"].items():
             stages[name].extend(values)
     trace_event_names = sorted(
-        {
-            name
-            for session in sessions
-            for name in session["trace_event_names"]
-        }
+        {name for session in sessions for name in session["trace_event_names"]}
     )
     total_frames = sum(session["frames"] for session in sessions)
     wall_seconds = aggregate_measurement_seconds(sessions)
@@ -679,9 +718,7 @@ async def run_level(args: argparse.Namespace, concurrency: int) -> dict:
         "successful_sessions": len(sessions),
         "errors": errors,
         "error_rate": len(errors) / concurrency,
-        "timing_sources": sorted(
-            {session["timing_source"] for session in sessions}
-        ),
+        "timing_sources": sorted({session["timing_source"] for session in sessions}),
         "chunk_total_ms": latency_summary(chunks),
         "action_to_first_frame_ms": latency_summary(action),
         "action_ingress_to_first_frame_ms": latency_summary(action_ingress),
@@ -704,6 +741,12 @@ async def async_main(args: argparse.Namespace) -> None:
     levels = [int(value) for value in args.concurrency.split(",") if value.strip()]
     if not levels or any(value < 1 for value in levels):
         raise ValueError("concurrency levels must be positive")
+    if args.generation_mode == "i2v":
+        if args.first_frame is None or not args.first_frame.is_file():
+            raise ValueError("--first-frame must name an existing image for i2v")
+        args.first_frame_bytes = args.first_frame.read_bytes()
+    elif args.first_frame is not None:
+        raise ValueError("--first-frame is only valid with --generation-mode=i2v")
     runs = []
     for concurrency in levels:
         run = await run_level(args, concurrency)
@@ -714,8 +757,13 @@ async def async_main(args: argparse.Namespace) -> None:
         "profile": args.profile,
         "request": {
             "model": args.model,
+            "generation_mode": args.generation_mode,
+            "first_frame": str(args.first_frame) if args.first_frame else None,
             "size": args.size,
             "fps": args.fps,
+            "sink": args.sink,
+            "window": args.window,
+            "completion_signal": args.completion_signal,
             "steps": 4,
             "warmup_chunks": args.warmup_chunks,
             "measured_chunks": args.measured_chunks,

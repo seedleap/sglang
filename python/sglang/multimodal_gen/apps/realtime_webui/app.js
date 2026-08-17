@@ -6,6 +6,12 @@ const WEBP_FRAME_CONTENT_TYPE = "image/webp";
 const JPEG_FRAME_CONTENT_TYPE = "image/jpeg";
 const DECODER_WORKER_URL = "./decoder_worker.js?v=rgb-worker-v10";
 const UI_CONFIG = Object.freeze(globalThis.SGLANG_REALTIME_UI_CONFIG || {});
+const DUAL_MODEL_CONFIG = Object.freeze(UI_CONFIG.dualModels || {});
+const H264_MSE_MIME_TYPE = 'video/mp4; codecs="avc1.4D401F"';
+const H264_WEBSOCKET_REQUESTED = UI_CONFIG.h264WebSocketEnabled === true;
+const H264_WEBSOCKET_ENABLED = H264_WEBSOCKET_REQUESTED
+  && Boolean(globalThis.MediaSource?.isTypeSupported?.(H264_MSE_MIME_TYPE));
+const DEFAULT_LINGBOT2_MODEL = "robbyant/lingbot-world-v2-14b-causal-fast-diffusers";
 const SESSION_ARTIFACT_SCHEMA_VERSION = 1;
 const SESSION_ARTIFACT_EVENT_LIMIT = 20000;
 const MAX_EMBEDDED_REFERENCE_IMAGE_BYTES = 2 * 1024 * 1024;
@@ -13,6 +19,79 @@ const MAX_EMBEDDED_REFERENCE_IMAGE_BYTES = 2 * 1024 * 1024;
 function configuredNumber(name, fallback) {
   const value = Number(UI_CONFIG[name]);
   return Number.isFinite(value) ? value : fallback;
+}
+
+function configuredModelNumber(key, name, fallback) {
+  const value = Number(DUAL_MODEL_CONFIG[key]?.[name]);
+  return Number.isFinite(value) ? value : fallback;
+}
+
+function h264CompressionInit(init, key) {
+  const bitrateKbps = Math.max(
+    250,
+    Math.min(
+      20000,
+      Math.trunc(configuredModelNumber(
+        key,
+        "h264BitrateKbps",
+        configuredNumber("h264CompressedBitrateKbps", 3000),
+      )),
+    ),
+  );
+  return {
+    ...init,
+    h264_bitrate_kbps: bitrateKbps,
+    h264_crf: configuredModelNumber(
+      key,
+      "h264Crf",
+      configuredNumber("h264CompressedCrf", 20),
+    ),
+    h264_preset: String(
+      DUAL_MODEL_CONFIG[key]?.h264Preset
+      || UI_CONFIG.h264CompressedPreset
+      || "fast",
+    ),
+    h264_gop_seconds: configuredModelNumber(
+      key,
+      "h264GopSeconds",
+      configuredNumber("h264CompressedGopSeconds", 2),
+    ),
+    h264_vbv_buffer_ms: configuredModelNumber(
+      key,
+      "h264VbvBufferMs",
+      configuredNumber("h264CompressedVbvBufferMs", 250),
+    ),
+    h264_startup_drop_frames: Math.max(
+      0,
+      Math.min(
+        120,
+        Math.trunc(configuredModelNumber(
+          key,
+          "h264StartupDropFrames",
+          key === "lingbot2" ? 8 : 0,
+        )),
+      ),
+    ),
+  };
+}
+
+function h264WebSocketEndpoint(key) {
+  const defaultEndpoint = `/api/h264ws/${key}`;
+  const configuredEndpoint = String(
+    DUAL_MODEL_CONFIG[key]?.h264WsUrl || UI_CONFIG.h264WebSocketBaseUrl || "",
+  ).trim();
+  if (!configuredEndpoint) return defaultEndpoint;
+  try {
+    const endpoint = new URL(defaultEndpoint, configuredEndpoint);
+    if (endpoint.protocol === "https:") endpoint.protocol = "wss:";
+    if (endpoint.protocol === "http:") endpoint.protocol = "ws:";
+    if (endpoint.protocol !== "ws:" && endpoint.protocol !== "wss:") {
+      return defaultEndpoint;
+    }
+    return endpoint.toString();
+  } catch {
+    return defaultEndpoint;
+  }
 }
 
 function configuredGenerationModes() {
@@ -36,10 +115,17 @@ const SMOOTH_PREVIEW_OUTPUT_QUALITY = 70;
 const SR_PREVIEW_OUTPUT_QUALITY = 70;
 const HEAVY_PREVIEW_OUTPUT_QUALITY = 60;
 const DEFAULT_TARGET_FPS = configuredNumber("targetFps", 24);
+const DEFAULT_LINGBOT2_TARGET_FPS = configuredModelNumber("lingbot2", "targetFps", 16);
+const DEFAULT_LINGBOT2_SINK_SIZE = configuredModelNumber("lingbot2", "sinkSize", 9);
+const DEFAULT_LINGBOT2_WINDOW_FRAMES = configuredModelNumber("lingbot2", "windowFrames", 18);
 const DEFAULT_PREVIEW_MAX_WIDTH = configuredNumber("previewMaxWidth", 832);
 const MAX_AUTO_PREVIEW_WIDTH = configuredNumber("maxAutoPreviewWidth", 1280);
 const DEFAULT_FRAME_INTERPOLATION_EXP = 1;
 const DEFAULT_FRAME_INTERPOLATION_SCALE = 1.0;
+const DEFAULT_SMOOTH_CATCHUP_RATE = Math.min(
+  2.5,
+  Math.max(1, configuredNumber("smoothCatchupRateMax", 1.1)),
+);
 const DEFAULT_UPSCALING_SCALE = 2;
 const DEFAULT_UPSCALING_MODEL =
   "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesr-general-x4v3.pth";
@@ -61,15 +147,36 @@ const DEFAULT_T2V_NUM_FRAMES = 9;
 const RECONNECT_CLOSE_TIMEOUT_MS = 15000;
 const DECODE_QUEUE_SECONDS = configuredNumber("decodeQueueSeconds", 5);
 const STARTUP_DECODE_QUEUE_SECONDS = configuredNumber("startupDecodeQueueSeconds", 5);
+const ONLINE_MAX_BUFFER_MS = configuredNumber("onlineMaxBufferMs", 1100);
+const ONLINE_MAX_BUFFER_CHUNKS = Math.max(
+  1,
+  Math.trunc(configuredNumber("onlineMaxBufferChunks", 2)),
+);
+const ONLINE_MAX_FRAME_AGE_MS = configuredNumber("onlineMaxFrameAgeMs", 1800);
+const ONLINE_DECODE_QUEUE_SLACK_FRAMES = configuredNumber("onlineDecodeQueueSlackFrames", 8);
 const MAX_DECODE_QUEUE_BYTES = configuredNumber(
   "maxDecodeQueueBytes",
   192 * 1024 * 1024,
 );
 const RECENT_DROP_DISPLAY_MS = 1800;
-const CONTROL_BUFFERED_AMOUNT_LIMIT = 1 << 20;
 const CONTROL_TRANSITION_FLUSH_DELAY_MS = 50;
 const CONTROL_HELD_STATE_HEARTBEAT_MS = 100;
 const SESSION_HEARTBEAT_MS = 15000;
+const PLAYBACK_ACK_INTERVAL_MS = 50;
+// Keep ACK flow-control opt-in until every deployed realtime worker supports
+// the playback_ack protocol extension. Older workers return `invalid event`.
+const PLAYBACK_ACK_ENABLED = UI_CONFIG.playbackAckEnabled === true;
+const SESSION_MAX_LIFETIME_SECONDS = Math.max(
+  1,
+  Math.trunc(configuredNumber("sessionMaxLifetimeSeconds", 60)),
+);
+const SESSION_MAX_LIFETIME_MS = SESSION_MAX_LIFETIME_SECONDS * 1000;
+const MAX_GOAL_MIN_PLAY_SECONDS = Math.max(0, SESSION_MAX_LIFETIME_SECONDS - 1);
+const EXPERIENCE_BUSY_MESSAGE = `当前正有人体验，请等待${SESSION_MAX_LIFETIME_SECONDS}s`;
+const GAMEPLAY_RECORDING_FPS = Math.max(
+  8,
+  Math.min(24, Math.trunc(configuredNumber("gameplayRecordingFps", 15))),
+);
 const BROWSER_USER_ID_STORAGE_KEY = "sglang-realtime-user-id";
 const MIN_RENDER_TIMER_FPS = 30;
 const MAX_RENDER_TIMER_FPS = 60;
@@ -103,34 +210,33 @@ const CONTROL_ACTION_META = {
   k: { label: "Pitch -", type: "rotation", axis: "-pitch", amount: "4deg/frame" },
   l: { label: "Yaw +", type: "rotation", axis: "+yaw", amount: "6deg/frame" },
 };
-const RECORDING_STAGE_WIDTH = 1600;
-const RECORDING_STAGE_TOPBAR_HEIGHT = 54;
-const RECORDING_STAGE_PREVIEW_HEIGHT = 586;
-const RECORDING_STAGE_CONTROLS_HEIGHT = 144;
-const RECORDING_STAGE_TIMELINE_HEIGHT = 48;
-const RECORDING_STAGE_TELEMETRY_HEIGHT = 96;
-const RECORDING_STAGE_HEIGHT =
-  RECORDING_STAGE_TOPBAR_HEIGHT +
-  RECORDING_STAGE_PREVIEW_HEIGHT +
-  RECORDING_STAGE_CONTROLS_HEIGHT +
-  RECORDING_STAGE_TIMELINE_HEIGHT +
-  RECORDING_STAGE_TELEMETRY_HEIGHT;
+const RECORDING_STAGE_WIDTH = 1280;
+const RECORDING_STAGE_HEIGHT = 720;
+const RECORDING_STAGE_TOPBAR_HEIGHT = 48;
+const RECORDING_STAGE_PREVIEW_HEIGHT = RECORDING_STAGE_HEIGHT - RECORDING_STAGE_TOPBAR_HEIGHT;
 const RECORDING_STAGE_PADDING = 18;
+const RECORDING_PROMPT_STATUS_HOLD_MS = 1600;
+const RECORDING_READY_TOAST_MS = 5000;
 
 function applyRuntimeUiConfig() {
-  $("fps").value = String(DEFAULT_TARGET_FPS);
-  $("guidance").value = String(
-    configuredNumber("guidanceScale", Number($("guidance").value)),
-  );
-  $("sinkSize").value = String(
-    configuredNumber("sinkSize", Number($("sinkSize").value)),
-  );
-  $("windowFrames").value = String(
-    configuredNumber("windowFrames", Number($("windowFrames").value)),
-  );
-  $("targetFpsSummary").textContent = `${DEFAULT_TARGET_FPS} fps`;
-  if (UI_CONFIG.modelLabel) {
-    $("modelSectionTitle").textContent = String(UI_CONFIG.modelLabel);
+  for (const key of ["minwm", "lingbot2"]) {
+    const isLingBot2 = key === "lingbot2";
+    modelControl(key, "fps").value = String(
+      isLingBot2 ? DEFAULT_LINGBOT2_TARGET_FPS : DEFAULT_TARGET_FPS,
+    );
+    modelControl(key, "guidance").value = String(
+      configuredNumber("guidanceScale", Number(modelControl(key, "guidance").value)),
+    );
+    modelControl(key, "sinkSize").value = String(
+      isLingBot2
+        ? DEFAULT_LINGBOT2_SINK_SIZE
+        : configuredNumber("sinkSize", Number(modelControl(key, "sinkSize").value)),
+    );
+    modelControl(key, "windowFrames").value = String(
+      isLingBot2
+        ? DEFAULT_LINGBOT2_WINDOW_FRAMES
+        : configuredNumber("windowFrames", Number(modelControl(key, "windowFrames").value)),
+    );
   }
   if (UI_CONFIG.titleSuffix) {
     const suffix = String(UI_CONFIG.titleSuffix);
@@ -142,7 +248,25 @@ function applyRuntimeUiConfig() {
       meta.amount = String(UI_CONFIG.actionAmountLabel);
     });
   }
+  if (H264_WEBSOCKET_ENABLED) {
+    const bitrateKbps = configuredNumber("h264CompressedBitrateKbps", 3000);
+    for (const key of ["minwm", "lingbot2"]) {
+      const chip = document.querySelector(`[data-model-key="${key}"] .stream-chip`);
+      if (chip) chip.textContent = `H.264 · WS · ${(bitrateKbps / 1000).toFixed(1)} Mbps`;
+    }
+  } else if (H264_WEBSOCKET_REQUESTED) {
+    addHistory("当前浏览器不支持 H.264 MSE，已自动回退 WebP WebSocket");
+  }
   configureGenerationModeSelect();
+}
+
+function modelControlId(key, id) {
+  if (key !== "lingbot2") return id;
+  return `lingbot2${id[0].toUpperCase()}${id.slice(1)}`;
+}
+
+function modelControl(key, id) {
+  return $(modelControlId(key, id));
 }
 
 function configureGenerationModeSelect() {
@@ -172,7 +296,7 @@ function updateT2VFrameHint() {
     ? Math.max(0, frames) / fps
     : 0;
   $("t2vFrameHint").textContent = (
-    `MinWM requires 1 + N × ${T2V_FRAME_STEP}; `
+    `Zing requires 1 + N × ${T2V_FRAME_STEP}; `
     + `${frames || 0} frames ≈ ${duration.toFixed(2)}s at ${fps || 0}fps.`
   );
 }
@@ -214,13 +338,13 @@ function readT2VNumFrames() {
     || (numFrames - 1) % T2V_FRAME_STEP !== 0
   ) {
     throw new Error(
-      `MinWM T2V Frames must equal 1 + N × ${T2V_FRAME_STEP}`,
+      `Zing T2V Frames must equal 1 + N × ${T2V_FRAME_STEP}`,
     );
   }
   return numFrames;
 }
 
-const REACTOR_PRESET_BASE_URL = "https://www.reactor.inc/lingbot-world-fast-v1";
+const PRESET_ASSET_BASE_URL = "./assets/presets/v1";
 
 const reactorPresets = [
   {
@@ -229,7 +353,8 @@ const reactorPresets = [
     size: "832x480",
     fps: DEFAULT_TARGET_FPS,
     prompt: "A locked first-person dragon-rider view matching the reference image: both tan forearms in brown leather gloves stay visible at the bottom, gripping leather reins around the green-brown scaled dragon neck; the dragon head, horns, and both wide wings frame the jungle valley, waterfalls, mist, and tall castle on the right. Smooth forward flight only, keep the same rider hands, dragon body, wing silhouette, castle placement, and humid daylight colors in every frame.",
-    referenceUrl: "./assets/dragon-ride.jpg",
+    referenceUrl: `${PRESET_ASSET_BASE_URL}/reactor-dragon-ride.png`,
+    mime: "image/png",
     source: "Reactor LingBot preset",
   },
   {
@@ -238,7 +363,8 @@ const reactorPresets = [
     size: "832x480",
     fps: DEFAULT_TARGET_FPS,
     prompt: "A third-person over-the-shoulder fantasy view following a sword-slung rider on a brown horse through curling valley mist, wildflower meadows, ruined stone arches, cottages, and a many-spired castle under a ringed gas giant and crescent moon.",
-    referenceUrl: `${REACTOR_PRESET_BASE_URL}/misted-kingdom.jpg`,
+    referenceUrl: `${PRESET_ASSET_BASE_URL}/reactor-misted-kingdom.png`,
+    mime: "image/png",
     source: "Reactor LingBot preset",
   },
   {
@@ -247,7 +373,7 @@ const reactorPresets = [
     size: "832x480",
     fps: DEFAULT_TARGET_FPS,
     prompt: "A third-person stern view of a battered grey aluminum work boat pushing through slate-black storm swells, wet wooden deck, warm cabin lamp, orange life rings, salt mist, churning wake, and a pale silver break in the dark horizon.",
-    referenceUrl: `${REACTOR_PRESET_BASE_URL}/storm-crossing.jpg`,
+    referenceUrl: `${PRESET_ASSET_BASE_URL}/reactor-storm-crossing.jpg`,
     source: "Reactor LingBot preset",
   },
   {
@@ -256,7 +382,7 @@ const reactorPresets = [
     size: "832x480",
     fps: DEFAULT_TARGET_FPS,
     prompt: "A third-person rear view of a mud-streaked vintage Defender 4x4 driving along a cobblestone-and-sand track through a coral-lit desert canyon toward a cliff-built sandstone citadel, with cacti, red poppies, ochre dunes, and peach sunset haze.",
-    referenceUrl: `${REACTOR_PRESET_BASE_URL}/citadel-approach.jpg`,
+    referenceUrl: `${PRESET_ASSET_BASE_URL}/reactor-citadel-approach.jpg`,
     source: "Reactor LingBot preset",
   },
   {
@@ -265,7 +391,8 @@ const reactorPresets = [
     size: "832x480",
     fps: DEFAULT_TARGET_FPS,
     prompt: "A third-person over-the-shoulder view following a golden retriever through a sunlit meadow with a patterned floral rug, stone bench, open book, potted seedling, cherry blossoms, rounded green oaks, soft hills, and a tender watercolor storybook atmosphere.",
-    referenceUrl: `${REACTOR_PRESET_BASE_URL}/spring-valley.jpg`,
+    referenceUrl: `${PRESET_ASSET_BASE_URL}/reactor-spring-valley.png`,
+    mime: "image/png",
     source: "Reactor LingBot preset",
   },
   {
@@ -274,7 +401,7 @@ const reactorPresets = [
     size: "832x480",
     fps: DEFAULT_TARGET_FPS,
     prompt: "A third-person follow view trailing a large grey reef shark through clear tropical water above a sunlit coral reef, with drifting sediment, shifting sun-ray lattices, clouds of reef fish, a sardine bait ball, and deep blue open-water haze.",
-    referenceUrl: `${REACTOR_PRESET_BASE_URL}/reef-patrol.jpg`,
+    referenceUrl: `${PRESET_ASSET_BASE_URL}/reactor-reef-patrol.jpg`,
     source: "Reactor LingBot preset",
   },
   {
@@ -283,7 +410,7 @@ const reactorPresets = [
     size: "832x480",
     fps: DEFAULT_TARGET_FPS,
     prompt: "A third-person rear view of a yellow four-person whitewater raft plunging through churning rapids in an alpine canyon, red lifejackets, yellow helmets, wet paddles, dark boulders, conifer slopes, and a snow-capped mountain at the vanishing point.",
-    referenceUrl: `${REACTOR_PRESET_BASE_URL}/alpine-run.jpg`,
+    referenceUrl: `${PRESET_ASSET_BASE_URL}/reactor-alpine-run.jpg`,
     source: "Reactor LingBot preset",
   },
   {
@@ -292,7 +419,7 @@ const reactorPresets = [
     size: "832x480",
     fps: DEFAULT_TARGET_FPS,
     prompt: "A centered elevated third-person game camera behind a lone kayaker in a bright red kayak crossing a calm deep blue alpine lake, scattered ice blocks, mirror reflections, huge snow-covered mountain ranges, vivid sky, and crisp cold wilderness scale.",
-    referenceUrl: `${REACTOR_PRESET_BASE_URL}/ice-kayak.jpg`,
+    referenceUrl: `${PRESET_ASSET_BASE_URL}/reactor-ice-kayak.jpg`,
     source: "Reactor LingBot preset",
   },
   {
@@ -301,7 +428,7 @@ const reactorPresets = [
     size: "832x480",
     fps: DEFAULT_TARGET_FPS,
     prompt: "A third-person follow view of a single black-and-white penguin waddling across a windswept Antarctic ice shelf toward a distant colony, crystalline snow, small flippers, scattered dark boulders, rocky shoreline, and pale polar sky.",
-    referenceUrl: `${REACTOR_PRESET_BASE_URL}/penguin.jpg`,
+    referenceUrl: `${PRESET_ASSET_BASE_URL}/reactor-penguin-colony.jpg`,
     source: "Reactor LingBot preset",
   },
   {
@@ -310,7 +437,7 @@ const reactorPresets = [
     size: "832x480",
     fps: DEFAULT_TARGET_FPS,
     prompt: "A centered third-person rear view of a six-wheeled Martian rover marked XR-7A P-3317 crossing cracked basalt toward a vast volcanic mountain, dusty rose twilight, ochre wheel plumes, weathered grey panels, and a cold alien horizon.",
-    referenceUrl: `${REACTOR_PRESET_BASE_URL}/mars-rover.jpg`,
+    referenceUrl: `${PRESET_ASSET_BASE_URL}/reactor-mars-mountain.jpg`,
     source: "Reactor LingBot preset",
   },
   {
@@ -319,7 +446,7 @@ const reactorPresets = [
     size: "832x480",
     fps: DEFAULT_TARGET_FPS,
     prompt: "A centered third-person anime view behind a young girl on a flower-covered coastal hillside overlooking a sparkling blue bay, rolling green hills, sailboats, dramatic cliffs, a small lighthouse, huge fluffy clouds, and warm hand-painted adventure atmosphere.",
-    referenceUrl: `${REACTOR_PRESET_BASE_URL}/anime3.png`,
+    referenceUrl: `${PRESET_ASSET_BASE_URL}/reactor-seaside-adventurer.png`,
     source: "Reactor LingBot preset",
     mime: "image/png",
   },
@@ -329,7 +456,7 @@ const reactorPresets = [
     size: "832x480",
     fps: DEFAULT_TARGET_FPS,
     prompt: "A centered elevated third-person game camera behind a Roman warrior riding an ancient chariot pulled by two white horses across an open grassy field, worn stone path, Roman ruins, broken columns, bright midday sky, and epic historical scale.",
-    referenceUrl: `${REACTOR_PRESET_BASE_URL}/chariot.png`,
+    referenceUrl: `${PRESET_ASSET_BASE_URL}/reactor-roman-chariot.png`,
     source: "Reactor LingBot preset",
     mime: "image/png",
   },
@@ -339,32 +466,121 @@ const reactorPresets = [
     size: "832x480",
     fps: DEFAULT_TARGET_FPS,
     prompt: "A third-person over-the-shoulder traversal behind a man in a wet leather jacket holding a flashlight down a derelict asylum corridor, standing water, torn vinyl strips, rusted ceiling debris, bloodstains, a toppled wheelchair, and a distant cyan-grey doorway glow.",
-    referenceUrl: `${REACTOR_PRESET_BASE_URL}/horror.jpg`,
+    referenceUrl: `${PRESET_ASSET_BASE_URL}/reactor-asylum-corridor.jpg`,
     source: "Reactor LingBot preset",
   },
 ];
 
 const examplePresets = [
-  { name: "Dragon Dolly", tone: "green", size: "832x480", fps: DEFAULT_TARGET_FPS, prompt: "A stable first-person dolly from the same dragon-rider viewpoint, keeping the black dragon head, horns, wings, jungle canopy, and distant castle consistent; slow forward camera motion, natural parallax, no creature morphing, no scene replacement.", referenceUrl: "https://raw.githubusercontent.com/robbyant/lingbot-world/main/examples/00/image.jpg", source: "LingBot example 00" },
-  { name: "Stone Orbit", tone: "blue", size: "832x480", fps: DEFAULT_TARGET_FPS, prompt: "A controlled look-around of the stone monument, overcast daylight, consistent geometry, subtle camera arc.", referenceUrl: "https://raw.githubusercontent.com/robbyant/lingbot-world/main/examples/01/image.jpg", source: "LingBot example 01" },
-  { name: "Urban Tilt", tone: "accent", size: "832x480", fps: DEFAULT_TARGET_FPS, prompt: "A cinematic urban wall shot with a slow tilt and slight forward movement, warm backlight, stable architecture.", referenceUrl: "https://raw.githubusercontent.com/robbyant/lingbot-world/main/examples/02/image.jpg", source: "LingBot example 02" },
-  { name: "Lake Scout", tone: "green", size: "832x480", fps: DEFAULT_TARGET_FPS, prompt: "A calm scouting shot across the lake, gentle camera drift, crisp mountains, stable reflections.", referenceUrl: "https://raw.githubusercontent.com/robbyant/lingbot-world/main/examples/03/image.jpg", source: "LingBot example 03" },
-  { name: "Ziggy Stardust", tone: "accent", size: "832x480", fps: DEFAULT_TARGET_FPS, prompt: "A static night view of a narrow London alley in soft rain, wet pavement reflecting a yellow streetlamp, the blue K. West sign glowing above a doorway, cardboard boxes near the wall, a pale parked car in the distance, and a slender glam-rock figure holding a guitar under the lamp; preserve the album-cover composition, brick storefronts, muted teal and amber colors, subtle rain shimmer only.", referenceUrl: "https://upload.wikimedia.org/wikipedia/en/0/01/ZiggyStardust.jpg", source: "David Bowie Ziggy Stardust artwork", mime: "image/jpeg" },
-  { name: "Plastic Beach", tone: "blue", size: "832x480", fps: DEFAULT_TARGET_FPS, prompt: "A static album-cover view matching the reference image: the Plastic Beach island stays centered above a dark midnight-blue ocean, the lighthouse remains on the left with its white reflection path, the starry navy sky stays unchanged, and the large white Plastic Beach title graphic stays in the lower foreground. Keep the original camera height, horizon, waterline, island silhouette, and deep blue color palette fixed; only tiny water shimmer, lighthouse glint, and subtle star twinkle, with no camera descent, no push-in, no orbit, and no turquoise color shift.", referenceUrl: "https://is1-ssl.mzstatic.com/image/thumb/Music/v4/b8/f9/b9/b8f9b9f8-a609-bde2-0302-349436ffc508/825646291038.jpg/600x600bb.jpg", source: "Gorillaz Plastic Beach artwork", mime: "image/jpeg" },
-  { name: "Plastic Ono Band", tone: "green", size: "832x480", fps: DEFAULT_TARGET_FPS, prompt: "A quiet sunlit park under a massive tree, a solitary figure resting in the grass, soft summer haze, restrained documentary camera, intimate and naturalistic.", referenceUrl: "https://upload.wikimedia.org/wikipedia/en/a/a4/JLPOBCover.jpg", source: "John Lennon/Plastic Ono Band artwork", mime: "image/jpeg" },
-  { name: "Kid A", tone: "accent", size: "832x480", fps: DEFAULT_TARGET_FPS, prompt: "A cold surreal mountain range with sharp icy peaks, black-red storm clouds, glacial light, slow lateral pan, abstract digital texture, uneasy atmospheric scale.", referenceUrl: "https://is1-ssl.mzstatic.com/image/thumb/Music122/v4/bd/8e/13/bd8e1358-b367-a689-cb84-cebd0b067dc4/634904078263.png/600x600bb.jpg", source: "Radiohead Kid A artwork", mime: "image/jpeg" },
+  { name: "Dragon Dolly", tone: "green", size: "832x480", fps: DEFAULT_TARGET_FPS, prompt: "A stable first-person dolly from the same dragon-rider viewpoint, keeping the black dragon head, horns, wings, jungle canopy, and distant castle consistent; slow forward camera motion, natural parallax, no creature morphing, no scene replacement.", referenceUrl: `${PRESET_ASSET_BASE_URL}/lingbot-example-00-dragon-dolly.jpg`, source: "LingBot example 00" },
 ];
 
+function presetKey(preset) {
+  if (!preset) return "";
+  if (preset.isCustom && preset.fingerprint) {
+    return `custom-${String(preset.fingerprint).replace(/[^a-zA-Z0-9]/g, "").slice(0, 64).toLowerCase()}`;
+  }
+  if (!presets.includes(preset)) return "";
+  return String(preset.name || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+const FEATURED_PRESET_NAMES = [
+  "Misted Kingdom",
+  "Penguin Colony",
+  "Seaside Adventurer",
+  "Dragon Ride",
+  "Spring Valley",
+];
+const featuredPresetNames = new Set(FEATURED_PRESET_NAMES);
 const presets = [
-  ...reactorPresets,
+  ...FEATURED_PRESET_NAMES.map((name) =>
+    reactorPresets.find((preset) => preset.name === name)
+  ),
+  ...reactorPresets.filter((preset) => !featuredPresetNames.has(preset.name)),
   ...examplePresets,
 ];
+const CUSTOM_WORLD_DB_NAME = "world-studio-custom-worlds";
+const CUSTOM_WORLD_DB_VERSION = 1;
+const CUSTOM_WORLD_STORE_NAME = "worlds";
+let customWorldPresets = [];
+let customWorldDbPromise = null;
+let customWorldLoadPromise = null;
+const MODEL_SLOT_DEFAULTS = ["minwm", "lingbot2", "happyoyster"];
+let activeModelSlotCount = 2;
+
+function selectedModelKeys() {
+  const keys = [];
+  for (let index = 0; index < activeModelSlotCount; index += 1) {
+    const key = $(`modelSlot${index}`)?.value || MODEL_SLOT_DEFAULTS[index];
+    if (!keys.includes(key)) keys.push(key);
+  }
+  return keys;
+}
+
+function modelSelected(key) {
+  return selectedModelKeys().includes(key);
+}
+
+function syncModelSlotUi() {
+  const selected = selectedModelKeys();
+  const grid = document.querySelector(".model-player-grid");
+  for (const key of MODEL_SLOT_DEFAULTS) {
+    const player = document.querySelector(`[data-model-key="${key}"]`);
+    if (player) player.hidden = !selected.includes(key);
+  }
+  for (const key of selected) {
+    const player = document.querySelector(`[data-model-key="${key}"]`);
+    if (player && grid) grid.appendChild(player);
+  }
+  grid?.classList.toggle("is-three-up", selected.length === 3);
+  $("modelSlot2Wrap").hidden = activeModelSlotCount < 3;
+  $("addModelSlotBtn").hidden = activeModelSlotCount >= 3;
+  $("removeModelSlotBtn").hidden = activeModelSlotCount < 3;
+}
+
+function ensureUniqueModelSlot(changedIndex) {
+  const changed = $(`modelSlot${changedIndex}`);
+  if (!changed) return;
+  for (let index = 0; index < activeModelSlotCount; index += 1) {
+    if (index === changedIndex) continue;
+    const other = $(`modelSlot${index}`);
+    if (other?.value !== changed.value) continue;
+    const replacement = MODEL_SLOT_DEFAULTS.find((key) => (
+      key !== changed.value
+      && !Array.from({ length: activeModelSlotCount }, (_, slotIndex) => (
+        slotIndex === index ? null : $(`modelSlot${slotIndex}`)?.value
+      )).includes(key)
+    ));
+    if (replacement) other.value = replacement;
+  }
+  syncModelSlotUi();
+}
+
+function allWorldPresets() {
+  return [...presets, ...customWorldPresets];
+}
 
 let ws = null;
+const h264ModelStats = { minwm: {}, lingbot2: {} };
+const activeH264Models = new Set();
 let selectedPreset = null;
 let selectedReferenceBytes = null;
 let selectedReferenceUrl = "";
 let selectedReferenceLabel = "";
+let selectedReferenceMimeType = "";
+let selectedReferencePreviewReady = false;
+let worldCompletionPending = false;
+let skillRuleNextId = 1;
+let preparedWorldRulesCache = null;
+let worldRulesDraftGeneration = 0;
+let sessionLifetimeExpired = false;
+let sessionPlayable = false;
+let worldExperiencePending = false;
+let worldExperienceReady = false;
 let lastGenerationMode = null;
 let savedI2VNumFrames = "9";
 let savedT2VNumFrames = String(DEFAULT_T2V_NUM_FRAMES);
@@ -384,7 +600,6 @@ let pendingDecodeBatches = 0;
 let droppedDecodeFrames = 0;
 let lastDecodeDropAt = 0;
 let lastDecodeDropCount = 0;
-let nextEventId = 1;
 let lastRawRgbFrame = null;
 let decoderWorker = null;
 let decodeWorkerUnavailable = false;
@@ -392,6 +607,10 @@ let decodeRequestId = 1;
 let streamEpoch = 0;
 let lastDecodeMs = 0;
 let lastDisplayLagMs = 0;
+let lastRenderedChunk = null;
+let lastReceivedChunk = null;
+let lastReceivedFrameBatchIndex = null;
+let frameBatchGapCount = 0;
 let encodedDecodeErrors = 0;
 let socketHadError = false;
 let socketCloseExpected = false;
@@ -399,30 +618,40 @@ let socketServerError = "";
 let renderedPreviewFrames = 0;
 let previewScaleFrame = 0;
 let recordingActive = false;
-let recordingSamples = [];
-let recordingEncoder = null;
-let recordingEncoderReady = null;
-let recordingEncoderConfig = null;
+let recordingTracks = [];
 let recordingFrameIndex = 0;
 let recordingFps = DEFAULT_TARGET_FPS;
 let recordingTimer = 0;
+let recordingFrameTimer = 0;
+let recordingStartedPerfMs = 0;
+let recordingElapsedMs = 0;
+let recordingDroppedFrames = 0;
 let recordingSaving = false;
-let recordingEncodeChain = Promise.resolve();
 let recordingMode = "";
-let recordingMediaRecorder = null;
-let recordingMediaChunks = [];
-let recordingCaptureStream = null;
-let recordingMimeType = "video/mp4";
 let recordingDirectoryHandle = null;
 let recordingBaseFileName = "";
+let recordingDownloads = [];
+let recordingReadyToastTimer = 0;
+let recordingReadyToastHideTimer = 0;
+let goalAchievementToastHideTimer = 0;
+let goalAchievementToastFinalizeTimer = 0;
+let recordingPromptDraft = "";
+let recordingPromptSubmitted = "";
+let recordingPromptStatus = "idle";
+let recordingPromptStatusPerfMs = 0;
+let recordingPromptChangeType = "";
+const recordingActionPulseUntil = new Map();
 let currentSessionArtifact = null;
 let recordingArtifact = null;
 let currentTrace = null;
 let renderedTraceChunks = new Set();
 const decodeRequests = new Map();
 let controlStateController = null;
+let worldRulesController = null;
+let runtimeSkillCooldownUiTimer = 0;
 let lastSentEventId = 0;
 let lastSampledEventId = 0;
+const pendingModelEvents = new Map();
 const traceTopologyApi = window.SGLangRealtimeTraceTopology || {};
 const traceTopology = traceTopologyApi.createRealtimeTraceTopology
   ? traceTopologyApi.createRealtimeTraceTopology({ maxEvents: 220 })
@@ -445,36 +674,836 @@ let activeWorkspaceView = "preview";
 let traceRenderFrame = 0;
 
 const stage = document.querySelector(".stage");
-const previewFrame = document.querySelector(".preview-frame");
-const canvas = $("viewport");
+const previewFrame = document.querySelector(".stage");
+const fullscreenController = window.SGLangFullscreen?.createFullscreenController?.({
+  documentRef: document,
+  target: stage,
+  button: $("fullscreenBtn"),
+  onError: (error) => {
+    addHistory(`fullscreen unavailable: ${error?.message || error}`);
+  },
+});
+const canvas = $("minwmViewport");
 const ctx = canvas.getContext("2d", { alpha: false });
+const minwmH264Video = $("minwmH264Viewport");
+const lingbot2Canvas = $("lingbot2Viewport");
+const lingbot2H264Video = $("lingbot2H264Viewport");
 const scratchCanvas = document.createElement("canvas");
 const scratchCtx = scratchCanvas.getContext("2d", { alpha: false });
 const recordingCanvas = document.createElement("canvas");
-const recordingCtx = recordingCanvas.getContext("2d", { alpha: false });
+let recordingCtx = recordingCanvas.getContext("2d", { alpha: false });
+const zingRecordingCanvas = document.createElement("canvas");
+const zingRecordingCtx = zingRecordingCanvas.getContext("2d", { alpha: false });
 const playbackController = new RealtimePlaybackController({
   mode: "adaptive",
   targetFps: DEFAULT_TARGET_FPS,
   lowLatencyPlayback: true,
   holdForTargetLead: true,
-  targetLeadChunkRatio: 0.75,
-  minTargetLeadMs: 360,
+  targetLeadChunkRatio: 0.7,
+  minTargetLeadMs: 260,
   maxTargetLeadMs: 900,
   lowLatencyMaxLeadFrames: 12,
   smoothTimelinePlaybackRateMin: 0.85,
-  smoothTimelinePlaybackRateMax: 2.5,
-  startLeadChunkRatio: 0.55,
-  minStartLeadMs: 260,
-  resumeLeadChunkRatio: 0.55,
-  minResumeLeadMs: 260,
-  maxResumeLeadMs: 900,
-  maxDeliveryLeadBoostMs: 360,
+  smoothTimelinePlaybackRateMax: DEFAULT_SMOOTH_CATCHUP_RATE,
+  realtimeMaxBufferMs: ONLINE_MAX_BUFFER_MS,
+  realtimeMaxBufferChunks: ONLINE_MAX_BUFFER_CHUNKS,
+  realtimeMaxFrameAgeMs: ONLINE_MAX_FRAME_AGE_MS,
+  startLeadChunkRatio: 0.45,
+  minStartLeadMs: 220,
+  resumeLeadChunkRatio: 0.45,
+  minResumeLeadMs: 180,
+  maxResumeLeadMs: 650,
+  maxDeliveryLeadBoostMs: 0,
   deliveryStallExpectedMultiplier: 1.8,
 });
+let lingbot2ReconnectTimer = 0;
+let lingbot2ReconnectAttempt = 0;
+let lingbot2ReconnectInFlight = false;
+
+function cancelLingbot2Reconnect() {
+  if (lingbot2ReconnectTimer) window.clearTimeout(lingbot2ReconnectTimer);
+  lingbot2ReconnectTimer = 0;
+  lingbot2ReconnectAttempt = 0;
+  lingbot2ReconnectInFlight = false;
+}
+
+function canReconnectLingbot2() {
+  return (
+    !sessionLifetimeExpired &&
+    selectedGenerationMode() === "i2v" &&
+    primarySessionConnected()
+  );
+}
+
+function scheduleLingbot2Reconnect(reason = "media stream unavailable") {
+  if (!canReconnectLingbot2() || lingbot2ReconnectTimer || lingbot2ReconnectInFlight) return;
+  const delaysMs = [250, 1000, 2500, 4000];
+  const delayMs = delaysMs[Math.min(lingbot2ReconnectAttempt, delaysMs.length - 1)];
+  lingbot2ReconnectAttempt += 1;
+  addHistory(`LingBot2 recovering in ${delayMs}ms · ${reason}`);
+  lingbot2ReconnectTimer = window.setTimeout(async () => {
+    lingbot2ReconnectTimer = 0;
+    if (!canReconnectLingbot2()) return;
+    lingbot2ReconnectInFlight = true;
+    try {
+      const restored = await dualModelController.reconnect("lingbot2");
+      if (!restored || !canReconnectLingbot2()) return;
+      lingbot2ReconnectAttempt = 0;
+      addHistory("LingBot2 connection restored");
+    } catch (error) {
+      addHistory(`LingBot2 recovery failed · ${error.message || error}`);
+      lingbot2ReconnectInFlight = false;
+      scheduleLingbot2Reconnect(error.message || "retry failed");
+      return;
+    } finally {
+      lingbot2ReconnectInFlight = false;
+    }
+  }, delayMs);
+}
+
+const lingbot2FallbackSession = new RealtimeModelSession({
+  key: "lingbot2",
+  canvas: lingbot2Canvas,
+  overlay: $("lingbot2PreviewOverlay"),
+  root: document.querySelector('[data-model-key="lingbot2"]'),
+  pack,
+  unpack,
+  workerUrl: DECODER_WORKER_URL,
+  startupMinChunk: 1,
+  onState: (state, details) => {
+    setModelConnectionState("lingbot2", state);
+    if (state === "error") {
+      addHistory(`LingBot2 error · ${details.message || details.reason || "unknown"}`);
+    }
+    if (state === "closed" && isSessionLifetimeReason(details.reason)) {
+      expireSessionLifetime({ closeSessions: true });
+    }
+  },
+  onStats: (stats) => {
+    const root = document.querySelector('[data-model-key="lingbot2"]');
+    if (!root) return;
+    root.dataset.chunk = stats.lastChunk ?? "";
+    root.dataset.frames = String(stats.frames || 0);
+    renderModelTelemetry("lingbot2", stats);
+    renderProtocolPerformance("lingbot2", stats);
+    markModelEventApplied("lingbot2", stats.lastAppliedEventId);
+  },
+  onFrame: () => markSessionPlayable("lingbot2"),
+  onError: (error) => {
+    if (isExperienceBusyError(error)) {
+      handleExperienceBusy();
+      return;
+    }
+    addHistory(`LingBot2 session failed · ${error.message || "unknown"}`);
+    scheduleLingbot2Reconnect(error.message || "stream failed");
+  },
+});
+
+function mirrorH264Video(key) {
+  const video = key === "lingbot2" ? lingbot2H264Video : minwmH264Video;
+  const target = key === "lingbot2" ? lingbot2Canvas : canvas;
+  const width = Number(video?.videoWidth || 0);
+  const height = Number(video?.videoHeight || 0);
+  if (!video || !width || !height) return;
+  if (target.width !== width || target.height !== height) {
+    target.width = width;
+    target.height = height;
+  }
+  const targetContext = target.getContext("2d", { alpha: false });
+  targetContext.drawImage(video, 0, 0, width, height);
+}
+
+function createH264ModelSession(key) {
+  const isLingBot2 = key === "lingbot2";
+  const video = isLingBot2 ? lingbot2H264Video : minwmH264Video;
+  const fallbackCanvas = isLingBot2 ? lingbot2Canvas : canvas;
+  return new H264WebSocketSession({
+    video,
+    overlay: $(`${key}PreviewOverlay`),
+    root: document.querySelector(`[data-model-key="${key}"]`),
+    endpoint: h264WebSocketEndpoint(key),
+    liveEdgeTargetMs: configuredNumber("h264WebSocketLiveEdgeTargetMs", 80),
+    liveEdgeSeekThresholdMs: configuredNumber("h264WebSocketSeekThresholdMs", 420),
+    onState: (state, details = {}) => {
+      setModelConnectionState(key, state);
+      if (state === "connecting") {
+        video.hidden = true;
+        fallbackCanvas.hidden = false;
+      }
+      if (["closed", "error", "unavailable"].includes(state)) {
+        activeH264Models.delete(key);
+        video.hidden = true;
+        fallbackCanvas.hidden = false;
+      }
+      if (state === "error") {
+        addHistory(`${modelLabel(key)} H.264 error · ${details.message || "unknown"}`);
+      }
+    },
+    onPlayable: ({ width, height }) => {
+      activeH264Models.add(key);
+      video.hidden = false;
+      fallbackCanvas.hidden = true;
+      addHistory(`${modelLabel(key)} H.264 WebSocket live · ${width}x${height}`);
+      markSessionPlayable(key);
+    },
+    onPresentedFrame: ({ eventId }) => {
+      mirrorH264Video(key);
+      markModelEventApplied(key, eventId);
+    },
+    onStats: (stats) => {
+      h264ModelStats[key] = { ...h264ModelStats[key], ...stats };
+      const root = document.querySelector(`[data-model-key="${key}"]`);
+      if (root) {
+        root.dataset.chunk = h264ModelStats[key].lastChunk ?? "";
+        root.dataset.frames = String(h264ModelStats[key].frames || 0);
+      }
+      renderModelTelemetry(key, h264ModelStats[key]);
+      renderProtocolPerformance(key, h264ModelStats[key]);
+    },
+    onError: (error) => {
+      addHistory(`${modelLabel(key)} H.264 session failed · ${error.message || error}`);
+    },
+  });
+}
+
+const minwmH264Session = H264_WEBSOCKET_ENABLED
+  ? createH264ModelSession("minwm")
+  : null;
+const lingbot2H264Session = H264_WEBSOCKET_ENABLED
+  ? createH264ModelSession("lingbot2")
+  : null;
+
+function preferredRealtimeSession(key, h264Session, fallbackSession) {
+  let selected = fallbackSession;
+  return {
+    async connect(init, url) {
+      if (h264Session) {
+        try {
+          await h264Session.connect(h264CompressionInit(init, key));
+          selected = h264Session;
+          return;
+        } catch (error) {
+          await h264Session.close("H.264 startup failed", { emitState: false });
+          addHistory(`${modelLabel(key)} H.264 启动失败，自动回退 WebP · ${error.message || error}`);
+          const video = key === "lingbot2" ? lingbot2H264Video : minwmH264Video;
+          const fallbackCanvas = key === "lingbot2" ? lingbot2Canvas : canvas;
+          video.hidden = true;
+          fallbackCanvas.hidden = false;
+        }
+      }
+      selected = fallbackSession;
+      return fallbackSession.connect(init, url);
+    },
+    sendEvent(envelope) { return selected?.sendEvent(envelope) || false; },
+    close(reason) {
+      void h264Session?.close(reason);
+      fallbackSession?.close?.(reason);
+    },
+    setUnavailable(reason) {
+      h264Session?.setUnavailable?.(reason);
+      fallbackSession?.setUnavailable?.(reason);
+    },
+    configure(options) { fallbackSession?.configure?.(options); },
+    snapshot() { return selected?.snapshot?.() || h264ModelStats[key] || {}; },
+    get active() { return Boolean(selected?.active); },
+    get connected() { return Boolean(selected?.connected); },
+    get bufferedAmount() { return Number(selected?.bufferedAmount || 0); },
+  };
+}
+
+const lingbot2Session = preferredRealtimeSession(
+  "lingbot2",
+  lingbot2H264Session,
+  lingbot2FallbackSession,
+);
+const happyOysterSession = new HappyOysterSession({
+  video: $("happyoysterViewport"),
+  overlay: $("happyoysterPreviewOverlay"),
+  root: document.querySelector('[data-model-key="happyoyster"]'),
+  onState: (state, details) => {
+    setModelConnectionState("happyoyster", state);
+    const fallback = {
+      preparing: "正在准备快乐生蚝 World…",
+      ready: "World 已就绪，正在连接视频流…",
+      connecting: "正在连接快乐生蚝视频流…",
+      live: "快乐生蚝已连接",
+      unavailable: details.reason || "当前模式不可用",
+      error: details.message || details.reason || "快乐生蚝连接失败",
+      closed: "快乐生蚝连接已关闭",
+      idle: "等待进入世界",
+    }[state];
+    setHappyOysterStageText(details.message || fallback, state);
+    setHappyOysterProgress(details.progress, state);
+    if (state === "live") markSessionPlayable("happyoyster");
+    if (state === "error") {
+      addHistory(`快乐生蚝 error · ${details.message || details.reason || "unknown"}`);
+    }
+  },
+  onError: (error) => {
+    addHistory(`快乐生蚝 session failed · ${error.message || "unknown"}`);
+  },
+});
+
+function buildHappyOysterInit(init) {
+  const unchangedPresetKey = selectedWorldContentIsUnchanged(init.prompt)
+    ? presetKey(selectedPreset)
+    : "";
+  const customKey = `custom-${fallbackBytesFingerprint(init.first_frame).split("-").at(-1)}-${fallbackBytesFingerprint(new TextEncoder().encode(init.prompt || "")).split("-").at(-1)}`;
+  return {
+    prompt: init.prompt,
+    firstFrame: init.first_frame,
+    firstFrameMimeType: selectedReferenceMimeType || selectedPreset?.mime || "image/png",
+    perspective: /first[-_ ]person/i.test(init.prompt || "") ? "first_person" : "third_person",
+    presetKey: unchangedPresetKey || customKey,
+  };
+}
+
+let primaryUsesH264 = false;
+const primarySessionAdapter = {
+  async connect(init, url) {
+    if (minwmH264Session) {
+      try {
+        await minwmH264Session.connect(h264CompressionInit(init, "minwm"));
+        primaryUsesH264 = true;
+        return;
+      } catch (error) {
+        await minwmH264Session.close("H.264 startup failed", { emitState: false });
+        addHistory(`Zing H.264 启动失败，自动回退 WebP · ${error.message || error}`);
+        minwmH264Video.hidden = true;
+        canvas.hidden = false;
+      }
+    }
+    primaryUsesH264 = false;
+    return openPrimarySession(init, url);
+  },
+  sendEvent(envelope) {
+    return primaryUsesH264
+      ? minwmH264Session?.sendEvent(envelope) || false
+      : sendPrimaryEventEnvelope(envelope);
+  },
+  close(reason) {
+    if (primaryUsesH264) {
+      streamEpoch += 1;
+      primaryUsesH264 = false;
+      void minwmH264Session?.close(reason);
+      return;
+    }
+    abortCurrentSession(reason, { expectedClose: true });
+  },
+};
+
+function primarySessionConnected() {
+  return primaryUsesH264
+    ? Boolean(minwmH264Session?.connected)
+    : Boolean(ws && ws.readyState === WebSocket.OPEN);
+}
+
+function primaryTransportBufferedAmount() {
+  return primaryUsesH264
+    ? Number(minwmH264Session?.bufferedAmount || 0)
+    : Number(ws?.bufferedAmount || 0);
+}
+const dualModelController = new DualModelController({
+  sessions: {
+    minwm: primarySessionAdapter,
+    lingbot2: lingbot2Session,
+    happyoyster: happyOysterSession,
+  },
+  backends: {
+    minwm: {
+      enabled: () => modelSelected("minwm"),
+      model: () => String(
+        DUAL_MODEL_CONFIG.minwm?.model
+        || UI_CONFIG.minwmModel
+        || $("model").value
+        || "minwm"
+      ),
+      wsUrl: (init) => backendWebSocketUrl("minwm", init.trace_id),
+    },
+    lingbot2: {
+      model: String(
+        DUAL_MODEL_CONFIG.lingbot2?.model
+        || UI_CONFIG.lingbot2Model
+        || DEFAULT_LINGBOT2_MODEL
+      ),
+      transformInit: (init) => {
+        const modelParams = readModelRequestParams("lingbot2", {
+          generationMode: init.generation_mode,
+          firstFrame: init.first_frame,
+        });
+        const interactiveInit = {
+          ...init,
+          ...modelParams,
+          realtime_interactive_event_grace_ms: 1800,
+        };
+        const is720p = interactiveInit.size === "1280x704" || interactiveInit.size === "1280x720";
+        if (!is720p) return interactiveInit;
+        return {
+          ...interactiveInit,
+          size: "1280x720",
+        };
+      },
+      enabled: (init) => modelSelected("lingbot2") && init.generation_mode !== "t2v",
+      unavailableReason: "T2V unavailable",
+      wsUrl: (init) => backendWebSocketUrl("lingbot2", init.trace_id),
+    },
+    happyoyster: {
+      model: "happyoyster-adventure",
+      nonBlocking: true,
+      enabled: (init) => modelSelected("happyoyster") && init.generation_mode === "i2v",
+      unavailableReason: "仅支持 I2V Adventure",
+      transformInit: buildHappyOysterInit,
+      wsUrl: "",
+    },
+  },
+  onBackgroundState: ({ key, state, error }) => {
+    if (key !== "happyoyster") return;
+    if (state === "connected") {
+      addHistory("快乐生蚝 RTC 已连接并加入同步控制");
+      return;
+    }
+    if (state === "failed") {
+      const message = error?.message || String(error || "连接失败");
+      setHappyOysterStageText(message, "error");
+      addHistory(`快乐生蚝后台接入失败 · ${message}`);
+    }
+  },
+});
+const PROMPT_LOG_LIMIT = 100;
+let promptLogEntries = [];
+let promptLogNextId = 1;
+
+function promptLogTypeLabel(changeType) {
+  return changeType === "one_time" ? "一次性" : "持久";
+}
+
+function promptLogSourceLabel(trigger) {
+  if (trigger === "user") return "用户输入";
+  if (trigger === "skill") return "技能按键";
+  return "规则触发";
+}
+
+function promptLogRuleLabel(rule, afterMs, entry = {}) {
+  if (rule === "session_start") return "进入世界，建立初始持久状态";
+  if (rule === "preset_runtime_update") return "切换世界预设，重建持久状态";
+  if (rule === "rewrite_failure_restore") return "新指令改写失败，恢复持久状态";
+  if (rule === "goal_time_probability") {
+    return `游玩 ${Number(entry.minPlaySeconds || 0)} 秒后目标概率命中 ${Number(entry.probability || 0)} · ${entry.goalName || "隐藏目标"}`;
+  }
+  if (rule === "one_time_timeout_restore") {
+    return `一次性指令持续 ${Math.round(Number(afterMs || 10000) / 1000)} 秒后恢复`;
+  }
+  return "系统规则发送";
+}
+
+function clearPromptLog() {
+  promptLogEntries = [];
+  promptLogNextId = 1;
+  renderPromptLog();
+}
+
+function appendPromptLog(prompt, metadata = {}) {
+  const normalizedPrompt = String(prompt || "").trim();
+  if (!normalizedPrompt) return;
+  const trigger = metadata.trigger === "skill"
+    ? "skill"
+    : metadata.trigger === "rule" || metadata.phase === "restore"
+      ? "rule"
+      : "user";
+  const changeType = metadata.changeType === "one_time" ? "one_time" : "persistent";
+  promptLogEntries.push({
+    id: promptLogNextId++,
+    timestamp: new Date(),
+    prompt: normalizedPrompt,
+    trigger,
+    changeType,
+    instruction: trigger === "user" ? String(metadata.instruction || "").trim() : "",
+    skillName: trigger === "skill" ? String(metadata.skillName || "").trim() : "",
+    skillInstruction: trigger === "skill" ? String(metadata.instruction || "").trim() : "",
+    rule: trigger === "rule" ? String(metadata.rule || "") : "",
+    afterMs: Number(metadata.afterMs || 0),
+    goalName: trigger === "rule" ? String(metadata.goalName || "") : "",
+    probability: trigger === "rule" ? Number(metadata.probability || 0) : 0,
+    minPlaySeconds: trigger === "rule" ? Number(metadata.minPlaySeconds || 0) : 0,
+  });
+  if (promptLogEntries.length > PROMPT_LOG_LIMIT) {
+    promptLogEntries.splice(0, promptLogEntries.length - PROMPT_LOG_LIMIT);
+  }
+  renderPromptLog();
+}
+
+function renderPromptLog() {
+  const list = $("promptLogList");
+  const empty = $("promptLogEmpty");
+  const count = $("promptLogCount");
+  if (!list || !empty || !count) return;
+  count.textContent = `${promptLogEntries.length} 条`;
+  empty.hidden = promptLogEntries.length > 0;
+  list.innerHTML = "";
+  for (const entry of [...promptLogEntries].reverse()) {
+    const item = document.createElement("li");
+    item.className = "prompt-log-entry";
+    item.dataset.trigger = entry.trigger;
+    item.dataset.changeType = entry.changeType;
+    const header = document.createElement("div");
+    header.className = "prompt-log-entry-header";
+    const sequence = document.createElement("b");
+    sequence.textContent = `#${entry.id}`;
+    const source = document.createElement("span");
+    source.className = "prompt-log-badge prompt-log-source";
+    source.textContent = promptLogSourceLabel(entry.trigger);
+    const type = document.createElement("span");
+    type.className = "prompt-log-badge prompt-log-type";
+    type.textContent = promptLogTypeLabel(entry.changeType);
+    const time = document.createElement("time");
+    time.dateTime = entry.timestamp.toISOString();
+    time.textContent = entry.timestamp.toLocaleTimeString("zh-CN", { hour12: false });
+    header.append(sequence, source, type, time);
+    const context = document.createElement("p");
+    context.className = "prompt-log-context";
+    context.textContent = entry.trigger === "user"
+      ? `用户输入：${entry.instruction || "（未记录）"}`
+      : entry.trigger === "skill"
+        ? `技能：${entry.skillName || "未命名技能"} · ${entry.skillInstruction}`
+        : `触发规则：${promptLogRuleLabel(entry.rule, entry.afterMs, entry)}`;
+    const fullPrompt = document.createElement("pre");
+    fullPrompt.className = "prompt-log-full";
+    fullPrompt.textContent = entry.prompt;
+    item.append(header, context, fullPrompt);
+    list.appendChild(item);
+  }
+}
+
+function beginPromptLogSession(prompt, rule = "session_start") {
+  clearPromptLog();
+  appendPromptLog(prompt, {
+    trigger: "rule",
+    changeType: "persistent",
+    rule,
+  });
+}
+
+const promptRewriteController = new PromptRewriteController({
+  rewrite: rewriteRuntimePrompt,
+  sendPrompt: (prompt, metadata) => {
+    const eventId = sendEvent(
+      "prompt",
+      prompt,
+      metadata.phase === "restore"
+        ? "persistent prompt restored"
+        : `${metadata.changeType} prompt update`,
+    );
+    if (metadata.phase === "restore" && eventId) {
+      setPromptRewriteStatus("已恢复上一条持久指令", "persistent");
+    }
+    if (eventId) {
+      appendPromptLog(prompt, metadata);
+      markRecordingPromptSent(prompt, metadata, eventId);
+    }
+    return eventId;
+  },
+  restoreDelayMs: 10000,
+});
+worldRulesController = new WorldRulesController({
+  completeRule: completeWorldRule,
+  dispatchPrepared: (prepared, metadata) => {
+    markRecordingPromptSubmitted(metadata.instruction || metadata.skillName || metadata.goalName || "");
+    return promptRewriteController.submitPrepared(
+      prepared,
+      metadata.instruction || "",
+      metadata,
+    );
+  },
+  skillCooldownMs: 10000,
+  achievementDelayMs: 5000,
+  onAchievement: (goal) => showGoalAchievement(goal.name),
+  onGoalResult: (result, goal) => {
+    if (result?.triggered) {
+      const changeType = result.result?.change_type === "persistent"
+        ? "persistent"
+        : "one_time";
+      setPromptRewriteStatus("目标规则已自动触发 · 5 秒后显示达成提示", changeType);
+      addHistory(
+        `goal auto-triggered · ${goal.name} · ${goal.min_play_seconds}s · probability ${goal.probability}`,
+      );
+      return;
+    }
+    if (!result?.canceled) {
+      addHistory(
+        `goal probability missed · ${goal.name} · roll ${Number(result?.roll || 0).toFixed(4)} / ${goal.probability}`,
+      );
+    }
+  },
+  onGoalError: (error, goal) => {
+    addHistory(`goal auto-trigger failed · ${goal.name} · ${error.message || error}`);
+    setPromptRewriteStatus("目标规则自动发送失败", "error");
+  },
+  onStateChange: (snapshot) => renderRuntimeSkillBar(snapshot),
+});
+let playbackAckTimer = 0;
+let lastRenderedEventId = 0;
+let primaryHasVisibleFrame = false;
+let sessionCountdownTimer = 0;
+let sessionCountdownDeadlineMs = 0;
+const sessionLifetimeGuard = new SessionLifetimeGuard({
+  durationMs: SESSION_MAX_LIFETIME_MS,
+  onExpire: () => expireSessionLifetime({ closeSessions: true }),
+});
+
+function isSessionLifetimeReason(reason) {
+  return String(reason || "").toLowerCase().includes("maximum session lifetime reached");
+}
+
+function resetSessionLifetimeUi() {
+  sessionLifetimeGuard.cancel();
+  stopSessionCountdown();
+  hideRecordingReadyToast({ immediate: true });
+  hideGoalAchievement({ immediate: true });
+  sessionLifetimeExpired = false;
+  sessionPlayable = false;
+  worldExperiencePending = false;
+  worldExperienceReady = false;
+  $("sessionNotice").hidden = true;
+  updateRecordButton();
+}
+
+function markWorldExperienceReady(modelKey) {
+  if (!worldExperiencePending || worldExperienceReady || sessionLifetimeExpired) return false;
+  worldExperiencePending = false;
+  worldExperienceReady = true;
+  sessionLifetimeGuard.start();
+  startSessionCountdown();
+  startRecording({ source: "first_visible_frame" });
+  worldRulesController?.startSession();
+  setStatus("Live", "live");
+  $("sessionNotice").hidden = true;
+  renderRuntimeSkillBar();
+  addHistory(`world ready · ${modelLabel(modelKey)} visible · timer and dual recordings started`);
+  return true;
+}
+
+function stopWorldExperienceTiming({ recordingReason = "session_closed" } = {}) {
+  worldExperiencePending = false;
+  worldExperienceReady = false;
+  sessionPlayable = false;
+  sessionLifetimeGuard.cancel();
+  stopSessionCountdown();
+  worldRulesController?.endSession();
+  hideGoalAchievement({ immediate: true });
+  if (recordingActive) void stopRecording({ reason: recordingReason });
+  updateRecordButton();
+}
+
+function markSessionPlayable(modelKey) {
+  if (sessionPlayable || sessionLifetimeExpired || !modelSelected(modelKey)) return false;
+  sessionPlayable = true;
+  markWorldExperienceReady(modelKey);
+  recordTrajectoryEvent("session_playable", { model: modelKey });
+  return true;
+}
+
+function schedulePrimaryPlaybackAck() {
+  if (!PLAYBACK_ACK_ENABLED || playbackAckTimer || !ws || ws.readyState !== WebSocket.OPEN) return;
+  playbackAckTimer = window.setTimeout(() => {
+    playbackAckTimer = 0;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    ws.send(pack({
+      type: "event",
+      kind: "playback_ack",
+      trace_id: currentTrace?.traceId,
+      payload: {
+        last_received_chunk: lastReceivedChunk,
+        last_rendered_chunk: lastRenderedChunk,
+        last_rendered_event_id: lastRenderedEventId,
+        playable: primaryHasVisibleFrame,
+      },
+    }));
+  }, PLAYBACK_ACK_INTERVAL_MS);
+}
+
+function formatSessionCountdown(seconds) {
+  const safeSeconds = Math.max(0, Math.floor(seconds));
+  const minutes = Math.floor(safeSeconds / 60);
+  const remainder = safeSeconds % 60;
+  return `${String(minutes).padStart(2, "0")}:${String(remainder).padStart(2, "0")}`;
+}
+
+function updateSessionCountdown() {
+  const remainingSeconds = Math.max(
+    0,
+    Math.ceil((sessionCountdownDeadlineMs - Date.now()) / 1000),
+  );
+  $("sessionCountdownText").textContent = formatSessionCountdown(remainingSeconds);
+  $("sessionCountdown").classList.toggle("is-ending", remainingSeconds <= 10);
+  if (remainingSeconds === 0 && sessionCountdownTimer) {
+    window.clearInterval(sessionCountdownTimer);
+    sessionCountdownTimer = 0;
+  }
+}
+
+function startSessionCountdown() {
+  stopSessionCountdown();
+  sessionCountdownDeadlineMs = Date.now() + SESSION_MAX_LIFETIME_MS;
+  $("sessionCountdown").hidden = false;
+  updateSessionCountdown();
+  sessionCountdownTimer = window.setInterval(updateSessionCountdown, 1000);
+}
+
+function stopSessionCountdown() {
+  if (sessionCountdownTimer) window.clearInterval(sessionCountdownTimer);
+  sessionCountdownTimer = 0;
+  sessionCountdownDeadlineMs = 0;
+  $("sessionCountdown").hidden = true;
+  $("sessionCountdown").classList.remove("is-ending");
+  $("sessionCountdownText").textContent = formatSessionCountdown(
+    Math.ceil(SESSION_MAX_LIFETIME_MS / 1000),
+  );
+}
+
+function showSessionNotice(message) {
+  $("sessionNotice").textContent = message;
+  $("sessionNotice").hidden = false;
+}
+
+function hideRecordingReadyToast({ immediate = false } = {}) {
+  if (recordingReadyToastTimer) window.clearTimeout(recordingReadyToastTimer);
+  if (recordingReadyToastHideTimer) window.clearTimeout(recordingReadyToastHideTimer);
+  recordingReadyToastTimer = 0;
+  recordingReadyToastHideTimer = 0;
+  const toast = $("recordingReadyToast");
+  if (!toast) return;
+  toast.classList.remove("is-visible");
+  if (immediate) {
+    toast.hidden = true;
+    return;
+  }
+  recordingReadyToastHideTimer = window.setTimeout(() => {
+    if (!toast.classList.contains("is-visible")) toast.hidden = true;
+    recordingReadyToastHideTimer = 0;
+  }, 180);
+}
+
+function showRecordingReadyToast() {
+  const toast = $("recordingReadyToast");
+  if (!toast) return;
+  hideRecordingReadyToast({ immediate: true });
+  toast.hidden = false;
+  window.requestAnimationFrame(() => toast.classList.add("is-visible"));
+  recordingReadyToastTimer = window.setTimeout(
+    () => hideRecordingReadyToast(),
+    RECORDING_READY_TOAST_MS,
+  );
+}
+
+function hideGoalAchievement({ immediate = false } = {}) {
+  if (goalAchievementToastHideTimer) window.clearTimeout(goalAchievementToastHideTimer);
+  if (goalAchievementToastFinalizeTimer) window.clearTimeout(goalAchievementToastFinalizeTimer);
+  goalAchievementToastHideTimer = 0;
+  goalAchievementToastFinalizeTimer = 0;
+  const toast = $("goalAchievementToast");
+  if (!toast) return;
+  toast.classList.remove("is-visible");
+  if (immediate) {
+    toast.hidden = true;
+    return;
+  }
+  goalAchievementToastFinalizeTimer = window.setTimeout(() => {
+    if (!toast.classList.contains("is-visible")) toast.hidden = true;
+    goalAchievementToastFinalizeTimer = 0;
+  }, 300);
+}
+
+function showGoalAchievement(goalName) {
+  const toast = $("goalAchievementToast");
+  if (!toast) return;
+  hideGoalAchievement({ immediate: true });
+  $("goalAchievementText").textContent = `你成功获得「${String(goalName || "隐藏目标").trim()}」`;
+  toast.hidden = false;
+  window.requestAnimationFrame(() => toast.classList.add("is-visible"));
+  goalAchievementToastHideTimer = window.setTimeout(
+    () => hideGoalAchievement(),
+    4500,
+  );
+}
+
+function isExperienceBusyError(error) {
+  const reason = String(error?.reason || "");
+  const message = String(error?.message || error || "");
+  return reason === "USER_SESSION_LIMIT" || message.includes("USER_SESSION_LIMIT");
+}
+
+function handleExperienceBusy() {
+  promptRewriteController.endSession();
+  stopWorldExperienceTiming({ recordingReason: "admission_rejected" });
+  dualModelController.close("showcase session is occupied");
+  $("connectBtn").disabled = false;
+  setStatus("Busy", "error");
+  setPreviewState("idle");
+  showSessionNotice(EXPERIENCE_BUSY_MESSAGE);
+  addHistory(EXPERIENCE_BUSY_MESSAGE);
+}
+
+function expireSessionLifetime({ closeSessions = false } = {}) {
+  if (sessionLifetimeExpired) return;
+  sessionLifetimeExpired = true;
+  promptRewriteController.endSession();
+  const finalizingRecording = recordingActive;
+  stopWorldExperienceTiming({ recordingReason: "session_timeout" });
+  if (closeSessions) dualModelController.close("maximum session lifetime reached");
+  showSessionNotice(finalizingRecording
+    ? "本轮体验已结束，正在生成游玩录像…"
+    : "连接已断开，请重新连接");
+  $("connectBtn").disabled = false;
+  setStatus("Disconnected", "error");
+  addHistory("连接已断开，请重新连接");
+}
 
 function setStatus(text, kind = "") {
   $("statusText").textContent = text;
   $("statusDot").className = "dot" + (kind ? ` ${kind}` : "");
+}
+
+function setModelConnectionState(key, state) {
+  const root = document.querySelector(`[data-model-key="${key}"]`);
+  if (root) root.dataset.sessionState = state;
+  const label = document.getElementById(`${key}ConnectionText`);
+  if (!label) return;
+  label.textContent = {
+    preparing: "构建中",
+    ready: "准备完成",
+    connecting: "连接中",
+    live: "已连接",
+    unavailable: "不可用",
+    error: "连接异常",
+    closed: "已断开",
+    idle: "待连接",
+  }[state] || "待连接";
+  renderRuntimeSkillBar();
+}
+
+function setHappyOysterStageText(message, state = "") {
+  const text = $("happyoysterStageText");
+  if (!text) return;
+  text.textContent = message || "正在准备快乐生蚝…";
+  if (state) text.dataset.state = state;
+  else delete text.dataset.state;
+}
+
+function setHappyOysterProgress(progress, state = "") {
+  const root = $("happyoysterProgress");
+  const bar = $("happyoysterProgressBar");
+  if (!root || !bar) return;
+  const value = Math.max(0, Math.min(100, Number(progress) || 0));
+  root.setAttribute("aria-valuenow", String(Math.round(value)));
+  root.hidden = state === "live" || state === "idle" || state === "closed";
+  bar.style.setProperty("--progress", `${value}%`);
+}
+
+function setHappyOysterReferencePreview(dataUrl = "") {
+  const image = $("happyoysterReferenceImage");
+  if (!image) return;
+  image.src = dataUrl;
+  image.hidden = !dataUrl;
 }
 
 function setPreviewState(state) {
@@ -535,6 +1564,27 @@ function traceWebSocketUrl(baseUrl) {
       ? `trace_id=${encodeURIComponent(currentTrace.traceId)}&`
       : "";
     return `${baseUrl}${separator}${trace}user_id=${encodeURIComponent(browserUserId)}`;
+  }
+}
+
+function backendWebSocketUrl(key, traceId) {
+  const configuredUrl = DUAL_MODEL_CONFIG[key]?.wsUrl;
+  const baseUrl = configuredUrl || $("serverUrl").value;
+  const configuredUserId = UI_CONFIG.singleExperienceUserIds?.[key];
+  const backendUserId = UI_CONFIG.singleExperience && configuredUserId
+    ? String(configuredUserId)
+    : `${browserUserId}:${key}`;
+  try {
+    const url = new URL(baseUrl, window.location.href);
+    if (!configuredUrl) {
+      url.pathname = `/backends/${key}/v1/realtime_video/generate`;
+      url.search = "";
+    }
+    if (traceId) url.searchParams.set("trace_id", traceId);
+    url.searchParams.set("user_id", backendUserId);
+    return url.toString();
+  } catch {
+    return baseUrl;
   }
 }
 
@@ -793,10 +1843,24 @@ function drawIdle() {
   renderedPreviewFrames = 0;
   ctx.fillStyle = "#11140f";
   ctx.fillRect(0, 0, w, h);
+  if (lingbot2Canvas.width !== w || lingbot2Canvas.height !== h) {
+    lingbot2Canvas.width = w;
+    lingbot2Canvas.height = h;
+  }
+  const lingbot2Context = lingbot2Canvas.getContext("2d", { alpha: false });
+  lingbot2Context.fillStyle = "#11140f";
+  lingbot2Context.fillRect(0, 0, w, h);
 }
 
 function resetStreamStats() {
   pendingHeader = null;
+  h264ModelStats.minwm = {};
+  h264ModelStats.lingbot2 = {};
+  activeH264Models.clear();
+  minwmH264Video.hidden = true;
+  lingbot2H264Video.hidden = true;
+  canvas.hidden = false;
+  lingbot2Canvas.hidden = false;
   clearFrameQueue();
   playbackController.reset({
     mode: selectedPlaybackMode(),
@@ -814,25 +1878,26 @@ function resetStreamStats() {
   droppedDecodeFrames = 0;
   lastDecodeDropAt = 0;
   lastDecodeDropCount = 0;
+  lastReceivedChunk = null;
+  lastReceivedFrameBatchIndex = null;
+  frameBatchGapCount = 0;
   encodedDecodeErrors = 0;
   renderedPreviewFrames = 0;
   lastSentEventId = 0;
+  lastRenderedEventId = 0;
+  primaryHasVisibleFrame = false;
+  if (playbackAckTimer) window.clearTimeout(playbackAckTimer);
+  playbackAckTimer = 0;
   lastSampledEventId = 0;
+  pendingModelEvents.clear();
+  lastRenderedChunk = null;
   renderedTraceChunks = new Set();
   controlStateController?.reset({ sendRelease: false });
   resetDecoderState();
+  resetModelTelemetry("minwm");
+  resetModelTelemetry("lingbot2");
   updateStats();
-  $("renderFps").textContent = "0";
-  $("latencyText").textContent = "-";
-  $("stageLatencyText").textContent = "-";
   $("actionStateText").textContent = "-";
-  $("decodeText").textContent = "-";
-  $("displayLagText").textContent = "-";
-  $("serverSendText").textContent = "-";
-  $("chunkPayloadText").textContent = "-";
-  $("theoreticalFpsText").textContent = "-";
-  $("chunkText").textContent = "chunk -";
-  $("payloadMode").textContent = selectedTransportLabel();
   updateOutputSizeText();
 }
 
@@ -965,68 +2030,193 @@ function isWorkerDecodableRawContentType(contentType) {
 }
 
 function updateStats() {
+  if (activeH264Models.has("minwm")) {
+    renderModelTelemetry("minwm", h264ModelStats.minwm);
+    renderProtocolPerformance("minwm", h264ModelStats.minwm);
+    return;
+  }
   const playback = playbackController.snapshot();
-  const playbackLabel =
-    playback.mode === "timeline"
-      ? "full timeline"
-      : playback.mode === "smooth_timeline"
-      ? "smooth timeline"
-      : playback.mode === "adaptive"
-      ? "adaptive input-fast"
-      : "low latency";
-  const queueParts = [
-    playbackLabel,
-    `buffer ${formatMs(playback.bufferMs)}`,
-  ];
-  queueParts.push(`q ${playback.queueFrames}`);
-  if (playback.buffering && playback.queueFrames) queueParts.push("hold");
-  if (pendingDecodeBatches) {
-    queueParts.push(`decode ${pendingDecodeBatches}`);
-    if (queuedDecodeBytes) queueParts.push(`decode-bytes ${formatBytes(queuedDecodeBytes)}`);
-  }
-  const now = performance.now();
-  if (playback.lastDropAt && now - playback.lastDropAt < RECENT_DROP_DISPLAY_MS) {
-    const reason = playback.lastDropReason ? ` ${playback.lastDropReason}` : "";
-    queueParts.push(`drop +${playback.lastDropCount}${reason}`);
-  }
-  if (lastDecodeDropAt && now - lastDecodeDropAt < RECENT_DROP_DISPLAY_MS) {
-    queueParts.push(`decode drop +${lastDecodeDropCount}`);
-  }
   const totalDroppedFrames = playback.droppedFrames + droppedDecodeFrames;
-  if (totalDroppedFrames) queueParts.push(`dropped ${totalDroppedFrames} total`);
-  $("queueText").textContent = queueParts.join(" · ");
-  $("frameText").textContent = `frames ${frames}`;
-  $("byteText").textContent = `${(bytes / 1048576).toFixed(1)} MB`;
-  $("stageLatencyText").textContent =
-    `${formatMs(playback.bufferMs)} / ${formatMs(playback.targetLeadMs)}`;
+  renderModelTelemetry("minwm", {
+    ...playback,
+    frames,
+    bytes,
+    lastChunk: lastRenderedChunk,
+    frameBatchGapCount,
+    lastDecodeMs,
+    lastDisplayLagMs,
+    renderFps: fpsSamples.length,
+    droppedFrames: totalDroppedFrames,
+    decodeQueueLength: pendingDecodeBatches,
+  });
 }
 
-function requestedInputFps() {
-  return Number($("fps").value || DEFAULT_TARGET_FPS);
+function resetModelTelemetry(key) {
+  renderModelTelemetry(key, {
+    frames: 0,
+    bytes: 0,
+    lastChunk: null,
+    lastDecodeMs: 0,
+    lastDisplayLagMs: 0,
+    renderFps: 0,
+    sourceFps: 0,
+    bufferMs: 0,
+    queueFrames: 0,
+  });
+  renderProtocolPerformance(key, {});
 }
 
-function frameInterpolationMultiplier() {
-  return $("frameInterpolation").checked ? 2 ** DEFAULT_FRAME_INTERPOLATION_EXP : 1;
+function performanceMs(value) {
+  const number = Number(value);
+  return Number.isFinite(number) && number >= 0
+    ? `${number.toFixed(number < 10 ? 1 : 0)} ms`
+    : "-";
 }
 
-function previewPlaybackTargetFps() {
-  return requestedInputFps() * frameInterpolationMultiplier();
+function renderProtocolPerformance(key, stats = {}) {
+  const telemetry = stats.chunkTelemetry || {};
+  const receiveMbps = Number(stats.receiveMbps || 0);
+  const bytesReceived = Number(stats.bytesReceived ?? stats.bytes ?? 0);
+  const sourceFps = Number(stats.serverFps || stats.sourceFps || 0);
+  const deliveryFps = Number(stats.deliveryFps || 0);
+  const renderFps = Number(stats.renderFps || 0);
+  const vaeQueueMs = Number(telemetry.vae_queue_wait_ms || 0);
+  const vaeDecodeMs = Number(
+    telemetry.vae_decode_ms || telemetry.model_vae_decode_ms || 0,
+  );
+  const h264FeedMs = Number(stats.lastBridgeEncoderFeedMs || 0);
+  const bridgeQueueMs = Number(stats.lastBridgeQueueMs || 0);
+  const webSocketDownlinkMs = Number(
+    stats.lastWebSocketDownlinkMs || stats.lastDownlinkMs || 0,
+  );
+  const mseQueueMs = Number(stats.lastMseQueueMs || 0);
+  const mseAppendMs = Number(stats.lastMseAppendMs || 0);
+  const playbackBufferMs = Number(
+    stats.playbackBufferMs ?? stats.mseBufferMs ?? stats.bufferMs ?? 0,
+  );
+  const inputUplinkMs = Number(
+    stats.lastInputUplinkMs || telemetry.input_uplink_ms,
+  );
+  const e2eMs = Number(
+    stats.lastPresentedControlToVideoMs || stats.lastControlToVideoMs || 0,
+  );
+  $(`${key}PerfData`).textContent = bytesReceived > 0
+    ? `${receiveMbps.toFixed(1)} Mb/s`
+    : "-";
+  $(`${key}PerfFps`).textContent = sourceFps > 0 || deliveryFps > 0 || renderFps > 0
+    ? `源 ${sourceFps.toFixed(1)} · 收 ${deliveryFps.toFixed(1)} · 显 ${renderFps.toFixed(1)}`
+    : "-";
+  $(`${key}PerfUplink`).textContent = inputUplinkMs > 0
+    ? performanceMs(inputUplinkMs)
+    : "-";
+  $(`${key}PerfScheduler`).textContent = telemetry.scheduler_forward_ms != null
+    ? performanceMs(telemetry.scheduler_forward_ms)
+    : "-";
+  $(`${key}PerfDenoise`).textContent = telemetry.model_denoise_ms != null
+    ? performanceMs(telemetry.model_denoise_ms)
+    : "-";
+  $(`${key}PerfVae`).textContent = vaeQueueMs > 0 || vaeDecodeMs > 0
+    ? `q ${performanceMs(vaeQueueMs)} · dec ${performanceMs(vaeDecodeMs)}`
+    : "-";
+  $(`${key}PerfH264Queue`).textContent = bridgeQueueMs > 0
+    ? performanceMs(bridgeQueueMs)
+    : "-";
+  $(`${key}PerfH264Feed`).textContent = h264FeedMs > 0
+    ? performanceMs(h264FeedMs)
+    : "-";
+  $(`${key}PerfDownlink`).textContent = webSocketDownlinkMs > 0
+    ? performanceMs(webSocketDownlinkMs)
+    : "-";
+  $(`${key}PerfMseQueue`).textContent = mseQueueMs > 0
+    ? performanceMs(mseQueueMs)
+    : "-";
+  $(`${key}PerfMseAppend`).textContent = mseAppendMs > 0
+    ? performanceMs(mseAppendMs)
+    : "-";
+  $(`${key}PerfPlaybackBuffer`).textContent = playbackBufferMs > 0
+    ? performanceMs(playbackBufferMs)
+    : "-";
+  $(`${key}PerfE2E`).textContent = e2eMs > 0 ? performanceMs(e2eMs) : "-";
+}
+
+function renderModelTelemetry(key, stats = {}) {
+  const prefix = key === "lingbot2" ? "lingbot2" : "minwm";
+  const renderFps = Number(stats.renderFps || 0);
+  const sourceFps = Number(stats.sourceFps || 0);
+  const serverFps = Number(stats.serverFps || sourceFps);
+  const deliveryFps = Number(stats.deliveryFps || sourceFps);
+  const bufferMs = Number(stats.bufferMs || 0);
+  const queueFrames = Number(stats.queueFrames ?? stats.queueLength ?? 0);
+  const droppedFrames = Number(stats.droppedFrames || 0);
+  const decodeQueueLength = Number(stats.decodeQueueLength || 0);
+  const frameBatchGapCount = Number(stats.frameBatchGapCount || 0);
+  const totalFrames = Number(stats.frames || 0);
+  const bufferParts = [formatMs(bufferMs), `q ${queueFrames}`];
+  if (decodeQueueLength) bufferParts.push(`decode ${decodeQueueLength}`);
+  if (droppedFrames) bufferParts.push(`drop ${droppedFrames}`);
+  if (frameBatchGapCount) bufferParts.push(`gap ${frameBatchGapCount}`);
+  $(`${prefix}ChunkText`).textContent = stats.lastChunk == null ? "-" : `#${stats.lastChunk}`;
+  $(`${prefix}RateText`).textContent = serverFps > 0 || deliveryFps > 0 || renderFps > 0
+    ? `${serverFps.toFixed(1)} source · ${deliveryFps.toFixed(1)} recv · ${renderFps} render`
+    : "-";
+  $(`${prefix}BufferText`).textContent = bufferParts.join(" · ");
+  $(`${prefix}FramesText`).textContent = `${totalFrames} · ${(Number(stats.bytes || 0) / 1048576).toFixed(1)} MB`;
+  $(`${prefix}DecodeText`).textContent = stats.lastDecodeMs > 0
+    ? `${Math.round(stats.lastDecodeMs)} ms`
+    : "-";
+  $(`${prefix}DisplayLagText`).textContent = stats.lastDisplayLagMs > 0
+    ? `${(stats.lastDisplayLagMs / 1000).toFixed(1)} s`
+    : "-";
+}
+
+function requestedInputFps(key = "minwm") {
+  return Number(modelControl(key, "fps").value || DEFAULT_TARGET_FPS);
+}
+
+function frameInterpolationMultiplier(key = "minwm") {
+  return modelControl(key, "frameInterpolation").checked
+    ? 2 ** DEFAULT_FRAME_INTERPOLATION_EXP
+    : 1;
+}
+
+function previewPlaybackTargetFps(key = "minwm") {
+  return requestedInputFps(key) * frameInterpolationMultiplier(key);
 }
 
 function syncPlaybackTargetFps() {
-  playbackController.setTargetFps(previewPlaybackTargetFps());
+  playbackController.setTargetFps(previewPlaybackTargetFps("minwm"));
+  lingbot2Session.configure({ targetFps: previewPlaybackTargetFps("lingbot2") });
   updateStats();
 }
 
-function selectedPlaybackMode() {
-  const value = $("playbackMode")?.value;
+function syncSmoothCatchupRate() {
+  const rate = Math.min(2.5, Math.max(1, Number($("smoothCatchupRate").value) || 1.1));
+  $("smoothCatchupRate").value = String(rate);
+  $("smoothCatchupRateText").textContent = `${rate.toFixed(2)}x`;
+  playbackController.setSmoothTimelinePlaybackRateMax(rate);
+  lingbot2Session.configure({ smoothTimelinePlaybackRateMax: rate });
+}
+
+function syncZingFrameInterpolation({ fromTopbar = true } = {}) {
+  const topbar = $("zingFrameInterpolation");
+  const requestControl = modelControl("minwm", "frameInterpolation");
+  if (fromTopbar) requestControl.checked = topbar.checked;
+  else topbar.checked = requestControl.checked;
+  tunePreviewQualityForPostprocess("minwm");
+  syncPlaybackTargetFps();
+}
+
+function selectedPlaybackMode(key = "minwm") {
+  const value = modelControl(key, "playbackMode")?.value;
   if (value === "timeline" || value === "adaptive" || value === "smooth_timeline") return value;
   return "live";
 }
 
 function syncPlaybackMode({ addToHistory = true } = {}) {
-  const mode = selectedPlaybackMode();
+  const mode = selectedPlaybackMode("minwm");
+  const lingbot2Mode = selectedPlaybackMode("lingbot2");
   playbackController.setMode(mode);
+  lingbot2Session.configure({ mode: lingbot2Mode });
   if (addToHistory) {
     const historyText =
       mode === "timeline"
@@ -1036,7 +2226,7 @@ function syncPlaybackMode({ addToHistory = true } = {}) {
         : mode === "adaptive"
         ? "playback · adaptive (buffered, fast input)"
         : "playback · low latency (may skip old frames)";
-    addHistory(historyText);
+    addHistory(`${historyText} · LingBot2 ${lingbot2Mode}`);
   }
   trimDecodeQueue();
   updateStats();
@@ -1052,20 +2242,169 @@ function closeFrames(items) {
 
 function recordingFileName(extension = "mp4") {
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-  return `sglang-realtime-${stamp}.${extension}`;
+  return `world-studio-gameplay-${stamp}.${extension}`;
+}
+
+function createRecordingTrack({ key, label, variant, canvas: targetCanvas, ctx: targetCtx }) {
+  return {
+    key,
+    label,
+    variant,
+    canvas: targetCanvas,
+    ctx: targetCtx,
+    samples: [],
+    encoder: null,
+    encoderReady: null,
+    encoderConfig: null,
+    encodeChain: Promise.resolve(),
+    mediaRecorder: null,
+    mediaChunks: [],
+    captureStream: null,
+    mimeType: recordingMode === "mediarecorder-webm"
+      ? supportedWebmMimeType()
+      : "video/mp4",
+    frameIndex: 0,
+    lastTimestampUs: -1,
+    droppedFrames: 0,
+  };
 }
 
 function updateRecordButton() {
   const button = $("recordBtn");
   button.classList.toggle("is-recording", recordingActive);
   button.classList.toggle("is-saving", recordingSaving);
-  button.disabled = recordingSaving;
+  const sessionLive = worldExperienceReady
+    && sessionCountdownDeadlineMs > Date.now()
+    && !sessionLifetimeExpired;
+  button.disabled = recordingSaving || (!recordingActive && !sessionLive);
   button.setAttribute("aria-pressed", recordingActive ? "true" : "false");
   $("recordLabel").textContent = recordingSaving
-    ? "Saving"
-    : recordingActive ? "Stop" : "Record";
-  const elapsedMs = recordingActive ? recordingFrameIndex / Math.max(1, recordingFps) * 1000 : 0;
+    ? "生成录像"
+    : recordingActive ? "录制中" : "游玩录像";
+  const elapsedMs = recordingActive
+    ? Math.max(0, performance.now() - recordingStartedPerfMs)
+    : recordingElapsedMs;
   $("recordDuration").textContent = formatRecordingDuration(elapsedMs);
+  button.title = recordingActive
+    ? "点击提前结束录像"
+    : sessionLive ? "开始录制当前游玩" : "进入世界后自动开始录制";
+  updateRecordingDownloadButton();
+}
+
+function updateRecordingDownloadButton() {
+  const button = $("recordDownloadBtn");
+  if (!button) return;
+  const ready = recordingDownloads.length === 2;
+  button.hidden = !ready;
+  button.disabled = !ready || recordingSaving;
+  button.setAttribute("aria-disabled", !ready || recordingSaving ? "true" : "false");
+  button.title = ready
+    ? `同步下载 ${recordingDownloads.map((item) => item.fileName).join("、")}`
+    : "两份录像生成后可下载";
+}
+
+function setRecordingDownloads(outputs = []) {
+  for (const item of recordingDownloads) {
+    if (item.url) URL.revokeObjectURL(item.url);
+  }
+  recordingDownloads = outputs
+    .filter((item) => item?.videoBlob && item?.fileName)
+    .map((item) => ({
+      ...item,
+      url: URL.createObjectURL(item.videoBlob),
+    }));
+  updateRecordingDownloadButton();
+}
+
+function downloadGameplayRecordings(event) {
+  if (recordingDownloads.length !== 2 || recordingSaving) {
+    event?.preventDefault?.();
+    return;
+  }
+  event?.preventDefault?.();
+  for (const item of recordingDownloads) {
+    const link = document.createElement("a");
+    link.href = item.url;
+    link.download = item.fileName;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+  }
+  addHistory(`downloaded both gameplay recordings · ${recordingDownloads.map((item) => item.fileName).join(" · ")}`);
+}
+
+function resetRecordingPromptOverlay() {
+  recordingPromptDraft = $("runtimePrompt")?.value || "";
+  recordingPromptSubmitted = "";
+  recordingPromptStatus = recordingPromptDraft ? "typing" : "idle";
+  recordingPromptStatusPerfMs = performance.now();
+  recordingPromptChangeType = "";
+}
+
+function updateRecordingPromptDraft(value) {
+  const next = String(value || "");
+  if (next === recordingPromptDraft) return;
+  recordingPromptDraft = next;
+  if (!recordingPromptSubmitted) {
+    recordingPromptStatus = next ? "typing" : "idle";
+    recordingPromptStatusPerfMs = performance.now();
+  }
+  if (recordingActive) recordTrajectoryEvent("runtime_prompt_input", { value: next });
+}
+
+function markRecordingPromptSubmitted(prompt) {
+  recordingPromptSubmitted = String(prompt || "").trim();
+  recordingPromptStatus = "rewriting";
+  recordingPromptStatusPerfMs = performance.now();
+  recordingPromptChangeType = "";
+  if (recordingActive) {
+    recordTrajectoryEvent("runtime_prompt_submitted", {
+      prompt: recordingPromptSubmitted,
+    });
+  }
+}
+
+function markRecordingPromptSent(prompt, metadata = {}, eventId = null) {
+  if (metadata.trigger === "rule" || metadata.phase === "restore") return;
+  recordingPromptSubmitted = String(
+    metadata.instruction || recordingPromptSubmitted || prompt || "",
+  ).trim();
+  recordingPromptStatus = "sent";
+  recordingPromptStatusPerfMs = performance.now();
+  recordingPromptChangeType = metadata.changeType || "persistent";
+  if (recordingActive) {
+    recordTrajectoryEvent("runtime_prompt_sent", {
+      event_id: eventId,
+      user_prompt: recordingPromptSubmitted,
+      rewritten_prompt: prompt,
+      change_type: recordingPromptChangeType,
+    });
+  }
+}
+
+function markRecordingPromptFailed(message = "") {
+  recordingPromptStatus = "error";
+  recordingPromptStatusPerfMs = performance.now();
+  if (recordingActive) {
+    recordTrajectoryEvent("runtime_prompt_failed", {
+      user_prompt: recordingPromptSubmitted,
+      error: String(message || "prompt rewrite failed"),
+    });
+  }
+}
+
+function recordingPromptOverlaySnapshot(now = performance.now()) {
+  const heldStatus = ["sent", "error"].includes(recordingPromptStatus);
+  if (heldStatus && now - recordingPromptStatusPerfMs > RECORDING_PROMPT_STATUS_HOLD_MS) {
+    recordingPromptSubmitted = "";
+    recordingPromptStatus = recordingPromptDraft ? "typing" : "idle";
+    recordingPromptChangeType = "";
+  }
+  return {
+    text: recordingPromptSubmitted || recordingPromptDraft,
+    status: recordingPromptStatus,
+    changeType: recordingPromptChangeType,
+  };
 }
 
 function formatRecordingDuration(elapsedMs) {
@@ -1261,7 +2600,7 @@ function recordPromptHistory(prompt, kind = "prompt_update", eventId = null, art
 async function createReferenceImageMeta(firstFrame) {
   if (!firstFrame) return null;
   const file = $("firstFrame").files[0];
-  const mime = file?.type || selectedPreset?.mime || mimeFromReferenceUrl(selectedReferenceUrl);
+  const mime = file?.type || selectedReferenceMimeType || selectedPreset?.mime || mimeFromReferenceUrl(selectedReferenceUrl);
   const bytes = firstFrame.byteLength || firstFrame.length || 0;
   const meta = {
     source: file ? "upload" : selectedReferenceUrl ? "preset_url" : "bytes",
@@ -1293,6 +2632,248 @@ async function sha256Bytes(bytes) {
   return Array.from(new Uint8Array(digest))
     .map((byte) => byte.toString(16).padStart(2, "0"))
     .join("");
+}
+
+function normalizeWorldDescription(value) {
+  return String(value || "").trim().replace(/\s+/g, " ");
+}
+
+function fallbackBytesFingerprint(bytes) {
+  const source = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes || 0);
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < source.length; index += 1) {
+    hash ^= source[index];
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return `fnv1a-${source.length}-${(hash >>> 0).toString(16).padStart(8, "0")}`;
+}
+
+async function customWorldFingerprint(firstFrame, description, knownImageHash = "") {
+  const normalizedDescription = normalizeWorldDescription(description);
+  const descriptionBytes = new TextEncoder().encode(normalizedDescription);
+  const imageHash = knownImageHash
+    || await sha256Bytes(firstFrame)
+    || fallbackBytesFingerprint(firstFrame);
+  const descriptionHash = await sha256Bytes(descriptionBytes)
+    || fallbackBytesFingerprint(descriptionBytes);
+  return `${imageHash}:${descriptionHash}`;
+}
+
+function requestResult(request) {
+  return new Promise((resolve, reject) => {
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error || new Error("browser storage request failed"));
+  });
+}
+
+function openCustomWorldDatabase() {
+  if (customWorldDbPromise) return customWorldDbPromise;
+  if (!globalThis.indexedDB) {
+    return Promise.reject(new Error("this browser does not support persistent world storage"));
+  }
+  customWorldDbPromise = new Promise((resolve, reject) => {
+    const request = globalThis.indexedDB.open(CUSTOM_WORLD_DB_NAME, CUSTOM_WORLD_DB_VERSION);
+    request.onupgradeneeded = () => {
+      const database = request.result;
+      if (!database.objectStoreNames.contains(CUSTOM_WORLD_STORE_NAME)) {
+        const store = database.createObjectStore(CUSTOM_WORLD_STORE_NAME, {
+          keyPath: "fingerprint",
+        });
+        store.createIndex("createdAt", "createdAt", { unique: false });
+      }
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => {
+      customWorldDbPromise = null;
+      reject(request.error || new Error("could not open custom world storage"));
+    };
+    request.onblocked = () => {
+      customWorldDbPromise = null;
+      reject(new Error("custom world storage upgrade is blocked"));
+    };
+  });
+  return customWorldDbPromise;
+}
+
+async function readStoredCustomWorlds() {
+  const database = await openCustomWorldDatabase();
+  const transaction = database.transaction(CUSTOM_WORLD_STORE_NAME, "readonly");
+  const records = await requestResult(
+    transaction.objectStore(CUSTOM_WORLD_STORE_NAME).getAll(),
+  );
+  return records.sort((left, right) => Number(left.createdAt) - Number(right.createdAt));
+}
+
+async function writeStoredCustomWorld(record) {
+  const database = await openCustomWorldDatabase();
+  await new Promise((resolve, reject) => {
+    const transaction = database.transaction(CUSTOM_WORLD_STORE_NAME, "readwrite");
+    transaction.objectStore(CUSTOM_WORLD_STORE_NAME).put(record);
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () => reject(
+      transaction.error || new Error("could not save custom world"),
+    );
+    transaction.onabort = () => reject(
+      transaction.error || new Error("custom world save was aborted"),
+    );
+  });
+}
+
+function customWorldPresetFromRecord(record) {
+  const imageBlob = record.imageBlob instanceof Blob
+    ? record.imageBlob
+    : new Blob([record.imageBlob], { type: record.mime || "image/png" });
+  return {
+    name: record.name,
+    tone: "green",
+    size: record.size || "832x480",
+    fps: Number(record.fps || DEFAULT_TARGET_FPS),
+    prompt: record.prompt,
+    referenceUrl: URL.createObjectURL(imageBlob),
+    source: "自定义世界",
+    mime: record.mime || imageBlob.type || "image/png",
+    imageBlob,
+    rules: record.rules || null,
+    fingerprint: record.fingerprint,
+    createdAt: Number(record.createdAt || Date.now()),
+    isCustom: true,
+  };
+}
+
+async function loadCustomWorldPresets() {
+  try {
+    const records = await readStoredCustomWorlds();
+    customWorldPresets = records.map(customWorldPresetFromRecord);
+    renderPresets();
+    if (records.length) addHistory(`loaded ${records.length} custom worlds`);
+  } catch (error) {
+    addHistory(`custom world library unavailable · ${error.message || error}`);
+  }
+}
+
+function ensureCustomWorldPresetsLoaded() {
+  if (!customWorldLoadPromise) {
+    customWorldLoadPromise = loadCustomWorldPresets();
+  }
+  return customWorldLoadPromise;
+}
+
+function selectedWorldContentIsUnchanged(description, preset = selectedPreset) {
+  return Boolean(
+    preset
+    && normalizeWorldDescription(preset.prompt) === normalizeWorldDescription(description)
+  );
+}
+
+function selectedWorldIsUnchanged(
+  description,
+  preset = selectedPreset,
+  rules = readWorldRulesDraft(),
+) {
+  return Boolean(
+    selectedWorldContentIsUnchanged(description, preset)
+    && worldRulesStorageSignature(preset.rules || {}) === worldRulesStorageSignature(rules)
+  );
+}
+
+async function matchesBuiltInWorld(firstFrame, description, imageHash) {
+  const candidates = presets.filter((preset) => (
+    normalizeWorldDescription(preset.prompt) === description
+  ));
+  for (const preset of candidates) {
+    try {
+      const presetBytes = await fetchReferenceBytes(preset.referenceUrl);
+      const presetHash = await sha256Bytes(presetBytes)
+        || fallbackBytesFingerprint(presetBytes);
+      if (presetHash === imageHash) return true;
+    } catch (error) {
+      addHistory(`preset duplicate check skipped · ${preset.name} · ${error.message || error}`);
+    }
+  }
+  return false;
+}
+
+async function rememberEnteredWorld(firstFrame, referenceImage, entrySnapshot = {}) {
+  const description = normalizeWorldDescription(
+    entrySnapshot.description ?? $("prompt").value,
+  );
+  const entryPreset = entrySnapshot.preset ?? selectedPreset;
+  const entryRules = normalizedWorldRulesForStorage(
+    entrySnapshot.rules ?? readWorldRulesDraft(),
+  );
+  const shouldKeepSelection = () => (
+    selectedPreset === entryPreset
+    && normalizeWorldDescription($("prompt").value) === description
+    && worldRulesStorageSignature(readWorldRulesDraft()) === worldRulesStorageSignature(entryRules)
+  );
+  if (!firstFrame?.byteLength || !description || selectedWorldIsUnchanged(
+    description,
+    entryPreset,
+    entryRules,
+  )) {
+    return false;
+  }
+  try {
+    await ensureCustomWorldPresetsLoaded();
+    const imageHash = referenceImage?.first_frame_sha256
+      || await sha256Bytes(firstFrame)
+      || fallbackBytesFingerprint(firstFrame);
+    if (!hasConfiguredWorldRules(entryRules)
+      && await matchesBuiltInWorld(firstFrame, description, imageHash)) return false;
+    const fingerprint = await customWorldFingerprint(
+      firstFrame,
+      description,
+      imageHash,
+    );
+    const existing = customWorldPresets.find((preset) => preset.fingerprint === fingerprint);
+    if (existing) {
+      if (worldRulesStorageSignature(existing.rules || {}) !== worldRulesStorageSignature(entryRules)) {
+        const updatedRecord = {
+          fingerprint: existing.fingerprint,
+          name: existing.name,
+          prompt: existing.prompt,
+          mime: existing.mime,
+          size: existing.size,
+          fps: existing.fps,
+          createdAt: existing.createdAt,
+          imageBlob: existing.imageBlob,
+          rules: entryRules,
+        };
+        await writeStoredCustomWorld(updatedRecord);
+        existing.rules = entryRules;
+        addHistory(`updated ${existing.name} world rules`);
+      }
+      if (shouldKeepSelection()) selectedPreset = existing;
+      renderPresets();
+      return false;
+    }
+    const mime = referenceImage?.mime
+      || $("firstFrame").files[0]?.type
+      || selectedReferenceMimeType
+      || "image/png";
+    const createdAt = Date.now();
+    const record = {
+      fingerprint,
+      name: `自定义世界 ${customWorldPresets.length + 1}`,
+      prompt: description,
+      mime,
+      size: modelControl("minwm", "size").value || "832x480",
+      fps: Number(modelControl("minwm", "fps").value || DEFAULT_TARGET_FPS),
+      createdAt,
+      imageBlob: new Blob([firstFrame], { type: mime }),
+      rules: entryRules,
+    };
+    await writeStoredCustomWorld(record);
+    const preset = customWorldPresetFromRecord(record);
+    customWorldPresets.push(preset);
+    if (shouldKeepSelection()) selectedPreset = preset;
+    renderPresets();
+    addHistory(`saved ${preset.name} to world library`);
+    return true;
+  } catch (error) {
+    addHistory(`custom world save failed · ${error.message || error}`);
+    return false;
+  }
 }
 
 function bytesToDataUrl(bytes, mime = "application/octet-stream") {
@@ -1340,7 +2921,7 @@ function jsonSafe(value, depth = 0) {
   return String(value);
 }
 
-function startRecording() {
+function startRecording({ source = "manual" } = {}) {
   if (recordingActive || recordingSaving) return;
   recordingMode = selectRecordingMode();
   if (!recordingMode) {
@@ -1349,43 +2930,62 @@ function startRecording() {
     return;
   }
   recordingActive = true;
-  recordingSamples = [];
-  recordingEncoder = null;
-  recordingEncoderReady = null;
-  recordingEncoderConfig = null;
-  recordingMediaRecorder = null;
-  recordingMediaChunks = [];
-  recordingCaptureStream = null;
-  recordingMimeType = recordingMode === "mediarecorder-webm"
-    ? supportedWebmMimeType()
-    : "video/mp4";
+  setRecordingDownloads([]);
+  recordingTracks = [
+    createRecordingTrack({
+      key: "comparison",
+      label: "Zing × LingBot2",
+      variant: "comparison",
+      canvas: recordingCanvas,
+      ctx: recordingCtx,
+    }),
+    createRecordingTrack({
+      key: "zing",
+      label: "Zing",
+      variant: "zing",
+      canvas: zingRecordingCanvas,
+      ctx: zingRecordingCtx,
+    }),
+  ];
   recordingFrameIndex = 0;
-  recordingFps = Math.max(1, previewPlaybackTargetFps());
-  recordingEncodeChain = Promise.resolve();
+  recordingFps = Math.max(1, Math.min(GAMEPLAY_RECORDING_FPS, previewPlaybackTargetFps()));
+  recordingStartedPerfMs = performance.now();
+  recordingElapsedMs = 0;
+  recordingDroppedFrames = 0;
   recordingBaseFileName = recordingFileName().replace(/\.[^.]*$/, "");
+  recordingActionPulseUntil.clear();
+  resetRecordingPromptOverlay();
   recordingArtifact = ensureSessionArtifact();
   recordingArtifact.recording = {
     base_file_name: recordingBaseFileName,
     started_at: new Date().toISOString(),
     started_client_ms: artifactClientMs(recordingArtifact),
     mode: recordingMode,
-    mime_type: recordingMimeType,
+    mime_type: recordingTracks[0].mimeType,
     capture_scope: "stage",
     capture_width: RECORDING_STAGE_WIDTH,
     capture_height: RECORDING_STAGE_HEIGHT,
     target_fps: recordingFps,
+    timing: "wall_clock",
+    source,
+    variants: recordingTracks.map((track) => track.key),
   };
-  if (recordingMode === "mediarecorder-webm") startWebmRecording();
-  recordTrajectoryEvent("record_start", { target_fps: recordingFps });
+  if (recordingMode === "mediarecorder-webm") {
+    for (const track of recordingTracks) startWebmRecording(track);
+  }
+  startRecordingFramePump();
+  recordTrajectoryEvent("record_start", { target_fps: recordingFps, source });
   recordingTimer = window.setInterval(updateRecordButton, 250);
   updateRecordButton();
   updateRecordFolderButton();
-  addHistory("recording started");
+  addHistory("dual recording started · comparison + Zing");
 }
 
-async function stopRecording() {
+async function stopRecording({ reason = "manual" } = {}) {
   if (!recordingActive || recordingSaving) return;
+  recordingElapsedMs = Math.max(0, performance.now() - recordingStartedPerfMs);
   recordingActive = false;
+  stopRecordingFramePump();
   if (recordingTimer) {
     window.clearInterval(recordingTimer);
     recordingTimer = 0;
@@ -1395,86 +2995,108 @@ async function stopRecording() {
   updateRecordFolderButton();
 
   const extension = recordingMode === "mediarecorder-webm" ? "webm" : "mp4";
-  const fileName = `${recordingBaseFileName || recordingFileName(extension).replace(/\.[^.]*$/, "")}.${extension}`;
   try {
     recordTrajectoryEvent("record_stop", {
-      encoded_frames: recordingSamples.length,
+      encoded_frames: Object.fromEntries(
+        recordingTracks.map((track) => [track.key, track.samples.length]),
+      ),
       captured_frames: recordingFrameIndex,
       mode: recordingMode,
+      reason,
+      elapsed_ms: Math.round(recordingElapsedMs),
+      dropped_frames: Object.fromEntries(
+        recordingTracks.map((track) => [track.key, track.droppedFrames]),
+      ),
     });
-    const videoBlob = recordingMode === "mediarecorder-webm"
-      ? await stopWebmRecording()
-      : await buildMp4RecordingBlob();
-    await saveRecordingArtifactFiles(videoBlob, fileName);
-    addHistory(`saved ${recordingFrameIndex} frames · ${extension}/json/html`);
+    const baseFileName = recordingBaseFileName
+      || recordingFileName(extension).replace(/\.[^.]*$/, "");
+    const outputs = await Promise.all(recordingTracks.map(async (track) => ({
+      key: track.key,
+      label: track.label,
+      fileName: `${baseFileName}-${track.key}.${extension}`,
+      videoBlob: recordingMode === "mediarecorder-webm"
+        ? await stopWebmRecording(track)
+        : await buildMp4RecordingBlob(track),
+    })));
+    await saveRecordingArtifactFiles(outputs, { deferDownload: true });
+    addHistory(`both gameplay recordings ready · ${recordingFrameIndex} synchronized frames · ${extension}`);
+    if (["session_timeout", "session_closed", "primary_disconnected"].includes(reason)) {
+      showSessionNotice("两份游玩录像已生成，可点击右上角同步下载");
+      showRecordingReadyToast();
+    }
   } catch (error) {
     if (error?.name === "AbortError") {
       addHistory("recording save canceled");
     } else {
       addHistory(error.message || "recording save failed");
       setStatus("Save failed", "error");
+      showSessionNotice("游玩录像生成失败，请重新体验后再试");
     }
   } finally {
-    recordingEncoder?.close?.();
-    recordingEncoder = null;
-    recordingEncoderReady = null;
-    stopRecordingCaptureStream();
-    recordingMediaRecorder = null;
-    recordingMediaChunks = [];
-    recordingCaptureStream = null;
+    for (const track of recordingTracks) {
+      track.encoder?.close?.();
+      track.encoder = null;
+      track.encoderReady = null;
+      stopRecordingCaptureStream(track);
+      track.mediaRecorder = null;
+      track.mediaChunks = [];
+      track.captureStream = null;
+    }
     recordingMode = "";
     recordingSaving = false;
-    recordingSamples = [];
+    recordingTracks = [];
     updateRecordButton();
     updateRecordFolderButton();
   }
 }
 
-async function buildMp4RecordingBlob() {
-  await recordingEncodeChain;
-  if (!recordingEncoder || !recordingSamples.length) throw new Error("No frames were recorded");
-  await recordingEncoder.flush();
-  return buildRecordingMp4();
+async function buildMp4RecordingBlob(track) {
+  await track.encodeChain;
+  if (!track.encoder) throw new Error(`No ${track.label} frames were recorded`);
+  await track.encoder.flush();
+  if (!track.samples.length) throw new Error(`No ${track.label} frames were recorded`);
+  return buildRecordingMp4(track);
 }
 
-function startWebmRecording() {
-  drawRecordingStageFrame(canvas);
-  recordingMediaChunks = [];
-  recordingCaptureStream = recordingCanvas.captureStream(recordingFps);
-  recordingMediaRecorder = new MediaRecorder(
-    recordingCaptureStream,
-    recordingMimeType ? { mimeType: recordingMimeType } : undefined,
+function startWebmRecording(track) {
+  drawRecordingStageFrame(canvas, track);
+  track.mediaChunks = [];
+  track.captureStream = track.canvas.captureStream(recordingFps);
+  track.mediaRecorder = new MediaRecorder(
+    track.captureStream,
+    track.mimeType ? { mimeType: track.mimeType } : undefined,
   );
-  recordingMimeType = recordingMediaRecorder.mimeType || recordingMimeType || "video/webm";
-  recordingMediaRecorder.ondataavailable = (event) => {
-    if (event.data?.size) recordingMediaChunks.push(event.data);
+  track.mimeType = track.mediaRecorder.mimeType || track.mimeType || "video/webm";
+  track.mediaRecorder.ondataavailable = (event) => {
+    if (event.data?.size) track.mediaChunks.push(event.data);
   };
-  recordingMediaRecorder.onerror = (event) => {
+  track.mediaRecorder.onerror = (event) => {
     recordingActive = false;
-    addHistory(event.error?.message || "recording media recorder failed");
+    stopRecordingFramePump();
+    addHistory(event.error?.message || `${track.label} recorder failed`);
     updateRecordButton();
   };
-  recordingMediaRecorder.start(250);
+  track.mediaRecorder.start(250);
 }
 
-function stopWebmRecording() {
+function stopWebmRecording(track) {
   return new Promise((resolve, reject) => {
-    const recorder = recordingMediaRecorder;
+    const recorder = track.mediaRecorder;
     if (!recorder) {
-      reject(new Error("No WebM recorder was started"));
+      reject(new Error(`No ${track.label} WebM recorder was started`));
       return;
     }
     recorder.onstop = () => {
-      stopRecordingCaptureStream();
-      if (!recordingMediaChunks.length) {
-        reject(new Error("No frames were recorded"));
+      stopRecordingCaptureStream(track);
+      if (!track.mediaChunks.length) {
+        reject(new Error(`No ${track.label} frames were recorded`));
         return;
       }
-      resolve(new Blob(recordingMediaChunks, { type: recordingMimeType || "video/webm" }));
+      resolve(new Blob(track.mediaChunks, { type: track.mimeType || "video/webm" }));
     };
     recorder.onerror = (event) => {
-      stopRecordingCaptureStream();
-      reject(event.error || new Error("recording media recorder failed"));
+      stopRecordingCaptureStream(track);
+      reject(event.error || new Error(`${track.label} recorder failed`));
     };
     if (recorder.state === "inactive") {
       recorder.onstop();
@@ -1489,85 +3111,113 @@ function stopWebmRecording() {
   });
 }
 
-function stopRecordingCaptureStream() {
-  for (const track of recordingCaptureStream?.getTracks?.() || []) track.stop();
-  recordingCaptureStream = null;
+function stopRecordingCaptureStream(track) {
+  for (const streamTrack of track?.captureStream?.getTracks?.() || []) streamTrack.stop();
+  if (track) track.captureStream = null;
 }
 
-function recordDecodedFrameBatch(decodedFrames) {
-  if (!recordingActive || recordingSaving) return;
-  for (const item of decodedFrames) {
-    if (!recordingActive) break;
-    recordDecodedFrame(item.image);
-  }
-  updateRecordButton();
+function startRecordingFramePump() {
+  stopRecordingFramePump();
+  captureRecordingFrame();
+  recordingFrameTimer = window.setInterval(
+    captureRecordingFrame,
+    Math.max(32, Math.round(1000 / Math.max(1, recordingFps))),
+  );
 }
 
-function recordDecodedFrame(image) {
+function stopRecordingFramePump() {
+  if (recordingFrameTimer) window.clearInterval(recordingFrameTimer);
+  recordingFrameTimer = 0;
+}
+
+function captureRecordingFrame() {
   if (!recordingActive || recordingSaving) return;
+  const elapsedMs = Math.max(0, performance.now() - recordingStartedPerfMs);
+  recordingElapsedMs = elapsedMs;
+  for (const track of recordingTracks) drawRecordingStageFrame(canvas, track);
+  recordingFrameIndex += 1;
   if (recordingMode === "mediarecorder-webm") {
-    drawRecordingStageFrame(image);
-    recordingFrameIndex += 1;
-    recordingMediaRecorder?.requestData?.();
+    for (const track of recordingTracks) track.frameIndex += 1;
     return;
   }
-  const frameIndex = recordingFrameIndex;
+  for (const track of recordingTracks) captureRecordingTrack(track, elapsedMs);
+  recordingDroppedFrames = recordingTracks.reduce(
+    (sum, track) => sum + track.droppedFrames,
+    0,
+  );
+}
+
+function captureRecordingTrack(track, elapsedMs) {
+  if (track.encoder?.encodeQueueSize > 4) {
+    track.droppedFrames += 1;
+    return;
+  }
+  const frameIndex = track.frameIndex;
   const duration = Math.round(1_000_000 / Math.max(1, recordingFps));
-  const timestamp = frameIndex * duration;
+  const timestamp = Math.max(track.lastTimestampUs + 1, Math.round(elapsedMs * 1000));
+  track.lastTimestampUs = timestamp;
   let frame;
   try {
-    frame = createRecordingFrame(image, timestamp, duration);
+    frame = new VideoFrame(track.canvas, { timestamp, duration });
   } catch (error) {
     recordingActive = false;
-    addHistory(error.message || "recording frame capture failed");
+    stopRecordingFramePump();
+    addHistory(error.message || `${track.label} frame capture failed`);
     updateRecordButton();
     return;
   }
-  recordingFrameIndex += 1;
-  recordingEncodeChain = recordingEncodeChain
+  track.frameIndex += 1;
+  track.encodeChain = track.encodeChain
     .then(async () => {
-      await ensureRecordingEncoder(frame.displayWidth, frame.displayHeight);
-      recordingEncoder.encode(frame, { keyFrame: frameIndex === 0 || frameIndex % 120 === 0 });
-      frame.close();
+      try {
+        await ensureRecordingEncoder(track, frame.displayWidth, frame.displayHeight);
+        track.encoder.encode(frame, { keyFrame: frameIndex === 0 || frameIndex % 120 === 0 });
+      } finally {
+        frame.close();
+      }
     })
     .catch((error) => {
-      frame.close();
       recordingActive = false;
-      addHistory(error.message || "recording encode failed");
+      stopRecordingFramePump();
+      addHistory(error.message || `${track.label} encode failed`);
       updateRecordButton();
     });
 }
 
-function createRecordingFrame(image, timestamp, duration) {
-  drawRecordingStageFrame(image);
-  return new VideoFrame(recordingCanvas, { timestamp, duration });
-}
-
-function drawRecordingStageFrame(image) {
-  ensureRecordingStageCanvas();
-  const source = recordingDrawableSource(image || canvas);
-  const sourceWidth = source.width || canvas.width || 1280;
-  const sourceHeight = source.height || canvas.height || 720;
+function drawRecordingStageFrame(image, track = recordingTracks[0] || {
+  variant: "comparison",
+  canvas: recordingCanvas,
+  ctx: recordingCtx,
+}) {
+  const previousCtx = recordingCtx;
+  recordingCtx = track.ctx;
+  ensureRecordingStageCanvas(track.canvas);
+  const minwmSource = recordingDrawableSource(image || canvas);
   recordingCtx.save();
-  recordingCtx.imageSmoothingEnabled = true;
-  recordingCtx.imageSmoothingQuality = "medium";
-  recordingCtx.fillStyle = "#11140f";
-  recordingCtx.fillRect(0, 0, RECORDING_STAGE_WIDTH, RECORDING_STAGE_HEIGHT);
-  drawRecordingTopbar();
-  drawRecordingPreview(source, sourceWidth, sourceHeight);
-  drawRecordingControls();
-  drawRecordingTimeline();
-  drawRecordingTelemetry();
-  recordingCtx.restore();
+  try {
+    recordingCtx.imageSmoothingEnabled = true;
+    recordingCtx.imageSmoothingQuality = "medium";
+    recordingCtx.fillStyle = "#11140f";
+    recordingCtx.fillRect(0, 0, RECORDING_STAGE_WIDTH, RECORDING_STAGE_HEIGHT);
+    drawRecordingTopbar(track.variant);
+    if (track.variant === "zing") drawRecordingZingPreview(minwmSource);
+    else drawRecordingComparisonPreview(minwmSource, lingbot2Canvas);
+    drawRecordingBottomGradient();
+    drawRecordingControls();
+    drawRecordingPromptComposer();
+  } finally {
+    recordingCtx.restore();
+    recordingCtx = previousCtx;
+  }
 }
 
-function ensureRecordingStageCanvas() {
+function ensureRecordingStageCanvas(targetCanvas = recordingCanvas) {
   if (
-    recordingCanvas.width !== RECORDING_STAGE_WIDTH ||
-    recordingCanvas.height !== RECORDING_STAGE_HEIGHT
+    targetCanvas.width !== RECORDING_STAGE_WIDTH ||
+    targetCanvas.height !== RECORDING_STAGE_HEIGHT
   ) {
-    recordingCanvas.width = RECORDING_STAGE_WIDTH;
-    recordingCanvas.height = RECORDING_STAGE_HEIGHT;
+    targetCanvas.width = RECORDING_STAGE_WIDTH;
+    targetCanvas.height = RECORDING_STAGE_HEIGHT;
   }
 }
 
@@ -1583,77 +3233,93 @@ function recordingDrawableSource(image) {
   return image || canvas;
 }
 
-function drawRecordingTopbar() {
+function drawRecordingTopbar(variant = "comparison") {
   const y = 0;
-  fillRecordingRect(0, y, RECORDING_STAGE_WIDTH, RECORDING_STAGE_TOPBAR_HEIGHT, "#10140f");
+  fillRecordingRect(0, y, RECORDING_STAGE_WIDTH, RECORDING_STAGE_TOPBAR_HEIGHT, "#0b1110");
   recordingCtx.fillStyle = "rgba(232, 234, 223, 0.12)";
   recordingCtx.fillRect(0, RECORDING_STAGE_TOPBAR_HEIGHT - 1, RECORDING_STAGE_WIDTH, 1);
 
   let x = RECORDING_STAGE_PADDING;
-  const dotKind = $("statusDot")?.classList.contains("live")
-    ? "live"
-    : $("statusDot")?.classList.contains("error") ? "error" : "";
   recordingCtx.beginPath();
-  recordingCtx.arc(x + 6, y + RECORDING_STAGE_TOPBAR_HEIGHT / 2, 5, 0, Math.PI * 2);
-  recordingCtx.fillStyle = dotKind === "live" ? "#8ecf9d" : dotKind === "error" ? "#b9543c" : "#687164";
+  recordingCtx.moveTo(x, 33);
+  recordingCtx.lineTo(x + 12, 13);
+  recordingCtx.lineTo(x + 24, 33);
+  recordingCtx.closePath();
+  recordingCtx.strokeStyle = "#79dfbd";
+  recordingCtx.lineWidth = 4;
+  recordingCtx.stroke();
+  x += 38;
+  drawRecordingLabel("World Studio", x, y + 31, {
+    color: "#f7faf8",
+    font: "700 17px ui-sans-serif, system-ui, sans-serif",
+    maxWidth: 150,
+  });
+
+  x += 174;
+  recordingCtx.beginPath();
+  recordingCtx.arc(x + 5, y + RECORDING_STAGE_TOPBAR_HEIGHT / 2, 5, 0, Math.PI * 2);
+  recordingCtx.fillStyle = recordingActive ? "#e48674" : "#687164";
   recordingCtx.fill();
-  x += 24;
-  drawRecordingLabel(recordingElementText("statusText", "Idle"), x, y + 33, {
-    color: "#e8eadf",
-    font: "18px ui-sans-serif, system-ui, sans-serif",
-    maxWidth: 120,
+  drawRecordingLabel(recordingSaving ? "正在生成录像" : "游玩录制", x + 17, y + 30, {
+    color: "rgba(247, 250, 248, 0.82)",
+    font: "600 14px ui-sans-serif, system-ui, sans-serif",
+    maxWidth: 110,
   });
-  x += 126;
-  drawRecordingLabel(recordingElementText("chunkText", "chunk -"), x, y + 33, {
-    color: "#e8eadf",
-    font: "15px ui-sans-serif, system-ui, sans-serif",
-    maxWidth: 96,
-  });
-  x += 118;
-  drawRecordingPill(x, y + 11, 126, 32, {
-    label: recordingActive ? "Stop" : "Record",
-    detail: recordingElementText("recordDuration", "00:00"),
-    active: recordingActive,
-  });
-  x += 146;
-  drawRecordingPill(x, y + 11, 86, 32, {
-    label: recordingElementText("recordFolderLabel", "Folder"),
-    active: $("recordFolderBtn")?.classList.contains("is-selected"),
+  drawRecordingLabel(formatRecordingDuration(recordingElapsedMs), x + 128, y + 30, {
+    color: "#f7faf8",
+    font: "700 14px ui-monospace, SFMono-Regular, monospace",
+    maxWidth: 60,
   });
 
-  let right = RECORDING_STAGE_WIDTH - RECORDING_STAGE_PADDING;
-  right = drawRecordingTopbarStatRight(`buffer ${recordingElementText("stageLatencyText", "-")}`, right, y);
-  right = drawRecordingTopbarStatRight(`action ${recordingElementText("actionStateText", "-")}`, right, y);
-  right = drawRecordingTopbarStatRight(`source ${recordingElementText("theoreticalFpsText", "-")}`, right, y);
-  right = drawRecordingTopbarStatRight(`render ${recordingElementText("renderFps", "0")} fps`, right, y);
-  right = drawRecordingTopbarStatRight(`output ${recordingElementText("outputSizeText", "-")}`, right, y);
-  drawRecordingTopbarStatRight(
-    `Preview ${recordingElementText("previewScaleText", "100%")}`,
-    right,
-    y,
-  );
+  drawRecordingLabel(variant === "zing" ? "Zing" : "Zing  ×  LingBot2", RECORDING_STAGE_WIDTH - RECORDING_STAGE_PADDING, y + 30, {
+    align: "right",
+    color: "rgba(247, 250, 248, 0.72)",
+    font: "600 14px ui-sans-serif, system-ui, sans-serif",
+    maxWidth: 180,
+  });
 }
 
-function drawRecordingTopbarStatRight(text, right, y) {
-  recordingCtx.font = "600 15px ui-sans-serif, system-ui, sans-serif";
-  const width = Math.min(recordingCtx.measureText(text).width, 250);
-  drawRecordingLabel(text, right - width, y + 33, {
-    color: "#fffdf7",
-    font: "600 15px ui-sans-serif, system-ui, sans-serif",
-    maxWidth: width,
-  });
-  return right - width - 24;
-}
-
-function drawRecordingPreview(source, sourceWidth, sourceHeight) {
+function drawRecordingZingPreview(minwmSource) {
   const y = RECORDING_STAGE_TOPBAR_HEIGHT;
   fillRecordingRect(0, y, RECORDING_STAGE_WIDTH, RECORDING_STAGE_PREVIEW_HEIGHT, "#11140f");
-  const previewRect = {
-    x: 118,
+  drawRecordingFittedSource(minwmSource, {
+    x: 0,
     y,
-    width: RECORDING_STAGE_WIDTH - 236,
+    width: RECORDING_STAGE_WIDTH,
     height: RECORDING_STAGE_PREVIEW_HEIGHT,
-  };
+  });
+}
+
+function drawRecordingComparisonPreview(minwmSource, lingbot2Source) {
+  const y = RECORDING_STAGE_TOPBAR_HEIGHT;
+  fillRecordingRect(0, y, RECORDING_STAGE_WIDTH, RECORDING_STAGE_PREVIEW_HEIGHT, "#11140f");
+  const gap = 12;
+  const inset = 24;
+  const titleHeight = 34;
+  const width = (RECORDING_STAGE_WIDTH - inset * 2 - gap) / 2;
+  const height = RECORDING_STAGE_PREVIEW_HEIGHT - titleHeight;
+  const players = [
+    { label: "Zing", source: minwmSource, x: inset },
+    { label: "LingBot2", source: lingbot2Source, x: inset + width + gap },
+  ];
+  for (const player of players) {
+    drawRecordingLabel(player.label, player.x + 4, y + 24, {
+      color: "#fffdf7",
+      font: "600 16px ui-sans-serif, system-ui, sans-serif",
+      maxWidth: width - 8,
+    });
+    drawRecordingFittedSource(player.source, {
+      x: player.x,
+      y: y + titleHeight,
+      width,
+      height,
+    });
+  }
+}
+
+function drawRecordingFittedSource(source, previewRect) {
+  const sourceWidth = source?.width || 1280;
+  const sourceHeight = source?.height || 720;
   const scale = Math.min(
     previewRect.width / Math.max(1, sourceWidth),
     previewRect.height / Math.max(1, sourceHeight),
@@ -1663,174 +3329,148 @@ function drawRecordingPreview(source, sourceWidth, sourceHeight) {
   const drawX = Math.round(previewRect.x + (previewRect.width - drawWidth) / 2);
   const drawY = Math.round(previewRect.y + (previewRect.height - drawHeight) / 2);
   fillRecordingRect(previewRect.x, previewRect.y, previewRect.width, previewRect.height, "#151912");
-  recordingCtx.drawImage(source, drawX, drawY, drawWidth, drawHeight);
+  if (sourceWidth > 0 && sourceHeight > 0) {
+    recordingCtx.drawImage(source, drawX, drawY, drawWidth, drawHeight);
+  }
 }
 
 function drawRecordingControls() {
-  const y = RECORDING_STAGE_TOPBAR_HEIGHT + RECORDING_STAGE_PREVIEW_HEIGHT;
-  fillRecordingRect(0, y, RECORDING_STAGE_WIDTH, RECORDING_STAGE_CONTROLS_HEIGHT, "#151912");
-  recordingCtx.fillStyle = "rgba(232, 234, 223, 0.12)";
-  recordingCtx.fillRect(0, y, RECORDING_STAGE_WIDTH, 1);
-  const gap = 38;
-  const clusterWidth = (RECORDING_STAGE_WIDTH - RECORDING_STAGE_PADDING * 2 - gap) / 2;
-  drawRecordingControlCluster("MOVE", RECORDING_STAGE_PADDING, y + 24, clusterWidth, [
+  const y = RECORDING_STAGE_HEIGHT - 112;
+  drawRecordingControlCluster("移动", 24, y, [
     [null, "w", null],
     ["a", "s", "d"],
   ]);
-  drawRecordingControlCluster(
-    "LOOK",
-    RECORDING_STAGE_PADDING + clusterWidth + gap,
-    y + 24,
-    clusterWidth,
-    [
-      [null, "i", null],
-      ["j", "k", "l"],
-    ],
-  );
+  drawRecordingControlCluster("视角", 176, y, [
+    [null, "i", null],
+    ["j", "k", "l"],
+  ]);
 }
 
-function drawRecordingControlCluster(title, x, y, width, rows) {
-  drawRecordingLabel(title, x, y + 61, {
-    color: "rgba(232, 234, 223, 0.62)",
-    font: "15px ui-sans-serif, system-ui, sans-serif",
-    maxWidth: 66,
+function drawRecordingControlCluster(title, x, y, rows) {
+  drawRecordingLabel(title, x, y - 8, {
+    color: "rgba(255, 255, 255, 0.7)",
+    font: "600 11px ui-sans-serif, system-ui, sans-serif",
+    maxWidth: 72,
   });
-  const padX = x + 72;
-  const cellGap = 8;
-  const buttonWidth = (width - 72 - cellGap * 2) / 3;
-  const buttonHeight = 44;
+  const cellGap = 5;
+  const buttonSize = 38;
   rows.forEach((row, rowIndex) => {
     row.forEach((action, columnIndex) => {
       if (!action) return;
       drawRecordingControlButton(
         action,
-        padX + columnIndex * (buttonWidth + cellGap),
-        y + rowIndex * (buttonHeight + cellGap),
-        buttonWidth,
-        buttonHeight,
+        x + columnIndex * (buttonSize + cellGap),
+        y + rowIndex * (buttonSize + cellGap),
+        buttonSize,
+        buttonSize,
       );
     });
   });
 }
 
 function drawRecordingControlButton(action, x, y, width, height) {
-  const active = controlStateController?.activeActions?.has(action);
-  const radius = 5;
-  fillRecordingRoundedRect(x, y, width, height, radius, active ? "#8c9288" : "#eef1ec");
+  const active = controlStateController?.activeActions?.has(action)
+    || Number(recordingActionPulseUntil.get(action) || 0) > performance.now();
+  const radius = 10;
+  fillRecordingRoundedRect(
+    x,
+    y,
+    width,
+    height,
+    radius,
+    active ? "rgba(121, 223, 189, 0.92)" : "rgba(15, 19, 18, 0.72)",
+  );
   strokeRecordingRoundedRect(
     x,
     y,
     width,
     height,
     radius,
-    active ? "#aeb4aa" : "rgba(232, 234, 223, 0.18)",
+    active ? "rgba(227, 255, 246, 0.94)" : "rgba(255, 255, 255, 0.35)",
   );
-  const meta = CONTROL_ACTION_META[action] || {};
-  drawRecordingLabel(meta.label || action.toUpperCase(), x + width / 2, y + 28, {
-    align: "center",
-    color: active ? "#fffdf7" : "#11140f",
-    font: "16px ui-sans-serif, system-ui, sans-serif",
-    maxWidth: width - 34,
-  });
   const keyLabel = action === "i" ? "↑" : action === "j" ? "←" : action === "k" ? "↓" : action === "l" ? "→" : action.toUpperCase();
-  drawRecordingLabel(keyLabel, x + width - 16, y + 16, {
-    align: "right",
-    color: active ? "rgba(255, 253, 247, 0.78)" : "#687164",
-    font: "700 13px ui-sans-serif, system-ui, sans-serif",
-    maxWidth: 28,
+  drawRecordingLabel(keyLabel, x + width / 2, y + 25, {
+    align: "center",
+    color: active ? "#0b1411" : "rgba(255, 255, 255, 0.9)",
+    font: "700 16px ui-sans-serif, system-ui, sans-serif",
+    maxWidth: width - 10,
   });
 }
 
-function drawRecordingTimeline() {
-  const y = RECORDING_STAGE_TOPBAR_HEIGHT +
-    RECORDING_STAGE_PREVIEW_HEIGHT +
-    RECORDING_STAGE_CONTROLS_HEIGHT;
-  fillRecordingRect(0, y, RECORDING_STAGE_WIDTH, RECORDING_STAGE_TIMELINE_HEIGHT, "#11140f");
-  recordingCtx.fillStyle = "rgba(232, 234, 223, 0.12)";
-  recordingCtx.fillRect(0, y, RECORDING_STAGE_WIDTH, 1);
-  const text = [
-    recordingElementText("queueText", "queue 0"),
-    recordingElementText("frameText", "frames 0"),
-    recordingElementText("byteText", "0 MB"),
-  ].join("   ");
-  drawRecordingLabel(text, RECORDING_STAGE_WIDTH - RECORDING_STAGE_PADDING, y + 31, {
-    align: "right",
-    color: "#e8eadf",
-    font: "16px ui-sans-serif, system-ui, sans-serif",
-    maxWidth: RECORDING_STAGE_WIDTH - RECORDING_STAGE_PADDING * 2,
-  });
+function drawRecordingBottomGradient() {
+  const height = 210;
+  const y = RECORDING_STAGE_HEIGHT - height;
+  const gradient = recordingCtx.createLinearGradient(0, y, 0, RECORDING_STAGE_HEIGHT);
+  gradient.addColorStop(0, "rgba(5, 10, 9, 0)");
+  gradient.addColorStop(0.46, "rgba(5, 10, 9, 0.46)");
+  gradient.addColorStop(1, "rgba(5, 10, 9, 0.9)");
+  fillRecordingRect(0, y, RECORDING_STAGE_WIDTH, height, gradient);
 }
 
-function drawRecordingTelemetry() {
-  const y = RECORDING_STAGE_TOPBAR_HEIGHT +
-    RECORDING_STAGE_PREVIEW_HEIGHT +
-    RECORDING_STAGE_CONTROLS_HEIGHT +
-    RECORDING_STAGE_TIMELINE_HEIGHT;
-  fillRecordingRect(0, y, RECORDING_STAGE_WIDTH, RECORDING_STAGE_TELEMETRY_HEIGHT, "#11140f");
-  const rows = [
-    [
-      ["Payload", recordingElementText("payloadMode", selectedTransportLabel())],
-      ["Server send", recordingElementText("serverSendText", "-")],
-      ["Chunk bytes", recordingElementText("chunkPayloadText", "-")],
-    ],
-    [
-      ["Chunk wait", recordingElementText("latencyText", "-")],
-      ["Decode", recordingElementText("decodeText", "-")],
-      ["Display lag", recordingElementText("displayLagText", "-")],
-    ],
-  ];
-  const cellWidth = RECORDING_STAGE_WIDTH / 3;
-  const cellHeight = RECORDING_STAGE_TELEMETRY_HEIGHT / 2;
-  rows.forEach((row, rowIndex) => {
-    row.forEach(([label, value], columnIndex) => {
-      const x = columnIndex * cellWidth;
-      const cellY = y + rowIndex * cellHeight;
-      recordingCtx.fillStyle = "rgba(232, 234, 223, 0.1)";
-      recordingCtx.fillRect(x, cellY, cellWidth, 1);
-      if (columnIndex > 0) recordingCtx.fillRect(x, cellY, 1, cellHeight);
-      drawRecordingLabel(label, x + 18, cellY + 30, {
-        color: "rgba(232, 234, 223, 0.62)",
-        font: "15px ui-sans-serif, system-ui, sans-serif",
-        maxWidth: cellWidth * 0.45,
-      });
-      drawRecordingLabel(value, x + cellWidth - 18, cellY + 30, {
-        align: "right",
-        color: "#fffdf7",
-        font: "700 16px ui-sans-serif, system-ui, sans-serif",
-        maxWidth: cellWidth * 0.5,
-      });
-    });
-  });
-}
+function drawRecordingPromptComposer() {
+  const snapshot = recordingPromptOverlaySnapshot();
+  const x = 450;
+  const y = RECORDING_STAGE_HEIGHT - 88;
+  const width = 700;
+  const height = 56;
+  const sendSize = 42;
+  const sendX = x + width - sendSize - 7;
+  const sent = snapshot.status === "sent";
+  const failed = snapshot.status === "error";
 
-function drawRecordingPill(x, y, width, height, { label, detail = "", active = false }) {
+  fillRecordingRoundedRect(x, y, width, height, 18, "rgba(244, 247, 245, 0.82)");
+  strokeRecordingRoundedRect(x, y, width, height, 18, "rgba(255, 255, 255, 0.82)");
+
+  const displayText = snapshot.text || "输入世界指令…";
+  const textColor = snapshot.text ? "#17201d" : "rgba(23, 32, 29, 0.48)";
+  drawRecordingLabel(displayText, x + 20, y + 35, {
+    color: textColor,
+    font: "500 18px ui-sans-serif, system-ui, sans-serif",
+    maxWidth: width - sendSize - 54,
+  });
+
+  if (snapshot.text && ["typing", "rewriting"].includes(snapshot.status)) {
+    recordingCtx.font = "500 18px ui-sans-serif, system-ui, sans-serif";
+    const cursorX = Math.min(
+      sendX - 16,
+      x + 21 + recordingCtx.measureText(snapshot.text).width,
+    );
+    if (Math.floor(performance.now() / 450) % 2 === 0) {
+      fillRecordingRect(cursorX, y + 17, 1.5, 22, "rgba(23, 32, 29, 0.78)");
+    }
+  }
+
   fillRecordingRoundedRect(
-    x,
-    y,
-    width,
-    height,
-    6,
-    active ? "#b9543c" : "rgba(238, 241, 236, 0.08)",
+    sendX,
+    y + 7,
+    sendSize,
+    sendSize,
+    14,
+    failed ? "#e48674" : sent ? "#79dfbd" : "rgba(24, 34, 31, 0.9)",
   );
-  strokeRecordingRoundedRect(x, y, width, height, 6, "rgba(232, 234, 223, 0.24)");
-  drawRecordingLabel(label, x + 14, y + 21, {
-    color: "#e8eadf",
-    font: "14px ui-sans-serif, system-ui, sans-serif",
-    maxWidth: width - (detail ? 62 : 28),
+  drawRecordingLabel(sent ? "✓" : failed ? "!" : "→", sendX + sendSize / 2, y + 34, {
+    align: "center",
+    color: sent ? "#0b1411" : "#f7faf8",
+    font: "700 20px ui-sans-serif, system-ui, sans-serif",
+    maxWidth: 26,
   });
-  if (detail) {
-    drawRecordingLabel(detail, x + width - 12, y + 21, {
+
+  if (snapshot.status === "rewriting") {
+    drawRecordingLabel("AI 改写中", sendX - 14, y - 8, {
       align: "right",
-      color: "rgba(232, 234, 223, 0.78)",
-      font: "14px ui-sans-serif, system-ui, sans-serif",
-      maxWidth: 48,
+      color: "rgba(255, 255, 255, 0.82)",
+      font: "600 11px ui-sans-serif, system-ui, sans-serif",
+      maxWidth: 90,
+    });
+  } else if (sent) {
+    const typeLabel = snapshot.changeType === "one_time" ? "一次性指令已发送" : "持久指令已发送";
+    drawRecordingLabel(typeLabel, sendX - 14, y - 8, {
+      align: "right",
+      color: "#b7f4df",
+      font: "600 11px ui-sans-serif, system-ui, sans-serif",
+      maxWidth: 120,
     });
   }
-}
-
-function recordingElementText(id, fallback = "-") {
-  const value = $(id)?.textContent;
-  return value && String(value).trim() ? String(value).trim() : fallback;
 }
 
 function drawRecordingLabel(text, x, y, {
@@ -1889,17 +3529,17 @@ function recordingRoundedRectPath(x, y, width, height, radius) {
   recordingCtx.quadraticCurveTo(x, y, x + r, y);
 }
 
-async function ensureRecordingEncoder(width, height) {
-  if (recordingEncoderReady) return recordingEncoderReady;
-  recordingEncoderReady = createRecordingEncoder(width, height);
-  return recordingEncoderReady;
+async function ensureRecordingEncoder(track, width, height) {
+  if (track.encoderReady) return track.encoderReady;
+  track.encoderReady = createRecordingEncoder(track, width, height);
+  return track.encoderReady;
 }
 
-async function createRecordingEncoder(width, height) {
+async function createRecordingEncoder(track, width, height) {
   const fps = Math.max(1, recordingFps);
   const bitrate = Math.round(Math.min(
-    180_000_000,
-    Math.max(24_000_000, width * height * fps * 0.8),
+    20_000_000,
+    Math.max(6_000_000, width * height * fps * 0.45),
   ));
   const configs = [
     { codec: "avc1.640028", width, height, bitrate, framerate: fps },
@@ -1922,25 +3562,25 @@ async function createRecordingEncoder(width, height) {
     }
   }
   if (!supported) throw new Error("This browser cannot encode H.264 MP4");
-  recordingEncoderConfig = supported;
-  recordingEncoder = new VideoEncoder({
-    output: (chunk, metadata) => recordEncodedChunk(chunk, metadata),
+  track.encoderConfig = supported;
+  track.encoder = new VideoEncoder({
+    output: (chunk, metadata) => recordEncodedChunk(track, chunk, metadata),
     error: (error) => {
       recordingActive = false;
-      addHistory(error.message || "recording encoder failed");
+      addHistory(error.message || `${track.label} encoder failed`);
       updateRecordButton();
     },
   });
-  recordingEncoder.configure(supported);
+  track.encoder.configure(supported);
 }
 
-function recordEncodedChunk(chunk, metadata) {
+function recordEncodedChunk(track, chunk, metadata) {
   if (metadata?.decoderConfig?.description) {
-    recordingEncoderConfig.description = metadata.decoderConfig.description;
+    track.encoderConfig.description = metadata.decoderConfig.description;
   }
   const data = new Uint8Array(chunk.byteLength);
   chunk.copyTo(data);
-  recordingSamples.push({
+  track.samples.push({
     data,
     timestamp: chunk.timestamp,
     duration: chunk.duration || 0,
@@ -1963,8 +3603,8 @@ function sidecarFileName(fileName, extension) {
   return `${String(fileName).replace(/\.[^.]*$/, "")}.${extension}`;
 }
 
-async function saveRecordingArtifactFiles(videoBlob, fileName) {
-  const artifact = finalizeRecordingArtifact(videoBlob, fileName);
+async function saveRecordingArtifactFiles(outputs, { deferDownload = false } = {}) {
+  const artifact = finalizeRecordingArtifact(outputs);
   const jsonFileName = artifact.recording.json_file;
   const htmlFileName = artifact.recording.html_file;
   const jsonBlob = new Blob(
@@ -1975,31 +3615,57 @@ async function saveRecordingArtifactFiles(videoBlob, fileName) {
     [buildReplayHtml(artifact)],
     { type: "text/html" },
   );
-  await saveRecordingFiles([
-    { name: fileName, blob: videoBlob },
+  const files = [
+    ...outputs.map((output) => ({ name: output.fileName, blob: output.videoBlob })),
     { name: jsonFileName, blob: jsonBlob },
     { name: htmlFileName, blob: htmlBlob },
-  ]);
+  ];
+  if (recordingDirectoryHandle) {
+    await saveRecordingFiles(files);
+  } else if (!deferDownload) {
+    await saveRecordingFiles(files);
+  }
+  setRecordingDownloads(outputs);
 }
 
-function finalizeRecordingArtifact(videoBlob, fileName) {
+function finalizeRecordingArtifact(outputs) {
   const artifact = recordingArtifact || ensureSessionArtifact();
-  const jsonFileName = sidecarFileName(fileName, "json");
-  const htmlFileName = sidecarFileName(fileName, "html");
+  const primary = outputs.find((output) => output.key === "comparison") || outputs[0];
+  if (!primary) throw new Error("No recording outputs were generated");
+  const sidecarBaseName = primary.fileName.replace(/-comparison\.[^.]*$/, "");
+  const jsonFileName = `${sidecarBaseName}.json`;
+  const htmlFileName = `${sidecarBaseName}.html`;
+  const tracksByKey = Object.fromEntries(recordingTracks.map((track) => [track.key, track]));
+  const videos = Object.fromEntries(outputs.map((output) => {
+    const track = tracksByKey[output.key];
+    return [output.key, {
+      label: output.label,
+      mime_type: output.videoBlob.type || track?.mimeType || "video/mp4",
+      frames: track?.frameIndex || 0,
+      dropped_frames: track?.droppedFrames || 0,
+      encoded_chunks: recordingMode === "mediarecorder-webm"
+        ? track?.mediaChunks.length || 0
+        : track?.samples.length || 0,
+      video_file: output.fileName,
+      video_url: recordingAssetUrl(output.fileName),
+      video_bytes: output.videoBlob.size,
+    }];
+  }));
   artifact.recording = {
     ...(artifact.recording || {}),
     stopped_at: new Date().toISOString(),
     stopped_client_ms: artifactClientMs(artifact),
     mode: recordingMode,
-    mime_type: videoBlob.type || recordingMimeType,
+    mime_type: primary.videoBlob.type || tracksByKey.comparison?.mimeType || "video/mp4",
     fps: recordingFps,
     frames: recordingFrameIndex,
-    encoded_chunks: recordingMode === "mediarecorder-webm"
-      ? recordingMediaChunks.length
-      : recordingSamples.length,
-    video_file: fileName,
-    video_url: recordingAssetUrl(fileName),
-    video_bytes: videoBlob.size,
+    dropped_frames: recordingDroppedFrames,
+    duration_ms: Math.round(recordingElapsedMs),
+    encoded_chunks: videos.comparison?.encoded_chunks || 0,
+    video_file: primary.fileName,
+    video_url: recordingAssetUrl(primary.fileName),
+    video_bytes: primary.videoBlob.size,
+    videos,
     json_file: jsonFileName,
     json_url: recordingAssetUrl(jsonFileName),
     html_file: htmlFileName,
@@ -2467,13 +4133,13 @@ function escapeHtmlAttribute(value) {
     .replaceAll("'", "&#39;");
 }
 
-function buildRecordingMp4() {
-  if (!recordingEncoderConfig.description) {
+function buildRecordingMp4(track) {
+  if (!track.encoderConfig?.description) {
     throw new Error("H.264 encoder did not return MP4 decoder config");
   }
-  const width = recordingEncoderConfig.width;
-  const height = recordingEncoderConfig.height;
-  const samples = normalizeRecordingSamples(recordingSamples);
+  const width = track.encoderConfig.width;
+  const height = track.encoderConfig.height;
+  const samples = normalizeRecordingSamples(track.samples);
   const mdatPayload = concatBytes(samples.map((sample) => sample.data));
   const ftyp = mp4Box("ftyp", ascii("isom"), u32(0x200), ascii("isom"), ascii("iso2"), ascii("avc1"), ascii("mp41"));
   const mdat = mp4Box("mdat", mdatPayload);
@@ -2483,7 +4149,7 @@ function buildRecordingMp4() {
     height,
     samples,
     firstSampleOffset,
-    avcConfig: new Uint8Array(recordingEncoderConfig.description),
+    avcConfig: new Uint8Array(track.encoderConfig.description),
   });
   return new Blob([ftyp, mdat, moov], { type: "video/mp4" });
 }
@@ -2734,6 +4400,10 @@ function hasPendingPlaybackInput() {
 function enqueueDecodeBatch(header, data, epoch) {
   const frameCount = Number(header.num_frames || 1);
   const payloadBytes = payloadByteLength(data);
+  const eventId = Number(header.event_id || 0);
+  if (lastSentEventId > 0 && eventId >= lastSentEventId) {
+    dropQueuedDecodeBatchesBeforeEvent(eventId);
+  }
   decodeQueue.push({ header, data, epoch, frameCount, payloadBytes });
   queuedDecodeFrames += frameCount;
   queuedDecodeBytes += payloadBytes;
@@ -2741,6 +4411,23 @@ function enqueueDecodeBatch(header, data, epoch) {
   trimDecodeQueue();
   pumpDecodeQueue();
   updateStats();
+}
+
+function dropQueuedDecodeBatchesBeforeEvent(eventId) {
+  const kept = [];
+  for (const item of decodeQueue) {
+    if (Number(item.header?.event_id || 0) >= eventId) {
+      kept.push(item);
+      continue;
+    }
+    queuedDecodeFrames = Math.max(0, queuedDecodeFrames - item.frameCount);
+    queuedDecodeBytes = Math.max(0, queuedDecodeBytes - item.payloadBytes);
+    pendingDecodeBatches = Math.max(0, pendingDecodeBatches - 1);
+    droppedDecodeFrames += item.frameCount;
+    lastDecodeDropAt = performance.now();
+    lastDecodeDropCount = item.frameCount;
+  }
+  decodeQueue = kept;
 }
 
 function payloadByteLength(data) {
@@ -2751,19 +4438,32 @@ function payloadByteLength(data) {
 function trimDecodeQueue() {
   if (recordingActive) return;
   if (!decodeQueue.length) return;
-  const preservesTimeline =
-    selectedPlaybackMode() === "timeline" ||
-    selectedPlaybackMode() === "smooth_timeline";
+  const playbackMode = selectedPlaybackMode();
+  const preservesTimeline = playbackMode === "timeline";
+  const boundedRealtime = playbackMode === "smooth_timeline";
   const playback = playbackController.snapshot();
-  const decodeWindowSeconds = renderedPreviewFrames
-    ? Math.max(DECODE_QUEUE_SECONDS, (playback.maxLeadMs || 0) / 1000)
-    : STARTUP_DECODE_QUEUE_SECONDS;
-  const maxQueuedFrames = preservesTimeline
-    ? Number.POSITIVE_INFINITY
-    : Math.max(
-        2,
-        Math.round(previewPlaybackTargetFps() * decodeWindowSeconds),
-      );
+  let maxQueuedFrames;
+  if (preservesTimeline) {
+    maxQueuedFrames = Number.POSITIVE_INFINITY;
+  } else if (boundedRealtime && renderedPreviewFrames) {
+    const fallbackFrames = Math.max(
+      1,
+      Math.floor(previewPlaybackTargetFps() * ONLINE_MAX_BUFFER_MS / 1000),
+    );
+    maxQueuedFrames = Math.max(
+      2,
+      Number(playback.maxRealtimeBufferFrames || fallbackFrames) +
+        ONLINE_DECODE_QUEUE_SLACK_FRAMES,
+    );
+  } else {
+    const decodeWindowSeconds = renderedPreviewFrames
+      ? Math.max(DECODE_QUEUE_SECONDS, (playback.maxLeadMs || 0) / 1000)
+      : STARTUP_DECODE_QUEUE_SECONDS;
+    maxQueuedFrames = Math.max(
+      2,
+      Math.round(previewPlaybackTargetFps() * decodeWindowSeconds),
+    );
+  }
   while (
     (queuedDecodeFrames > maxQueuedFrames || queuedDecodeBytes > MAX_DECODE_QUEUE_BYTES) &&
     decodeQueue.length > 1
@@ -2995,7 +4695,7 @@ function handleEncodedPreviewDecodeError(error, header, data, payloadBytes) {
   const signature = payloadSignature(data);
   const mode = shortPayloadMode(header.content_type);
   const message = error?.message || "encoded preview decode failed";
-  $("decodeText").textContent = `drop ${encodedDecodeErrors}`;
+  $("minwmDecodeText").textContent = `drop ${encodedDecodeErrors}`;
   setStatus("Decode dropped", "error");
   addHistory(
     `decode drop c${header.chunk_index} ${mode} ${formatBytes(payloadBytes)} ${signature} · ${message}`,
@@ -3044,8 +4744,10 @@ function drawFrame(image, { close = true, markRendered = true } = {}) {
   ctx.imageSmoothingEnabled = true;
   ctx.imageSmoothingQuality = "medium";
   ctx.drawImage(drawSource, 0, 0, sourceWidth, sourceHeight);
+  primaryHasVisibleFrame = true;
   if (markRendered) renderedPreviewFrames += 1;
   setPreviewState("live");
+  markSessionPlayable("minwm");
   if (close && !(image instanceof ImageData)) image.close?.();
 }
 
@@ -3061,18 +4763,16 @@ function renderLoop(now) {
     drawFrame(item.image);
     fpsSamples.push(now);
     fpsSamples = fpsSamples.filter((t) => now - t < 1000);
-    const renderedFps = String(fpsSamples.length);
-    $("renderFps").textContent = renderedFps;
-    $("chunkText").textContent = `chunk ${item.chunk}`;
+    lastRenderedChunk = item.chunk;
+    lastRenderedEventId = Number(item.eventId || lastRenderedEventId || 0);
     lastDisplayLagMs = now - (item.receivedAt || now);
-    $("decodeText").textContent = `${Math.round(item.decodeMs || lastDecodeMs)} ms`;
-    $("displayLagText").textContent = `${(lastDisplayLagMs / 1000).toFixed(1)} s`;
     recordChunkFirstRendered(item.chunk, {
       render_loop: true,
       display_lag_ms: lastDisplayLagMs,
       decode_ms: item.decodeMs || lastDecodeMs,
     });
     updateStats();
+    schedulePrimaryPlaybackAck();
   } else if (decision.action === "hold") {
     updateStats();
   }
@@ -3105,6 +4805,62 @@ async function readFirstFrame() {
   return undefined;
 }
 
+function drawPlaceholderImage(targetCanvas, image, sizeText) {
+  const requestedSize = parseSizeValue(sizeText);
+  const width = requestedSize?.width || image.width || image.naturalWidth || 1280;
+  const height = requestedSize?.height || image.height || image.naturalHeight || 720;
+  if (targetCanvas.width !== width || targetCanvas.height !== height) {
+    targetCanvas.width = width;
+    targetCanvas.height = height;
+  }
+  const targetContext = targetCanvas.getContext("2d", { alpha: false });
+  const sourceWidth = image.width || image.naturalWidth || width;
+  const sourceHeight = image.height || image.naturalHeight || height;
+  const scale = Math.min(width / sourceWidth, height / sourceHeight);
+  const drawWidth = sourceWidth * scale;
+  const drawHeight = sourceHeight * scale;
+  targetContext.fillStyle = "#11140f";
+  targetContext.fillRect(0, 0, width, height);
+  targetContext.imageSmoothingEnabled = true;
+  targetContext.imageSmoothingQuality = "high";
+  targetContext.drawImage(
+    image,
+    (width - drawWidth) / 2,
+    (height - drawHeight) / 2,
+    drawWidth,
+    drawHeight,
+  );
+}
+
+function drawVisibleReferencePlaceholders() {
+  if (!selectedReferencePreviewReady) return;
+  const referencePreview = $("referencePreview");
+  drawPlaceholderImage(canvas, referencePreview, modelControl("minwm", "size").value);
+  drawPlaceholderImage(
+    lingbot2Canvas,
+    referencePreview,
+    modelControl("lingbot2", "size").value,
+  );
+}
+
+async function drawInitialReferencePlaceholders(firstFrame) {
+  if (!firstFrame?.byteLength || typeof createImageBitmap !== "function") return;
+  let image;
+  try {
+    image = await createImageBitmap(new Blob([firstFrame]));
+    drawPlaceholderImage(canvas, image, modelControl("minwm", "size").value);
+    drawPlaceholderImage(
+      lingbot2Canvas,
+      image,
+      modelControl("lingbot2", "size").value,
+    );
+  } catch (error) {
+    addHistory(`reference placeholder unavailable · ${error?.message || error}`);
+  } finally {
+    image?.close?.();
+  }
+}
+
 async function fetchReferenceBytes(url) {
   try {
     const response = await fetch(url, { cache: "force-cache", mode: "cors" });
@@ -3126,44 +4882,679 @@ async function fetchReferenceBytes(url) {
 function drawReferencePreviewFromImageSource(src, label) {
   const preview = $("referencePreview");
   const previewCtx = preview.getContext("2d", { alpha: false });
-  previewCtx.fillStyle = "#e5e7df";
+  selectedReferencePreviewReady = false;
+  previewCtx.fillStyle = "#101515";
   previewCtx.fillRect(0, 0, preview.width, preview.height);
   $("referenceName").textContent = label;
   const img = new Image();
-  img.onload = () => {
-    const scale = Math.min(preview.width / img.width, preview.height / img.height);
-    const w = img.width * scale, h = img.height * scale;
-    previewCtx.fillRect(0, 0, preview.width, preview.height);
-    previewCtx.drawImage(img, (preview.width - w) / 2, (preview.height - h) / 2, w, h);
-    if (src.startsWith("blob:")) URL.revokeObjectURL(src);
+  return new Promise((resolve) => {
+    img.onload = () => {
+      const scale = Math.min(preview.width / img.width, preview.height / img.height);
+      const w = img.width * scale, h = img.height * scale;
+      previewCtx.fillRect(0, 0, preview.width, preview.height);
+      previewCtx.drawImage(img, (preview.width - w) / 2, (preview.height - h) / 2, w, h);
+      setHappyOysterReferencePreview(preview.toDataURL("image/jpeg", 0.86));
+      selectedReferencePreviewReady = true;
+      updateWorldDraftState();
+      drawVisibleReferencePlaceholders();
+      if (src.startsWith("blob:")) URL.revokeObjectURL(src);
+      resolve(true);
+    };
+    img.onerror = () => {
+      selectedReferencePreviewReady = false;
+      updateWorldDraftState();
+      previewCtx.fillStyle = "#11140f";
+      previewCtx.fillRect(0, 0, preview.width, preview.height);
+      previewCtx.fillStyle = "#8c9288";
+      previewCtx.font = "14px ui-sans-serif, Avenir Next, Helvetica Neue, sans-serif";
+      previewCtx.textAlign = "center";
+      previewCtx.textBaseline = "middle";
+      previewCtx.fillText("reference image unavailable", preview.width / 2, preview.height / 2);
+      setHappyOysterReferencePreview("");
+      if (src.startsWith("blob:")) URL.revokeObjectURL(src);
+      resolve(false);
+    };
+    img.src = src;
+  });
+}
+
+function clearReferencePreview() {
+  const preview = $("referencePreview");
+  const previewCtx = preview.getContext("2d", { alpha: false });
+  selectedReferencePreviewReady = false;
+  previewCtx.fillStyle = "#101515";
+  previewCtx.fillRect(0, 0, preview.width, preview.height);
+  $("referenceName").textContent = "尚未选择图片";
+  setHappyOysterReferencePreview("");
+}
+
+function hasFirstFrame() {
+  return Boolean(
+    $("firstFrame").files[0]
+    || selectedReferenceBytes?.byteLength
+    || (selectedReferenceUrl && selectedReferencePreviewReady)
+  );
+}
+
+function hasWorldDescription() {
+  return Boolean($("prompt").value.trim());
+}
+
+function skillRuleElements() {
+  return Array.from(document.querySelectorAll(".skill-rule-item"));
+}
+
+function setWorldRulesStatus(message, state = "") {
+  const status = $("worldRulesStatus");
+  status.textContent = message;
+  if (state) status.dataset.state = state;
+  else delete status.dataset.state;
+}
+
+function readWorldRulesDraft() {
+  const goalInput = $("goalRuleInput").value;
+  const goalMinPlaySeconds = $("goalMinPlaySeconds").value;
+  if (goalInput.trim() && goalMinPlaySeconds !== "") {
+    const seconds = Number(goalMinPlaySeconds);
+    if (!Number.isFinite(seconds) || seconds < 0 || seconds > MAX_GOAL_MIN_PLAY_SECONDS) {
+      throw new Error(`目标至少游玩时间必须在 0–${MAX_GOAL_MIN_PLAY_SECONDS} 秒之间`);
+    }
+  }
+  return {
+    skills: skillRuleElements().map((item) => ({
+      id: item.dataset.skillRuleId,
+      input: item.querySelector("[data-rule-field='input']").value,
+    })),
+    goal: {
+      min_play_seconds: goalMinPlaySeconds,
+      probability: $("goalProbability").value,
+      input: goalInput,
+    },
   };
-  img.onerror = () => {
-    previewCtx.fillStyle = "#11140f";
-    previewCtx.fillRect(0, 0, preview.width, preview.height);
-    previewCtx.fillStyle = "#8c9288";
-    previewCtx.font = "14px ui-sans-serif, Avenir Next, Helvetica Neue, sans-serif";
-    previewCtx.textAlign = "center";
-    previewCtx.textBaseline = "middle";
-    previewCtx.fillText("reference image unavailable", preview.width / 2, preview.height / 2);
-    if (src.startsWith("blob:")) URL.revokeObjectURL(src);
+}
+
+function normalizedWorldRulesForStorage(draft = readWorldRulesDraft()) {
+  return normalizeWorldRulesDraft(draft);
+}
+
+function worldRulesStorageSignature(draft = readWorldRulesDraft()) {
+  try {
+    return JSON.stringify(normalizedWorldRulesForStorage(draft));
+  } catch {
+    return JSON.stringify(draft || {});
+  }
+}
+
+function hasConfiguredWorldRules(draft = readWorldRulesDraft()) {
+  try {
+    const normalized = normalizedWorldRulesForStorage(draft);
+    return Boolean(normalized.skills.length || normalized.goal);
+  } catch {
+    return true;
+  }
+}
+
+function worldRulesPreparationSignature(description, draft = readWorldRulesDraft()) {
+  return JSON.stringify({
+    description: normalizeWorldDescription(description),
+    rules: normalizedWorldRulesForStorage(draft),
+  });
+}
+
+function invalidatePreparedWorldRules() {
+  preparedWorldRulesCache = null;
+  worldRulesDraftGeneration += 1;
+  skillRuleElements().forEach((item) => {
+    const state = item.querySelector(".skill-rule-state");
+    state.textContent = item.querySelector("[data-rule-field='input']").value.trim()
+      ? "待进入世界时由 AI 补全"
+      : "填写技能标签或动作描述后启用";
+    delete state.dataset.state;
+  });
+}
+
+function updateWorldRulesDraftUi() {
+  const items = skillRuleElements();
+  items.forEach((item, index) => {
+    item.querySelector(".skill-rule-key").textContent = String(index + 1);
+  });
+  $("skillRuleEmpty").hidden = items.length > 0;
+  $("addSkillRuleBtn").disabled = items.length >= 9;
+  const skillCount = items.filter((item) => (
+    item.querySelector("[data-rule-field='input']").value.trim()
+  )).length;
+  const hasGoal = Boolean($("goalRuleInput").value.trim());
+  const parts = [];
+  if (skillCount) parts.push(`${skillCount} 个技能`);
+  if (hasGoal) {
+    const minPlaySeconds = $("goalMinPlaySeconds").value.trim() || "10";
+    parts.push(`1 个目标 · ≥${minPlaySeconds}s`);
+  }
+  $("worldRulesSummary").textContent = parts.length ? parts.join(" · ") : "未配置";
+
+  if (!parts.length) {
+    setWorldRulesStatus("规则非必填", "");
+    return;
+  }
+  try {
+    normalizedWorldRulesForStorage();
+    setWorldRulesStatus("进入世界前 AI 会自动补全名称与完整 Prompt", "ready");
+  } catch (error) {
+    setWorldRulesStatus(error.message || "规则配置不完整", "error");
+  }
+}
+
+function handleWorldRulesDraftInput() {
+  invalidatePreparedWorldRules();
+  updateWorldRulesDraftUi();
+}
+
+function addSkillRule(skill = {}, { focus = true } = {}) {
+  const list = $("skillRuleList");
+  if (skillRuleElements().length >= 9) {
+    setWorldRulesStatus("最多可以配置 9 个技能", "error");
+    return null;
+  }
+  const item = document.createElement("article");
+  item.className = "skill-rule-item";
+  const existingIds = new Set(skillRuleElements().map((entry) => entry.dataset.skillRuleId));
+  let skillId = String(skill.id || "").trim();
+  if (!skillId || existingIds.has(skillId)) {
+    do {
+      skillId = `skill-${skillRuleNextId++}`;
+    } while (existingIds.has(skillId));
+  } else {
+    const numericId = /^skill-(\d+)$/.exec(skillId);
+    if (numericId) skillRuleNextId = Math.max(skillRuleNextId, Number(numericId[1]) + 1);
+  }
+  item.dataset.skillRuleId = skillId;
+
+  const head = document.createElement("div");
+  head.className = "skill-rule-item-head";
+  const key = document.createElement("span");
+  key.className = "skill-rule-key";
+  key.setAttribute("aria-hidden", "true");
+  const input = document.createElement("textarea");
+  input.rows = 2;
+  input.maxLength = 2000;
+  input.placeholder = "输入技能标签或动作描述，例如：召唤飞船；或：从云层中召唤一艘发光飞船……";
+  input.value = String(skill.input || skill.instruction || skill.name || "");
+  input.dataset.ruleField = "input";
+  input.setAttribute("aria-label", "技能标签或动作描述");
+  const remove = document.createElement("button");
+  remove.className = "skill-rule-remove";
+  remove.type = "button";
+  remove.setAttribute("aria-label", "删除技能");
+  remove.title = "删除技能";
+  remove.textContent = "×";
+  head.append(key, input, remove);
+  const state = document.createElement("span");
+  state.className = "skill-rule-state";
+  state.textContent = input.value.trim()
+    ? "待进入世界时由 AI 补全"
+    : "填写技能标签或动作描述后启用";
+  item.append(head, state);
+  list.appendChild(item);
+
+  input.addEventListener("input", handleWorldRulesDraftInput);
+  remove.onclick = () => {
+    item.remove();
+    handleWorldRulesDraftInput();
   };
-  img.src = src;
+  updateWorldRulesDraftUi();
+  if (focus) input.focus({ preventScroll: true });
+  return item;
+}
+
+function applyWorldRulesDraft(draft = null) {
+  $("skillRuleList").innerHTML = "";
+  const skills = Array.isArray(draft?.skills) ? draft.skills : [];
+  skills.slice(0, 9).forEach((skill) => addSkillRule(skill, { focus: false }));
+  $("goalMinPlaySeconds").value = draft?.goal?.min_play_seconds == null
+    ? (draft?.goal?.minPlaySeconds == null ? "" : String(draft.goal.minPlaySeconds))
+    : String(draft.goal.min_play_seconds);
+  $("goalProbability").value = draft?.goal?.probability == null
+    ? ""
+    : String(draft.goal.probability);
+  $("goalRuleInput").value = String(
+    draft?.goal?.input || draft?.goal?.instruction || draft?.goal?.name || "",
+  );
+  invalidatePreparedWorldRules();
+  updateWorldRulesDraftUi();
+}
+
+function setWorldRulesPreparing(pending) {
+  $("worldRulesPanel").setAttribute("aria-busy", pending ? "true" : "false");
+  $("worldRulesPanel").querySelectorAll("input, textarea, button").forEach((control) => {
+    control.disabled = pending;
+  });
+  $("addSkillRuleBtn").disabled = pending || skillRuleElements().length >= 9;
+}
+
+async function prepareWorldRulesForEntry(description) {
+  const draft = readWorldRulesDraft();
+  const signature = worldRulesPreparationSignature(description, draft);
+  if (preparedWorldRulesCache?.signature === signature) {
+    return preparedWorldRulesCache.prepared;
+  }
+  const normalized = normalizedWorldRulesForStorage(draft);
+  const ruleCount = normalized.skills.length + (normalized.goal ? 1 : 0);
+  if (!ruleCount) {
+    setWorldRulesStatus("当前世界未配置规则", "");
+    return { skills: [], goal: null };
+  }
+
+  const generation = worldRulesDraftGeneration;
+  setWorldRulesPreparing(true);
+  setWorldRulesStatus(`正在并行补全 ${ruleCount} 条规则…`, "working");
+  skillRuleElements().forEach((item) => {
+    const state = item.querySelector(".skill-rule-state");
+    if (item.querySelector("[data-rule-field='input']").value.trim()) {
+      state.textContent = "AI 正在补全名称与 Prompt…";
+      delete state.dataset.state;
+    }
+  });
+  try {
+    const prepared = await worldRulesController.prepare(normalized, description);
+    if (generation !== worldRulesDraftGeneration) {
+      throw new Error("规则已发生变化，请重新进入世界");
+    }
+    prepared.skills.forEach((skill) => {
+      const item = skillRuleElements().find((candidate) => (
+        candidate.dataset.skillRuleId === skill.id
+      ));
+      const state = item?.querySelector(".skill-rule-state");
+      if (!state) return;
+      state.textContent = skill.prepared.change_type === "one_time"
+        ? `✓ ${skill.name} · 一次性`
+        : `✓ ${skill.name} · 持久`;
+      state.dataset.state = "ready";
+    });
+    preparedWorldRulesCache = { signature, prepared };
+    setWorldRulesStatus(`${ruleCount} 条规则已补全；技能可立即使用，目标将按时间自动触发`, "ready");
+    return prepared;
+  } catch (error) {
+    $("worldRulesPanel").open = true;
+    skillRuleElements().forEach((item) => {
+      const state = item.querySelector(".skill-rule-state");
+      if (!state.dataset.state) {
+        state.textContent = "补全失败，请重试";
+        state.dataset.state = "error";
+      }
+    });
+    setWorldRulesStatus(error.message || "规则补全失败", "error");
+    throw error;
+  } finally {
+    setWorldRulesPreparing(false);
+  }
+}
+
+function hasLiveWorldRuleTarget() {
+  return selectedModelKeys().some((key) => (
+    document.querySelector(`[data-model-key="${key}"]`)?.dataset.sessionState === "live"
+  ));
+}
+
+function renderRuntimeSkillBar(snapshot = null) {
+  snapshot = snapshot || worldRulesController?.snapshot() || { skills: [] };
+  const bar = $("runtimeSkillBar");
+  const container = $("runtimeSkillButtons");
+  const hint = $("runtimeSkillHint");
+  if (!bar || !container) return;
+  const cooldownRemainingMs = Math.max(0, Number(snapshot.skillCooldownRemainingMs || 0));
+  const cooldownActive = cooldownRemainingMs > 0;
+  const cooldownSeconds = Math.max(1, Math.ceil(cooldownRemainingMs / 1000));
+  if (cooldownActive && !runtimeSkillCooldownUiTimer) {
+    runtimeSkillCooldownUiTimer = window.setInterval(() => {
+      renderRuntimeSkillBar(worldRulesController?.snapshot());
+    }, 200);
+  } else if (!cooldownActive && runtimeSkillCooldownUiTimer) {
+    window.clearInterval(runtimeSkillCooldownUiTimer);
+    runtimeSkillCooldownUiTimer = 0;
+  }
+  container.innerHTML = "";
+  bar.hidden = snapshot.skills.length === 0;
+  bar.classList.toggle("is-cooldown", cooldownActive);
+  if (hint) {
+    hint.textContent = cooldownActive
+      ? `全部技能共享冷却 · ${cooldownSeconds}s`
+      : "点击或按数字键触发 · 共享 10s CD";
+  }
+  const canTrigger = worldExperienceReady
+    && sessionPlayable
+    && !sessionLifetimeExpired
+    && hasLiveWorldRuleTarget();
+  snapshot.skills.forEach((skill, index) => {
+    const button = document.createElement("button");
+    button.className = "runtime-skill-button";
+    button.type = "button";
+    button.dataset.skillId = skill.id;
+    button.disabled = !canTrigger || skill.pending || cooldownActive;
+    button.classList.toggle("is-pending", Boolean(skill.pending));
+    button.classList.toggle("is-cooldown", cooldownActive);
+    button.title = cooldownActive
+      ? `全部技能冷却中，还剩 ${cooldownSeconds} 秒`
+      : skill.instruction;
+    const shortcut = document.createElement("kbd");
+    shortcut.textContent = String(index + 1);
+    const label = document.createElement("span");
+    label.textContent = skill.pending
+      ? `${skill.name}…`
+      : cooldownActive
+        ? `${skill.name} · ${cooldownSeconds}s`
+        : skill.name;
+    button.append(shortcut, label);
+    button.onclick = () => triggerWorldSkill(skill.id);
+    container.appendChild(button);
+  });
+}
+
+async function triggerWorldSkill(skillId) {
+  const rulesSnapshot = worldRulesController.snapshot();
+  const skill = rulesSnapshot.skills.find((item) => item.id === skillId);
+  if (!skill || !worldExperienceReady || !sessionPlayable || !hasLiveWorldRuleTarget()) {
+    setPromptRewriteStatus("模型连接已断开，请重新进入世界", "error");
+    renderRuntimeSkillBar();
+    return;
+  }
+  if (rulesSnapshot.skillCooldownRemainingMs > 0) {
+    setPromptRewriteStatus(
+      `全部技能冷却中，还剩 ${Math.ceil(rulesSnapshot.skillCooldownRemainingMs / 1000)} 秒`,
+      "working",
+    );
+    renderRuntimeSkillBar(rulesSnapshot);
+    return;
+  }
+  setPromptRewriteStatus(`正在触发技能「${skill.name}」…`, "working");
+  try {
+    const result = await worldRulesController.triggerSkill(skillId);
+    if (result?.ignored) {
+      if (result.reason === "shared_cooldown") {
+        setPromptRewriteStatus(
+          `全部技能冷却中，还剩 ${Math.ceil(Number(result.remaining_ms || 0) / 1000)} 秒`,
+          "working",
+        );
+      }
+      return;
+    }
+    setPromptRewriteStatus(
+      result.change_type === "one_time"
+        ? `已触发「${skill.name}」· 一次性，10 秒后恢复`
+        : `已触发「${skill.name}」· 持久状态`,
+      result.change_type,
+    );
+    canvas.focus({ preventScroll: true });
+  } catch (error) {
+    setPromptRewriteStatus(error.message || "技能触发失败，请重试", "error");
+    addHistory(`skill trigger failed · ${skill.name} · ${error.message || error}`);
+  }
+}
+
+function setWorldDraftStatus(message, state = "") {
+  const status = $("worldDraftStatus");
+  status.textContent = message;
+  if (state) status.dataset.state = state;
+  else delete status.dataset.state;
+}
+
+function setWorldCompletionBusy(pending, completingFromImage = false) {
+  worldCompletionPending = pending;
+  const button = $("enhanceBtn");
+  button.disabled = pending;
+  button.classList.toggle("is-loading", pending);
+  button.setAttribute("aria-busy", pending ? "true" : "false");
+  $("enhanceBtnLabel").textContent = pending ? "正在补全…" : "补全世界";
+  $("enhanceBtnHint").textContent = pending
+    ? (completingFromImage ? "正在理解首帧并生成完整描述" : "正在生成世界描述和首帧")
+    : "补齐首帧与完整世界描述";
+  $("clearWorldBtn").disabled = pending;
+  $("prompt").readOnly = pending;
+  $("firstFrame").disabled = pending;
+  document.querySelectorAll(".preset").forEach((preset) => {
+    preset.disabled = pending;
+  });
+  updateWorldDraftState();
+}
+
+function updateWorldDraftState() {
+  const hasImage = hasFirstFrame();
+  const hasDescription = hasWorldDescription();
+  $("firstFrameState").textContent = hasImage ? "✓ 已填写" : "未填写";
+  $("worldDescriptionState").textContent = hasDescription ? "✓ 已填写" : "未填写";
+  $("firstFrameState").classList.toggle("is-complete", hasImage);
+  $("worldDescriptionState").classList.toggle("is-complete", hasDescription);
+  document.querySelector(".reference-upload").classList.toggle("has-image", hasImage);
+  $("referenceUploadTitle").textContent = hasImage ? "更换首帧" : "上传首帧";
+  const complete = hasImage && hasDescription;
+  $("connectBtn").disabled = worldCompletionPending;
+  $("connectBtn").title = complete
+    ? "进入当前世界"
+    : "需要首帧图片和世界描述；点击后会提示缺少项";
+  if (!worldCompletionPending && !complete) {
+    const missing = [
+      !hasImage ? "首帧图片" : "",
+      !hasDescription ? "世界描述" : "",
+    ].filter(Boolean).join("和");
+    setWorldDraftStatus(`还需要${missing}，可点击补全世界`, "incomplete");
+  } else if (!worldCompletionPending && complete) {
+    setWorldDraftStatus("世界已完整，可以进入", "ready");
+  }
+}
+
+function clearWorldDraft() {
+  if (ws && ws.readyState === WebSocket.OPEN) closeSession("world draft cleared");
+  selectedPreset = null;
+  selectedReferenceBytes = null;
+  selectedReferenceUrl = "";
+  selectedReferenceLabel = "";
+  selectedReferenceMimeType = "";
+  $("firstFrame").value = "";
+  $("prompt").value = "";
+  applyWorldRulesDraft(null);
+  document.querySelectorAll(".preset").forEach((button) => {
+    button.classList.remove("is-selected");
+    button.setAttribute("aria-pressed", "false");
+  });
+  clearReferencePreview();
+  updateWorldDraftState();
+  $("prompt").focus({ preventScroll: true });
+  addHistory("world draft cleared");
+}
+
+async function worldCompletionImage() {
+  const file = $("firstFrame").files[0];
+  if (file) return file;
+  if (!hasFirstFrame()) return null;
+  const bytes = await readFirstFrame();
+  if (!bytes?.byteLength) return null;
+  const mime = selectedReferenceMimeType
+    || selectedPreset?.mime
+    || mimeFromReferenceUrl(selectedReferenceUrl)
+    || "image/png";
+  return new File([bytes], selectedReferenceLabel || "first-frame", { type: mime });
+}
+
+async function completeWorldDraft() {
+  if (worldCompletionPending) return;
+  const seedText = $("prompt").value.trim();
+  if (!seedText && !hasFirstFrame()) {
+    setWorldDraftStatus("请先写一句世界描述或上传一张图片", "error");
+    $("prompt").focus({ preventScroll: true });
+    return;
+  }
+  let finalStatus = null;
+  const completingFromImage = hasFirstFrame();
+  setWorldCompletionBusy(true, completingFromImage);
+  setWorldDraftStatus(
+    completingFromImage ? "正在理解首帧并补全世界描述…" : "正在生成世界描述和首帧，请稍候…",
+    "working",
+  );
+  await new Promise((resolve) => requestAnimationFrame(() => resolve()));
+  try {
+    const form = new FormData();
+    if (seedText) form.append("world_description", seedText);
+    const image = await worldCompletionImage();
+    if (image) form.append("first_frame", image, image.name);
+    const response = await fetch("./api/world/complete", { method: "POST", body: form });
+    let result = null;
+    try {
+      result = await response.json();
+    } catch {
+      result = null;
+    }
+    if (!response.ok) {
+      throw new Error(result?.error || `world completion failed (${response.status})`);
+    }
+    $("prompt").value = String(result.world_description || "").trim();
+    invalidatePreparedWorldRules();
+    updateWorldRulesDraftUi();
+    if (result.image_url) {
+      selectedPreset = null;
+      selectedReferenceBytes = null;
+      selectedReferenceUrl = result.image_url;
+      selectedReferenceLabel = "AI 生成首帧";
+      selectedReferenceMimeType = "image/png";
+      $("firstFrame").value = "";
+      await drawReferencePreviewFromImageSource(result.image_url, selectedReferenceLabel);
+    }
+    if (!hasFirstFrame() || !hasWorldDescription()) {
+      throw new Error("world completion did not produce both required fields");
+    }
+    finalStatus = {
+      message: result.image_generated
+        ? "已生成首帧并补全世界描述"
+        : "已根据首帧补全世界描述",
+      state: "ready",
+    };
+    addHistory("world draft completed");
+  } catch (error) {
+    finalStatus = {
+      message: error.message || "世界补全失败，请重试",
+      state: "error",
+    };
+    addHistory(`world completion failed · ${error.message || error}`);
+  } finally {
+    setWorldCompletionBusy(false);
+    if (finalStatus) setWorldDraftStatus(finalStatus.message, finalStatus.state);
+  }
 }
 
 function drawReferencePreview(file) {
   selectedReferenceBytes = null;
   selectedReferenceUrl = "";
   selectedReferenceLabel = file ? file.name : "";
-  if (!file) return;
+  selectedReferenceMimeType = file?.type || "";
+  if (!file) {
+    clearReferencePreview();
+    updateWorldDraftState();
+    return;
+  }
   drawReferencePreviewFromImageSource(URL.createObjectURL(file), file.name);
+  updateWorldDraftState();
+}
+
+function clearSelectedWorldPreset() {
+  selectedPreset = null;
+  document.querySelectorAll(".preset").forEach((button) => {
+    button.classList.remove("is-selected");
+    button.setAttribute("aria-pressed", "false");
+  });
+}
+
+function isSupportedFirstFrameImage(file) {
+  if (!file) return false;
+  const supportedTypes = new Set(["image/png", "image/jpeg", "image/webp"]);
+  if (file.type) return supportedTypes.has(file.type.toLowerCase());
+  return /\.(?:png|jpe?g|webp)$/i.test(file.name || "");
+}
+
+async function useFirstFrameFile(file, { fromDrop = false } = {}) {
+  if (!file) return false;
+  if (!isSupportedFirstFrameImage(file)) {
+    setWorldDraftStatus("请拖入 PNG、JPG 或 WebP 图片", "error");
+    addHistory("unsupported first-frame file rejected");
+    return false;
+  }
+  clearSelectedWorldPreset();
+  selectedReferenceBytes = null;
+  selectedReferenceUrl = "";
+  selectedReferenceLabel = file.name || "拖入的首帧";
+  selectedReferenceMimeType = file.type || mimeFromReferenceUrl(file.name);
+  $("firstFrame").value = "";
+  const previewPromise = drawReferencePreviewFromImageSource(
+    URL.createObjectURL(file),
+    selectedReferenceLabel,
+  );
+  selectedReferenceBytes = new Uint8Array(await file.arrayBuffer());
+  await previewPromise;
+  updateWorldDraftState();
+  if (fromDrop) addHistory(`first frame dropped · ${selectedReferenceLabel}`);
+  return true;
+}
+
+function setupFirstFrameDropZone() {
+  const dropZone = $("referenceDropZone");
+  if (!dropZone) return;
+  let dragDepth = 0;
+  const hasFiles = (event) => {
+    const types = event.dataTransfer?.types;
+    if (!types) return Boolean(event.dataTransfer?.files?.length);
+    for (let index = 0; index < types.length; index += 1) {
+      if (types[index] === "Files") return true;
+    }
+    return Boolean(event.dataTransfer?.files?.length);
+  };
+  const clearDragging = () => {
+    dragDepth = 0;
+    dropZone.classList.remove("is-dragging");
+  };
+  dropZone.addEventListener("dragenter", (event) => {
+    if (!hasFiles(event) || worldCompletionPending) return;
+    event.preventDefault();
+    dragDepth += 1;
+    dropZone.classList.add("is-dragging");
+  });
+  dropZone.addEventListener("dragover", (event) => {
+    if (!hasFiles(event) || worldCompletionPending) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+  });
+  dropZone.addEventListener("dragleave", (event) => {
+    if (!hasFiles(event)) return;
+    event.preventDefault();
+    dragDepth = Math.max(0, dragDepth - 1);
+    if (!dragDepth) dropZone.classList.remove("is-dragging");
+  });
+  dropZone.addEventListener("drop", (event) => {
+    event.preventDefault();
+    if (worldCompletionPending) {
+      clearDragging();
+      return;
+    }
+    const files = Array.from(event.dataTransfer?.files || []);
+    clearDragging();
+    void useFirstFrameFile(files[0], { fromDrop: true }).catch((error) => {
+      setWorldDraftStatus("首帧图片读取失败，请重试", "error");
+      addHistory(`dropped first frame failed · ${error.message || error}`);
+    });
+  });
+  window.addEventListener("dragend", clearDragging);
+  window.addEventListener("drop", clearDragging);
 }
 
 async function setPresetReference(preset) {
-  selectedReferenceBytes = null;
+  selectedReferenceBytes = preset.imageBlob
+    ? new Uint8Array(await preset.imageBlob.arrayBuffer())
+    : null;
   selectedReferenceUrl = preset.referenceUrl;
   selectedReferenceLabel = preset.source;
+  selectedReferenceMimeType = preset.mime || mimeFromReferenceUrl(preset.referenceUrl);
   $("firstFrame").value = "";
-  drawReferencePreviewFromImageSource(preset.referenceUrl, selectedReferenceLabel);
+  const previewUrl = preset.imageBlob
+    ? URL.createObjectURL(preset.imageBlob)
+    : preset.referenceUrl;
+  await drawReferencePreviewFromImageSource(previewUrl, selectedReferenceLabel);
+  updateWorldDraftState();
 }
 
 function showError(error) {
@@ -3176,7 +5567,9 @@ function abortCurrentSession(reason = "session closed by client", {
   clearFrames = true,
   expectedClose = true,
   keepConnectDisabled = false,
+  resetControls = true,
 } = {}) {
+  promptRewriteController.endSession();
   recordTrajectoryEvent(expectedClose ? "session_close_requested" : "session_abort_requested", {
     reason,
     clear_frames: clearFrames,
@@ -3186,7 +5579,7 @@ function abortCurrentSession(reason = "session closed by client", {
   streamEpoch++;
   clearQueueOnClose = clearFrames;
   socketCloseExpected = expectedClose;
-  controlStateController?.reset({ sendRelease: false });
+  if (resetControls) controlStateController?.reset({ sendRelease: false });
   pendingHeader = null;
   rejectPendingDecodes("session aborted");
   resetDecoderState();
@@ -3210,7 +5603,11 @@ function abortCurrentSession(reason = "session closed by client", {
 }
 
 function closeSession(reason = "session closed by client", clearFrames = true) {
-  abortCurrentSession(reason, { clearFrames, expectedClose: true });
+  promptRewriteController.endSession();
+  cancelLingbot2Reconnect();
+  stopWorldExperienceTiming({ recordingReason: "session_closed" });
+  clearQueueOnClose = clearFrames;
+  dualModelController.close(reason);
 }
 
 function waitForSocketClose(socket, timeoutMs = RECONNECT_CLOSE_TIMEOUT_MS) {
@@ -3231,7 +5628,18 @@ function waitForSocketClose(socket, timeoutMs = RECONNECT_CLOSE_TIMEOUT_MS) {
 }
 
 async function connect() {
+  if (recordingActive) {
+    await stopRecording({ reason: "session_replaced" });
+  }
+  promptRewriteController.endSession();
+  worldRulesController.endSession();
+  setPromptRewriteStatus("进入世界后可发送新指令", "");
+  cancelLingbot2Reconnect();
+  resetSessionLifetimeUi();
   $("connectBtn").disabled = true;
+  setModelConnectionState("minwm", "connecting");
+  setModelConnectionState("lingbot2", "connecting");
+  setModelConnectionState("happyoyster", "connecting");
   setStatus("Preparing");
   setPreviewState("waiting");
   addHistory("preparing session");
@@ -3254,15 +5662,37 @@ async function connect() {
       fps: Number($("fps").value || DEFAULT_TARGET_FPS),
     });
     const generationMode = selectedGenerationMode();
+    if (!hasWorldDescription() || !hasFirstFrame()) {
+      setStatus("Complete world first", "error");
+      setWorldDraftStatus("请先补齐首帧图片和世界描述", "error");
+      setModelConnectionState("minwm", "idle");
+      setModelConnectionState("lingbot2", "idle");
+      setModelConnectionState("happyoyster", "idle");
+      setPreviewState("idle");
+      addHistory("world draft incomplete");
+      $("connectBtn").disabled = false;
+      (hasWorldDescription() ? $("firstFrame") : $("prompt")).focus?.({ preventScroll: true });
+      return;
+    }
+    const enteredWorldRules = normalizedWorldRulesForStorage();
+    const preparedWorldRules = await prepareWorldRulesForEntry($("prompt").value.trim());
     const continuousT2V = generationMode === "t2v" && $("continuous").checked;
+    const enteredWorldSnapshot = {
+      description: $("prompt").value,
+      preset: selectedPreset,
+      rules: enteredWorldRules,
+    };
+    let enteredFirstFrame;
     let firstFrame;
     let numFrames = Number($("numFrames").value);
     if (generationMode === "i2v") {
-      if (!$("firstFrame").files[0] && !selectedReferenceBytes && !selectedReferenceUrl) {
-        await setPresetReference(presets[0]);
-      }
-      firstFrame = await readFirstFrame();
+      drawVisibleReferencePlaceholders();
+      enteredFirstFrame = await readFirstFrame();
+      firstFrame = enteredFirstFrame;
       if (!firstFrame) {
+        setModelConnectionState("minwm", "idle");
+        setModelConnectionState("lingbot2", "idle");
+        setModelConnectionState("happyoyster", "idle");
         setStatus("Pick a reference", "error");
         setPreviewState("idle");
         addHistory("reference image required for I2V");
@@ -3270,53 +5700,91 @@ async function connect() {
         return;
       }
     } else {
+      enteredFirstFrame = await readFirstFrame();
       numFrames = continuousT2V ? undefined : readT2VNumFrames();
     }
-    const previewTransportParams = readPreviewTransportParams();
-    const frameInterpolationParams = readFrameInterpolationParams();
-    const superResolutionParams = readSuperResolutionParams();
+    await drawInitialReferencePlaceholders(firstFrame);
     const init = compact({
       type: "init",
-      generation_mode: generationMode,
       model: $("model").value,
-      prompt: $("prompt").value,
-      size: $("size").value,
-      fps: Number($("fps").value || DEFAULT_TARGET_FPS),
-      num_frames: continuousT2V ? undefined : numFrames,
-      seed: Number($("seed").value),
-      num_inference_steps: Number($("steps").value),
-      guidance_scale: Number($("guidance").value),
-      realtime_causal_sink_size: readOptionalInteger("sinkSize"),
-      realtime_causal_kv_cache_num_frames: readOptionalInteger("windowFrames"),
-      max_chunks: generationMode === "t2v" || $("continuous").checked
-        ? undefined
-        : 1,
       trace_id: currentTrace.traceId,
-      first_frame: firstFrame,
-      ...previewTransportParams,
-      ...frameInterpolationParams,
-      ...superResolutionParams,
+      playback_ack_enabled: PLAYBACK_ACK_ENABLED,
+      ...readModelRequestParams("minwm", {
+        generationMode,
+        firstFrame,
+        numFrames: continuousT2V ? undefined : numFrames,
+      }),
     });
-    const referenceImage = await createReferenceImageMeta(firstFrame);
+    const referenceImage = await createReferenceImageMeta(enteredFirstFrame);
     beginSessionArtifact(init, referenceImage);
     if (currentSessionArtifact && currentTrace) {
       currentSessionArtifact.trace_id = currentTrace.traceId;
     }
+    // Mount prepared skills before waiting for every comparison backend. A slow
+    // or reconnecting secondary model must not leave an already-entered world
+    // without its controls. The buttons stay disabled until a live target exists.
+    promptRewriteController.beginSession(init.prompt);
+    worldRulesController.activate(preparedWorldRules);
+    beginPromptLogSession(init.prompt);
     document.activeElement?.blur?.();
     canvas.tabIndex = 0;
     canvas.focus();
-    const socket = new WebSocket(traceWebSocketUrl($("serverUrl").value));
+    worldExperiencePending = true;
+    worldExperienceReady = false;
+    setStatus("Loading world", "live");
+    addHistory("model connected · waiting for first visible Zing frame");
+    const connectionReport = await dualModelController.connect(init);
+    if (epoch !== streamEpoch) return;
+    void rememberEnteredWorld(
+      enteredFirstFrame,
+      referenceImage,
+      enteredWorldSnapshot,
+    ).catch((error) => {
+      addHistory(`custom world save failed · ${error.message || error}`);
+    });
+    if (connectionReport.failed.length) {
+      addHistory(
+        `partial session · ${connectionReport.failed
+          .map(({ key, error }) => `${modelLabel(key)} unavailable: ${error?.message || error}`)
+          .join(" · ")}`,
+      );
+      if (connectionReport.failed.some(({ key }) => key === "lingbot2")) {
+        scheduleLingbot2Reconnect("initial connection failed");
+      }
+    }
+    if (connectionReport.pending?.includes("happyoyster")) {
+      setHappyOysterStageText("正在创建快乐生蚝 World…", "preparing");
+      addHistory("快乐生蚝 World 正在独立构建 · Zing/LingBot2 已先行启动");
+    }
+    if (!worldExperienceReady) setStatus("Loading world", "live");
+  } catch (error) {
+    stopWorldExperienceTiming({ recordingReason: "startup_failed" });
+    $("connectBtn").disabled = false;
+    setModelConnectionState("minwm", "error");
+    setStatus("Init failed", "error");
+    if (!renderedPreviewFrames) setPreviewState("idle");
+    addHistory(error.message || "init failed");
+  }
+}
+
+function openPrimarySession(init, url) {
+  const epoch = streamEpoch;
+  const generationMode = init.generation_mode;
+  const referenceImage = currentSessionArtifact?.reference_image || null;
+  return new Promise((resolve, reject) => {
+    const socket = new WebSocket(url);
     ws = socket;
     socket.binaryType = "arraybuffer";
     socketHadError = false;
     socketCloseExpected = false;
     socketServerError = "";
+    let opened = false;
     socket.onopen = () => {
       if (epoch !== streamEpoch) return;
-      markClientTrace("client.ws_open", {
-        url: traceWebSocketUrl($("serverUrl").value),
-      });
-      recordTrajectoryEvent("socket_open", { url: traceWebSocketUrl($("serverUrl").value) });
+      opened = true;
+      setModelConnectionState("minwm", "live");
+      markClientTrace("client.ws_open", { url });
+      recordTrajectoryEvent("socket_open", { url });
       const initPayload = pack(init);
       socket.send(initPayload);
       markClientTrace("client.init_sent", {
@@ -3332,9 +5800,10 @@ async function connect() {
       });
       setStatus("Starting", "live");
       const source = generationMode === "t2v"
-        ? `${numFrames} frames from text`
+        ? `${init.num_frames || "continuous"} frames from text`
         : selectedReferenceLabel || "uploaded reference";
-      addHistory(`${generationMode.toUpperCase()} session started · ${source}`);
+      addHistory(`${generationMode.toUpperCase()} dual session started · ${source}`);
+      resolve();
     };
     socket.onclose = (event) => {
       if (epoch !== streamEpoch) return;
@@ -3350,8 +5819,9 @@ async function connect() {
       }
       clearQueueOnClose = false;
       const reason = event.reason ? ` · ${event.reason}` : "";
-      const closeText = `socket closed code=${event.code}${reason}`;
+      const closeText = `Zing socket closed code=${event.code}${reason}`;
       const normalClose = event.code === 1000 || event.code === 1001;
+      setModelConnectionState("minwm", normalClose ? "closed" : "error");
       if (socketServerError) {
         setStatus("Server closed", "error");
         addHistory(`${closeText} · ${socketServerError}`);
@@ -3363,23 +5833,37 @@ async function connect() {
         addHistory(closeText);
       }
       recordTrajectoryEvent("socket_close", {
+        backend: "minwm",
         code: event.code,
         reason: event.reason || "",
         normal_close: normalClose,
         expected_close: socketCloseExpected,
       });
+      if (isSessionLifetimeReason(event.reason)) {
+        expireSessionLifetime({ closeSessions: true });
+      } else if (!socketCloseExpected) {
+        const hadReadyWorld = worldExperienceReady;
+        stopWorldExperienceTiming({ recordingReason: "primary_disconnected" });
+        lingbot2Session.close("Zing primary session closed");
+        if (hadReadyWorld) {
+          showSessionNotice("Zing 连接已中断，已结束计时并生成当前录像");
+        }
+      }
       void traceHttpClient?.flushClientEvents().catch(() => {});
       if (!renderedPreviewFrames) setPreviewState("idle");
+      if (!opened) reject(new Error(`Zing closed before startup (${event.code})`));
       socketCloseExpected = false;
     };
     socket.onerror = () => {
       if (epoch !== streamEpoch) return;
       markClientTrace("client.ws_error");
-      recordTrajectoryEvent("socket_error", { ready_state: socket.readyState });
+      recordTrajectoryEvent("socket_error", { backend: "minwm", ready_state: socket.readyState });
       if (!socketCloseExpected) {
+        setModelConnectionState("minwm", "error");
         socketHadError = true;
         $("connectBtn").disabled = false;
       }
+      if (!opened) reject(new Error("Zing websocket transport error"));
     };
     socket.onmessage = (event) => {
       if (epoch !== streamEpoch) return;
@@ -3389,12 +5873,13 @@ async function connect() {
         handleReceiveError(error, epoch);
       }
     };
-  } catch (error) {
-    $("connectBtn").disabled = false;
-    setStatus("Init failed", "error");
-    if (!renderedPreviewFrames) setPreviewState("idle");
-    addHistory(error.message || "init failed");
-  }
+  });
+}
+
+function sendPrimaryEventEnvelope(envelope) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+  ws.send(pack({ ...envelope, trace_id: currentTrace?.traceId }));
+  return true;
 }
 
 function handleReceiveError(error, epoch) {
@@ -3404,6 +5889,7 @@ function handleReceiveError(error, epoch) {
   abortCurrentSession(error.message || "receive failed", {
     clearFrames: false,
     expectedClose: false,
+    resetControls: false,
   });
 }
 
@@ -3417,6 +5903,16 @@ function receive(data, epoch) {
         payload_bytes: data.byteLength || data.size || 0,
       });
       socketServerError = message.content || "unknown";
+      // The protocol defines invalid events as non-fatal. Do not convert one
+      // rejected control extension into a complete dual-model disconnect.
+      if (socketServerError === "invalid event") {
+        addHistory("server rejected one event · session kept alive");
+        return;
+      }
+      if (isExperienceBusyError(message)) {
+        handleExperienceBusy();
+        return;
+      }
       setStatus(socketServerError, "error");
       addHistory(`server error: ${socketServerError}`);
       recordTrajectoryEvent("server_error", { content: socketServerError });
@@ -3437,9 +5933,11 @@ function receive(data, epoch) {
         content_type: message.content_type || "",
         num_frames: Number(message.num_frames || 0),
         payload_bytes: payload?.byteLength || payload?.size || payload?.length || 0,
+        frame_batch_gap_count: observeFrameBatchGap(message),
       });
       recordFrameBatchReceived(message, payload?.byteLength || payload?.size || payload?.length || 0);
       enqueueDecodeBatch(message, payload, epoch);
+      schedulePrimaryPlaybackAck();
       if (!renderedPreviewFrames) setStatus("Receiving", "live");
       return;
     }
@@ -3464,9 +5962,11 @@ function receive(data, epoch) {
     content_type: header.content_type || "",
     num_frames: Number(header.num_frames || 0),
     payload_bytes: data.byteLength || data.size || data.length || 0,
+    frame_batch_gap_count: observeFrameBatchGap(header),
   });
   recordFrameBatchReceived(header, data?.byteLength || data?.size || data?.length || 0);
   enqueueDecodeBatch(header, data, epoch);
+  schedulePrimaryPlaybackAck();
 }
 
 async function decodeAndEnqueueFrameBatch(header, data, epoch) {
@@ -3502,27 +6002,15 @@ async function decodeAndEnqueueFrameBatch(header, data, epoch) {
       decode_ms: decodedFrames[0].decodeMs || lastDecodeMs,
     });
   }
-  // record source frames before preview playback can hold or drop for latency
-  recordDecodedFrameBatch(decodedFrames);
+  // Gameplay recording runs from a wall-clock frame pump so control and prompt
+  // timing stays accurate even when model delivery stalls or skips frames.
   const enqueueResult = playbackController.enqueueDecodedFrames(header, decodedFrames, now);
   closeFrames(enqueueResult.droppedFrames);
-  const playback = enqueueResult.snapshot;
   lastSampledEventId = Number(header.event_id || lastSampledEventId);
+  markModelEventApplied("minwm", lastSampledEventId);
   updateControlDebugText();
-  $("chunkPayloadText").textContent = `${formatBytes(payloadBytes)} · ${chunkFrameCount}f`;
-  const realtimeRatio = playback.targetFps > 0
-    ? playback.sourceFps / playback.targetFps
-    : 0;
-  $("theoreticalFpsText").textContent = (
-    `${playback.sourceFps.toFixed(1)} fps · ${realtimeRatio.toFixed(2)}x`
-  );
-  if (enqueueResult.cutover?.latencyMs) {
-    const eventLatency = enqueueResult.cutover.latencyMs / 1000;
-    $("latencyText").textContent = `${eventLatency.toFixed(1)}s · event`;
-  }
   frames += chunkFrameCount;
   bytes += payloadBytes;
-  $("payloadMode").textContent = payloadModeLabelFromHeader(header);
   updateOutputSizeFromHeader(header);
   setStatus("Live", "live");
   updateStats();
@@ -3542,7 +6030,27 @@ function recordFrameBatchReceived(header, payloadBytes) {
     preview_width: header.preview_width,
     preview_height: header.preview_height,
     payload_bytes: payloadBytes,
+    frame_batch_gap_count: frameBatchGapCount,
   });
+}
+
+function observeFrameBatchGap(header) {
+  const chunkIndex = Number(header.chunk_index || 0);
+  const frameBatchIndex = Number(header.frame_batch_index || 0);
+  if (lastReceivedChunk === null) {
+    frameBatchGapCount += Math.max(0, frameBatchIndex);
+  } else if (chunkIndex === lastReceivedChunk) {
+    const expected = Number(lastReceivedFrameBatchIndex || 0) + 1;
+    if (frameBatchIndex > expected) frameBatchGapCount += frameBatchIndex - expected;
+  } else if (chunkIndex > lastReceivedChunk) {
+    frameBatchGapCount += Math.max(0, frameBatchIndex);
+    if (chunkIndex > lastReceivedChunk + 1) {
+      frameBatchGapCount += chunkIndex - lastReceivedChunk - 1;
+    }
+  }
+  lastReceivedChunk = chunkIndex;
+  lastReceivedFrameBatchIndex = frameBatchIndex;
+  return frameBatchGapCount;
 }
 
 function recordChunkFirstRendered(chunkIndex, details = {}) {
@@ -3571,30 +6079,25 @@ function recordChunkFirstRendered(chunkIndex, details = {}) {
 }
 
 function sendEvent(kind, payload, historyText = null) {
-  if (!ws || ws.readyState !== WebSocket.OPEN) {
-    addHistory(`${historyText || `${kind} event`} · socket not open`);
+  const delivery = dualModelController.sendEvent(kind, payload);
+  const deliveredModels = Object.entries(delivery.sent)
+    .filter(([, sent]) => sent)
+    .map(([key]) => key);
+  if (!deliveredModels.length) {
+    addHistory(`${historyText || `${kind} event`} · no model socket open`);
     recordTrajectoryEvent(`${kind}_event_dropped`, {
-      reason: "socket not open",
+      reason: "no model socket open",
       payload,
     });
     return null;
   }
-  const eventId = nextEventId++;
+  const eventId = delivery.eventId;
   const clientSentPerfMs = performance.now();
-  const clientSentEpochMs = Date.now();
-  ws.send(pack({
-    type: "event",
-    kind,
-    payload,
-    event_id: eventId,
-    trace_id: currentTrace?.traceId,
-    client_sent_perf_ms: roundTraceNumber(clientSentPerfMs),
-    client_sent_epoch_ms: clientSentEpochMs,
-  }));
   markClientTrace("client.event_sent", {
     kind,
     event_id: eventId,
-    ws_buffered_amount: ws.bufferedAmount,
+    delivered_models: deliveredModels,
+    ws_buffered_amount: primaryTransportBufferedAmount(),
   });
   lastSentEventId = eventId;
   updateControlDebugText();
@@ -3605,6 +6108,7 @@ function sendEvent(kind, payload, historyText = null) {
     recordTrajectoryEvent("camera_actions_sent", {
       event_id: eventId,
       payload,
+      delivered_models: deliveredModels,
       active_actions: controlStateController
         ? Array.from(controlStateController.activeActions).sort()
         : [],
@@ -3613,14 +6117,64 @@ function sendEvent(kind, payload, historyText = null) {
     recordTrajectoryEvent(`${kind}_event_sent`, { event_id: eventId, payload });
   }
   if (kind === "camera_actions" || kind === "prompt") {
-    playbackController.noteInputEvent(eventId, performance.now(), {
-      cutoverMode: cameraActionHasActiveMotion(payload) || kind === "prompt" ? "motion" : "settle",
-    });
-    updateStats();
+    if (delivery.sent.minwm) {
+      playbackController.noteInputEvent(eventId, performance.now(), {
+        cutoverMode: kind === "prompt"
+          ? "prompt"
+          : cameraActionHasActiveMotion(payload)
+            ? "motion"
+            : "settle",
+      });
+      updateStats();
+    }
     setStatus("Updating", "live");
   }
-  addHistory(`${historyText || `${kind} event sent`} · event#${eventId}`);
+  trackPendingModelEvent(delivery, kind);
+  addHistory(
+    `${historyText || `${kind} event sent`} · event#${eventId} · ${formatModelDelivery(delivery.sent)}`,
+  );
   return eventId;
+}
+
+function modelLabel(key) {
+  if (key === "lingbot2") return "LingBot2";
+  if (key === "happyoyster") return "快乐生蚝";
+  return "Zing";
+}
+
+function formatModelDelivery(sent = {}) {
+  const entries = Object.entries(sent);
+  if (!entries.length) return "no active model";
+  return entries
+    .map(([key, delivered]) => `${modelLabel(key)} ${delivered ? "sent" : "send failed"}`)
+    .join(" · ");
+}
+
+function trackPendingModelEvent(delivery, kind) {
+  if (kind !== "prompt" && kind !== "camera_actions") return;
+  const pending = new Set(
+    Object.entries(delivery.sent)
+      .filter(([, sent]) => sent)
+      .map(([key]) => key),
+  );
+  if (!pending.size) return;
+  pendingModelEvents.set(delivery.eventId, { kind, pending });
+}
+
+function markModelEventApplied(key, eventId) {
+  const appliedEventId = Number(eventId || 0);
+  if (!appliedEventId) return;
+  const root = document.querySelector(`[data-model-key="${key}"]`);
+  if (root) root.dataset.lastAppliedEventId = String(appliedEventId);
+  for (const [pendingEventId, event] of pendingModelEvents) {
+    if (pendingEventId > appliedEventId || !event.pending.has(key)) continue;
+    event.pending.delete(key);
+    if (event.kind === "prompt") {
+      const outcome = pendingEventId === appliedEventId ? "applied" : "superseded";
+      addHistory(`${modelLabel(key)} prompt ${outcome} · event#${pendingEventId}`);
+    }
+    if (!event.pending.size) pendingModelEvents.delete(pendingEventId);
+  }
 }
 
 function cameraActionHasActiveMotion(payload) {
@@ -3648,15 +6202,34 @@ function sendCameraControlTransitions(transitions) {
 async function applyPreset(preset, options = {}) {
   const sendRuntimeEvents = options.sendRuntimeEvents
     ?? Boolean(ws && ws.readyState === WebSocket.OPEN);
+  let preparedPresetRules = null;
   selectedPreset = preset;
+  document.querySelectorAll(".preset").forEach((button) => {
+    const selected = button.dataset.presetName === preset.name;
+    button.classList.toggle("is-selected", selected);
+    button.setAttribute("aria-pressed", selected ? "true" : "false");
+  });
   $("prompt").value = preset.prompt;
-  $("size").value = preset.size;
-  $("fps").value = UI_CONFIG.targetFps == null ? preset.fps : DEFAULT_TARGET_FPS;
+  applyWorldRulesDraft(preset.rules || null);
+  modelControl("minwm", "fps").value = UI_CONFIG.targetFps == null
+    ? preset.fps
+    : DEFAULT_TARGET_FPS;
   updateOutputSizeText();
   syncPlaybackTargetFps();
   await setPresetReference(preset);
+  updateWorldDraftState();
+  const presetRuleCount = normalizedWorldRulesForStorage(preset.rules || {}).skills.length
+    + (normalizedWorldRulesForStorage(preset.rules || {}).goal ? 1 : 0);
+  setWorldDraftStatus(
+    `已填充「${preset.name}」的首帧、世界描述${presetRuleCount ? `和 ${presetRuleCount} 条规则` : ""}`,
+    "ready",
+  );
   if (sendRuntimeEvents) {
-    sendEvent("prompt", preset.prompt, `prompt update · ${preset.name}`);
+    preparedPresetRules = await prepareWorldRulesForEntry(preset.prompt);
+    promptRewriteController.beginSession(preset.prompt);
+    worldRulesController.activate(preparedPresetRules);
+    const eventId = sendEvent("prompt", preset.prompt, `prompt update · ${preset.name}`);
+    if (eventId) beginPromptLogSession(preset.prompt, "preset_runtime_update");
   }
   addHistory(`preset ${preset.name}`);
 }
@@ -3697,7 +6270,8 @@ function modelsUrlFromServerUrl(serverUrl) {
   const url = new URL(serverUrl, window.location.href);
   if (url.protocol === "ws:") url.protocol = "http:";
   if (url.protocol === "wss:") url.protocol = "https:";
-  url.pathname = "/v1/models";
+  const backendPrefix = url.pathname.match(/^\/backends\/[^/]+/)?.[0] || "";
+  url.pathname = `${backendPrefix}/v1/models`;
   url.search = "";
   url.hash = "";
   return url.toString();
@@ -3705,11 +6279,8 @@ function modelsUrlFromServerUrl(serverUrl) {
 
 function realtimeServerUrlFromLocation() {
   if (!window.location.host) return "";
-  if (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1") {
-    return "";
-  }
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-  return `${protocol}//${window.location.host}/v1/realtime_video/generate`;
+  return `${protocol}//${window.location.host}/backends/minwm/v1/realtime_video/generate`;
 }
 
 function applyDefaultServerUrl() {
@@ -3741,6 +6312,7 @@ function presetForModelInfo(info) {
 
 async function queryServerModelInfo(options = {}) {
   const applyPresetForModel = options.applyPresetForModel ?? true;
+  const preserveSize = options.preserveSize ?? false;
   let info;
   try {
     const response = await fetch(modelsUrlFromServerUrl($("serverUrl").value), {
@@ -3757,7 +6329,7 @@ async function queryServerModelInfo(options = {}) {
   const modelId = servedModelId(info);
   const preset = presetForModelInfo(info);
   if (preset && applyPresetForModel && preset !== selectedPreset) {
-    await applyPreset(preset, { sendRuntimeEvents: false });
+    await applyPreset(preset, { sendRuntimeEvents: false, preserveSize });
   }
   if (modelId) $("model").value = modelId;
   addHistory(
@@ -3766,13 +6338,6 @@ async function queryServerModelInfo(options = {}) {
       : `server model · ${modelId || "unknown"}`,
   );
   return info;
-}
-
-function enhancePrompt() {
-  const suffix = " high-fidelity temporal consistency, stable camera geometry, natural motion, clean lighting.";
-  if (!$("prompt").value.includes("temporal consistency")) {
-    $("prompt").value = `${$("prompt").value.trim()},${suffix}`;
-  }
 }
 
 function compact(obj) {
@@ -3787,40 +6352,52 @@ function readOptionalInteger(id) {
   return Number(value);
 }
 
-function readPreviewTransportParams() {
-  const outputFormat = $("transportFormat").value;
-  const outputQuality = Number($("transportQuality").value || DEFAULT_PREVIEW_OUTPUT_QUALITY);
+function readPreviewTransportParams(key = "minwm") {
+  const outputFormat = modelControl(key, "transportFormat").value;
+  const outputQuality = Number(
+    modelControl(key, "transportQuality").value || DEFAULT_PREVIEW_OUTPUT_QUALITY,
+  );
   if (!outputFormat) return {};
   const params = {
     realtime_output_format: outputFormat,
   };
-  const baseSize = parseSizeValue($("size").value);
+  const baseSize = parseSizeValue(modelControl(key, "size").value);
   params.realtime_preview_max_width = previewMaxWidthForSize(baseSize);
   if (outputFormat === "webp" || outputFormat === "jpeg") {
     params.output_compression = outputQuality;
-    if ($("superResolution").checked && $("frameInterpolation").checked) {
+    if (
+      modelControl(key, "superResolution").checked
+      && modelControl(key, "frameInterpolation").checked
+    ) {
       if (baseSize?.width) params.realtime_preview_max_width = baseSize.width;
     }
   }
   return params;
 }
 
-function tunePreviewQualityForPostprocess() {
-  if ($("transportFormat").value !== "webp") return;
-  const currentQuality = Number($("transportQuality").value || DEFAULT_PREVIEW_OUTPUT_QUALITY);
+function tunePreviewQualityForPostprocess(key = "minwm") {
+  if (modelControl(key, "transportFormat").value !== "webp") return;
+  const currentQuality = Number(
+    modelControl(key, "transportQuality").value || DEFAULT_PREVIEW_OUTPUT_QUALITY,
+  );
   let qualityCap = MAX_WEBP_PREVIEW_OUTPUT_QUALITY;
-  if ($("frameInterpolation").checked && $("superResolution").checked) {
+  if (
+    modelControl(key, "frameInterpolation").checked
+    && modelControl(key, "superResolution").checked
+  ) {
     qualityCap = HEAVY_PREVIEW_OUTPUT_QUALITY;
-  } else if ($("frameInterpolation").checked) {
+  } else if (modelControl(key, "frameInterpolation").checked) {
     qualityCap = SMOOTH_PREVIEW_OUTPUT_QUALITY;
-  } else if ($("superResolution").checked) {
+  } else if (modelControl(key, "superResolution").checked) {
     qualityCap = SR_PREVIEW_OUTPUT_QUALITY;
   }
-  if (currentQuality > qualityCap) $("transportQuality").value = String(qualityCap);
+  if (currentQuality > qualityCap) {
+    modelControl(key, "transportQuality").value = String(qualityCap);
+  }
 }
 
-function readFrameInterpolationParams() {
-  if (!$("frameInterpolation").checked) return {};
+function readFrameInterpolationParams(key = "minwm") {
+  if (!modelControl(key, "frameInterpolation").checked) return {};
   return {
     enable_frame_interpolation: true,
     frame_interpolation_exp: DEFAULT_FRAME_INTERPOLATION_EXP,
@@ -3828,19 +6405,41 @@ function readFrameInterpolationParams() {
   };
 }
 
-function readUpscalingScale() {
-  return Number($("upscalingScale").value || DEFAULT_UPSCALING_SCALE);
+function readUpscalingScale(key = "minwm") {
+  return Number(modelControl(key, "upscalingScale").value || DEFAULT_UPSCALING_SCALE);
 }
 
-function readSuperResolutionParams() {
-  if (!$("superResolution").checked) return {};
+function readSuperResolutionParams(key = "minwm") {
+  if (!modelControl(key, "superResolution").checked) return {};
   const params = {
     enable_upscaling: true,
-    upscaling_scale: readUpscalingScale(),
+    upscaling_scale: readUpscalingScale(key),
   };
-  const modelPath = $("upscalingModel").value;
+  const modelPath = modelControl(key, "upscalingModel").value;
   if (modelPath) params.upscaling_model_path = modelPath;
   return params;
+}
+
+function readModelRequestParams(key, { generationMode, firstFrame, numFrames } = {}) {
+  const continuous = modelControl(key, "continuous").checked;
+  const requestedFrames = numFrames ?? Number(modelControl(key, "numFrames").value);
+  return compact({
+    generation_mode: generationMode,
+    prompt: $("prompt").value,
+    size: modelControl(key, "size").value,
+    fps: requestedInputFps(key),
+    num_frames: generationMode === "t2v" && continuous ? undefined : requestedFrames,
+    seed: Number(modelControl(key, "seed").value),
+    num_inference_steps: Number(modelControl(key, "steps").value),
+    guidance_scale: Number(modelControl(key, "guidance").value),
+    realtime_causal_sink_size: readOptionalInteger(modelControlId(key, "sinkSize")),
+    realtime_causal_kv_cache_num_frames: readOptionalInteger(modelControlId(key, "windowFrames")),
+    max_chunks: generationMode === "t2v" || continuous ? undefined : 1,
+    first_frame: firstFrame,
+    ...readPreviewTransportParams(key),
+    ...readFrameInterpolationParams(key),
+    ...readSuperResolutionParams(key),
+  });
 }
 
 function parseSizeValue(sizeText) {
@@ -3897,11 +6496,11 @@ function updateOutputSizeFromHeader(header) {
   }
 }
 
-function updateSuperResolutionControls() {
-  const disabled = !$("superResolution").checked;
-  $("upscalingScale").disabled = disabled;
-  $("upscalingModel").disabled = disabled;
-  updateOutputSizeText();
+function updateSuperResolutionControls(key = "minwm") {
+  const disabled = !modelControl(key, "superResolution").checked;
+  modelControl(key, "upscalingScale").disabled = disabled;
+  modelControl(key, "upscalingModel").disabled = disabled;
+  if (key === "minwm") updateOutputSizeText();
 }
 
 function setPreviewScale(value) {
@@ -3947,9 +6546,15 @@ function formatMs(value) {
 
 function renderPresets() {
   $("presetList").innerHTML = "";
-  presets.forEach((preset) => {
+  allWorldPresets().forEach((preset) => {
     const btn = document.createElement("button");
     btn.className = "preset";
+    btn.type = "button";
+    btn.dataset.presetName = preset.name;
+    const selected = preset === selectedPreset
+      || Boolean(preset.fingerprint && preset.fingerprint === selectedPreset?.fingerprint);
+    btn.classList.toggle("is-selected", selected);
+    btn.setAttribute("aria-pressed", selected ? "true" : "false");
     btn.dataset.tone = preset.tone;
     const thumb = document.createElement("img");
     thumb.className = "preset-thumb";
@@ -3958,9 +6563,27 @@ function renderPresets() {
     thumb.loading = "lazy";
     thumb.onerror = () => thumb.replaceWith(createPresetThumbFallback(preset));
     const title = document.createElement("b");
-    title.textContent = preset.name;
+    title.textContent = ({
+      "Dragon Ride": "山谷飞龙",
+      "Misted Kingdom": "雾谷骑行",
+      "Storm Crossing": "风暴航行",
+      "Citadel Approach": "峡谷越野",
+      "Spring Valley": "春日山谷",
+      "Reef Patrol": "珊瑚巡游",
+      "Alpine Run": "高山漂流",
+      "Ice Kayak": "冰湖泛舟",
+      "Penguin Colony": "企鹅冰原",
+      "Mars Mountain": "火星远征",
+      "Seaside Adventurer": "海岸冒险",
+      "Roman Chariot": "罗马战车",
+      "Asylum Corridor": "废墟走廊",
+    })[preset.name] || preset.name;
     const meta = document.createElement("span");
-    meta.textContent = `${preset.source} · ${preset.size} · ${preset.fps}fps`;
+    const presetRules = normalizedWorldRulesForStorage(preset.rules || {});
+    const ruleCount = presetRules.skills.length + (presetRules.goal ? 1 : 0);
+    meta.textContent = preset.isCustom
+      ? `已保存的自定义世界${ruleCount ? ` · ${ruleCount} 条规则` : ""}`
+      : `填充首帧 + 世界描述${ruleCount ? ` + ${ruleCount} 条规则` : ""}`;
     btn.append(thumb, title, meta);
     btn.onclick = () => applyPreset(preset).catch(showError);
     $("presetList").appendChild(btn);
@@ -3993,21 +6616,36 @@ async function applyQueryParams() {
     $("generationMode").value = generationMode;
     updateGenerationModeUi();
   }
-  $("transportFormat").value = params.get("transport") || DEFAULT_PREVIEW_OUTPUT_FORMAT;
-  $("transportQuality").value = params.get("quality") || String(DEFAULT_PREVIEW_OUTPUT_QUALITY);
   const playbackParam = params.get("playback");
-  if (playbackParam === "live" || playbackParam === "timeline" || playbackParam === "adaptive" || playbackParam === "smooth_timeline") {
-    $("playbackMode").value = playbackParam;
-  }
   const srParam = params.get("sr");
-  $("superResolution").checked = srParam === "1" || srParam === "true";
   const smoothParam = params.get("smooth");
-  $("frameInterpolation").checked = smoothParam === "1" || smoothParam === "true";
-  $("upscalingScale").value = params.get("sr_scale") || String(DEFAULT_UPSCALING_SCALE);
-  $("upscalingModel").value = params.get("sr_model") || DEFAULT_UPSCALING_MODEL;
-  tunePreviewQualityForPostprocess();
+  const catchupParam = Number(params.get("catchup"));
+  for (const key of ["minwm", "lingbot2"]) {
+    modelControl(key, "transportFormat").value = params.get("transport") || DEFAULT_PREVIEW_OUTPUT_FORMAT;
+    modelControl(key, "transportQuality").value = params.get("quality") || String(DEFAULT_PREVIEW_OUTPUT_QUALITY);
+    if (
+      playbackParam === "live"
+      || playbackParam === "timeline"
+      || playbackParam === "adaptive"
+      || playbackParam === "smooth_timeline"
+    ) {
+      modelControl(key, "playbackMode").value = playbackParam;
+    }
+    modelControl(key, "superResolution").checked = srParam === "1" || srParam === "true";
+    modelControl(key, "frameInterpolation").checked = smoothParam === "1" || smoothParam === "true";
+    modelControl(key, "upscalingScale").value = params.get("sr_scale") || String(DEFAULT_UPSCALING_SCALE);
+    modelControl(key, "upscalingModel").value = params.get("sr_model") || DEFAULT_UPSCALING_MODEL;
+    tunePreviewQualityForPostprocess(key);
+    updateSuperResolutionControls(key);
+  }
+  $("smoothCatchupRate").value = String(
+    Number.isFinite(catchupParam) && catchupParam > 0
+      ? catchupParam
+      : DEFAULT_SMOOTH_CATCHUP_RATE,
+  );
+  syncSmoothCatchupRate();
+  syncZingFrameInterpolation({ fromTopbar: false });
   setPreviewScale(params.get("preview_scale") || params.get("zoom"));
-  updateSuperResolutionControls();
   syncPlaybackTargetFps();
   syncPlaybackMode({ addToHistory: false });
 
@@ -4136,17 +6774,21 @@ function unpack(buf) {
 }
 
 applyRuntimeUiConfig();
+syncModelSlotUi();
 renderPresets();
+void ensureCustomWorldPresetsLoaded();
 drawIdle();
 setPreviewScale(DEFAULT_PREVIEW_SCALE);
-updateSuperResolutionControls();
+updateSuperResolutionControls("minwm");
+updateSuperResolutionControls("lingbot2");
 applyQueryParams()
   .then(async (query) => {
-    if (!query.preset) await applyPreset(presets[0], { sendRuntimeEvents: false });
+    if (!query.preset) clearWorldDraft();
     return query;
   })
   .then((query) => queryServerModelInfo({
-    applyPresetForModel: !query.model && !query.preset,
+    applyPresetForModel: false,
+    preserveSize: true,
   }))
   .catch(showError);
 scheduleRenderLoop();
@@ -4154,40 +6796,326 @@ renderTraceTopology();
 updateRecordButton();
 updateRecordFolderButton();
 $("connectBtn").onclick = connect;
-$("stopBtn").onclick = () => closeSession();
-$("sendPromptBtn").onclick = () => sendEvent("prompt", $("prompt").value);
-$("enhanceBtn").onclick = enhancePrompt;
-$("recordBtn").onclick = () => {
+function closeForModelSlotChange() {
+  if (!ws && dualModelController.activeKeys.size === 0 && !happyOysterSession.connected) return;
+  closeSession("model comparison selection changed");
+  setStatus("Selection changed");
+}
+for (let slotIndex = 0; slotIndex < MODEL_SLOT_DEFAULTS.length; slotIndex += 1) {
+  $(`modelSlot${slotIndex}`).addEventListener("change", () => {
+    closeForModelSlotChange();
+    ensureUniqueModelSlot(slotIndex);
+  });
+}
+$("addModelSlotBtn").onclick = () => {
+  const sessionActive = Boolean(
+    ws
+    || dualModelController.activeKeys.size > 0
+    || happyOysterSession.connected
+  );
+  activeModelSlotCount = 3;
+  ensureUniqueModelSlot(2);
+  if (!sessionActive || !modelSelected("happyoyster")) return;
+  setModelConnectionState("happyoyster", "preparing");
+  setHappyOysterStageText("正在创建快乐生蚝 World…", "preparing");
+  addHistory("正在把快乐生蚝加入当前对比会话");
+  void dualModelController.activate("happyoyster").catch((error) => {
+    const message = error?.message || String(error || "连接失败");
+    setModelConnectionState("happyoyster", "error");
+    setHappyOysterStageText(message, "error");
+  });
+};
+$("removeModelSlotBtn").onclick = () => {
+  closeForModelSlotChange();
+  activeModelSlotCount = 2;
+  syncModelSlotUi();
+};
+$("clearWorldBtn").onclick = clearWorldDraft;
+$("enhanceBtn").onclick = completeWorldDraft;
+$("prompt").addEventListener("input", () => {
+  updateWorldDraftState();
+  handleWorldRulesDraftInput();
+});
+$("addSkillRuleBtn").onclick = () => {
+  $("worldRulesPanel").open = true;
+  addSkillRule();
+  handleWorldRulesDraftInput();
+};
+$("goalMinPlaySeconds").max = String(MAX_GOAL_MIN_PLAY_SECONDS);
+for (const id of ["goalMinPlaySeconds", "goalProbability", "goalRuleInput"]) {
+  $(id).addEventListener("input", handleWorldRulesDraftInput);
+}
+$("stopBtn").onclick = () => {
+  closeSession();
+  setModelConnectionState("minwm", "closed");
+  setModelConnectionState("lingbot2", "closed");
+  setModelConnectionState("happyoyster", "closed");
+};
+
+function setPromptRewriteStatus(message, state = "") {
+  const status = $("promptRewriteStatus");
+  status.textContent = message;
+  if (state) status.dataset.state = state;
+  else delete status.dataset.state;
+}
+
+async function rewriteRuntimePrompt(payload) {
+  const response = await fetch("./api/prompt/rewrite", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  let result = null;
+  try {
+    result = await response.json();
+  } catch {
+    result = null;
+  }
+  if (!response.ok) {
+    throw new Error(result?.error || `prompt rewrite failed (${response.status})`);
+  }
+  return result;
+}
+
+async function completeWorldRule(payload) {
+  const response = await fetch("./api/world-rule/complete", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  let result = null;
+  try {
+    result = await response.json();
+  } catch {
+    result = null;
+  }
+  if (!response.ok) {
+    throw new Error(result?.error || `world rule completion failed (${response.status})`);
+  }
+  return result;
+}
+
+let runtimePromptRewritePending = false;
+
+async function sendRuntimePromptUpdate() {
+  const input = $("runtimePrompt");
+  const prompt = input.value.trim();
+  if (!prompt) {
+    input.focus();
+    return;
+  }
+  if (runtimePromptRewritePending) return;
+  runtimePromptRewritePending = true;
+  markRecordingPromptSubmitted(prompt);
+  input.blur();
+  canvas.focus({ preventScroll: true });
+  $("sendPromptBtn").disabled = true;
+  setPromptRewriteStatus("正在理解并改写指令…", "working");
+  try {
+    const result = await promptRewriteController.submit(prompt);
+    if (result.ignored) return;
+    input.value = "";
+    updateRecordingPromptDraft("");
+    if (result.change_type === "one_time") {
+      setPromptRewriteStatus("已发送 · 一次性指令，10 秒后恢复持久状态", "one_time");
+    } else {
+      setPromptRewriteStatus("已发送 · 持久指令", "persistent");
+    }
+  } catch (error) {
+    markRecordingPromptFailed(error.message || error);
+    setPromptRewriteStatus(error.message || "指令改写失败，请重试", "error");
+    addHistory(`prompt rewrite failed · ${error.message || error}`);
+    input.focus({ preventScroll: true });
+  } finally {
+    runtimePromptRewritePending = false;
+    $("sendPromptBtn").disabled = false;
+  }
+}
+
+$("sendPromptBtn").onclick = sendRuntimePromptUpdate;
+$("runtimePrompt").addEventListener("keydown", (event) => {
+  if (event.key !== "Enter" || event.shiftKey || event.isComposing) return;
+  event.preventDefault();
+  sendRuntimePromptUpdate();
+});
+$("runtimePrompt").addEventListener("input", (event) => {
+  updateRecordingPromptDraft(event.currentTarget.value);
+});
+
+function setupVoicePromptInput() {
+  const button = $("voicePromptBtn");
+  const status = $("voicePromptStatus");
+  const input = $("runtimePrompt");
+  const secureBaseUrl = String(UI_CONFIG.secureBaseUrl || "").trim();
+  if (!window.isSecureContext) {
+    if (secureBaseUrl) {
+      status.textContent = "切换 HTTPS";
+      button.title = "点击切换到 HTTPS 后使用语音输入";
+      button.onclick = () => {
+        try {
+          const secureUrl = new URL(
+            `${window.location.pathname}${window.location.search}${window.location.hash}`,
+            secureBaseUrl,
+          );
+          if (secureUrl.protocol !== "https:") throw new Error("secureBaseUrl must use HTTPS");
+          window.location.assign(secureUrl);
+        } catch (error) {
+          status.textContent = "需要 HTTPS";
+          button.disabled = true;
+        }
+      };
+    } else {
+      button.disabled = true;
+      button.title = "语音输入需要 HTTPS 安全连接";
+      status.textContent = "需要 HTTPS";
+    }
+    return;
+  }
+  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SpeechRecognition) {
+    button.disabled = true;
+    button.title = "当前浏览器不支持语音输入";
+    status.textContent = "暂不支持";
+    return;
+  }
+
+  const recognition = new SpeechRecognition();
+  recognition.lang = "zh-CN";
+  recognition.continuous = false;
+  recognition.interimResults = true;
+  let listening = false;
+  let prefix = "";
+  let idleStatus = "点击说话";
+
+  const speechErrorLabels = {
+    "not-allowed": "麦克风未授权",
+    "service-not-allowed": "语音服务未授权",
+    "audio-capture": "未检测到麦克风",
+    network: "语音服务网络异常",
+    "no-speech": "未听清，请重试",
+  };
+
+  function focusInputAtEnd() {
+    input.focus({ preventScroll: true });
+    const end = input.value.length;
+    input.setSelectionRange(end, end);
+  }
+
+  function setListening(next) {
+    listening = next;
+    button.classList.toggle("is-listening", next);
+    button.setAttribute("aria-pressed", next ? "true" : "false");
+    status.textContent = next ? "正在聆听" : idleStatus;
+  }
+
+  recognition.onstart = () => {
+    prefix = input.value.trim();
+    idleStatus = "点击说话";
+    setListening(true);
+  };
+  recognition.onresult = (event) => {
+    let transcript = "";
+    for (let index = 0; index < event.results.length; index += 1) {
+      transcript += event.results[index][0]?.transcript || "";
+    }
+    const spacer = prefix && transcript ? " " : "";
+    input.value = `${prefix}${spacer}${transcript}`.trimStart();
+    if (document.activeElement === input) {
+      const end = input.value.length;
+      input.setSelectionRange(end, end);
+    }
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    if (transcript) idleStatus = "已识别";
+  };
+  recognition.onerror = (event) => {
+    idleStatus = event.error === "aborted"
+      ? "点击说话"
+      : speechErrorLabels[event.error] || "语音识别失败";
+    setListening(false);
+  };
+  recognition.onend = () => {
+    setListening(false);
+  };
+  button.addEventListener("pointerdown", (event) => {
+    // Keep the textarea focused while pressing the microphone. Native buttons
+    // otherwise take focus before the speech recognizer starts.
+    event.preventDefault();
+    focusInputAtEnd();
+  });
+  button.onclick = () => {
+    focusInputAtEnd();
+    try {
+      if (listening) recognition.stop();
+      else {
+        idleStatus = "正在启动";
+        status.textContent = idleStatus;
+        recognition.start();
+      }
+    } catch (error) {
+      idleStatus = "请重试";
+      setListening(false);
+    }
+  };
+}
+
+setupVoicePromptInput();
+setupFirstFrameDropZone();
+$("recordBtn").onclick = async () => {
   if (recordingActive) {
-    stopRecording();
+    await stopRecording({ reason: "manual" });
   } else {
-    startRecording();
+    const sessionLive = worldExperienceReady
+      && sessionCountdownDeadlineMs > Date.now()
+      && !sessionLifetimeExpired;
+    if (!sessionLive) {
+      showSessionNotice("请先进入世界，再开始游玩录像");
+      return;
+    }
+    startRecording({ source: "manual" });
   }
 };
+$("recordDownloadBtn").onclick = downloadGameplayRecordings;
 $("recordFolderBtn").onclick = () => {
   chooseRecordingDirectory().catch((error) => {
     addHistory(error.message || "record folder selection failed");
   });
 };
-$("firstFrame").onchange = () => drawReferencePreview($("firstFrame").files[0]);
+$("firstFrame").onchange = () => {
+  clearSelectedWorldPreset();
+  drawReferencePreview($("firstFrame").files[0]);
+};
 $("generationMode").addEventListener("change", updateGenerationModeUi);
 $("continuous").addEventListener("change", updateGenerationModeUi);
 $("numFrames").addEventListener("input", updateT2VFrameHint);
-$("size").addEventListener("input", () => updateOutputSizeText());
-$("fps").addEventListener("input", () => {
-  syncPlaybackTargetFps();
-  updateT2VFrameHint();
-});
-$("playbackMode").addEventListener("change", () => syncPlaybackMode());
-$("superResolution").addEventListener("change", updateSuperResolutionControls);
-$("upscalingScale").addEventListener("change", () => updateOutputSizeText());
-$("frameInterpolation").addEventListener("change", () => {
-  tunePreviewQualityForPostprocess();
-  syncPlaybackTargetFps();
-});
-$("superResolution").addEventListener("change", tunePreviewQualityForPostprocess);
+for (const key of ["minwm", "lingbot2"]) {
+  modelControl(key, "size").addEventListener("input", () => {
+    if (key === "minwm") updateOutputSizeText();
+  });
+  modelControl(key, "fps").addEventListener("input", () => {
+    syncPlaybackTargetFps();
+    if (key === "minwm") updateT2VFrameHint();
+  });
+  modelControl(key, "playbackMode").addEventListener("change", () => syncPlaybackMode());
+  modelControl(key, "superResolution").addEventListener("change", () => {
+    updateSuperResolutionControls(key);
+    tunePreviewQualityForPostprocess(key);
+  });
+  modelControl(key, "upscalingScale").addEventListener("change", () => {
+    if (key === "minwm") updateOutputSizeText();
+  });
+  modelControl(key, "frameInterpolation").addEventListener("change", () => {
+    if (key === "minwm") syncZingFrameInterpolation({ fromTopbar: false });
+    tunePreviewQualityForPostprocess(key);
+    syncPlaybackTargetFps();
+  });
+}
 $("previewScale").addEventListener("input", () => setPreviewScale($("previewScale").value));
+$("smoothCatchupRate").addEventListener("input", syncSmoothCatchupRate);
+$("zingFrameInterpolation").addEventListener("change", () => {
+  syncZingFrameInterpolation({ fromTopbar: true });
+});
 canvas.addEventListener("pointerdown", () => canvas.focus({ preventScroll: true }));
+lingbot2Canvas.addEventListener("pointerdown", () => canvas.focus({ preventScroll: true }));
 $("serverUrl").addEventListener("change", () => {
   queryServerModelInfo({ applyPresetForModel: true }).catch(showError);
 });
@@ -4226,6 +7154,12 @@ function keyboardAction(event) {
   return CONTROL_KEY_ACTIONS.get(event.key.toLowerCase()) || null;
 }
 
+function keyboardSkill(event) {
+  if (event.altKey || event.ctrlKey || event.metaKey) return null;
+  if (!/^[1-9]$/.test(event.key)) return null;
+  return worldRulesController.snapshot().skills[Number(event.key) - 1] || null;
+}
+
 function setControlButtonActive(action, active) {
   document.querySelectorAll(`[data-action="${action}"]`).forEach((btn) => {
     btn.classList.toggle("is-key-active", active);
@@ -4258,11 +7192,17 @@ class ControlStateController {
     if (active === hadAction) return false;
     if (active) {
       this.activeActions.add(action);
+      if (recordingActive) {
+        recordingActionPulseUntil.set(action, performance.now() + 120);
+      }
     } else {
       this.activeActions.delete(action);
     }
     this.updateButtons();
-    this.enqueueTransition();
+    // Send presses immediately so a running model has the largest possible
+    // chance of sampling the held state at its next chunk boundary. Releases
+    // keep the short batching window to compact rapid key/chord changes.
+    this.enqueueTransition({ immediate: active });
     if (this.activeActions.size) this.scheduleStateHeartbeat();
     else this.clearStateHeartbeatTimer();
     return true;
@@ -4272,7 +7212,7 @@ class ControlStateController {
     this.reset({ sendRelease: true });
   }
 
-  enqueueTransition() {
+  enqueueTransition({ immediate = false } = {}) {
     const actions = Array.from(this.activeActions).sort();
     const last = this.pendingTransitions[this.pendingTransitions.length - 1];
     if (last && this.sameActions(last.actions, actions)) return;
@@ -4281,7 +7221,8 @@ class ControlStateController {
       clientTsMs: Math.round(performance.now()),
     });
     this.compactPendingIfNeeded();
-    this.scheduleFlush();
+    if (immediate) this.flush();
+    else this.scheduleFlush();
   }
 
   scheduleFlush() {
@@ -4308,9 +7249,6 @@ class ControlStateController {
   flush() {
     this.clearFlushTimer();
     if (!this.pendingTransitions.length) return;
-    if (ws && ws.bufferedAmount > CONTROL_BUFFERED_AMOUNT_LIMIT) {
-      this.compactPendingToLatestPulse();
-    }
     const transitions = this.pendingTransitions;
     this.pendingTransitions = [];
     sendCameraControlTransitions(transitions);
@@ -4361,23 +7299,19 @@ const CONTROL_ACTION_META_KEYS = Object.keys(CONTROL_ACTION_META);
 controlStateController = new ControlStateController();
 updateControlDebugText();
 window.setInterval(() => {
-  if (!ws || ws.readyState !== WebSocket.OPEN) return;
-  const eventId = nextEventId++;
-  ws.send(pack({
-    type: "event",
-    kind: "heartbeat",
-    payload: {
-      active_actions: Array.from(controlStateController.activeActions).sort(),
-    },
-    event_id: eventId,
-    trace_id: currentTrace?.traceId,
-    client_sent_perf_ms: roundTraceNumber(performance.now()),
-    client_sent_epoch_ms: Date.now(),
-  }));
+  dualModelController.sendEvent("heartbeat", {
+    active_actions: Array.from(controlStateController.activeActions).sort(),
+  });
 }, SESSION_HEARTBEAT_MS);
 
 document.addEventListener("keydown", (event) => {
   if (isTypingTarget(event.target)) return;
+  const skill = keyboardSkill(event);
+  if (skill) {
+    event.preventDefault();
+    if (!event.repeat) void triggerWorldSkill(skill.id);
+    return;
+  }
   const action = keyboardAction(event);
   if (!action) return;
   event.preventDefault();

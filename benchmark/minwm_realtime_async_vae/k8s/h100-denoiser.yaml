@@ -18,13 +18,16 @@ spec:
       labels:
         seedleap.ai/capacity-pool: minwm-async-denoiser-h100
         seedleap.ai/denoiser-worker: "true"
+        seedleap.ai/model-cache-storage: local-nvme
         seedleap.ai/test-run: minwm-async-vae-benchmark
     spec:
-      expireAfter: 24h
+      # Spot interruption is handled by Karpenter's interruption queue. Avoid an
+      # additional periodic restart for healthy, long-lived GPU workers.
+      expireAfter: Never
       nodeClassRef:
         group: karpenter.k8s.aws
         kind: EC2NodeClass
-        name: minwm-test-h100-single-ec2
+        name: minwm-async-denoiser-8gpu-nvme-ec2
       requirements:
         - key: karpenter.sh/capacity-type
           operator: In
@@ -50,6 +53,8 @@ metadata:
     seedleap.ai/ttl-after-test: required
 spec:
   limits:
+    # One 8-GPU H100 Spot node runs two Zing SP=2 workers and one LingBot2 SP=4
+    # worker, consuming all eight GPUs.
     cpu: "192"
     nvidia.com/gpu: "8"
   disruption:
@@ -60,13 +65,16 @@ spec:
       labels:
         seedleap.ai/capacity-pool: minwm-async-denoiser-h100-8x
         seedleap.ai/denoiser-worker: "true"
+        seedleap.ai/model-cache-storage: local-nvme
         seedleap.ai/test-run: minwm-async-vae-benchmark
     spec:
-      expireAfter: 24h
+      # Spot interruption is handled by Karpenter's interruption queue. Avoid an
+      # additional periodic restart for healthy, long-lived GPU workers.
+      expireAfter: Never
       nodeClassRef:
         group: karpenter.k8s.aws
         kind: EC2NodeClass
-        name: minwm-test-h100-ec2
+        name: minwm-async-denoiser-8gpu-nvme-ec2
       requirements:
         - key: karpenter.sh/capacity-type
           operator: In
@@ -113,6 +121,9 @@ metadata:
     seedleap.ai/ttl-after-test: required
 spec:
   replicas: REPLACE_WITH_DENOISER_BASE_REPLICAS
+  ordinals:
+    # Preserve the H100-resident workers selected during the two-node scale-in.
+    start: 2
   revisionHistoryLimit: 1
   serviceName: minwm-async-denoiser-headless
   podManagementPolicy: Parallel
@@ -134,6 +145,7 @@ spec:
       nodeSelector:
         karpenter.sh/nodepool: REPLACE_WITH_DENOISER_NODEPOOL
         karpenter.sh/capacity-type: spot
+        seedleap.ai/model-cache-storage: local-nvme
       tolerations:
         - key: nvidia.com/gpu
           operator: Equal
@@ -193,7 +205,7 @@ spec:
               --endpoint=ws://$(POD_IP):30000/v1/realtime_video/generate
               --reservation-endpoint=http://$(POD_IP):30000/v1/realtime_worker
               --node-name=$(NODE_NAME)
-              --capacity=4
+              --capacity=1
               --model-revision=REPLACE_WITH_MODEL_ID
               --vae-fingerprint=taew2_2-d053e216
               --interval-s=5
@@ -211,7 +223,7 @@ spec:
             requests: {cpu: 25m, memory: 64Mi}
             limits: {cpu: 200m, memory: 256Mi}
           volumeMounts:
-            - {name: worker-epoch, mountPath: /var/run/minwm-worker, readOnly: true}
+            - {name: worker-epoch, mountPath: /var/run/minwm-worker}
       containers:
         - name: denoiser
           image: REPLACE_WITH_DENOISER_IMAGE_DIGEST
@@ -224,9 +236,9 @@ spec:
             - name: POD_NAME
               valueFrom: {fieldRef: {fieldPath: metadata.name}}
             - {name: MODEL_REVISION, value: REPLACE_WITH_MODEL_ID}
-            - {name: REALTIME_MAX_SESSIONS, value: "4"}
+            - {name: REALTIME_MAX_SESSIONS, value: "1"}
             - name: REALTIME_UI_CONFIG_JSON
-              value: '{"generationModes":["i2v","t2v"],"defaultGenerationMode":"i2v","t2vFrameStep":4,"t2vDefaultNumFrames":121}'
+              value: '{"generationModes":["i2v","t2v"],"defaultGenerationMode":"i2v","t2vFrameStep":4,"t2vDefaultNumFrames":121,"sessionMaxLifetimeSeconds":70}'
             - name: MINWM_MODEL
               value: /model-cache/REPLACE_WITH_MODEL_ID/REPLACE_WITH_MODEL_ARTIFACT_REVISION/model
             - {name: TAEHV_CHECKPOINT_PATH, value: /opt/taehv/taew2_2.pth}
@@ -255,18 +267,22 @@ spec:
                 --pipeline-class-name MinWMCausalDMDPipeline \
                 --attention-backend fa \
                 --performance-mode speed \
-                --num-gpus 1 \
-                --sp-degree 1 \
+                --num-gpus 2 \
+                --tp-size 1 \
+                --sp-degree 2 \
+                --ulysses-degree 2 \
+                --ring-degree 1 \
+                --enable-cuda-graph \
                 --enable-cfg-parallel false \
                 --enable-torch-compile false \
                 --warmup-mode off \
-                --batching-max-size 4 \
+                --batching-max-size 1 \
                 --batching-delay-ms 2 \
                 --realtime-max-sessions "${REALTIME_MAX_SESSIONS}" \
                 --realtime-max-sessions-per-worker "${REALTIME_MAX_SESSIONS}" \
                 --realtime-vae-backend taehv_remote \
                 --realtime-session-idle-timeout-s 60 \
-                --realtime-session-max-lifetime-s 600 \
+                --realtime-session-max-lifetime-s 70 \
                 --realtime-admission-wait-s 10 \
                 --realtime-causal-sink-size 8 \
                 --realtime-causal-kv-cache-num-frames 32 \
@@ -329,15 +345,15 @@ spec:
             failureThreshold: 6
           resources:
             requests:
-              cpu: "6"
-              memory: 160Gi
+              cpu: "24"
+              memory: 300Gi
               ephemeral-storage: 24Gi
-              nvidia.com/gpu: "1"
+              nvidia.com/gpu: "2"
             limits:
-              cpu: "7"
-              memory: 220Gi
+              cpu: "40"
+              memory: 400Gi
               ephemeral-storage: 32Gi
-              nvidia.com/gpu: "1"
+              nvidia.com/gpu: "2"
           volumeMounts:
             - {name: model-cache, mountPath: /model-cache, readOnly: true}
             - {name: shm, mountPath: /dev/shm}
@@ -345,7 +361,7 @@ spec:
             - {name: startup-lock, mountPath: /var/run/minwm-startup-lock}
       volumes:
         - name: checkpoint-archive
-          persistentVolumeClaim: {claimName: minwm-async-west-s3, readOnly: true}
+          persistentVolumeClaim: {claimName: minwm-model-serving-east2-s3, readOnly: true}
         - name: shm
           emptyDir: {medium: Memory, sizeLimit: 64Gi}
         - name: startup-lock
@@ -354,7 +370,7 @@ spec:
             type: DirectoryOrCreate
         - name: model-cache
           hostPath:
-            path: /var/lib/minwm-model-cache
+            path: /mnt/k8s-disks/0/minwm-model-cache
             type: DirectoryOrCreate
         - name: worker-epoch
           emptyDir: {}

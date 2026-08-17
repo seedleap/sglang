@@ -87,24 +87,54 @@ assert.match(
   "webui should show the default output size before the first server response",
 );
 assert.match(
+  appJs,
+  /if \(!query\.preset\) clearWorldDraft\(\);/,
+  "the world builder should start empty until the visitor selects or completes a world",
+);
+assert.match(
+  appJs,
+  /async function applyPreset\(preset, options = \{\}\) \{[\s\S]*?\$\("prompt"\)\.value = preset\.prompt;[\s\S]*?modelControl\("minwm", "fps"\)\.value/,
+  "preset application should hydrate shared prompt/reference without overwriting LingBot2 defaults",
+);
+assert.doesNotMatch(
+  appJs,
+  /\$\("size"\)\.value\s*=\s*preset\.size/,
+  "preset selection must preserve the user-entered size",
+);
+assert.match(
   indexHtml,
   /<option value="adaptive">Adaptive \(buffered, fast input\)<\/option>/,
   "webui should keep adaptive playback available",
 );
 assert.match(
   indexHtml,
-  /<option value="smooth_timeline" selected>Smooth timeline \(catch-up, no skip\)<\/option>/,
-  "webui should default to the no-skip catch-up timeline mode for smoother playback",
+  /<option value="live" selected>Low latency \(may skip\)<\/option>/,
+  "the interactive showcase should default to low-latency playback",
+);
+assert.match(
+  indexHtml,
+  /<option value="smooth_timeline">Smooth realtime \(~1s buffer\)<\/option>/,
+  "smooth realtime should remain available as a soft jitter-buffered mode",
 );
 assert.match(
   appJs,
-  /playbackParam === "live" \|\| playbackParam === "timeline" \|\| playbackParam === "adaptive" \|\| playbackParam === "smooth_timeline"/,
+  /playbackParam === "live"[\s\S]*?playbackParam === "timeline"[\s\S]*?playbackParam === "adaptive"[\s\S]*?playbackParam === "smooth_timeline"/,
   "webui should accept playback=adaptive and playback=smooth_timeline from the URL",
 );
 assert.match(
   appJs,
-  /const preservesTimeline[\s\S]*selectedPlaybackMode\(\) === "timeline"[\s\S]*selectedPlaybackMode\(\) === "smooth_timeline"/,
-  "webui should avoid browser decode drops in smooth timeline except at the byte cap",
+  /const boundedRealtime\s*=\s*playbackMode === "smooth_timeline"/,
+  "webui should bound smooth realtime browser decode backlog",
+);
+assert.match(
+  appJs,
+  /const ONLINE_MAX_BUFFER_MS\s*=\s*configuredNumber\("onlineMaxBufferMs", 1100\);/,
+  "webui should keep a short soft realtime playback tail by default",
+);
+assert.match(
+  appJs,
+  /const ONLINE_MAX_BUFFER_CHUNKS\s*=\s*Math\.max\([\s\S]*configuredNumber\("onlineMaxBufferChunks", 2\)/,
+  "webui should allow roughly two chunks of realtime jitter before trimming",
 );
 assert.match(
   appJs,
@@ -153,28 +183,43 @@ assert.match(
 );
 assert.match(
   appJs,
-  /targetLeadChunkRatio:\s*0\.75/,
-  "24 fps playback should keep enough jitter lead for sub-24fps backend delivery",
+  /targetLeadChunkRatio:\s*0\.7/,
+  "24 fps playback should keep enough jitter lead for smoother display",
 );
 assert.match(
   appJs,
-  /minTargetLeadMs:\s*360/,
-  "24 fps playback should avoid chasing a too-small buffer when backend delivery is bursty",
+  /minTargetLeadMs:\s*260/,
+  "24 fps playback should avoid underrunning on ordinary chunk jitter",
 );
 assert.match(
   appJs,
   /maxTargetLeadMs:\s*900/,
-  "24 fps playback should trade a bounded sub-second lead for smoother display",
+  "24 fps playback should keep realtime lag around one second instead of growing unbounded",
 );
 assert.match(
   appJs,
-  /maxDeliveryLeadBoostMs:\s*360/,
-  "webui should bound adaptive jitter buffering",
+  /maxDeliveryLeadBoostMs:\s*0/,
+  "webui should not add adaptive delivery lead in bounded realtime mode",
 );
 assert.match(
   appJs,
-  /smoothTimelinePlaybackRateMax:\s*2\.5/,
-  "smooth timeline should catch up quickly without dropping old backlog",
+  /smoothTimelinePlaybackRateMax:\s*DEFAULT_SMOOTH_CATCHUP_RATE/,
+  "smooth timeline should use the production-configured bounded catch-up rate",
+);
+assert.match(
+  appJs,
+  /configuredNumber\("smoothCatchupRateMax",\s*1\.1\)/,
+  "production playback should default to the stable 1.1x catch-up limit",
+);
+assert.match(
+  indexHtml,
+  /id="smoothCatchupRate"[^>]*min="1"[^>]*max="2\.5"[^>]*value="1\.1"/,
+  "webui should expose the smooth timeline catch-up ceiling above the videos",
+);
+assert.match(
+  indexHtml,
+  /id="zingFrameInterpolation"[^>]*type="checkbox"/,
+  "webui should expose an opt-in Zing frame interpolation control",
 );
 assert.match(
   appJs,

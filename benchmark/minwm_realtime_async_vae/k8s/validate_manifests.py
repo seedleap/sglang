@@ -11,13 +11,18 @@ ROOT = Path(__file__).resolve().parent
 BASE_MANIFESTS = (
     "namespace.yaml",
     "west-s3-volume.yaml",
+    "east2-model-serving-s3-volume.yaml",
     "observability.yaml",
+    "8gpu-nodeclass.yaml",
     "coordinator.yaml",
     "gateway.yaml",
     "worker-discovery.yaml",
     "autoscaling.yaml",
     "h100-denoiser.yaml",
+    "lingbot2-h100-denoiser.yaml",
     "l4-vae.yaml",
+    "network-policy.yaml",
+    "gpu-replica-safety.yaml",
     "gateway-service.yaml",
 )
 
@@ -57,15 +62,43 @@ def validate(documents: list[dict]) -> None:
     denoiser = find(documents, "NodePool", "minwm-async-denoiser-h100")
     denoiser_8x = find(documents, "NodePool", "minwm-async-denoiser-h100-8x")
     vae = find(documents, "NodePool", "minwm-async-vae-l4")
+    vae_spot = find(documents, "NodePool", "minwm-async-vae-l4-spot")
     assert requirement_values(denoiser, "karpenter.sh/capacity-type") == ["spot"]
     assert requirement_values(denoiser_8x, "karpenter.sh/capacity-type") == ["spot"]
-    assert requirement_values(vae, "karpenter.sh/capacity-type") == ["spot"]
+    assert requirement_values(vae, "karpenter.sh/capacity-type") == ["on-demand"]
+    assert requirement_values(vae_spot, "karpenter.sh/capacity-type") == ["spot"]
+    assert vae["spec"]["weight"] > vae_spot["spec"]["weight"]
     assert requirement_values(denoiser, "node.kubernetes.io/instance-type") == [
-        "p5.48xlarge"
+        "p5.48xlarge",
     ]
     assert requirement_values(denoiser_8x, "node.kubernetes.io/instance-type") == [
-        "p5.48xlarge"
+        "p5.48xlarge",
     ]
+    denoiser_nodeclass = find(
+        documents, "EC2NodeClass", "minwm-async-denoiser-8gpu-nvme-ec2"
+    )
+    assert denoiser_8x["spec"]["template"]["spec"]["nodeClassRef"]["name"] == (
+        "minwm-async-denoiser-8gpu-nvme-ec2"
+    )
+    assert denoiser["spec"]["template"]["spec"]["nodeClassRef"]["name"] == (
+        "minwm-async-denoiser-8gpu-nvme-ec2"
+    )
+    assert denoiser_nodeclass["spec"]["instanceStorePolicy"] == "RAID0"
+    assert (
+        denoiser_nodeclass["spec"]["blockDeviceMappings"][0]["ebs"]["volumeSize"]
+        == "100Gi"
+    )
+    for pool in (denoiser, denoiser_8x):
+        assert (
+            pool["spec"]["template"]["metadata"]["labels"][
+                "seedleap.ai/model-cache-storage"
+            ]
+            == "local-nvme"
+        )
+    assert [
+        interface["networkCardIndex"]
+        for interface in denoiser_nodeclass["spec"]["networkInterfaces"]
+    ] == list(range(8))
     assert requirement_values(denoiser_8x, "topology.kubernetes.io/zone") == [
         "us-east-2a",
         "us-east-2b",
@@ -80,10 +113,12 @@ def validate(documents: list[dict]) -> None:
     assert 1 <= int(vae["spec"]["limits"]["nvidia.com/gpu"]) <= 8
 
     workloads = (
-        find(documents, "StatefulSet", "minwm-async-denoiser"),
-        find(documents, "Deployment", "minwm-async-vae"),
+        (find(documents, "StatefulSet", "minwm-async-denoiser"), "2"),
+        (find(documents, "StatefulSet", "lingbot2-async-denoiser"), 4),
+        (find(documents, "Deployment", "minwm-async-vae"), "1"),
+        (find(documents, "Deployment", "lingbot2-async-vae"), "1"),
     )
-    for workload in workloads:
+    for workload, expected_gpus in workloads:
         labels = workload["metadata"]["labels"]
         assert labels["seedleap.ai/test-run"] == "minwm-async-vae-benchmark"
         assert labels["seedleap.ai/ttl-after-test"] == "required"
@@ -91,10 +126,33 @@ def validate(documents: list[dict]) -> None:
         resources = container["resources"]
         assert resources.get("requests")
         assert resources.get("limits")
-        assert resources["requests"]["nvidia.com/gpu"] == "1"
-        assert resources["limits"]["nvidia.com/gpu"] == "1"
+        assert resources["requests"]["nvidia.com/gpu"] == expected_gpus
+        assert resources["limits"]["nvidia.com/gpu"] == expected_gpus
 
     denoiser = find(documents, "StatefulSet", "minwm-async-denoiser")
+    lingbot = find(documents, "StatefulSet", "lingbot2-async-denoiser")
+    assert denoiser["spec"]["replicas"] == "REPLACE_WITH_DENOISER_BASE_REPLICAS"
+    assert lingbot["spec"]["replicas"] == 1
+    assert denoiser["spec"]["ordinals"]["start"] == 2
+    assert lingbot["spec"]["ordinals"]["start"] == 1
+    assert denoiser["spec"]["updateStrategy"]["type"] == "OnDelete"
+    assert lingbot["spec"]["updateStrategy"]["type"] == "OnDelete"
+    for workload in (denoiser, lingbot):
+        model_cache = next(
+            volume
+            for volume in workload["spec"]["template"]["spec"]["volumes"]
+            if volume["name"] == "model-cache"
+        )
+        assert model_cache["hostPath"] == {
+            "path": "/mnt/k8s-disks/0/minwm-model-cache",
+            "type": "DirectoryOrCreate",
+        }
+        assert (
+            workload["spec"]["template"]["spec"]["nodeSelector"][
+                "seedleap.ai/model-cache-storage"
+            ]
+            == "local-nvme"
+        )
     containers = denoiser["spec"]["template"]["spec"]["containers"]
     assert {container["name"] for container in containers} == {"denoiser"}
     command = " ".join(containers[0]["args"])
@@ -109,17 +167,18 @@ def validate(documents: list[dict]) -> None:
     assert heartbeat["restartPolicy"] == "Always"
     assert "realtime_worker_heartbeat" in " ".join(heartbeat["args"])
 
-    gateway_service = find(documents, "Service", "minwm-realtime-public")
+    gateway_service = find(documents, "Service", "zing-lingbot-public")
     assert gateway_service["spec"]["selector"] == {
         "app.kubernetes.io/name": "minwm-realtime-gateway"
     }
-
     assert find(documents, "Namespace", "minwm-realtime")
 
 
 def main() -> None:
     validate(load_documents())
-    print("MinWM async-VAE manifests satisfy Spot, quota, and cleanup policies.")
+    print(
+        "MinWM async-VAE manifests satisfy capacity, availability, and safety policies."
+    )
 
 
 if __name__ == "__main__":

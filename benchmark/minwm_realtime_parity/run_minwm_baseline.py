@@ -12,7 +12,6 @@ import time
 from pathlib import Path
 
 import numpy as np
-
 from common import (
     action_label_sequence,
     action_weights,
@@ -105,11 +104,10 @@ def main() -> None:
     sys.path.insert(0, str(minwm_root))
 
     import torch
-    from einops import rearrange
-    from omegaconf import OmegaConf
-
     from configs.configuration import PretrainedConfig
     from dataloader.processors.wan_packed import WanPackedProcessor
+    from einops import rearrange
+    from omegaconf import OmegaConf
     from pipeline import PipelineBase
     from wan_utils.misc import set_seed
 

@@ -129,12 +129,12 @@ from sglang.multimodal_gen.configs.sample.krea2 import (
 from sglang.multimodal_gen.configs.sample.lingbot_world import (
     LingBotWorldSamplingParams,
 )
-from sglang.multimodal_gen.configs.sample.minwm import MinWMSamplingParams
 from sglang.multimodal_gen.configs.sample.ltx_2 import (
     LTX2SamplingParams,
     LTX23HQSamplingParams,
     LTX23SamplingParams,
 )
+from sglang.multimodal_gen.configs.sample.minwm import MinWMSamplingParams
 from sglang.multimodal_gen.configs.sample.mova import (
     MOVA_360P_SamplingParams,
     MOVA_720P_SamplingParams,
@@ -360,7 +360,12 @@ def _get_config_info(
     if model_id is not None:
         model_id_lower = model_id.lower()
         for registered_hf_id in all_model_hf_paths:
-            if get_model_short_name(registered_hf_id).lower() == model_id_lower:
+            registered_hf_id_lower = registered_hf_id.lower()
+            registered_short_name = get_model_short_name(registered_hf_id).lower()
+            if (
+                registered_hf_id_lower == model_id_lower
+                or registered_short_name == model_id_lower
+            ):
                 logger.debug(
                     f"Resolved model via explicit --model-id '{model_id}' → '{registered_hf_id}'."
                 )
@@ -1004,7 +1009,8 @@ def _register_configs():
         ],
         model_detectors=[
             # Match "sana-wm" or "sana_wm" but NOT plain T2I "sana" checkpoints.
-            lambda hf_id: "sana-wm" in hf_id.lower() or "sana_wm" in hf_id.lower(),
+            lambda hf_id: "sana-wm" in hf_id.lower()
+            or "sana_wm" in hf_id.lower(),
         ],
     )
 

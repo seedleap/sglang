@@ -1,0 +1,476 @@
+{
+  "case_id": "case_10",
+  "category": "human_body_hidden",
+  "human_or_nonhuman": "human",
+  "human_hands_visible": false,
+  "source_family": "mixed",
+  "source_batch": "batch_059",
+  "sample_id": "lbd_a6730bb94a8b23d8787be635",
+  "first_frame": "images/case_10_lbd_a6730bb94a8b23d8787be635.png",
+  "prompt_file": "prompts/case_10.txt",
+  "metadata_file": "metadata/case_10.json",
+  "prompt": "Continuous first-person gameplay from the viewpoint of a knife-skills student. A knife-skills classroom has a single long maple demonstration table offset beside a centered epoxy-floor lane; magnetic utensil rails line one wall and an empty instructor platform creates a distant landmark. The environment fills the frame from an eye-level human viewpoint. The visual style is realistic educational photography. At 24 FPS, turn the view left for 93 frames, then move backward for 36 frames. Spatial layout, lighting, viewpoint identity, and visible viewpoint anchors remain continuous throughout the sequence.",
+  "subject_primary": "human",
+  "subject_detail": "human/adult/knife-skills-student",
+  "subject_visible": false,
+  "visible_parts": [],
+  "body_plan": "bipedal adult human",
+  "locomotion_mode": "walking",
+  "scene_primary": "indoor",
+  "scene_description": "A knife-skills classroom has a single long maple demonstration table offset beside a centered epoxy-floor lane; magnetic utensil rails line one wall and an empty instructor platform creates a distant landmark.",
+  "art_style_primary": "realistic",
+  "trajectory_id": "combo_j-s_93-36_nostop",
+  "action_family_pattern": "ijkl_to_wasd",
+  "action_segments": [
+    {
+      "kind": "movement",
+      "key": "j",
+      "start_frame": 0,
+      "end_frame": 92,
+      "num_frames": 93
+    },
+    {
+      "kind": "movement",
+      "key": "s",
+      "start_frame": 93,
+      "end_frame": 128,
+      "num_frames": 36
+    }
+  ],
+  "width": 1672,
+  "height": 941,
+  "image_sha256": "1d8a543d5d015027c7745f8aa0671801ccb0c5e770b8c5cf26e3f615baa12b1a",
+  "source_image_uri": "s3://leap-world-us-east-2/world-model/generation/lingbot_first_person_wasd_ijkl_mixed_noop_v3_20260727/batch_059/images/lbd_a6730bb94a8b23d8787be635.png",
+  "visual_qa": "passed",
+  "prompt_policy": "positive_scene_motion_only_v1",
+  "action": {
+    "traj_id": "combo_j-s_93-36_nostop",
+    "fps": 24,
+    "num_frames": 129,
+    "traj_type": "2_action_segments",
+    "condition_inputs": {
+      "camera_actions": [
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ]
+      ]
+    },
+    "segments": [
+      {
+        "kind": "movement",
+        "key": "j",
+        "start_frame": 0,
+        "end_frame": 92,
+        "num_frames": 93
+      },
+      {
+        "kind": "movement",
+        "key": "s",
+        "start_frame": 93,
+        "end_frame": 128,
+        "num_frames": 36
+      }
+    ],
+    "movement_key": "j",
+    "ending_movement_key": "s",
+    "movement_pair": "j+s",
+    "camera_key": "",
+    "action_pattern": "api:combo:j-s:93-36:nostop",
+    "has_stop": false,
+    "stop_frames": 0,
+    "stop_after_action_index": null,
+    "stop_position": null,
+    "key_sequence": [
+      "j",
+      "s"
+    ],
+    "movement_durations": [
+      93,
+      36
+    ]
+  }
+}

@@ -54,8 +54,8 @@ class _Coordinator:
                 endpoint=self.denoiser_endpoint,
                 az="test-a",
                 slot_index=0,
-                model_revision="minwm-r1",
-                vae_fingerprint="taew2_2",
+                model_revision=request["model_revision"],
+                vae_fingerprint=request["vae_fingerprint"],
             ),
             vae=WorkerSlot(
                 worker_id="vae-1",
@@ -64,7 +64,7 @@ class _Coordinator:
                 az="test-a",
                 slot_index=0,
                 model_revision="",
-                vae_fingerprint="taew2_2",
+                vae_fingerprint=request["vae_fingerprint"],
             ),
         )
 
@@ -130,6 +130,7 @@ def test_gateway_routes_control_and_direct_vae_media_and_queries_trace_over_http
                 )
                 accepted = decode_message(await output.recv())
                 assert accepted["type"] == "session_output_accepted"
+
                 async def send_frame(index: int):
                     await output.send(
                         encode_message(
@@ -169,9 +170,7 @@ def test_gateway_routes_control_and_direct_vae_media_and_queries_trace_over_http
                     )
                 )
                 completion_accepted = decode_message(await output.recv())
-                assert completion_accepted["type"] == (
-                    "media_chunk_complete_accepted"
-                )
+                assert completion_accepted["type"] == ("media_chunk_complete_accepted")
                 assert completion_accepted["chunk_index"] == 0
 
         coordinator = _Coordinator(
@@ -181,6 +180,7 @@ def test_gateway_routes_control_and_direct_vae_media_and_queries_trace_over_http
             coordinator,
             model_revision="minwm-r1",
             vae_fingerprint="taew2_2",
+            lingbot2_vae_fingerprint="taew2_1",
             internal_output_url=(
                 f"ws://127.0.0.1:{gateway_port}/v1/internal/realtime_output"
             ),
@@ -196,6 +196,7 @@ def test_gateway_routes_control_and_direct_vae_media_and_queries_trace_over_http
                     "?user_id=user-a&trace_id=trace-a"
                 )
                 async with connect(url, max_size=None, compression=None) as browser:
+
                     async def send_actions_until_closed():
                         await browser.send(
                             encode_message(
@@ -217,7 +218,7 @@ def test_gateway_routes_control_and_direct_vae_media_and_queries_trace_over_http
                     try:
                         while True:
                             messages.append(
-                                    decode_message(
+                                decode_message(
                                     await asyncio.wait_for(browser.recv(), 4)
                                 )
                             )
@@ -253,9 +254,7 @@ def test_gateway_routes_control_and_direct_vae_media_and_queries_trace_over_http
                         "/v1/realtime_video/traces/trace-a"
                     )
                 assert response.status_code == 200
-                assert response.json()["events"][0]["event"] == (
-                    "gateway.ws_accepted"
-                )
+                assert response.json()["events"][0]["event"] == ("gateway.ws_accepted")
             finally:
                 server.should_exit = True
                 await server_task
@@ -265,5 +264,67 @@ def test_gateway_routes_control_and_direct_vae_media_and_queries_trace_over_http
         assert len(coordinator.released) == 1
         assert denoiser_close_started_at is not None
         assert coordinator.released_at - denoiser_close_started_at >= 0.045
+
+    asyncio.run(run())
+
+
+def test_gateway_routes_named_lingbot2_websocket_through_coordinator():
+    async def run():
+        gateway_port = _free_port()
+        lingbot2_port = _free_port()
+        received = []
+
+        async def lingbot2_denoiser(connection):
+            query = parse_qs(urlsplit(connection.request.path).query)
+            await connection.send(encode_message("session_ready"))
+            received.append(
+                {
+                    "query": query,
+                    "payload": await connection.recv(),
+                }
+            )
+            await connection.close(code=1000)
+
+        coordinator = _Coordinator(
+            f"ws://127.0.0.1:{lingbot2_port}/v1/realtime_video/generate"
+        )
+        app = create_app(
+            coordinator,
+            model_revision="minwm-r1",
+            vae_fingerprint="taew2_2",
+            lingbot2_vae_fingerprint="taew2_1",
+            internal_output_url=(
+                f"ws://127.0.0.1:{gateway_port}/v1/internal/realtime_output"
+            ),
+            lingbot2_model_revision="lingbot2-r1",
+            release_grace_s=0,
+        )
+
+        async with serve(lingbot2_denoiser, "127.0.0.1", lingbot2_port):
+            server, server_task = await _run_gateway(app, gateway_port)
+            try:
+                url = (
+                    f"ws://127.0.0.1:{gateway_port}"
+                    "/backends/lingbot2/v1/realtime_video/generate"
+                    "?user_id=user-a&trace_id=trace-a"
+                )
+                payload = encode_message("camera_actions", event_id=7, actions=["w"])
+                async with connect(url, max_size=None, compression=None) as browser:
+                    ready = decode_message(await browser.recv())
+                    assert ready["type"] == "session_ready", ready
+                    await browser.send(payload)
+                    await browser.wait_closed()
+                assert coordinator.admitted[0]["model_revision"] == "lingbot2-r1"
+                assert coordinator.admitted[0]["vae_fingerprint"] == "taew2_1"
+                assert received[0]["query"]["trace_id"] == ["trace-a"]
+                assert received[0]["query"]["realtime_vae_worker_url"] == [
+                    "ws://vae-1:18081/v1/realtime_vae/decode"
+                ]
+                assert decode_message(received[0]["payload"])["event_id"] == 7
+            finally:
+                server.should_exit = True
+                await server_task
+
+        assert len(coordinator.released) == 1
 
     asyncio.run(run())

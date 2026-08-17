@@ -1,0 +1,46 @@
+ARG PYTHON_IMAGE=public.ecr.aws/docker/library/python@sha256:d657ab0ade19f404a6ccc883ab399540de667aff751748ce23c07330c5a89e64
+
+FROM ${PYTHON_IMAGE}
+
+ARG SOURCE_REVISION
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    WEBUI_HOST=0.0.0.0 \
+    WEBUI_PORT=18080
+
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && \
+    apt-get install -y --no-install-recommends ffmpeg && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python -m pip install --no-cache-dir \
+      'aiohttp==3.14.3' \
+      'google-auth==2.56.3' \
+      'google-genai==2.17.0' \
+      'msgspec==0.21.1' \
+      'openai==3.0.0' \
+      'pillow==12.3.0' \
+      'pydantic==2.13.4'
+
+COPY python/sglang/multimodal_gen/apps/realtime_webui \
+     /opt/sglang/python/sglang/multimodal_gen/apps/realtime_webui
+
+RUN chmod 0644 \
+      /opt/sglang/python/sglang/multimodal_gen/apps/realtime_webui/happyoyster_prebuilt_worlds.json
+
+RUN install -d -o 65532 -g 65532 \
+      /opt/sglang/python/sglang/multimodal_gen/apps/realtime_webui_generated && \
+    python -m compileall -q \
+      /opt/sglang/python/sglang/multimodal_gen/apps/realtime_webui && \
+    ffmpeg -hide_banner -encoders 2>/dev/null | grep -q 'libx264'
+
+LABEL org.opencontainers.image.title="minwm-dual-realtime-webui" \
+      org.opencontainers.image.revision=${SOURCE_REVISION}
+
+USER 65532:65532
+WORKDIR /opt/sglang/python/sglang/multimodal_gen/apps/realtime_webui
+
+ENTRYPOINT ["python", "server.py"]

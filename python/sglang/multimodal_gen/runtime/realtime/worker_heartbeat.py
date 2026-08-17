@@ -7,6 +7,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import quote, urlsplit
@@ -16,7 +17,6 @@ import httpx
 from sglang.multimodal_gen.runtime.realtime.worker_reservation import (
     resolve_worker_epoch,
 )
-
 
 logger = logging.getLogger(__name__)
 WorkerRole = Literal["denoiser", "vae"]
@@ -37,7 +37,9 @@ async def discover_kubernetes_node_az(
     try:
         zone = response.json()["metadata"]["labels"]["topology.kubernetes.io/zone"]
     except (KeyError, TypeError) as exc:
-        raise RuntimeError("Kubernetes Node is missing its availability-zone label") from exc
+        raise RuntimeError(
+            "Kubernetes Node is missing its availability-zone label"
+        ) from exc
     if not isinstance(zone, str) or not zone:
         raise RuntimeError("Kubernetes Node availability zone is invalid")
     return zone
@@ -68,7 +70,10 @@ class WorkerHeartbeatReporter:
         if role not in ("denoiser", "vae"):
             raise ValueError("role must be denoiser or vae")
         reservation_parts = urlsplit(reservation_endpoint)
-        if reservation_parts.scheme not in ("http", "https") or not reservation_parts.netloc:
+        if (
+            reservation_parts.scheme not in ("http", "https")
+            or not reservation_parts.netloc
+        ):
             raise ValueError("reservation_endpoint must be an HTTP endpoint")
         if not worker_id or not az or capacity < 1:
             raise ValueError("worker identity, AZ, and positive capacity are required")
@@ -101,16 +106,29 @@ class WorkerHeartbeatReporter:
         if not state.is_success:
             return False
         runtime_state = state.json()
+        runtime_epoch = str(runtime_state.get("worker_epoch") or "").strip()
+        if not runtime_epoch:
+            return False
         if self.worker_epoch_file is not None:
             try:
                 expected_epoch = self.worker_epoch_file.read_text().strip()
             except FileNotFoundError:
-                return False
+                expected_epoch = ""
+            if runtime_epoch != expected_epoch:
+                temporary = self.worker_epoch_file.with_name(
+                    f".{self.worker_epoch_file.name}.{os.getpid()}.tmp"
+                )
+                temporary.write_text(f"{runtime_epoch}\n")
+                os.replace(temporary, self.worker_epoch_file)
+                logger.warning(
+                    "repaired stale worker epoch file from local runtime state"
+                )
+                expected_epoch = runtime_epoch
         else:
             expected_epoch = self.worker_epoch
         if not expected_epoch:
             return False
-        if runtime_state.get("worker_epoch") != expected_epoch:
+        if runtime_epoch != expected_epoch:
             raise RuntimeError("worker state epoch does not match heartbeat epoch")
         runtime_payload = {
             key: runtime_state[key]

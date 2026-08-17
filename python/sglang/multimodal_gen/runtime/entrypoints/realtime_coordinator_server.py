@@ -29,7 +29,6 @@ from sglang.multimodal_gen.runtime.utils.realtime_trace import (
     normalize_trace_id,
 )
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -165,9 +164,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--candidate-limit", type=int, default=64)
     parser.add_argument("--denoiser-capacity-limit", type=int)
     parser.add_argument("--vae-capacity-limit", type=int)
-    parser.add_argument(
-        "--worker-reservation-timeout-s", type=float, default=2.0
-    )
+    parser.add_argument("--worker-reservation-timeout-s", type=float, default=2.0)
     return parser.parse_args()
 
 

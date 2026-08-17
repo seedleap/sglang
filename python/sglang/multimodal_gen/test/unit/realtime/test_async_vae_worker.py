@@ -101,10 +101,14 @@ class _SynchronousStreamingBlockingEngine(_SynchronousBlockingEngine):
         )
 
 
-def test_taehv_engine_warmup_runs_a_production_shape_decode(monkeypatch):
+@pytest.mark.parametrize("latent_channels", [16, 48])
+def test_taehv_engine_warmup_uses_the_checkpoint_latent_channels(
+    monkeypatch, latent_channels
+):
     engine = TAEHVEngine.__new__(TAEHVEngine)
     engine.device = torch.device("cpu")
     engine.dtype = torch.bfloat16
+    engine.model = type("TAEHVModel", (), {"latent_channels": latent_channels})()
     decoder = object()
     calls = []
 
@@ -118,7 +122,7 @@ def test_taehv_engine_warmup_runs_a_production_shape_decode(monkeypatch):
 
     engine.warmup()
 
-    assert calls == [(decoder, (1, 48, 1, 30, 52), torch.bfloat16, True)]
+    assert calls == [(decoder, (1, latent_channels, 1, 30, 52), torch.bfloat16, True)]
 
 
 def test_taehv_engine_decodes_model_space_latents_without_native_vae_denorm():
@@ -458,6 +462,60 @@ def test_worker_coalesces_streaming_yields_into_configured_transport_batch():
         assert batches[0].source_height == 8
         assert batches[0].preview_width == 8
         assert batches[0].preview_height == 8
+        await worker.close_all()
+
+    asyncio.run(scenario())
+
+
+def test_worker_parallelizes_single_frame_encoding_but_emits_in_frame_order(
+    monkeypatch,
+):
+    async def scenario():
+        worker = AsyncVAEWorker(
+            _FakeEngine(),
+            max_sessions=1,
+            encoded_frames_per_batch=1,
+            encode_workers=2,
+        )
+        await worker.open(SessionOpen("s", "g", output_format="webp"))
+        original_encode = worker._encode_frames
+        active = 0
+        max_active = 0
+        active_lock = threading.Lock()
+        emitted = []
+
+        def observed_encode(frames, opened):
+            nonlocal active, max_active
+            with active_lock:
+                active += 1
+                max_active = max(max_active, active)
+            try:
+                time.sleep(0.05)
+                return original_encode(frames, opened)
+            finally:
+                with active_lock:
+                    active -= 1
+
+        monkeypatch.setattr(worker, "_encode_frames", observed_encode)
+
+        async def on_frame_batch(batch):
+            emitted.append(batch.frame_batch_index)
+
+        latents = torch.zeros(1, 48, 2, 2, 2, dtype=torch.bfloat16)
+        result = await worker.decode(
+            replace(
+                _header("s", "g", 0),
+                shape=tuple(latents.shape),
+                byte_length=latents.numel() * latents.element_size(),
+            ),
+            latents,
+            on_frame_batch=on_frame_batch,
+        )
+
+        assert result.num_frames == 2
+        assert max_active == 2
+        assert emitted == [0, 1]
+        assert worker.runtime_state()["encode_workers"] == 2
         await worker.close_all()
 
     asyncio.run(scenario())

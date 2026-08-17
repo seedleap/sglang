@@ -160,6 +160,8 @@ class RealtimeVideoGenerationsRequest(VideoGenerationsRequest):
     realtime_output_format: Optional[Literal["raw", "webp", "jpeg"]] = None
     realtime_preview_max_width: Optional[int] = None
     realtime_output_pacing: Optional[bool] = False
+    realtime_interactive_event_grace_ms: Optional[int] = Field(default=0, ge=0, le=2500)
+    playback_ack_enabled: Optional[bool] = False
     realtime_causal_sink_size: Optional[int] = None
     realtime_causal_kv_cache_num_frames: Optional[int] = None
     trace_id: Optional[str] = None

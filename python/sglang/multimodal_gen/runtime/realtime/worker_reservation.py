@@ -14,7 +14,6 @@ from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Response, status
 
-
 WorkerLifecycle = Literal["ready", "draining", "failed"]
 _PROCESS_EPOCH = os.environ.get("WORKER_EPOCH") or uuid4().hex
 _PROCESS_EPOCH_PATHS: set[str] = set()
@@ -195,9 +194,7 @@ class WorkerReservationRegistry:
         *,
         owner_id: str | None,
     ) -> None:
-        if reservation.consumed and (
-            not owner_id or reservation.owner_id != owner_id
-        ):
+        if reservation.consumed and (not owner_id or reservation.owner_id != owner_id):
             raise WorkerReservationRejected("RESERVATION_OWNER_MISMATCH")
 
     async def mark_runnable(self, token: str, *, owner_id: str) -> None:
@@ -227,25 +224,20 @@ class WorkerReservationRegistry:
                 elapsed_ms = max(0.0, (self._clock() - reservation.consumed_at) * 1000)
                 self._completed_sessions += 1
                 alpha = 1.0 / min(self._completed_sessions, 16)
-                self._service_time_ms += alpha * (
-                    elapsed_ms - self._service_time_ms
-                )
+                self._service_time_ms += alpha * (elapsed_ms - self._service_time_ms)
 
     async def drain(self, deadline: float) -> None:
         if deadline <= 0:
             raise ValueError("drain deadline must be positive")
         async with self._lock:
             self._drain_deadline = deadline
-            self._lifecycle = (
-                "draining" if deadline > self._clock() else "failed"
-            )
+            self._lifecycle = "draining" if deadline > self._clock() else "failed"
 
     async def snapshot(self) -> dict[str, str | int | float | None]:
         async with self._lock:
             self._expire_locked(self._clock())
             active_sessions = sum(
-                reservation.consumed
-                for reservation in self._reservations.values()
+                reservation.consumed for reservation in self._reservations.values()
             )
             reserved_sessions = len(self._reservations) - active_sessions
             load = dict(self._load_provider() if self._load_provider else {})
@@ -275,9 +267,7 @@ class WorkerReservationRegistry:
                 "blocked_sessions": blocked_sessions,
                 "queue_depth": queue_depth,
                 "service_time_ms": service_time_ms,
-                "normalized_load": (
-                    active_sessions + reserved_sessions
-                )
+                "normalized_load": (active_sessions + reserved_sessions)
                 / self.capacity,
             }
 

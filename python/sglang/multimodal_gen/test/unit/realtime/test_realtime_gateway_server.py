@@ -59,6 +59,31 @@ def test_gateway_parses_ui_config_for_the_served_webui():
     }
 
 
+def test_gateway_exposes_named_minwm_and_lingbot2_backends():
+    app = create_app(
+        _Coordinator(),
+        model_revision="minwm-r1",
+        vae_fingerprint="taew2_2",
+        internal_output_url="ws://gateway/v1/internal/realtime_output",
+        lingbot2_upstream_url="ws://lingbot2:30000/v1/realtime_video/generate",
+        lingbot2_model_revision="lingbot2-r1",
+    )
+
+    routes = {route.path for route in app.routes}
+    assert "/backends/minwm/v1/realtime_video/generate" in routes
+    assert "/backends/lingbot2/v1/realtime_video/generate" in routes
+    assert "/backends/minwm/v1/models" in routes
+    assert "/backends/lingbot2/v1/models" in routes
+
+    client = TestClient(app)
+    assert client.get("/backends/minwm/v1/models").json()["data"][0]["id"] == (
+        "minwm-r1"
+    )
+    assert client.get("/backends/lingbot2/v1/models").json()["data"][0]["id"] == (
+        "lingbot2-r1"
+    )
+
+
 def test_gateway_trace_events_use_the_independent_otlp_log_plane():
     source = inspect.getsource(realtime_gateway_server)
 
@@ -212,6 +237,33 @@ def test_gateway_readiness_depends_on_coordinator():
 
     assert ready_client.get("/readyz").status_code == 200
     response = unavailable_client.get("/readyz")
+    assert response.status_code == 503
+    assert response.json()["detail"] == "coordinator unavailable"
+
+
+def test_gateway_readiness_tolerates_a_bounded_coordinator_probe_blip():
+    coordinator = _Coordinator()
+    clock = [100.0]
+    client = TestClient(
+        create_app(
+            coordinator,
+            model_revision="minwm-r1",
+            vae_fingerprint="taew2_2",
+            internal_output_url="ws://gateway/v1/internal/realtime_output",
+            readiness_coordinator_grace_s=30.0,
+            readiness_clock=lambda: clock[0],
+        )
+    )
+
+    assert client.get("/readyz").json()["coordinator"] == "ready"
+    coordinator.ready = False
+    clock[0] = 125.0
+    response = client.get("/readyz")
+    assert response.status_code == 200
+    assert response.json()["coordinator"] == "degraded"
+
+    clock[0] = 131.0
+    response = client.get("/readyz")
     assert response.status_code == 503
     assert response.json()["detail"] == "coordinator unavailable"
 

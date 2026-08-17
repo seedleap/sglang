@@ -1,0 +1,412 @@
+{
+  "case_id": "case_20",
+  "category": "nonhuman_mechanical",
+  "human_or_nonhuman": "nonhuman",
+  "human_hands_visible": false,
+  "source_family": "mixed",
+  "source_batch": "batch_056",
+  "sample_id": "lbd_aef443067c9db5fa7cbcd6c1",
+  "first_frame": "images/case_20_lbd_aef443067c9db5fa7cbcd6c1.png",
+  "prompt_file": "prompts/case_20.txt",
+  "metadata_file": "metadata/case_20.json",
+  "prompt": "Continuous first-person gameplay from the viewpoint of a compact street-cleaning robot. A pedestrian riverside promenade curves gently under plane trees, with pale stone paving, cast-iron benches, low parapet walls, and a glass recycling station beside the route. A rounded green brush housing and narrow intake lip remain visible along the lower frame. The visual style is realistic urban documentary photography. At 24 FPS, move backward for 53 frames, hold a steady view for 48 frames, turn the view left for 20 frames, then move forward for 8 frames. Spatial layout, lighting, viewpoint identity, and visible viewpoint anchors remain continuous throughout the sequence.",
+  "subject_primary": "object",
+  "subject_detail": "object/street-cleaning robot/compact litter-sweeper",
+  "subject_visible": true,
+  "visible_parts": [
+    "the sweeper’s rounded green brush housing and narrow intake lip at the lower edge"
+  ],
+  "body_plan": "compact three-wheel cleaning chassis",
+  "locomotion_mode": "self-propelled rolling",
+  "scene_primary": "outdoor_built",
+  "scene_description": "A pedestrian riverside promenade curves gently under plane trees, with pale stone paving, cast-iron benches, low parapet walls, and a glass recycling station beside the route.",
+  "art_style_primary": "realistic",
+  "trajectory_id": "combo_s-j-w_53-20-8_stop48after1",
+  "action_family_pattern": "wasd_to_ijkl_to_wasd",
+  "action_segments": [
+    {
+      "kind": "movement",
+      "key": "s",
+      "start_frame": 0,
+      "end_frame": 52,
+      "num_frames": 53
+    },
+    {
+      "kind": "noop",
+      "key": null,
+      "start_frame": 53,
+      "end_frame": 100,
+      "num_frames": 48
+    },
+    {
+      "kind": "movement",
+      "key": "j",
+      "start_frame": 101,
+      "end_frame": 120,
+      "num_frames": 20
+    },
+    {
+      "kind": "movement",
+      "key": "w",
+      "start_frame": 121,
+      "end_frame": 128,
+      "num_frames": 8
+    }
+  ],
+  "width": 1672,
+  "height": 941,
+  "image_sha256": "e6d10a3f5db27946695c5e4a9ea67f08273643f2e1fabc47a9d5f834c7b48c3c",
+  "source_image_uri": "s3://leap-world-us-east-2/world-model/generation/lingbot_first_person_wasd_ijkl_mixed_noop_v3_20260727/batch_056/images/lbd_aef443067c9db5fa7cbcd6c1.png",
+  "visual_qa": "passed",
+  "prompt_policy": "positive_scene_motion_only_v1",
+  "action": {
+    "traj_id": "combo_s-j-w_53-20-8_stop48after1",
+    "fps": 24,
+    "num_frames": 129,
+    "traj_type": "3_action_segments",
+    "condition_inputs": {
+      "camera_actions": [
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [
+          "s"
+        ],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "j"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ]
+      ]
+    },
+    "segments": [
+      {
+        "kind": "movement",
+        "key": "s",
+        "start_frame": 0,
+        "end_frame": 52,
+        "num_frames": 53
+      },
+      {
+        "kind": "noop",
+        "key": null,
+        "start_frame": 53,
+        "end_frame": 100,
+        "num_frames": 48
+      },
+      {
+        "kind": "movement",
+        "key": "j",
+        "start_frame": 101,
+        "end_frame": 120,
+        "num_frames": 20
+      },
+      {
+        "kind": "movement",
+        "key": "w",
+        "start_frame": 121,
+        "end_frame": 128,
+        "num_frames": 8
+      }
+    ],
+    "movement_key": "s",
+    "ending_movement_key": "w",
+    "movement_pair": "s+w",
+    "camera_key": "",
+    "action_pattern": "api:combo:s-j-w:53-20-8:stop48after1",
+    "has_stop": true,
+    "stop_frames": 48,
+    "stop_after_action_index": 0,
+    "stop_position": "after_action_1",
+    "key_sequence": [
+      "s",
+      "j",
+      "w"
+    ],
+    "movement_durations": [
+      53,
+      20,
+      8
+    ]
+  }
+}

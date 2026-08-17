@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -17,6 +18,16 @@ if TYPE_CHECKING:
     from sglang.multimodal_gen.runtime.entrypoints.openai.realtime.realtime_adapter import (
         BaseRealtimeModelAdapter,
     )
+
+
+def _non_negative_int(value: Any, fallback: int) -> int:
+    if isinstance(value, bool):
+        return fallback
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return fallback
+    return parsed if parsed >= 0 else fallback
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,8 +58,15 @@ class GenerateSession:
         self.trace_started_at = time.perf_counter()
         self.trace_started_epoch_ms = int(time.time() * 1000)
         self.created_at = time.monotonic()
+        self.playable_at: float | None = None
+        self.playback_ack_enabled = False
+        self.last_received_chunk = -1
+        self.last_rendered_chunk = -1
+        self.last_rendered_event_id = 0
         self.last_client_activity_at = self.created_at
         self.client_activity_version = 0
+        self.interactive_event_version = 0
+        self._interactive_event = asyncio.Event()
         self.action_version = 0
         self.prompt_version = 0
         self.denoise_intervals: dict[int, tuple[float, float]] = {}
@@ -75,6 +93,7 @@ class GenerateSession:
         self.gateway_output_token: str | None = None
         self.pending_control_refresh: tuple[str, int | None] | None = None
         self.control_refresh_task: Any = None
+        self.input_event_timings: dict[int, tuple[float, float]] = {}
 
     def set_adapter(self, adapter: BaseRealtimeModelAdapter):
         self.adapter = adapter
@@ -86,6 +105,7 @@ class GenerateSession:
     def set_request(self, request: RealtimeVideoGenerationsRequest):
         self.bind_trace(request)
         self.request = request
+        self.playback_ack_enabled = bool(request.playback_ack_enabled)
 
     def dispose(self):
         if self.adapter is not None:
@@ -105,9 +125,74 @@ class GenerateSession:
         self.vae_decoder_backend = None
         self.pending_control_refresh = None
         self.control_refresh_task = None
+        self.input_event_timings.clear()
+        self.playable_at = None
+        self.playback_ack_enabled = False
+        self.last_received_chunk = -1
+        self.last_rendered_chunk = -1
+        self.last_rendered_event_id = 0
         self.denoise_intervals.clear()
         self.vae_intervals.clear()
         self.realtime_session.dispose()
+
+    def record_input_event(
+        self,
+        event_id: int | None,
+        client_sent_epoch_ms: float | None,
+        server_received_epoch_ms: float,
+    ) -> None:
+        if event_id is None or event_id <= 0 or not client_sent_epoch_ms:
+            return
+        self.input_event_timings[int(event_id)] = (
+            float(client_sent_epoch_ms),
+            float(server_received_epoch_ms),
+        )
+        while len(self.input_event_timings) > 128:
+            self.input_event_timings.pop(next(iter(self.input_event_timings)))
+
+    def consume_input_timing(self, event_id: int | None) -> dict[str, float] | None:
+        """Consume the first user input included in a generated event burst."""
+        if event_id is None or event_id <= 0:
+            return None
+        consumed = [
+            candidate
+            for candidate in self.input_event_timings
+            if candidate <= int(event_id)
+        ]
+        if not consumed:
+            return None
+        first_event_id = min(consumed)
+        client_sent, server_received = self.input_event_timings[first_event_id]
+        for candidate in consumed:
+            self.input_event_timings.pop(candidate, None)
+        return {
+            "input_event_id": float(first_event_id),
+            "client_sent_epoch_ms": client_sent,
+            "server_received_epoch_ms": server_received,
+            "input_uplink_ms": max(0.0, server_received - client_sent),
+        }
+
+    def mark_playable(self) -> None:
+        if self.playable_at is None:
+            self.playable_at = time.monotonic()
+
+    def apply_playback_ack(self, payload: Any) -> None:
+        if not isinstance(payload, dict):
+            return
+        self.last_received_chunk = max(
+            self.last_received_chunk,
+            _non_negative_int(payload.get("last_received_chunk"), -1),
+        )
+        self.last_rendered_chunk = max(
+            self.last_rendered_chunk,
+            _non_negative_int(payload.get("last_rendered_chunk"), -1),
+        )
+        self.last_rendered_event_id = max(
+            self.last_rendered_event_id,
+            _non_negative_int(payload.get("last_rendered_event_id"), 0),
+        )
+        if payload.get("playable") is True:
+            self.mark_playable()
 
     def mark_client_activity(self) -> None:
         self.last_client_activity_at = time.monotonic()
@@ -118,6 +203,27 @@ class GenerateSession:
             self.action_version += 1
         elif kind in {"prompt", "scene_cut"}:
             self.prompt_version += 1
+        self.interactive_event_version += 1
+        self._interactive_event.set()
+
+    async def wait_for_interactive_event_after(
+        self, version: int, timeout_s: float
+    ) -> bool:
+        deadline = time.monotonic() + max(0.0, timeout_s)
+        while self.interactive_event_version <= version:
+            self._interactive_event.clear()
+            if self.interactive_event_version > version:
+                break
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            try:
+                await asyncio.wait_for(
+                    self._interactive_event.wait(), timeout=remaining
+                )
+            except TimeoutError:
+                return False
+        return True
 
     @property
     def current_chunk(self) -> RealtimeChunkContext | None:

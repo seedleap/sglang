@@ -1,0 +1,57 @@
+Happy Oyster Web SDK — Proprietary Software License Agreement
+
+Copyright (c) 2026 Alibaba Group. All Rights Reserved.
+
+This software, including @happy-oyster/js-sdk and all of its source code,
+object code, documentation, and related materials (collectively, the
+"Software"), is the proprietary and confidential property of Alibaba Group
+and its licensors (the "Licensor"). The Software is licensed, not sold.
+
+1. GRANT OF LICENSE
+   Subject to your full compliance with this Agreement, the Licensor grants
+   you a limited, non-exclusive, non-transferable, non-sublicensable, and
+   revocable right to install and use the Software solely to integrate and
+   call its public interfaces in your own applications.
+
+2. RESTRICTIONS
+   Except as expressly permitted by this Agreement or by applicable law that
+   cannot be excluded by agreement, you shall NOT, and shall not permit any
+   third party to:
+   (a) copy, modify, adapt, translate, or create derivative works of the
+       Software;
+   (b) reverse engineer, decompile, disassemble, or otherwise attempt to
+       derive the source code, structure, or algorithms of the Software;
+   (c) distribute, sublicense, lease, rent, lend, sell, or otherwise transfer
+       the Software or make it available to any third party, except as an
+       integral and non-separable part of your own application;
+   (d) remove, alter, or obscure any copyright, trademark, or other
+       proprietary notices contained in the Software.
+
+3. OWNERSHIP
+   The Licensor retains all right, title, and interest in and to the
+   Software, including all intellectual property rights therein. No rights
+   are granted to you other than those expressly set forth in this Agreement.
+
+4. NO WARRANTY
+   THE SOFTWARE IS PROVIDED "AS IS" AND "AS AVAILABLE", WITHOUT WARRANTY OF
+   ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES
+   OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT.
+
+5. LIMITATION OF LIABILITY
+   TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW, IN NO EVENT SHALL THE
+   LICENSOR BE LIABLE FOR ANY INDIRECT, INCIDENTAL, SPECIAL, CONSEQUENTIAL,
+   OR PUNITIVE DAMAGES, OR ANY LOSS OF PROFITS OR DATA, ARISING OUT OF OR IN
+   CONNECTION WITH THE USE OF OR INABILITY TO USE THE SOFTWARE.
+
+6. TERMINATION
+   This license is effective until terminated. It terminates automatically
+   and immediately, without notice, if you breach any term of this Agreement.
+   Upon termination, you must cease all use of the Software and destroy all
+   copies in your possession or control.
+
+7. GOVERNING LAW
+   This Agreement shall be governed by and construed in accordance with the
+   applicable laws of the jurisdiction in which the Licensor is established,
+   without regard to its conflict-of-laws principles.
+
+For licensing inquiries, please contact the Licensor.

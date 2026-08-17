@@ -1,0 +1,92 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: minwm-async-denoiser
+  namespace: minwm-realtime
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: minwm-async-denoiser
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: lingbot2-async-denoiser
+  namespace: minwm-realtime
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: lingbot2-async-denoiser
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: minwm-async-vae
+  namespace: minwm-realtime
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: minwm-async-vae
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: lingbot2-async-vae
+  namespace: minwm-realtime
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: lingbot2-async-vae
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: minwm-production-gpu-min-replicas
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [apps]
+        apiVersions: [v1]
+        operations: [CREATE, UPDATE, DELETE]
+        resources:
+          - deployments
+          - deployments/scale
+          - statefulsets
+          - statefulsets/scale
+  validations:
+    - expression: >-
+        request.operation != 'DELETE' ||
+        !(oldObject.metadata.name in [
+          'minwm-async-denoiser',
+          'lingbot2-async-denoiser',
+          'minwm-async-vae',
+          'lingbot2-async-vae'
+        ])
+      message: Production GPU workloads cannot be deleted; use the break-glass runbook.
+    - expression: >-
+        request.operation == 'DELETE' ||
+        !(object.metadata.name in [
+          'minwm-async-denoiser',
+          'lingbot2-async-denoiser',
+          'minwm-async-vae',
+          'lingbot2-async-vae'
+        ]) ||
+        (has(object.spec.replicas) && object.spec.replicas >= 1)
+      message: Production GPU workloads must retain at least one replica.
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: minwm-production-gpu-min-replicas
+spec:
+  policyName: minwm-production-gpu-min-replicas
+  validationActions: [Deny]
+  matchResources:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: minwm-realtime

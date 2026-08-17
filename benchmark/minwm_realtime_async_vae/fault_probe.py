@@ -107,9 +107,7 @@ async def _session(
             if read_pause_s:
                 await asyncio.sleep(read_pause_s)
             target = stop_after_chunks or chunks
-            completed = await _consume(
-                websocket, target_chunks=target, timeout_s=180
-            )
+            completed = await _consume(websocket, target_chunks=target, timeout_s=180)
             if stop_after_chunks is not None:
                 outcome = "client_disconnected"
                 await websocket.close(code=1000, reason="fault probe disconnect")
@@ -142,9 +140,7 @@ async def _reconnect_with_backoff(
     while True:
         attempts += 1
         try:
-            result = await _session(
-                ws_url, model, user_id=user_id, chunks=chunks
-            )
+            result = await _session(ws_url, model, user_id=user_id, chunks=chunks)
             result["admission_attempts"] = attempts
             result["admission_recovery_ms"] = round(
                 (time.perf_counter() - started) * 1000.0, 3

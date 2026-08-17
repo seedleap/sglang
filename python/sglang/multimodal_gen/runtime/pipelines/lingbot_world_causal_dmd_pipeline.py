@@ -26,9 +26,17 @@ from sglang.multimodal_gen.runtime.pipelines_core.stages.realtime import (
     RealtimeChunkLatentPreparationStage,
     RealtimeImageVAEEncodingStage,
     RealtimeInputValidationStage,
+    RealtimeLatentHandoffStage,
     RealtimeTextEncodingStage,
 )
 from sglang.multimodal_gen.runtime.server_args import ServerArgs
+
+
+def _use_remote_realtime_vae(server_args: ServerArgs) -> bool:
+    if bool(getattr(server_args, "realtime_remote_vae_enabled", False)):
+        return True
+    value = getattr(server_args, "realtime_vae_worker_url", None)
+    return isinstance(value, str) and bool(value.strip())
 
 
 class LingBotWorldCausalDMDPipeline(LoRAPipeline, ComposedPipelineBase):
@@ -90,12 +98,15 @@ class LingBotWorldCausalDMDPipeline(LoRAPipeline, ComposedPipelineBase):
                 scheduler=self.get_module("scheduler"),
             ),
         )
-        self.add_stage(
-            CausalVaeDecodingStage(
-                vae=self.get_module("vae"),
-                pipeline=self,
+        if _use_remote_realtime_vae(server_args):
+            self.add_stage(RealtimeLatentHandoffStage())
+        else:
+            self.add_stage(
+                CausalVaeDecodingStage(
+                    vae=self.get_module("vae"),
+                    pipeline=self,
+                )
             )
-        )
 
 
 EntryClass = LingBotWorldCausalDMDPipeline

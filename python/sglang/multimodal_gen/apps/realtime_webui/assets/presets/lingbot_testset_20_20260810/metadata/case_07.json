@@ -1,0 +1,298 @@
+{
+  "case_id": "case_07",
+  "category": "human_body_hidden",
+  "human_or_nonhuman": "human",
+  "human_hands_visible": false,
+  "source_family": "wasd",
+  "source_batch": "batch_054",
+  "sample_id": "lbd_9f04c197a16b59f71a07f5ce",
+  "first_frame": "images/case_07_lbd_9f04c197a16b59f71a07f5ce.png",
+  "prompt_file": "prompts/case_07.txt",
+  "metadata_file": "metadata/case_07.json",
+  "prompt": "Continuous first-person gameplay from the viewpoint of a desert field researcher. A dry canyon restoration wash has a level compacted-earth trail threading between low woven-brush check structures, pale sandstone walls, and a distant rain gauge mast; the corridor stays broad and clear through the center. The environment fills the frame from an eye-level human viewpoint. The visual style is naturalistic desert field photography. At 24 FPS, strafe left for 8 frames, move forward for 25 frames, then hold a steady view for 96 frames. Spatial layout, lighting, viewpoint identity, and visible viewpoint anchors remain continuous throughout the sequence.",
+  "subject_primary": "human",
+  "subject_detail": "human/adult/desert-field-researcher",
+  "subject_visible": false,
+  "visible_parts": [],
+  "body_plan": "bipedal human",
+  "locomotion_mode": "walking",
+  "scene_primary": "outdoor_natural",
+  "scene_description": "A dry canyon restoration wash has a level compacted-earth trail threading between low woven-brush check structures, pale sandstone walls, and a distant rain gauge mast; the corridor stays broad and clear through the center.",
+  "art_style_primary": "realistic",
+  "trajectory_id": "combo_a-w_8-25_stop96after2",
+  "action_family_pattern": "wasd",
+  "action_segments": [
+    {
+      "kind": "movement",
+      "key": "a",
+      "start_frame": 0,
+      "end_frame": 7,
+      "num_frames": 8
+    },
+    {
+      "kind": "movement",
+      "key": "w",
+      "start_frame": 8,
+      "end_frame": 32,
+      "num_frames": 25
+    },
+    {
+      "kind": "noop",
+      "key": null,
+      "start_frame": 33,
+      "end_frame": 128,
+      "num_frames": 96
+    }
+  ],
+  "width": 1672,
+  "height": 941,
+  "image_sha256": "5e00c1353d6872921096254a8b5e08197137eb1b4072577969335aeb609c897a",
+  "source_image_uri": "s3://leap-world-us-east-2/world-model/generation/lingbot_first_person_wasd_noop_20260725/batch_054/images/lbd_9f04c197a16b59f71a07f5ce.png",
+  "visual_qa": "passed",
+  "prompt_policy": "positive_scene_motion_only_v1",
+  "action": {
+    "traj_id": "combo_a-w_8-25_stop96after2",
+    "fps": 24,
+    "num_frames": 129,
+    "traj_type": "2_action_segments",
+    "condition_inputs": {
+      "camera_actions": [
+        [
+          "a"
+        ],
+        [
+          "a"
+        ],
+        [
+          "a"
+        ],
+        [
+          "a"
+        ],
+        [
+          "a"
+        ],
+        [
+          "a"
+        ],
+        [
+          "a"
+        ],
+        [
+          "a"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [
+          "w"
+        ],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        []
+      ]
+    },
+    "segments": [
+      {
+        "kind": "movement",
+        "key": "a",
+        "start_frame": 0,
+        "end_frame": 7,
+        "num_frames": 8
+      },
+      {
+        "kind": "movement",
+        "key": "w",
+        "start_frame": 8,
+        "end_frame": 32,
+        "num_frames": 25
+      },
+      {
+        "kind": "noop",
+        "key": null,
+        "start_frame": 33,
+        "end_frame": 128,
+        "num_frames": 96
+      }
+    ],
+    "movement_key": "a",
+    "ending_movement_key": "w",
+    "movement_pair": "a+w",
+    "camera_key": "",
+    "action_pattern": "api:combo:a-w:8-25:stop96after2",
+    "has_stop": true,
+    "stop_frames": 96,
+    "stop_after_action_index": 1,
+    "stop_position": "after_action_2",
+    "key_sequence": [
+      "a",
+      "w"
+    ],
+    "movement_durations": [
+      8,
+      25
+    ]
+  }
+}

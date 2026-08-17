@@ -8,6 +8,7 @@ import asyncio
 import inspect
 import io
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
@@ -127,11 +128,14 @@ class AsyncVAEWorker:
         max_sessions: int,
         queue_depth_per_session: int = 1,
         encoded_frames_per_batch: int = 1,
+        encode_workers: int = 4,
     ) -> None:
         if max_sessions < 1:
             raise ValueError("max_sessions must be positive")
         if queue_depth_per_session < 1:
             raise ValueError("queue_depth_per_session must be positive")
+        if encode_workers < 1:
+            raise ValueError("encode_workers must be positive")
         engine_max_sessions = getattr(engine, "max_sessions", None)
         if engine_max_sessions is not None and max_sessions > engine_max_sessions:
             raise ValueError(
@@ -143,6 +147,12 @@ class AsyncVAEWorker:
         self.max_sessions = max_sessions
         self.queue_depth_per_session = queue_depth_per_session
         self.encoded_frames_per_batch = max(1, encoded_frames_per_batch)
+        self.encode_workers = encode_workers
+        self._encode_executor = ThreadPoolExecutor(
+            max_workers=encode_workers,
+            thread_name_prefix="realtime-webp",
+        )
+        self._encode_executor_shutdown = False
         self._sessions: dict[tuple[str, str], _WorkerSession] = {}
         self._session_lock = asyncio.Lock()
         self._actor_lock = asyncio.Lock()
@@ -487,7 +497,13 @@ class AsyncVAEWorker:
         previous_callback: asyncio.Task | None,
         on_frame_batch: FrameBatchCallback | None,
     ) -> tuple[EncodedFrameBatch, ...]:
-        encoded = await asyncio.to_thread(self._encode_frames, frames, opened)
+        loop = asyncio.get_running_loop()
+        encoded = await loop.run_in_executor(
+            self._encode_executor,
+            self._encode_frames,
+            frames,
+            opened,
+        )
         indexed = tuple(
             EncodedFrameBatch(
                 payloads=batch.payloads,
@@ -648,6 +664,13 @@ class AsyncVAEWorker:
     async def close_all(self) -> None:
         for session_id, generation_id in list(self._sessions):
             await self.close(session_id, generation_id)
+        if not self._encode_executor_shutdown:
+            self._encode_executor_shutdown = True
+            await asyncio.to_thread(
+                self._encode_executor.shutdown,
+                wait=True,
+                cancel_futures=True,
+            )
 
     @property
     def active_sessions(self) -> int:
@@ -666,6 +689,7 @@ class AsyncVAEWorker:
                 state.queue.qsize() for state in self._sessions.values()
             ),
             "service_time_ms": self._service_time_ms,
+            "encode_workers": self.encode_workers,
         }
 
     def _update_capacity_metrics(self) -> None:
@@ -681,7 +705,7 @@ class TAEHVEngine:
 
     backend = "taehv"
     rgb_quantization = "round"
-    _DEFAULT_WARMUP_SHAPE = (1, 48, 1, 30, 52)
+    _DEFAULT_WARMUP_SPATIAL_SHAPE = (1, 30, 52)
 
     def __init__(
         self,
@@ -714,9 +738,15 @@ class TAEHVEngine:
     @torch.no_grad()
     def warmup(
         self,
-        latent_shape: tuple[int, int, int, int, int] = _DEFAULT_WARMUP_SHAPE,
+        latent_shape: tuple[int, int, int, int, int] | None = None,
     ) -> None:
         """Pay decoder/CUDA initialization before the worker becomes ready."""
+        if latent_shape is None:
+            latent_shape = (
+                1,
+                int(self.model.latent_channels),
+                *self._DEFAULT_WARMUP_SPATIAL_SHAPE,
+            )
         decoder = self.create_decoder(("warmup", "warmup"))
         latents = torch.zeros(latent_shape, dtype=self.dtype)
         for _ in self.iter_decode(decoder, latents, first_chunk=True):

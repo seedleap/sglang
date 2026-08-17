@@ -6,6 +6,9 @@ from types import SimpleNamespace
 
 import torch
 
+from sglang.multimodal_gen.runtime.pipelines.lingbot_world_causal_dmd_pipeline import (
+    _use_remote_realtime_vae as lingbot_uses_remote_realtime_vae,
+)
 from sglang.multimodal_gen.runtime.pipelines.minwm_causal_dmd_pipeline import (
     _use_remote_realtime_vae,
 )
@@ -87,6 +90,53 @@ def test_handoff_prepends_i2v_reference_only_for_first_chunk():
     assert later_out.realtime_handoff["has_reference"] is True
 
 
+def test_handoff_aligns_sp_sharded_i2v_reference_latent_for_first_chunk():
+    stage = object.__new__(RealtimeLatentHandoffStage)
+    req = _req(block_idx=0, image_latent=torch.randn(1, 48, 1, 30, 52))
+    req.latents = torch.randn(1, 48, 2, 24, 52)
+
+    out = stage.forward(req, SimpleNamespace())
+
+    assert out.realtime_latents.shape == (1, 48, 3, 24, 52)
+    assert out.realtime_handoff["has_reference"] is True
+    assert out.realtime_handoff["reference_latent_aligned"] is True
+    assert out.realtime_handoff["reference_latent_shape"] == [1, 48, 1, 30, 52]
+    assert out.realtime_handoff["generated_latent_shape"] == [1, 48, 2, 24, 52]
+
+
+def test_handoff_extracts_lingbot_i2v_condition_latent_channels():
+    stage = object.__new__(RealtimeLatentHandoffStage)
+    condition = torch.randn(1, 20, 6, 30, 52)
+    req = _req(block_idx=0, image_latent=condition)
+    req.latents = torch.randn(1, 16, 2, 30, 52)
+
+    out = stage.forward(req, SimpleNamespace())
+
+    assert out.realtime_latents.shape == (1, 16, 3, 30, 52)
+    assert torch.equal(
+        out.realtime_latents[:, :, :1],
+        condition[:, -16:, :1].to(dtype=torch.bfloat16),
+    )
+    assert out.realtime_handoff["has_reference"] is True
+    assert out.realtime_handoff["reference_latent_channel_slice"] == "last_16"
+    assert out.realtime_handoff["reference_latent_temporal_slice"] == "first_1"
+    assert out.realtime_handoff["reference_latent_shape"] == [1, 20, 6, 30, 52]
+    assert out.realtime_handoff["generated_latent_shape"] == [1, 16, 2, 30, 52]
+
+
+def test_handoff_preserves_lingbot_ncthw_generated_latents():
+    stage = RealtimeLatentHandoffStage()
+    req = _req(block_idx=0, image_latent=torch.randn(1, 20, 6, 90, 160))
+    req.latents = torch.randn(1, 16, 3, 90, 160)
+
+    out = stage.forward(req, SimpleNamespace())
+
+    assert out.realtime_latents.shape == (1, 16, 4, 90, 160)
+    assert out.realtime_handoff["generated_latent_frames"] == 3
+    assert out.realtime_handoff["reference_latent_channel_slice"] == "last_16"
+    assert out.realtime_handoff["reference_latent_temporal_slice"] == "first_1"
+
+
 def test_minwm_pipeline_remote_vae_requires_an_explicit_backend():
     assert not _use_remote_realtime_vae(
         SimpleNamespace(
@@ -96,6 +146,27 @@ def test_minwm_pipeline_remote_vae_requires_an_explicit_backend():
     assert _use_remote_realtime_vae(
         SimpleNamespace(
             realtime_vae_backend="exact_remote",
+        )
+    )
+
+
+def test_lingbot_pipeline_remote_vae_is_feature_flagged():
+    assert not lingbot_uses_remote_realtime_vae(
+        SimpleNamespace(
+            realtime_vae_worker_url=None,
+            realtime_remote_vae_enabled=False,
+        )
+    )
+    assert lingbot_uses_remote_realtime_vae(
+        SimpleNamespace(
+            realtime_vae_worker_url="ws://vae:18081/v1/realtime_vae/decode",
+            realtime_remote_vae_enabled=False,
+        )
+    )
+    assert lingbot_uses_remote_realtime_vae(
+        SimpleNamespace(
+            realtime_vae_worker_url=None,
+            realtime_remote_vae_enabled=True,
         )
     )
     assert _use_remote_realtime_vae(

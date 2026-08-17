@@ -291,6 +291,7 @@ def create_app(
                         is_final_frame_batch=frame_batch.is_final,
                         is_final_chunk=header.is_final_chunk,
                         encode_ms=frame_batch.encode_ms,
+                        server_sent_epoch_ms=time.time() * 1000,
                     )
                     shared_reference = None
                     if (
@@ -491,6 +492,7 @@ def _add_worker_cli_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--max-sessions", type=int)
     parser.add_argument("--queue-depth-per-session", type=int, default=1)
     parser.add_argument("--encoded-frames-per-batch", type=int)
+    parser.add_argument("--encode-workers", type=int, default=4)
     parser.add_argument("--max-message-mb", type=int, default=64)
     parser.add_argument("--shared-memory-dir")
     parser.add_argument("--worker-epoch")
@@ -665,6 +667,7 @@ def _run_worker(args, exact_server_args) -> None:
         max_sessions=max_sessions,
         queue_depth_per_session=args.queue_depth_per_session,
         encoded_frames_per_batch=_resolve_encoded_frames_per_batch(args),
+        encode_workers=args.encode_workers,
     )
     reservations = WorkerReservationRegistry(
         worker_epoch=resolve_worker_epoch(args.worker_epoch),

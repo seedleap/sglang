@@ -1041,17 +1041,19 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
         target_dtype: torch.dtype,
         autocast_enabled: bool,
     ) -> torch.Tensor:
-        graph_key = self._minwm_cuda_graph_key(
-            latent_model_input=latent_model_input,
-            prompt_embeds=prompt_embeds,
-            timestep=timestep,
-            kv_cache=kv_cache,
-            crossattn_cache=crossattn_cache,
-            pos_cond_kwargs=pos_cond_kwargs,
-            image_kwargs=image_kwargs,
-            current_timestep=current_timestep,
-            attn_metadata=attn_metadata,
-        )
+        graph_key = None
+        if not self._causal_sequence_shard_enabled(batch):
+            graph_key = self._minwm_cuda_graph_key(
+                latent_model_input=latent_model_input,
+                prompt_embeds=prompt_embeds,
+                timestep=timestep,
+                kv_cache=kv_cache,
+                crossattn_cache=crossattn_cache,
+                pos_cond_kwargs=pos_cond_kwargs,
+                image_kwargs=image_kwargs,
+                current_timestep=current_timestep,
+                attn_metadata=attn_metadata,
+            )
         with (
             torch.autocast(
                 device_type=current_platform.device_type,

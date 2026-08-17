@@ -200,7 +200,7 @@ function backlogDropsContiguousOldFrames() {
   assert.equal(snapshot.lastDropReason, "backlog");
 }
 
-function eventCutoverKeepsOnlySmallOldFrameGrace() {
+function actionCutoverKeepsOnlySmallOldFrameGrace() {
   const controller = new RealtimePlaybackController({ targetFps: 25 });
   enqueueChunk(controller, { chunk: 1, frameCount: 24, durationMs: 960, now: 1000 });
   controller.noteInputEvent(5, 1050);
@@ -213,9 +213,9 @@ function eventCutoverKeepsOnlySmallOldFrameGrace() {
   });
   assert.ok(result.cutover);
   assert.equal(result.droppedFrames.length, 21);
+  assert.equal(controller.snapshot().lastDropReason, "event cutover");
   assert.equal(controller.queue[0].chunk, 1);
   assert.equal(controller.queue[0].index, 0);
-  assert.equal(controller.queue[3].chunk, 2);
 }
 
 function settleEventCutoverKeepsOnlySmallOldFrameGrace() {
@@ -327,6 +327,8 @@ function smoothTimelineModePreservesBacklogAndCatchesUp() {
   const controller = new RealtimePlaybackController({
     mode: "smooth_timeline",
     targetFps: 25,
+    realtimeMaxBufferMs: 0,
+    realtimeMaxBufferChunks: 0,
     minTargetLeadMs: 200,
     maxTargetLeadMs: 400,
     maxLeadExtraChunkRatio: 0.2,
@@ -345,14 +347,18 @@ function smoothTimelineModePreservesBacklogAndCatchesUp() {
   const catchUp = controller.snapshot();
   assert.equal(decision.action, "draw");
   assert.equal(catchUp.droppedFrames, 0);
-  assert.ok(catchUp.playbackRate > 1.5, `playback rate ${catchUp.playbackRate}`);
-  assert.ok(catchUp.renderFps > 40, `render fps ${catchUp.renderFps}`);
+  assert.equal(catchUp.smoothTimelineEmergencyCatchup, true);
+  assert.ok(catchUp.playbackRate > 1.1, `playback rate ${catchUp.playbackRate}`);
+  assert.ok(catchUp.playbackRate <= 2.5, `playback rate ${catchUp.playbackRate}`);
+  assert.ok(catchUp.renderFps > 27.5 && catchUp.renderFps <= 62.5, `render fps ${catchUp.renderFps}`);
 }
 
-function smoothTimelineModePreservesFramesAcrossEventCutover() {
+function smoothTimelineModeCutsOldFramesAcrossEventCutover() {
   const controller = new RealtimePlaybackController({
     mode: "smooth_timeline",
     targetFps: 25,
+    realtimeMaxBufferMs: 0,
+    realtimeMaxBufferChunks: 0,
     minTargetLeadMs: 1600,
     maxTargetLeadMs: 2400,
     maxLeadExtraChunkRatio: 1.0,
@@ -367,17 +373,45 @@ function smoothTimelineModePreservesFramesAcrossEventCutover() {
     now: 1150,
   });
   assert.ok(result.cutover);
-  assert.equal(result.droppedFrames.length, 0);
-  assert.equal(controller.snapshot().droppedFrames, 0);
-  assert.equal(controller.queue.length, 36);
+  assert.equal(result.droppedFrames.length, 21);
+  assert.equal(controller.snapshot().droppedFrames, 21);
+  assert.equal(controller.queue.length, 15);
   assert.equal(controller.queue[0].eventId, 0);
-  assert.equal(controller.queue[24].eventId, 5);
+  assert.equal(controller.queue[3].eventId, 5);
+}
+
+function smoothTimelineModeCutsOldFramesForPromptUpdate() {
+  const controller = new RealtimePlaybackController({
+    mode: "smooth_timeline",
+    targetFps: 25,
+    realtimeMaxBufferMs: 0,
+    realtimeMaxBufferChunks: 0,
+    minTargetLeadMs: 1600,
+    maxTargetLeadMs: 2400,
+    maxLeadExtraChunkRatio: 1.0,
+  });
+  enqueueChunk(controller, { chunk: 1, frameCount: 24, durationMs: 960, now: 1000 });
+  controller.noteInputEvent(5, 1050, { cutoverMode: "prompt" });
+  const result = enqueueChunk(controller, {
+    chunk: 2,
+    eventId: 5,
+    frameCount: 12,
+    durationMs: 480,
+    now: 1150,
+  });
+
+  assert.ok(result.cutover);
+  assert.equal(result.droppedFrames.length, 24);
+  assert.equal(controller.queue.length, 12);
+  assert.equal(controller.queue[0].eventId, 5);
 }
 
 function smoothTimelineModePacesInsteadOfDrainingEveryRenderTick() {
   const controller = new RealtimePlaybackController({
     mode: "smooth_timeline",
     targetFps: 50,
+    realtimeMaxBufferMs: 0,
+    realtimeMaxBufferChunks: 0,
   });
   enqueueChunk(controller, {
     chunk: 1,
@@ -399,6 +433,8 @@ function smoothTimelineModeSpeedsUpToCatchBacklogWithoutDropping() {
   const controller = new RealtimePlaybackController({
     mode: "smooth_timeline",
     targetFps: 24,
+    realtimeMaxBufferMs: 0,
+    realtimeMaxBufferChunks: 0,
     holdForTargetLead: true,
     targetLeadChunkRatio: 0.75,
     minTargetLeadMs: 600,
@@ -554,6 +590,105 @@ function deliveryFpsCapsOptimisticServerFps() {
   assert.ok(snapshot.sourceFps < 7, `source fps ${snapshot.sourceFps}`);
 }
 
+function smoothTimelineDoesNotTurnDeliveryJitterIntoPlaybackSlowdown() {
+  const controller = new RealtimePlaybackController({
+    mode: "smooth_timeline",
+    targetFps: 24,
+    holdForTargetLead: true,
+  });
+  enqueueChunk(controller, {
+    chunk: 0,
+    frameCount: 16,
+    durationMs: 670,
+    now: 1000,
+    receivedAt: 1000,
+  });
+  enqueueChunk(controller, {
+    chunk: 1,
+    frameCount: 16,
+    durationMs: 670,
+    now: 3400,
+    receivedAt: 3400,
+  });
+
+  const snapshot = controller.snapshot();
+
+  assert.ok(snapshot.serverFps > 22, `server fps ${snapshot.serverFps}`);
+  assert.ok(snapshot.deliveryFps < 7, `delivery fps ${snapshot.deliveryFps}`);
+  assert.ok(snapshot.sourceFps < 7, `effective fps ${snapshot.sourceFps}`);
+  assert.ok(snapshot.bufferMs < 1600, `buffer ms ${snapshot.bufferMs}`);
+  assert.ok(snapshot.renderFps > 22, `render fps ${snapshot.renderFps}`);
+}
+
+function smoothTimelineModeKeepsRealtimeTailBounded() {
+  const controller = new RealtimePlaybackController({
+    mode: "smooth_timeline",
+    targetFps: 24,
+    realtimeMaxBufferMs: 500,
+    realtimeMaxBufferChunks: 1,
+    realtimeMaxFrameAgeMs: 500,
+    holdForTargetLead: true,
+    minTargetLeadMs: 80,
+    maxTargetLeadMs: 500,
+  });
+  enqueueChunk(controller, {
+    chunk: 0,
+    frameCount: 12,
+    durationMs: 500,
+    now: 1000,
+    receivedAt: 1000,
+  });
+  enqueueChunk(controller, {
+    chunk: 1,
+    frameCount: 12,
+    durationMs: 500,
+    now: 1020,
+    receivedAt: 1020,
+  });
+
+  const snapshot = controller.snapshot();
+
+  assert.equal(snapshot.mode, "smooth_timeline");
+  assert.equal(snapshot.queueFrames, 12);
+  assert.equal(controller.queue.every((frame) => frame.chunkIndex === 1), true);
+  assert.ok(snapshot.bufferMs <= 500, `buffer ms ${snapshot.bufferMs}`);
+  assert.equal(snapshot.droppedFrames, 12);
+  assert.equal(snapshot.lastDropReason, "bounded realtime chunk");
+}
+
+function smoothTimelineModeAllowsSoftRealtimeJitterWindow() {
+  const controller = new RealtimePlaybackController({
+    mode: "smooth_timeline",
+    targetFps: 24,
+    realtimeMaxBufferMs: 1100,
+    realtimeMaxBufferChunks: 2,
+    realtimeMaxFrameAgeMs: 1800,
+    holdForTargetLead: true,
+    minTargetLeadMs: 260,
+    maxTargetLeadMs: 900,
+  });
+  enqueueChunk(controller, {
+    chunk: 0,
+    frameCount: 9,
+    durationMs: 450,
+    now: 1000,
+    receivedAt: 1000,
+  });
+  enqueueChunk(controller, {
+    chunk: 1,
+    frameCount: 9,
+    durationMs: 450,
+    now: 1100,
+    receivedAt: 1100,
+  });
+
+  const snapshot = controller.snapshot();
+
+  assert.equal(snapshot.queueFrames, 18);
+  assert.equal(snapshot.droppedFrames, 0);
+  assert.ok(snapshot.bufferMs <= 1100, `buffer ms ${snapshot.bufferMs}`);
+}
+
 function deliveryCadenceExpandsAdaptiveLeadWindow() {
   const controller = new RealtimePlaybackController({
     mode: "adaptive",
@@ -652,6 +787,19 @@ function lowLatencyModePreservesNewestChunkAndCutsOldActionImmediately() {
   assert.equal(controller.queue.some((frame) => frame.eventId < 5), false);
 }
 
+function smoothTimelineCatchupCeilingCanBeAdjustedAtRuntime() {
+  const controller = new RealtimePlaybackController({
+    mode: "smooth_timeline",
+    targetFps: 24,
+  });
+
+  assert.equal(controller.snapshot().smoothTimelinePlaybackRateMax, 1.1);
+  controller.setSmoothTimelinePlaybackRateMax(1.35);
+  assert.equal(controller.snapshot().smoothTimelinePlaybackRateMax, 1.35);
+  controller.setSmoothTimelinePlaybackRateMax(99);
+  assert.equal(controller.snapshot().smoothTimelinePlaybackRateMax, 2.5);
+}
+
 stableSourceDoesNotDrop();
 slowServerPacesAtSourceFps();
 smallBufferStartsFromFirstChunk();
@@ -661,14 +809,15 @@ smallBufferContinuesWhenMoreFramesArrive();
 smallBufferPacesSlowChunksAtSourceFps();
 burstySubTargetSourceKeepsWarmBuffer();
 backlogDropsContiguousOldFrames();
-eventCutoverKeepsOnlySmallOldFrameGrace();
+actionCutoverKeepsOnlySmallOldFrameGrace();
 settleEventCutoverKeepsOnlySmallOldFrameGrace();
 staleFramesAfterWallClockPauseResumeAtFreshestChunk();
 timelineModeNeverDropsBacklog();
 timelineModeDrainsBacklogOnEveryRenderTick();
 timelineModePreservesFramesAcrossEventCutover();
 smoothTimelineModePreservesBacklogAndCatchesUp();
-smoothTimelineModePreservesFramesAcrossEventCutover();
+smoothTimelineModeCutsOldFramesAcrossEventCutover();
+smoothTimelineModeCutsOldFramesForPromptUpdate();
 smoothTimelineModePacesInsteadOfDrainingEveryRenderTick();
 smoothTimelineModeSpeedsUpToCatchBacklogWithoutDropping();
 adaptiveModeKeepsBoundedBacklogWithoutLowLatencyJump();
@@ -676,7 +825,11 @@ adaptiveModeCutsActiveInputWithoutOldFrameGrace();
 adaptiveModeDropsBufferedFramesForActiveInputCutover();
 adaptiveModeRendersCutoverFrameWithoutWaitingForBufferLead();
 deliveryFpsCapsOptimisticServerFps();
+smoothTimelineDoesNotTurnDeliveryJitterIntoPlaybackSlowdown();
+smoothTimelineModeKeepsRealtimeTailBounded();
+smoothTimelineModeAllowsSoftRealtimeJitterWindow();
 deliveryCadenceExpandsAdaptiveLeadWindow();
 switchingBackToLiveTrimsTimelineBacklog();
 lowLatencyModeFollowsMeasuredSourceInsteadOfDrainingAtTargetFps();
 lowLatencyModePreservesNewestChunkAndCutsOldActionImmediately();
+smoothTimelineCatchupCeilingCanBeAdjustedAtRuntime();

@@ -282,6 +282,17 @@ def test_minwm_realtime_state_preserves_single_key_direction(key, expected_label
     assert state.latest_sampled_event_id == 17
 
 
+def test_minwm_realtime_state_preserves_short_press_for_half_chunk():
+    state = MinWMRealtimeState()
+    state.receive_camera_state(["w"], event_id=17)
+    state.receive_camera_state([], event_id=18)
+
+    forward = key_state_to_action_label(["w"])
+    assert state.sample_action_labels(4) == [forward, forward, 0, 0]
+    assert state.latest_sampled_event_id == 18
+    assert state.sample_action_labels(4) == [0, 0, 0, 0]
+
+
 def test_minwm_realtime_action_switch_reaches_next_chunk():
     state = MinWMRealtimeState()
     session = SimpleNamespace(
@@ -1114,6 +1125,60 @@ def test_minwm_cuda_graph_accepts_bounded_block_relative_cache():
 
     assert kwargs["allow_growth"] is False
     assert kwargs["rope_position_mode"] == "block_relative"
+
+
+def test_minwm_sequence_shard_forward_bypasses_cuda_graph(monkeypatch):
+    from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.minwm import (
+        minwm_causal_denoising as denoising_module,
+    )
+
+    class Transformer:
+        def __init__(self):
+            self.action_in = SimpleNamespace(
+                prepare_label_table=lambda _device: None,
+                validate_runtime_action=True,
+            )
+            self.calls = []
+
+        def __call__(self, latent, prompt, timestep, **kwargs):
+            self.calls.append(kwargs)
+            return latent
+
+    class RejectGraphRunner:
+        def __init__(self, _key):
+            self.key = _key
+            self.graph = object()
+
+        def run(self, **_kwargs):
+            pytest.fail("sequence-sharded MinWM must not replay a CUDA graph")
+
+    stage = MinWMCausalDMDDenoisingStage.__new__(MinWMCausalDMDDenoisingStage)
+    stage.transformer = Transformer()
+    stage._minwm_cuda_graph_runner = None
+    stage._minwm_cuda_graph_key = lambda **_kwargs: ("captured",)
+    stage._causal_sequence_shard_enabled = lambda _batch: True
+    monkeypatch.setattr(denoising_module, "_MinWMCudaGraphRunner", RejectGraphRunner)
+
+    latent = torch.zeros(1, 2, 4, 3, 3)
+    result = stage._forward_causal_transformer_impl(
+        SimpleNamespace(enable_sequence_shard=True),
+        latent_model_input=latent,
+        prompt_embeds=torch.zeros(1, 2, 3),
+        timestep=torch.ones(1),
+        kv_cache=[object()],
+        crossattn_cache=[object()],
+        current_start_tokens=48,
+        start_frame=12,
+        image_kwargs={},
+        pos_cond_kwargs={"action": torch.zeros(1, 4, dtype=torch.long)},
+        current_timestep=1,
+        attn_metadata=None,
+        target_dtype=torch.float32,
+        autocast_enabled=False,
+    )
+
+    assert result is latent
+    assert stage.transformer.calls[0]["start_frame"] == 12
 
 
 @pytest.mark.parametrize(

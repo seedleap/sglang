@@ -20,7 +20,7 @@ from uuid import uuid4
 import httpx
 import uvicorn
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosedOK
@@ -38,6 +38,7 @@ from sglang.multimodal_gen.runtime.realtime.coordinator import (
 from sglang.multimodal_gen.runtime.realtime.gateway import (
     AdmissionQueueFull,
     BoundedAdmissionWaiterGate,
+    BrowserPlaybackAckWindow,
     GatewayOutputRegistry,
     OutputBackpressureError,
     OutputProtocolError,
@@ -51,7 +52,6 @@ from sglang.multimodal_gen.runtime.utils.realtime_trace import (
     emit_realtime_trace_payload,
     normalize_trace_id,
 )
-
 
 WEBUI_ROOT = Path(__file__).resolve().parents[2] / "apps" / "realtime_webui"
 logger = logging.getLogger(__name__)
@@ -264,12 +264,18 @@ def create_app(
     model_revision: str,
     vae_fingerprint: str,
     internal_output_url: str,
-    output_queue_depth: int = 2,
-    output_enqueue_timeout_s: float = 1.0,
+    lingbot2_upstream_url: str | None = None,
+    lingbot2_model_revision: str = "robbyant/lingbot-world-v2-14b-causal-fast-diffusers",
+    lingbot2_vae_fingerprint: str | None = None,
+    output_queue_depth: int = 64,
+    output_enqueue_timeout_s: float = 0.0,
     output_drain_timeout_s: float = 5.0,
     lease_renew_interval_s: float = 10.0,
     release_grace_s: float = 0.5,
     max_admission_waiters: int = 64,
+    readiness_coordinator_timeout_s: float = 1.0,
+    readiness_coordinator_grace_s: float = 30.0,
+    readiness_clock=time.monotonic,
     connect_factory=connect,
     ui_config: dict[str, Any] | None = None,
     trace_query=None,
@@ -278,13 +284,15 @@ def create_app(
         raise ValueError("release_grace_s must be non-negative")
     if output_drain_timeout_s <= 0:
         raise ValueError("output_drain_timeout_s must be positive")
+    if readiness_coordinator_timeout_s <= 0:
+        raise ValueError("readiness_coordinator_timeout_s must be positive")
+    if readiness_coordinator_grace_s < 0:
+        raise ValueError("readiness_coordinator_grace_s must be non-negative")
     registry = GatewayOutputRegistry(
         queue_depth=output_queue_depth,
         enqueue_timeout_s=output_enqueue_timeout_s,
     )
-    admission_gate = BoundedAdmissionWaiterGate(
-        max_waiters=max_admission_waiters
-    )
+    admission_gate = BoundedAdmissionWaiterGate(max_waiters=max_admission_waiters)
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -296,6 +304,7 @@ def create_app(
     app = FastAPI(title="SGLang Realtime Gateway", lifespan=lifespan)
     app.state.output_registry = registry
     app.state.admission_gate = admission_gate
+    last_coordinator_ready_at: float | None = None
 
     @app.get("/healthz")
     async def healthz():
@@ -303,17 +312,37 @@ def create_app(
 
     @app.get("/readyz")
     async def readyz():
+        nonlocal last_coordinator_ready_at
         try:
-            await coordinator.health()
+            await asyncio.wait_for(
+                coordinator.health(),
+                timeout=readiness_coordinator_timeout_s,
+            )
         except Exception as exc:
+            now = readiness_clock()
+            if (
+                last_coordinator_ready_at is not None
+                and now - last_coordinator_ready_at <= readiness_coordinator_grace_s
+            ):
+                return {
+                    "status": "ready",
+                    "coordinator": "degraded",
+                    "last_success_age_s": round(now - last_coordinator_ready_at, 3),
+                }
             raise HTTPException(
                 status_code=503, detail="coordinator unavailable"
             ) from exc
-        return {"status": "ready"}
+        last_coordinator_ready_at = readiness_clock()
+        return {"status": "ready", "coordinator": "ready"}
 
+    @app.get("/backends/minwm/v1/models")
     @app.get("/v1/models")
     async def models():
         return {"object": "list", "data": [{"id": model_revision}]}
+
+    @app.get("/backends/lingbot2/v1/models")
+    async def lingbot2_models():
+        return {"object": "list", "data": [{"id": lingbot2_model_revision}]}
 
     @app.get("/v1/realtime_video/traces/{trace_id}")
     async def get_trace(trace_id: str, after: int = 0, limit: int = 220):
@@ -336,7 +365,9 @@ def create_app(
             raise HTTPException(status_code=400, detail="invalid trace_id")
         raw_events = payload.get("events")
         if not isinstance(raw_events, list) or len(raw_events) > 64:
-            raise HTTPException(status_code=400, detail="events must contain at most 64 items")
+            raise HTTPException(
+                status_code=400, detail="events must contain at most 64 items"
+            )
         accepted = 0
         for raw_event in raw_events:
             if not isinstance(raw_event, dict):
@@ -391,7 +422,17 @@ def create_app(
             while True:
                 wire = await websocket.receive_bytes()
                 message = decode_message(wire)
+                enqueue_started = time.perf_counter()
                 await route.put(wire)
+                _log_gateway_trace(
+                    route.trace_id,
+                    "gateway.output_enqueued",
+                    session_id=session_id,
+                    generation_id=generation_id,
+                    enqueue_ms=round((time.perf_counter() - enqueue_started) * 1000, 3),
+                    **route.queue_metrics(),
+                    **_browser_send_trace_fields(wire),
+                )
                 if message.get("type") == "media_chunk_complete":
                     await websocket.send_bytes(
                         encode_message(
@@ -410,12 +451,14 @@ def create_app(
             await websocket.close(code=1008, reason=str(exc))
         finally:
             if route is not None:
-                await registry.unbind(
-                    session_id, generation_id, token=output_token
-                )
+                await registry.unbind(session_id, generation_id, token=output_token)
 
-    @app.websocket("/v1/realtime_video/generate")
-    async def generate(websocket: WebSocket):
+    async def _generate_coordinator_session(
+        websocket: WebSocket,
+        *,
+        selected_model_revision: str,
+        selected_vae_fingerprint: str,
+    ) -> None:
         await websocket.accept()
         sender = _BrowserSender(websocket)
         session_id = uuid4().hex
@@ -429,6 +472,7 @@ def create_app(
         upstream = None
         tasks: set[asyncio.Task] = set()
         expected_last_chunk: int | None = None
+        playback_ack_window = BrowserPlaybackAckWindow()
         try:
             admitted_at = time.perf_counter()
             _log_gateway_trace(trace_id, "gateway.ws_accepted", session_id=session_id)
@@ -437,8 +481,8 @@ def create_app(
                     user_id=_user_id(websocket),
                     session_id=session_id,
                     generation_id=generation_id,
-                    model_revision=model_revision,
-                    vae_fingerprint=vae_fingerprint,
+                    model_revision=selected_model_revision,
+                    vae_fingerprint=selected_vae_fingerprint,
                     wait_for_capacity=True,
                     trace_id=trace_id,
                 )
@@ -453,7 +497,10 @@ def create_app(
                 vae_worker_id=assignment.vae.worker_id,
             )
             route = await registry.register(
-                session_id, generation_id, token=output_token
+                session_id,
+                generation_id,
+                token=output_token,
+                trace_id=trace_id,
             )
             upstream_url = build_denoiser_url(
                 assignment.denoiser.endpoint,
@@ -492,10 +539,15 @@ def create_app(
                                 control = decode_message(payload)
                             except ProtocolViolation:
                                 control = None
-                            if isinstance(control, dict) and control.get("type") == "init":
+                            if (
+                                isinstance(control, dict)
+                                and control.get("type") == "init"
+                            ):
                                 max_chunks = int(control.get("max_chunks") or 0)
                                 if max_chunks > 0:
                                     expected_last_chunk = max_chunks - 1
+                        if isinstance(payload, bytes):
+                            await playback_ack_window.observe_browser_message(payload)
                         await upstream.send(payload)
                 except ConnectionClosedOK:
                     return
@@ -521,18 +573,43 @@ def create_app(
                 while True:
                     wire = await route.get()
                     try:
-                        await send_browser_with_trace(wire, send_source="vae")
+                        await send_browser_with_trace(
+                            wire,
+                            send_source="vae",
+                            queue_fields=route.queue_metrics(),
+                        )
                     finally:
                         route.task_done()
 
             async def send_browser_with_trace(
-                wire: bytes, *, send_source: str
+                wire: bytes,
+                *,
+                send_source: str,
+                queue_fields: dict[str, Any] | None = None,
             ) -> None:
                 send_started = time.perf_counter()
                 send_fields = _browser_send_trace_fields(wire)
+                queue_fields = queue_fields or {}
+                if not await playback_ack_window.allow_output(wire):
+                    _log_gateway_trace(
+                        trace_id,
+                        "gateway.browser_send_dropped",
+                        session_id=session_id,
+                        generation_id=generation_id,
+                        send_source=send_source,
+                        drop_reason="playback_ack_window",
+                        last_received_chunk=playback_ack_window.last_received_chunk,
+                        last_rendered_chunk=playback_ack_window.last_rendered_chunk,
+                        **queue_fields,
+                        **send_fields,
+                    )
+                    return
                 try:
                     await sender.send(wire)
                 except Exception as exc:
+                    browser_send_ms = round(
+                        (time.perf_counter() - send_started) * 1000, 3
+                    )
                     _log_gateway_trace(
                         trace_id,
                         "gateway.browser_send_complete",
@@ -540,13 +617,14 @@ def create_app(
                         generation_id=generation_id,
                         send_source=send_source,
                         send_ok=False,
-                        send_ms=round(
-                            (time.perf_counter() - send_started) * 1000, 3
-                        ),
+                        send_ms=browser_send_ms,
+                        browser_send_ms=browser_send_ms,
                         error_type=type(exc).__name__,
+                        **queue_fields,
                         **send_fields,
                     )
                     raise
+                browser_send_ms = round((time.perf_counter() - send_started) * 1000, 3)
                 _log_gateway_trace(
                     trace_id,
                     "gateway.browser_send_complete",
@@ -554,7 +632,9 @@ def create_app(
                     generation_id=generation_id,
                     send_source=send_source,
                     send_ok=True,
-                    send_ms=round((time.perf_counter() - send_started) * 1000, 3),
+                    send_ms=browser_send_ms,
+                    browser_send_ms=browser_send_ms,
+                    **queue_fields,
                     **send_fields,
                 )
 
@@ -573,9 +653,7 @@ def create_app(
             output_task = asyncio.create_task(
                 output_to_browser(), name="gateway-vae-output"
             )
-            lease_task = asyncio.create_task(
-                renew_lease(), name="gateway-lease-renew"
-            )
+            lease_task = asyncio.create_task(renew_lease(), name="gateway-lease-renew")
             tasks = {
                 browser_input_task,
                 worker_control_task,
@@ -599,9 +677,7 @@ def create_app(
                             route.wait_until_output_closed(),
                             timeout=output_drain_timeout_s,
                         )
-                    await asyncio.wait_for(
-                        route.join(), timeout=output_drain_timeout_s
-                    )
+                    await asyncio.wait_for(route.join(), timeout=output_drain_timeout_s)
                 except TimeoutError:
                     logger.warning(
                         "Gateway media drain timed out for session_id=%s",
@@ -622,7 +698,9 @@ def create_app(
             pass
         except Exception as exc:
             try:
-                await sender.error(f"realtime gateway error: {str(exc).splitlines()[0]}")
+                await sender.error(
+                    f"realtime gateway error: {str(exc).splitlines()[0]}"
+                )
                 await websocket.close(code=1011, reason="gateway session failed")
             except Exception:
                 pass
@@ -633,9 +711,7 @@ def create_app(
                 if release_grace_s:
                     await asyncio.sleep(release_grace_s)
             if route is not None:
-                await registry.unregister(
-                    session_id, generation_id, token=output_token
-                )
+                await registry.unregister(session_id, generation_id, token=output_token)
             if assignment is not None:
                 try:
                     await coordinator.release(assignment)
@@ -644,11 +720,30 @@ def create_app(
                         "Coordinator release failed for session_id=%s",
                         assignment.session_id,
                     )
-            _log_gateway_trace(trace_id, "gateway.session_closed", session_id=session_id)
+            _log_gateway_trace(
+                trace_id, "gateway.session_closed", session_id=session_id
+            )
             try:
                 await websocket.close(code=1000)
             except Exception:
                 pass
+
+    @app.websocket("/backends/lingbot2/v1/realtime_video/generate")
+    async def generate_lingbot2(websocket: WebSocket):
+        await _generate_coordinator_session(
+            websocket,
+            selected_model_revision=lingbot2_model_revision,
+            selected_vae_fingerprint=(lingbot2_vae_fingerprint or vae_fingerprint),
+        )
+
+    @app.websocket("/backends/minwm/v1/realtime_video/generate")
+    @app.websocket("/v1/realtime_video/generate")
+    async def generate(websocket: WebSocket):
+        await _generate_coordinator_session(
+            websocket,
+            selected_model_revision=model_revision,
+            selected_vae_fingerprint=vae_fingerprint,
+        )
 
     @app.get("/")
     async def index():
@@ -664,17 +759,34 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--port", type=int, default=18080)
     parser.add_argument("--coordinator-url", required=True)
     parser.add_argument("--model-revision", required=True)
+    parser.add_argument(
+        "--lingbot2-upstream-url",
+        default=os.environ.get("LINGBOT2_UPSTREAM_WS"),
+    )
+    parser.add_argument(
+        "--lingbot2-model-revision",
+        default=os.environ.get(
+            "LINGBOT2_MODEL_REVISION",
+            "robbyant/lingbot-world-v2-14b-causal-fast-diffusers",
+        ),
+    )
     parser.add_argument("--vae-fingerprint", default="taew2_2")
+    parser.add_argument(
+        "--lingbot2-vae-fingerprint",
+        default=os.environ.get("LINGBOT2_VAE_FINGERPRINT"),
+    )
     parser.add_argument(
         "--internal-output-url",
         default=os.environ.get("REALTIME_GATEWAY_OUTPUT_URL"),
     )
-    parser.add_argument("--output-queue-depth", type=int, default=2)
-    parser.add_argument("--output-enqueue-timeout-s", type=float, default=5.0)
+    parser.add_argument("--output-queue-depth", type=int, default=64)
+    parser.add_argument("--output-enqueue-timeout-s", type=float, default=0.0)
     parser.add_argument("--output-drain-timeout-s", type=float, default=5.0)
     parser.add_argument("--lease-renew-interval-s", type=float, default=10.0)
     parser.add_argument("--release-grace-s", type=float, default=0.5)
     parser.add_argument("--max-admission-waiters", type=int, default=64)
+    parser.add_argument("--readiness-coordinator-timeout-s", type=float, default=1.0)
+    parser.add_argument("--readiness-coordinator-grace-s", type=float, default=30.0)
     parser.add_argument("--trace-log-group")
     parser.add_argument(
         "--ui-config-json",
@@ -710,12 +822,17 @@ def main() -> None:
         model_revision=args.model_revision,
         vae_fingerprint=args.vae_fingerprint,
         internal_output_url=args.internal_output_url,
+        lingbot2_upstream_url=args.lingbot2_upstream_url,
+        lingbot2_model_revision=args.lingbot2_model_revision,
+        lingbot2_vae_fingerprint=args.lingbot2_vae_fingerprint,
         output_queue_depth=args.output_queue_depth,
         output_enqueue_timeout_s=args.output_enqueue_timeout_s,
         output_drain_timeout_s=args.output_drain_timeout_s,
         lease_renew_interval_s=args.lease_renew_interval_s,
         release_grace_s=args.release_grace_s,
         max_admission_waiters=args.max_admission_waiters,
+        readiness_coordinator_timeout_s=args.readiness_coordinator_timeout_s,
+        readiness_coordinator_grace_s=args.readiness_coordinator_grace_s,
         ui_config=ui_config,
         trace_query=trace_query,
     )

@@ -21,14 +21,15 @@ GPU_SCALE_TIME_ZONE="${GPU_SCALE_TIME_ZONE:-Asia/Shanghai}"
 GPU_SCALE_UP_SUSPEND="${GPU_SCALE_UP_SUSPEND:-false}"
 GPU_SCALE_DOWN_SUSPEND="${GPU_SCALE_DOWN_SUSPEND:-false}"
 GPU_EVENT_SCALER_SUSPEND="${GPU_EVENT_SCALER_SUSPEND:-false}"
-DENOISER_BASE_REPLICAS="${DENOISER_BASE_REPLICAS:-1}"
+DENOISER_BASE_REPLICAS="${DENOISER_BASE_REPLICAS:-2}"
 VAE_BASE_REPLICAS="${VAE_BASE_REPLICAS:-1}"
-DENOISER_PEAK_REPLICAS="${DENOISER_PEAK_REPLICAS:-1}"
+DENOISER_PEAK_REPLICAS="${DENOISER_PEAK_REPLICAS:-2}"
 VAE_PEAK_REPLICAS="${VAE_PEAK_REPLICAS:-1}"
-DENOISER_RESTART_BATCH_SIZE="${DENOISER_RESTART_BATCH_SIZE:-2}"
+DENOISER_RESTART_BATCH_SIZE="${DENOISER_RESTART_BATCH_SIZE:-1}"
 DENOISER_NODEPOOL="${DENOISER_NODEPOOL:-}"
 NAMESPACE="minwm-realtime"
 ROLLOUT_TIMEOUT="${ROLLOUT_TIMEOUT:-45m}"
+DEPLOY_DRY_RUN_ONLY="${DEPLOY_DRY_RUN_ONLY:-false}"
 
 if ! [[ "${MODEL_ARTIFACT_REVISION}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]; then
   echo "MODEL_ARTIFACT_REVISION is not immutable-path safe" >&2
@@ -38,10 +39,15 @@ if ! [[ "${MODEL_ID}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]; then
   echo "MODEL_ID is not immutable-path safe" >&2
   exit 1
 fi
+if [[ "${MODEL_ID}" != "wan22-5b-stage3-dmd-47-0808-2fb2cfec2a2" || \
+      "${MODEL_ARTIFACT_REVISION}" != "gs3200-ema-student-v1" ]]; then
+  echo "production Zing must use the approved Haoze SP=2 checkpoint" >&2
+  exit 1
+fi
 
 aws s3api head-object \
-  --region us-west-2 \
-  --bucket leap-world-us-west-2 \
+  --region us-east-2 \
+  --bucket leap-world-model-serving-829115578968-us-east-2 \
   --key "world-model/minwm/serving-artifacts/${MODEL_ID}/${MODEL_ARTIFACT_REVISION}/model/_READY" \
   >/dev/null
 
@@ -88,6 +94,10 @@ for SUSPEND in \
     exit 1
   fi
 done
+if [[ "${DEPLOY_DRY_RUN_ONLY}" != "true" && "${DEPLOY_DRY_RUN_ONLY}" != "false" ]]; then
+  echo "DEPLOY_DRY_RUN_ONLY must be true or false" >&2
+  exit 1
+fi
 if [[ "${GPU_EVENT_SCALER_SUSPEND}" == "true" ]]; then
   GPU_EVENT_SCALER_REPLICAS=0
 else
@@ -102,10 +112,8 @@ KUSTOMIZED="${RELEASE_STATE_DIR}/kustomized.yaml"
 TABLE_STATE="${RELEASE_STATE_DIR}/coordinator-table.json"
 TTL_STATE="${RELEASE_STATE_DIR}/coordinator-ttl.json"
 RELEASE_APPLIED=0
-LEGACY_DENOISER_REPLICAS=""
-LEGACY_DENOISER_SCALED_DOWN=0
-DENOISER_CONTROLLER_RECREATED=0
 DENOISER_TEMPLATE_CHANGED=0
+LINGBOT_TEMPLATE_CHANGED=0
 DENOISER_PROTECTED_NODES=""
 SNAPSHOT_WORKLOADS=(
   deployment/minwm-realtime-adot
@@ -113,7 +121,9 @@ SNAPSHOT_WORKLOADS=(
   deployment/minwm-realtime-gateway
   deployment/minwm-realtime-gpu-capacity-scaler
   statefulset/minwm-async-denoiser
+  statefulset/lingbot2-async-denoiser
   deployment/minwm-async-vae
+  deployment/lingbot2-async-vae
 )
 
 cleanup() {
@@ -169,6 +179,43 @@ raise SystemExit(1)
   return 1
 }
 
+wait_for_statefulset_ready_replicas() {
+  local workload="$1"
+  local timeout_seconds
+  local deadline
+  timeout_seconds="$(python3 - "${ROLLOUT_TIMEOUT}" <<'PY'
+import re
+import sys
+
+match = re.fullmatch(r"([1-9][0-9]*)([smh])", sys.argv[1])
+if match is None:
+    raise SystemExit("ROLLOUT_TIMEOUT must use s, m, or h")
+value = int(match.group(1))
+multiplier = {"s": 1, "m": 60, "h": 3600}[match.group(2)]
+print(value * multiplier)
+PY
+)"
+  deadline=$((SECONDS + timeout_seconds))
+  while (( SECONDS <= deadline )); do
+    if kubectl get "${workload}" --namespace "${NAMESPACE}" --output json | \
+      python3 -c '
+import json
+import sys
+
+state = json.load(sys.stdin)
+desired = int(state.get("spec", {}).get("replicas") or 0)
+ready = int(state.get("status", {}).get("readyReplicas") or 0)
+raise SystemExit(0 if desired > 0 and ready >= desired else 1)
+'; then
+      return 0
+    fi
+    sleep 5
+  done
+  kubectl get "${workload}" --namespace "${NAMESPACE}" --output wide >&2
+  echo "timed out waiting for scale-out capacity: ${workload}" >&2
+  return 1
+}
+
 wait_for_rollout() {
   local workload="$1"
   local strategy=""
@@ -183,6 +230,39 @@ wait_for_rollout() {
       --namespace "${NAMESPACE}" \
       --timeout "${ROLLOUT_TIMEOUT}"
   fi
+}
+
+verify_denoiser_nvme_cache() {
+  local selector
+  local pod
+  local node
+  local nodeclass
+  local source
+  for selector in \
+    app.kubernetes.io/name=minwm-async-denoiser \
+    app.kubernetes.io/name=lingbot2-async-denoiser; do
+    while IFS= read -r pod; do
+      [[ -n "${pod}" ]] || continue
+      node="$(kubectl get pod "${pod}" --namespace "${NAMESPACE}" \
+        --output jsonpath='{.spec.nodeName}')"
+      nodeclass="$(kubectl get node "${node}" \
+        --output jsonpath='{.metadata.labels.karpenter\.k8s\.aws/ec2nodeclass}')"
+      if [[ "${nodeclass}" != "minwm-async-denoiser-8gpu-nvme-ec2" ]]; then
+        echo "${pod} is not running on the production NVMe NodeClass: ${nodeclass}" >&2
+        return 1
+      fi
+      source="$(kubectl exec --namespace "${NAMESPACE}" "${pod}" \
+        --container denoiser -- findmnt --noheadings --output SOURCE \
+        --target /model-cache)"
+      if ! [[ "${source}" == /dev/md* ]]; then
+        echo "${pod} model cache is not backed by local NVMe RAID0: ${source}" >&2
+        return 1
+      fi
+    done < <(
+      kubectl get pods --namespace "${NAMESPACE}" --selector "${selector}" \
+        --output name
+    )
+  done
 }
 
 statefulset_template_hash() {
@@ -256,11 +336,24 @@ restart_statefulset_in_batches() {
   local pod
   local pods=()
   local batch=()
+  local update_revision
+  update_revision="$(kubectl get statefulset/"${name}" --namespace "${NAMESPACE}" \
+    --output jsonpath='{.status.updateRevision}')"
   while IFS= read -r pod; do
     [[ -n "${pod}" ]] && pods+=("${pod}")
   done < <(
     kubectl get pods --namespace "${NAMESPACE}" --selector "${selector}" \
-      --output name | sort
+      --output json | python3 -c '
+import json
+import sys
+
+revision = sys.argv[1]
+items = json.load(sys.stdin).get("items", [])
+for item in sorted(items, key=lambda value: value["metadata"]["name"]):
+    labels = item.get("metadata", {}).get("labels", {})
+    if labels.get("controller-revision-hash") != revision:
+        print("pod/" + item["metadata"]["name"])
+' "${update_revision}"
   )
   if (( ${#pods[@]} == 0 )); then
     return 0
@@ -342,12 +435,6 @@ restore_release_snapshot() {
   echo "production rollout failed; restoring the exact pre-release workload specs" >&2
 
   if (( RELEASE_APPLIED == 1 )); then
-    if (( DENOISER_CONTROLLER_RECREATED == 1 )) && \
-       [[ -s "$(snapshot_path statefulset/minwm-async-denoiser)" ]]; then
-      kubectl delete statefulset/minwm-async-denoiser \
-        --namespace "${NAMESPACE}" --cascade=orphan --wait=true >/dev/null \
-        || rollback_failed=1
-    fi
     for workload in "${SNAPSHOT_WORKLOADS[@]}"; do
       snapshot="$(snapshot_path "${workload}")"
       if [[ -s "${snapshot}" ]]; then
@@ -475,16 +562,22 @@ CURRENT_DENOISER_POLICY="$(kubectl get statefulset/minwm-async-denoiser \
   --output jsonpath='{.spec.podManagementPolicy}')"
 if [[ -n "${CURRENT_DENOISER_POLICY}" && \
       "${CURRENT_DENOISER_POLICY}" != "Parallel" ]]; then
-  # podManagementPolicy is immutable. Preflight the remaining release against
-  # the live policy, then recreate only this controller after snapshots exist.
-  sed -i.bak \
-    "s/podManagementPolicy: Parallel/podManagementPolicy: ${CURRENT_DENOISER_POLICY}/" \
-    "${DRY_RUN_RENDERED}"
-  rm -f "${DRY_RUN_RENDERED}.bak"
+  echo "Refusing an in-place StatefulSet controller recreation; migrate podManagementPolicy with a separately provisioned canary." >&2
+  exit 1
+fi
+if kubectl get deployment/minwm-async-denoiser \
+  --namespace "${NAMESPACE}" >/dev/null 2>&1; then
+  echo "Refusing to scale a legacy GPU Deployment to zero; migrate it with a separately provisioned canary." >&2
+  exit 1
 fi
 
 kubectl apply --server-side --force-conflicts --dry-run=server \
   --field-manager=minwm-production -f "${DRY_RUN_RENDERED}" >/dev/null
+
+if [[ "${DEPLOY_DRY_RUN_ONLY}" == "true" ]]; then
+  echo "Production manifest server-side dry-run passed; no cluster resources were changed."
+  exit 0
+fi
 
 for workload in "${SNAPSHOT_WORKLOADS[@]}"; do
   snapshot_workload "${workload}"
@@ -497,28 +590,14 @@ if [[ -s "$(snapshot_path statefulset/minwm-async-denoiser)" ]]; then
 else
   OLD_DENOISER_TEMPLATE_HASH=""
 fi
+if [[ -s "$(snapshot_path statefulset/lingbot2-async-denoiser)" ]]; then
+  OLD_LINGBOT_TEMPLATE_HASH="$(
+    statefulset_template_hash <"$(snapshot_path statefulset/lingbot2-async-denoiser)"
+  )"
+else
+  OLD_LINGBOT_TEMPLATE_HASH=""
+fi
 RELEASE_APPLIED=1
-
-# Kubernetes cannot change a workload's kind in place. Keep the legacy
-# Deployment as a rollback target, but scale it to zero before creating the
-# StatefulSet so both controllers never compete for the same H100s.
-if [[ -s "$(snapshot_path deployment/minwm-async-denoiser)" ]]; then
-  LEGACY_DENOISER_REPLICAS="$(python3 -c \
-    'import json,sys; print(json.load(open(sys.argv[1]))["spec"].get("replicas", 0))' \
-    "$(snapshot_path deployment/minwm-async-denoiser)")"
-  LEGACY_DENOISER_REPLICAS="${LEGACY_DENOISER_REPLICAS:-0}"
-  kubectl scale deployment/minwm-async-denoiser \
-    --namespace "${NAMESPACE}" --replicas 0
-  LEGACY_DENOISER_SCALED_DOWN=1
-  wait_for_rollout "deployment/minwm-async-denoiser"
-fi
-
-if [[ -n "${CURRENT_DENOISER_POLICY}" && \
-      "${CURRENT_DENOISER_POLICY}" != "Parallel" ]]; then
-  kubectl delete statefulset/minwm-async-denoiser \
-    --namespace "${NAMESPACE}" --cascade=orphan --wait=true
-  DENOISER_CONTROLLER_RECREATED=1
-fi
 
 kubectl apply --server-side --force-conflicts \
   --field-manager=minwm-production -f "${RENDERED}"
@@ -531,10 +610,28 @@ if [[ -n "${OLD_DENOISER_TEMPLATE_HASH}" && \
       "${OLD_DENOISER_TEMPLATE_HASH}" != "${NEW_DENOISER_TEMPLATE_HASH}" ]]; then
   DENOISER_TEMPLATE_CHANGED=1
 fi
-if (( DENOISER_CONTROLLER_RECREATED == 1 || DENOISER_TEMPLATE_CHANGED == 1 )); then
+NEW_LINGBOT_TEMPLATE_HASH="$(
+  kubectl get statefulset/lingbot2-async-denoiser --namespace "${NAMESPACE}" \
+    --output json | statefulset_template_hash
+)"
+if [[ -n "${OLD_LINGBOT_TEMPLATE_HASH}" && \
+      "${OLD_LINGBOT_TEMPLATE_HASH}" != "${NEW_LINGBOT_TEMPLATE_HASH}" ]]; then
+  LINGBOT_TEMPLATE_CHANGED=1
+fi
+if (( DENOISER_TEMPLATE_CHANGED == 1 || LINGBOT_TEMPLATE_CHANGED == 1 )); then
   protect_denoiser_nodes
+fi
+if (( DENOISER_TEMPLATE_CHANGED == 1 )); then
+  # Preserve the old workers until every scale-out replica is Ready.
+  wait_for_statefulset_ready_replicas statefulset/minwm-async-denoiser
   restart_statefulset_in_batches minwm-async-denoiser \
     app.kubernetes.io/name=minwm-async-denoiser
+fi
+if (( LINGBOT_TEMPLATE_CHANGED == 1 )); then
+  # Keep the original LingBot worker serving until its peer is Ready.
+  wait_for_statefulset_ready_replicas statefulset/lingbot2-async-denoiser
+  restart_statefulset_in_batches lingbot2-async-denoiser \
+    app.kubernetes.io/name=lingbot2-async-denoiser
 fi
 
 wait_for_rollout "deployment/minwm-realtime-adot"
@@ -542,13 +639,11 @@ wait_for_rollout "deployment/minwm-realtime-coordinator"
 wait_for_rollout "deployment/minwm-realtime-gateway"
 wait_for_rollout "deployment/minwm-realtime-gpu-capacity-scaler"
 wait_for_rollout "statefulset/minwm-async-denoiser"
+wait_for_rollout "statefulset/lingbot2-async-denoiser"
+verify_denoiser_nvme_cache
 unprotect_denoiser_nodes
 wait_for_rollout "deployment/minwm-async-vae"
-
-if (( LEGACY_DENOISER_SCALED_DOWN == 1 )); then
-  kubectl delete deployment/minwm-async-denoiser \
-    --namespace "${NAMESPACE}" --cascade=foreground --wait=true
-fi
+wait_for_rollout "deployment/lingbot2-async-vae"
 
 RELEASE_APPLIED=0
 trap - ERR

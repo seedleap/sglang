@@ -23,6 +23,33 @@ The interface shape follows camera-control-first video playgrounds such as
 Reactor LingBot: reference image, scene prompt, enhancement, clip controls,
 move/look camera controls, recordings history, and model telemetry.
 
+The dual-model root page is presented as **World Studio**: visitors choose a
+world or upload a first frame, provide the initial world description, and
+compare Zing with LingBot2 side by side. Model and transport parameters remain
+in hidden compatibility controls and use deployment defaults. During a live
+world, a separate text/voice composer sends prompt updates to both models, and
+the compact WASD/IJKL keycaps retain the existing shared camera-action path.
+Only presets with packaged first-frame images are shown in the world list;
+metadata-only test cases are deliberately excluded from the visitor UI.
+
+For the isolated live dual-model preview, run `./run_live_dual.sh` and open
+`http://127.0.0.1:18083/`. Override `REALTIME_DUAL_GATEWAY_HTTP` and
+`REALTIME_DUAL_GATEWAY_WS` when the deployment owner rotates the gateway URL.
+The local page connects its video WebSockets directly to that gateway so frame
+traffic does not take an additional Python relay hop.
+The World Studio presentation defaults both players to low-latency playback,
+discarding stale backlog so camera and prompt updates remain responsive.
+World drafts may also include optional rules. Up to nine skill instructions and
+one probability-based goal are rewritten concurrently against the initial world
+description before the realtime sessions connect. Prepared skills appear above
+the movement controls and can be sent without another LLM round trip by clicking
+or pressing 1-9. The goal is evaluated once after each successful user or skill
+prompt, can complete only once per session, and shows its achievement notice five
+seconds after the prepared goal prompt is sent.
+The showcase session lifetime is provided by the hidden
+`sessionMaxLifetimeSeconds` runtime setting; the live dual-model launcher uses
+90 seconds, and both model workloads must use the same hard lifetime.
+
 ## I2V and T2V
 
 Deployments opt in to the mode selector through runtime config:

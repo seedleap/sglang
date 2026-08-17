@@ -243,10 +243,8 @@ class Scheduler(SchedulerWarmupMixin, SchedulerPostTrainingMixin, SchedulerDisag
             ):
                 continue
             if (
-                replacement.realtime_action_version
-                < current.realtime_action_version
-                or replacement.realtime_prompt_version
-                < current.realtime_prompt_version
+                replacement.realtime_action_version < current.realtime_action_version
+                or replacement.realtime_prompt_version < current.realtime_prompt_version
             ):
                 return False
             self.waiting_queue[index] = (identity, replacement, enqueue_time)
@@ -274,16 +272,14 @@ class Scheduler(SchedulerWarmupMixin, SchedulerPostTrainingMixin, SchedulerDisag
     @staticmethod
     def _replacement_is_current(replacement: Req, current: Req) -> bool:
         return (
-            replacement.realtime_action_version
-            >= current.realtime_action_version
-            and replacement.realtime_prompt_version
-            >= current.realtime_prompt_version
+            replacement.realtime_action_version >= current.realtime_action_version
+            and replacement.realtime_prompt_version >= current.realtime_prompt_version
         )
 
     def _replacement_matches_envelope(self, update: ReplaceQueuedRealtimeReq) -> bool:
-        return self._realtime_request_key(update.replacement) == self._realtime_request_key(
-            update
-        )
+        return self._realtime_request_key(
+            update.replacement
+        ) == self._realtime_request_key(update)
 
     def _find_waiting_realtime_request(
         self, update: ReplaceQueuedRealtimeReq
@@ -378,7 +374,9 @@ class Scheduler(SchedulerWarmupMixin, SchedulerPostTrainingMixin, SchedulerDisag
                 waiting_request = (
                     None if invalid else self._find_waiting_realtime_request(req)
                 )
-                replaced = False if invalid else self._replace_waiting_realtime_request(req)
+                replaced = (
+                    False if invalid else self._replace_waiting_realtime_request(req)
+                )
                 buffered = False
                 too_late = False
                 if not invalid and waiting_request is None:

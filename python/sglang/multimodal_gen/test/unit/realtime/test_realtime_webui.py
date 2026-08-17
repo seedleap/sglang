@@ -3,6 +3,30 @@
 from pathlib import Path
 
 
+def test_realtime_webui_routes_named_model_backends(monkeypatch):
+    from sglang.multimodal_gen.apps.realtime_webui import server
+
+    monkeypatch.setenv("MINWM_UPSTREAM_HTTP", "http://minwm:30000")
+    monkeypatch.setenv("MINWM_UPSTREAM_WS", "ws://minwm:30000")
+    monkeypatch.setenv("LINGBOT2_UPSTREAM_HTTP", "http://lingbot2:30000")
+    monkeypatch.setenv("LINGBOT2_UPSTREAM_WS", "ws://lingbot2:30000")
+
+    assert (
+        server._backend_upstream("minwm", "http", "/v1/health", "?verbose=1")
+        == "http://minwm:30000/v1/health?verbose=1"
+    )
+    assert (
+        server._backend_upstream("lingbot2", "ws", "/v1/realtime_video/generate", "")
+        == "ws://lingbot2:30000/v1/realtime_video/generate"
+    )
+    try:
+        server._backend_upstream("unknown", "http", "/v1/health", "")
+    except KeyError:
+        pass
+    else:
+        raise AssertionError("unknown backend names must fail closed")
+
+
 def test_realtime_webui_uses_same_origin_server_by_default():
     repo_root = Path(__file__).resolve().parents[6]
     app_js = (
@@ -12,7 +36,12 @@ def test_realtime_webui_uses_same_origin_server_by_default():
         repo_root / "python/sglang/multimodal_gen/apps/realtime_webui/server.py"
     ).read_text()
 
-    assert "`${protocol}//${window.location.host}/v1/realtime_video/generate`" in app_js
+    assert (
+        "`${protocol}//${window.location.host}/backends/minwm/v1/realtime_video/generate`"
+        in app_js
+    )
+    assert '"/backends/{backend}/v1/realtime_video/generate"' in proxy_server
+    assert '"*", "/backends/{backend}/v1/{path:.*}"' in proxy_server
     assert 'app.router.add_get("/v1/realtime_video/generate"' in proxy_server
     assert 'app.router.add_route("*", "/v1/{path:.*}"' in proxy_server
 
@@ -69,9 +98,9 @@ def test_realtime_webui_supports_explicit_minwm_t2v_sessions():
     assert 'savedT2VNumFrames = $("numFrames").value;' in app_js
     assert '$("numFrames").value = savedT2VNumFrames;' in app_js
     assert 'max_chunks: generationMode === "t2v"' in app_js
-    assert '$(' + '"continuous"' + ').disabled = false' in app_js
+    assert "$(" + '"continuous"' + ").disabled = false" in app_js
     assert "let savedT2VContinuous = true" in app_js
-    assert '$(' + '"continuous"' + ').checked = savedT2VContinuous' in app_js
+    assert "$(" + '"continuous"' + ").checked = savedT2VContinuous" in app_js
     assert '"Continuous T2V session"' in app_js
     assert '$("referenceSection").hidden = isT2V' in app_js
 
@@ -99,7 +128,8 @@ def test_realtime_webui_presets_do_not_emit_camera_scripts():
     assert 'id="upscalingScale"' in index_html
     assert 'class="workspace"' in index_html
     assert 'class="preview-frame"' in index_html
-    assert 'id="previewOverlay" class="preview-overlay"' in index_html
+    assert 'id="minwmPreviewOverlay" class="preview-overlay"' in index_html
+    assert 'id="lingbot2PreviewOverlay" class="preview-overlay"' in index_html
     assert 'id="previewScale" type="range" min="80" max="170" value="100"' in index_html
     assert 'id="previewScaleText"' in index_html
     assert 'id="outputSizeText"' in index_html
@@ -123,10 +153,18 @@ def test_realtime_webui_presets_do_not_emit_camera_scripts():
     assert 'id="guidance" type="number" value="1"' in index_html
     assert "styles.css?v=realtime-t2v-dump-trace-v1" in index_html
     assert "app.js?v=realtime-production-gateway-v17" in index_html
-    assert 'const DECODER_WORKER_URL = "./decoder_worker.js?v=rgb-worker-v10";' in app_js
+    assert (
+        'const DECODER_WORKER_URL = "./decoder_worker.js?v=rgb-worker-v10";' in app_js
+    )
     assert 'const DEFAULT_TARGET_FPS = configuredNumber("targetFps", 24);' in app_js
-    assert 'const DEFAULT_PREVIEW_MAX_WIDTH = configuredNumber("previewMaxWidth", 832);' in app_js
-    assert 'const MAX_AUTO_PREVIEW_WIDTH = configuredNumber("maxAutoPreviewWidth", 1280);' in app_js
+    assert (
+        'const DEFAULT_PREVIEW_MAX_WIDTH = configuredNumber("previewMaxWidth", 832);'
+        in app_js
+    )
+    assert (
+        'const MAX_AUTO_PREVIEW_WIDTH = configuredNumber("maxAutoPreviewWidth", 1280);'
+        in app_js
+    )
     assert "function previewMaxWidthForSize(baseSize)" in app_js
     assert "const DEFAULT_FRAME_INTERPOLATION_EXP = 1;" in app_js
     assert "const DEFAULT_FRAME_INTERPOLATION_SCALE = 1.0;" in app_js
@@ -136,7 +174,7 @@ def test_realtime_webui_presets_do_not_emit_camera_scripts():
     assert "stage.dataset.previewState = state" in app_js
     assert "previewProgressSpin" in styles_css
     assert "previewDotPulse" not in styles_css
-    assert 'document.querySelector(".preview-frame")' in app_js
+    assert 'document.querySelector(".model-player-grid")' in app_js
     assert 'previewFrame.style.setProperty("--preview-scale"' in app_js
     assert "cancelAnimationFrame(previewScaleFrame)" in app_js
     assert "enable_frame_interpolation: true" in app_js
@@ -150,7 +188,9 @@ def test_realtime_webui_presets_do_not_emit_camera_scripts():
     assert "preview_scale" in app_js
     assert "sr_scale" in app_js
     assert "playbackController.render(now" in app_js
-    assert "playbackController.enqueueDecodedFrames(header, decodedFrames, now)" in app_js
+    assert (
+        "playbackController.enqueueDecodedFrames(header, decodedFrames, now)" in app_js
+    )
     assert (
         'const REACTOR_PRESET_BASE_URL = "https://www.reactor.inc/lingbot-world-fast-v1";'
         in app_js
@@ -171,7 +211,10 @@ def test_realtime_webui_presets_do_not_emit_camera_scripts():
     assert "dragon-ride.jpg" in app_js
     assert 'referenceUrl: "./assets/dragon-ride.jpg"' in app_js
     assert "function createPresetThumbFallback" in app_js
-    assert "thumb.onerror = () => thumb.replaceWith(createPresetThumbFallback(preset))" in app_js
+    assert (
+        "thumb.onerror = () => thumb.replaceWith(createPresetThumbFallback(preset))"
+        in app_js
+    )
     assert "reference image unavailable" in app_js
     assert ".preset-thumb-fallback" in styles_css
     assert (
@@ -255,7 +298,9 @@ def test_realtime_webui_exposes_live_trace_topology_with_dump_trace_id():
     assert 'id="traceVaeEncodeText"' in index_html
     assert 'id="traceDenoiseText"' in index_html
     assert 'id="traceVaeDecodeText"' in index_html
-    assert "const traceTopologyApi = window.SGLangRealtimeTraceTopology || {};" in app_js
+    assert (
+        "const traceTopologyApi = window.SGLangRealtimeTraceTopology || {};" in app_js
+    )
     assert "function traceWebSocketUrl" in app_js
     assert 'message.type === "chunk_stats"' not in app_js
     assert "currentSessionArtifact.trace_id = currentTrace.traceId" in app_js
@@ -276,6 +321,8 @@ def test_realtime_webui_uses_frame_metadata_for_live_business_status():
         repo_root / "python/sglang/multimodal_gen/apps/realtime_webui/app.js"
     ).read_text()
 
-    assert "lastSampledEventId = Number(header.event_id || lastSampledEventId)" in app_js
+    assert (
+        "lastSampledEventId = Number(header.event_id || lastSampledEventId)" in app_js
+    )
     assert "formatBytes(payloadBytes)" in app_js
     assert "playback.sourceFps.toFixed(1)" in app_js

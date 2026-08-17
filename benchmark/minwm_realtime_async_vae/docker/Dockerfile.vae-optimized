@@ -1,0 +1,60 @@
+ARG PYTHON_IMAGE=public.ecr.aws/docker/library/python@sha256:d657ab0ade19f404a6ccc883ab399540de667aff751748ce23c07330c5a89e64
+
+FROM ${PYTHON_IMAGE}
+
+ARG TAEHV_REVISION=093b918971d59001a0bad6dfd6e0409b5e1752cf
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/opt/sglang/python:/opt/taehv \
+    SGLANG_LIGHTWEIGHT_RUNTIME=1 \
+    TAEHV_CHECKPOINT_PATH=/opt/taehv/taew2_2.pth
+
+# TAEHV only needs the CUDA runtime shipped by the PyTorch wheel. This avoids
+# carrying the full SGLang denoiser, compiler, training, and CUDA toolkit stack
+# on every L4 node.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends ca-certificates libgomp1 && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python -m pip install --no-cache-dir \
+      --index-url https://download.pytorch.org/whl/cu128 \
+      'torch==2.8.0+cu128'
+
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python -m pip install --no-cache-dir \
+      'fastapi==0.141.1' \
+      'httpx==0.28.1' \
+      'msgspec==0.21.1' \
+      'numpy==2.2.6' \
+      'opentelemetry-api==1.44.0' \
+      'opentelemetry-exporter-otlp-proto-grpc==1.44.0' \
+      'opentelemetry-sdk==1.44.0' \
+      'pillow==11.3.0' \
+      'prometheus-client==0.26.0' \
+      'psutil==7.2.2' \
+      'pyzmq==27.1.0' \
+      'tqdm==4.67.1' \
+      'uvicorn==0.52.1' \
+      'websockets==17.0.1'
+
+RUN install -d -m 0755 /opt/taehv
+ADD --checksum=sha256:19e02558b32d8684ceb490dafc1c05db5ec4ea3b0d2c3d0e7875d399d14d29b0 \
+    https://raw.githubusercontent.com/madebyollin/taehv/${TAEHV_REVISION}/taehv.py \
+    /opt/taehv/taehv.py
+ADD --checksum=sha256:d053e216ca50e2bb837bbcd79b85f0366bea00e5938025572382a773b74c559a \
+    https://raw.githubusercontent.com/madebyollin/taehv/${TAEHV_REVISION}/taew2_2.pth \
+    /opt/taehv/taew2_2.pth
+ADD --checksum=sha256:d26151e76cdc2c9424bef988de874b33d9a53f30ef3060cd556c429c469c797e \
+    https://raw.githubusercontent.com/madebyollin/taehv/${TAEHV_REVISION}/taew2_1.pth \
+    /opt/taehv/taew2_1.pth
+
+COPY python/sglang /opt/sglang/python/sglang
+WORKDIR /opt/sglang
+
+RUN python -c 'import opentelemetry.sdk._logs, torch, taehv; import opentelemetry.exporter.otlp.proto.grpc._log_exporter; from sglang.multimodal_gen.runtime.entrypoints import realtime_vae_server' && \
+    python -m compileall -q /opt/sglang/python/sglang /opt/taehv/taehv.py
+
+LABEL org.opencontainers.image.title="minwm-realtime-vae-optimized"
+ENTRYPOINT ["python", "-m", "sglang.multimodal_gen.runtime.entrypoints.realtime_vae_server"]
