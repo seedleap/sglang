@@ -843,7 +843,8 @@ else
     --output "${nsys_dir}/throughput.json" \
     > "${nsys_dir}/profile-client.log" 2>&1
   assert_profile_result "${nsys_dir}/throughput.json" 8 8
-  nsys stop --session="${nsys_session}"
+  timeout --kill-after=5s 20s \
+    nsys stop --session="${nsys_session}"
   capture_active=0
   capture_log_end_line="$(wc -l < "${nsys_dir}/server.log")"
   sed -n "${capture_log_start_line},${capture_log_end_line}p" \

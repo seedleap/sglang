@@ -253,7 +253,7 @@ def test_render_preserves_single_gpu_hardware_and_profile_contract(
     assert "trap 'finish 143' TERM" in runner
     assert "trap - EXIT INT TERM" in runner
     assert 'kill -KILL "${server_pid}"' in runner
-    assert "timeout --kill-after=5s 20s" in runner
+    assert runner.count("timeout --kill-after=5s 20s") == 2
     assert 'result["server"]["raw_frame_async_enqueue_ms"]' in runner
     assert 'structured_marker = "MINWM_RUNTIME_ALIGNMENT_JSON "' in runner
     assert '"cache_tokens": "27456"' in runner
