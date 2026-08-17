@@ -523,8 +523,17 @@ class GatewayOutputRoute:
                 self.rejected_completions += 1
             self._raise_if_failed()
         if message_type == "media_chunk_complete":
-            if chunk_index not in self._seen_chunks:
+            completion_num_frames = int(message.get("num_frames", -1))
+            empty_chunk_without_frames = (
+                chunk_index not in self._seen_chunks and completion_num_frames == 0
+            )
+            if chunk_index not in self._seen_chunks and not empty_chunk_without_frames:
                 raise OutputProtocolError("completion before frame batch")
+            if empty_chunk_without_frames:
+                if chunk_index < self._last_chunk_index + 1:
+                    raise OutputProtocolError("stale chunk")
+                if chunk_index > self._last_chunk_index + 1:
+                    raise OutputProtocolError("out-of-order chunk")
             completed = self._chunk_completed.setdefault(chunk_index, asyncio.Event())
             if completed.is_set():
                 raise OutputProtocolError("duplicate completion")
@@ -578,6 +587,15 @@ class GatewayOutputRoute:
                 )
             )
             self.accepted_completions += 1
+            if empty_chunk_without_frames:
+                # A decoder may legitimately produce no frames for a chunk.
+                # Its completion is still authoritative protocol progress, so
+                # the next chunk must start at the following index.  Recording
+                # it in _seen_chunks also prevents a late frame batch from
+                # filling a chunk that has already completed.
+                self._last_chunk_index = chunk_index
+                self._last_frame_batch_index = -1
+                self._seen_chunks.add(chunk_index)
             if is_final_chunk:
                 self.final_completion_received = True
                 self.final_completion_chunk = chunk_index
@@ -587,6 +605,9 @@ class GatewayOutputRoute:
         frame_batch_index = int(message.get("frame_batch_index", -1))
         if frame_batch_index < 0:
             raise OutputProtocolError("invalid frame sequence")
+        completed = self._chunk_completed.get(chunk_index)
+        if completed is not None and completed.is_set():
+            raise OutputProtocolError("frame batch after completion")
         if chunk_index < self._last_chunk_index:
             raise OutputProtocolError("stale chunk")
         if chunk_index > self._last_chunk_index + 1:

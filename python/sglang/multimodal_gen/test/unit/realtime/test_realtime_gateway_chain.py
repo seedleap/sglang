@@ -280,7 +280,14 @@ def test_gateway_routes_control_and_direct_vae_media_and_queries_trace_over_http
     asyncio.run(run())
 
 
-def test_gateway_finite_final_marker_completes_while_upstream_remains_open():
+@pytest.mark.parametrize(
+    "final_num_frames",
+    (0, 1),
+    ids=("empty-final-chunk", "one-frame-final-chunk"),
+)
+def test_gateway_finite_final_marker_completes_while_upstream_remains_open(
+    final_num_frames,
+):
     async def run():
         gateway_port = _free_port()
         denoiser_port = _free_port()
@@ -306,23 +313,24 @@ def test_gateway_finite_final_marker_completes_while_upstream_remains_open():
                 assert decode_message(await output.recv())["type"] == (
                     "session_output_accepted"
                 )
-                await output.send(
-                    encode_message(
-                        "frame_batch",
-                        session_id=session_id,
-                        generation_id=generation_id,
-                        request_id="request-0",
-                        chunk_index=0,
-                        frame_batch_index=0,
-                        payload_lengths=[4],
-                        payload=b"webp",
-                        content_type="image/webp",
-                        width=8,
-                        height=8,
-                        num_frames=1,
-                        is_final_frame_batch=True,
+                if final_num_frames:
+                    await output.send(
+                        encode_message(
+                            "frame_batch",
+                            session_id=session_id,
+                            generation_id=generation_id,
+                            request_id="request-0",
+                            chunk_index=0,
+                            frame_batch_index=0,
+                            payload_lengths=[4],
+                            payload=b"webp",
+                            content_type="image/webp",
+                            width=8,
+                            height=8,
+                            num_frames=1,
+                            is_final_frame_batch=True,
+                        )
                     )
-                )
                 await output.send(
                     encode_message(
                         "media_chunk_complete",
@@ -330,7 +338,7 @@ def test_gateway_finite_final_marker_completes_while_upstream_remains_open():
                         generation_id=generation_id,
                         request_id="request-0",
                         chunk_index=0,
-                        num_frames=1,
+                        num_frames=final_num_frames,
                         is_final_chunk=True,
                     )
                 )
@@ -377,11 +385,12 @@ def test_gateway_finite_final_marker_completes_while_upstream_remains_open():
                 await server_task
 
         assert observed["upstream_closed_by_gateway"] is True
-        assert [message["type"] for message in messages] == [
-            "frame_batch",
-            "media_chunk_complete",
-        ]
+        expected_types = ["media_chunk_complete"]
+        if final_num_frames:
+            expected_types.insert(0, "frame_batch")
+        assert [message["type"] for message in messages] == expected_types
         assert messages[-1]["is_final_chunk"] is True
+        assert messages[-1]["num_frames"] == final_num_frames
 
     asyncio.run(run())
 

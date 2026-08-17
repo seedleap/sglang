@@ -64,6 +64,7 @@ def _media_complete(
     chunk: int,
     *,
     generation: str = "g",
+    num_frames: int = 1,
     is_final: bool = False,
 ) -> bytes:
     return encode_message(
@@ -72,7 +73,7 @@ def _media_complete(
         generation_id=generation,
         request_id=f"r{chunk}",
         chunk_index=chunk,
-        num_frames=1,
+        num_frames=num_frames,
         is_final_chunk=is_final,
     )
 
@@ -535,6 +536,57 @@ def test_gateway_output_route_uses_media_completion_as_authoritative_marker():
 
         with pytest.raises(OutputProtocolError, match="duplicate completion"):
             await route.put(completion)
+
+    asyncio.run(run())
+
+
+def test_gateway_output_route_accepts_empty_completion_and_advances_sequence():
+    async def run():
+        registry = GatewayOutputRegistry(queue_depth=2)
+        route = await registry.register("s", "g", token="secret")
+
+        empty_completion = _media_complete(0, num_frames=0)
+        await route.put(empty_completion)
+        await route.wait_until_chunk_completed(0)
+
+        with pytest.raises(OutputProtocolError, match="frame batch after completion"):
+            await route.put(_frame(0))
+
+        next_frame = _frame(1)
+        await route.put(next_frame)
+        assert await route.get() == empty_completion
+        route.mark_output_forwarded(empty_completion)
+        route.task_done()
+        await route.wait_until_chunk_forwarded(0)
+        assert await route.get() == next_frame
+        route.mark_output_forwarded(next_frame)
+        route.task_done()
+        await route.join()
+
+        metrics = route.queue_metrics()
+        assert metrics["gateway_accepted_completions"] == 1
+        assert metrics["gateway_forwarded_completions"] == 1
+        assert metrics["gateway_forwarded_frames"] == 1
+
+    asyncio.run(run())
+
+
+def test_gateway_output_route_rejects_unordered_or_nonempty_completion_only_chunk():
+    async def run():
+        registry = GatewayOutputRegistry(queue_depth=2)
+        route = await registry.register("s", "g", token="secret")
+
+        with pytest.raises(OutputProtocolError, match="out-of-order chunk"):
+            await route.put(_media_complete(1, num_frames=0))
+        with pytest.raises(OutputProtocolError, match="completion before frame batch"):
+            await route.put(_media_complete(0, num_frames=1))
+
+        empty_completion = _media_complete(0, num_frames=0)
+        await route.put(empty_completion)
+        with pytest.raises(OutputProtocolError, match="duplicate completion"):
+            await route.put(empty_completion)
+        with pytest.raises(OutputProtocolError, match="out-of-order chunk"):
+            await route.put(_media_complete(2, num_frames=0))
 
     asyncio.run(run())
 
