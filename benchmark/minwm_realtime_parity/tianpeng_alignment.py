@@ -15,7 +15,6 @@ import urllib.request
 from pathlib import Path
 
 import numpy as np
-
 from common import is_realtime_trace_event, save_video, sha256_file, write_json
 
 DEFAULT_ALIGNMENT_URL = (

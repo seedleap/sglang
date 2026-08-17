@@ -70,9 +70,10 @@ def test_production_gpu_workloads_cannot_be_scaled_to_zero_or_deleted():
         "lingbot2-async-vae",
     ):
         assert workload in expressions
-        assert find(documents, "PodDisruptionBudget", workload)["spec"][
-            "minAvailable"
-        ] == 1
+        assert (
+            find(documents, "PodDisruptionBudget", workload)["spec"]["minAvailable"]
+            == 1
+        )
     assert "has(object.spec.replicas) && object.spec.replicas >= 1" in expressions
     assert "request.operation != 'DELETE'" in expressions
     assert binding["spec"]["validationActions"] == ["Deny"]
@@ -101,9 +102,7 @@ def test_h100_pool_uses_one_fully_utilized_spot_node():
     assert requirement_values(packed, "node.kubernetes.io/instance-type") == [
         "p5.48xlarge",
     ]
-    nodeclass = find(
-        documents, "EC2NodeClass", "minwm-async-denoiser-8gpu-nvme-ec2"
-    )
+    nodeclass = find(documents, "EC2NodeClass", "minwm-async-denoiser-8gpu-nvme-ec2")
     assert packed["spec"]["template"]["spec"]["nodeClassRef"]["name"] == (
         "minwm-async-denoiser-8gpu-nvme-ec2"
     )
@@ -113,9 +112,7 @@ def test_h100_pool_uses_one_fully_utilized_spot_node():
     assert nodeclass["spec"]["instanceStorePolicy"] == "RAID0"
     assert nodeclass["metadata"]["labels"]["seedleap.ai/environment"] == "production"
     assert "seedleap.ai/ttl-after-test" not in nodeclass["metadata"]["labels"]
-    assert nodeclass["spec"]["blockDeviceMappings"][0]["ebs"]["volumeSize"] == (
-        "100Gi"
-    )
+    assert nodeclass["spec"]["blockDeviceMappings"][0]["ebs"]["volumeSize"] == ("100Gi")
     assert [
         interface["networkCardIndex"]
         for interface in nodeclass["spec"]["networkInterfaces"]
@@ -183,12 +180,8 @@ def test_vae_deployment_can_land_on_either_l4_or_l40s_pool():
 
     l4_pool = find(base_documents, "NodePool", "minwm-async-vae-l4")
     l4_spot_pool = find(base_documents, "NodePool", "minwm-async-vae-l4-spot")
-    assert requirement_values(l4_pool, "karpenter.sh/capacity-type") == [
-        "on-demand"
-    ]
-    assert requirement_values(l4_spot_pool, "karpenter.sh/capacity-type") == [
-        "spot"
-    ]
+    assert requirement_values(l4_pool, "karpenter.sh/capacity-type") == ["on-demand"]
+    assert requirement_values(l4_spot_pool, "karpenter.sh/capacity-type") == ["spot"]
     assert l4_pool["spec"]["weight"] > l4_spot_pool["spec"]["weight"]
 
     for documents, name in (
@@ -214,10 +207,7 @@ def test_each_production_model_has_a_dedicated_l4_vae_worker():
     lingbot2 = find(documents, "Deployment", "lingbot2-async-vae")
     nodepool = find(documents, "NodePool", "minwm-async-vae-l4")
 
-    assert sum(
-        int(workload["spec"]["replicas"])
-        for workload in (minwm, lingbot2)
-    ) == 2
+    assert sum(int(workload["spec"]["replicas"]) for workload in (minwm, lingbot2)) == 2
     assert requirement_values(nodepool, "node.kubernetes.io/instance-type") == [
         "g6.2xlarge"
     ]
@@ -249,7 +239,10 @@ def test_tianpeng_direct_api_is_sp2_without_session_timeout():
 
     gateway = find(documents, "Deployment", "tianpeng-direct-realtime-gateway")
     gateway_command = " ".join(_container(gateway, "gateway")["args"])
-    assert "--model-revision=wan22-5b-varlen-product-ws1-720p-0810-5bfc5d2-gs1500-direct" in gateway_command
+    assert (
+        "--model-revision=wan22-5b-varlen-product-ws1-720p-0810-5bfc5d2-gs1500-direct"
+        in gateway_command
+    )
     service = find(documents, "Service", "tianpeng-direct-public")
     assert service["spec"]["type"] == "LoadBalancer"
 
@@ -273,20 +266,21 @@ def test_lingbot_denoiser_is_coordinator_managed_sp4_with_remote_vae():
     assert "--ring-degree 1" in command
     assert "--realtime-remote-vae-enabled" in command
     assert "--realtime-session-max-lifetime-s 70" in command
-    lingbot_env = {
-        item["name"]: item.get("value") for item in denoiser.get("env", [])
-    }
+    lingbot_env = {item["name"]: item.get("value") for item in denoiser.get("env", [])}
     assert lingbot_env["SGLANG_LINGBOT_LAZY_VAE_ENCODE_BLACK_FRAMES"] == "0"
     assert "--role=denoiser" in heartbeat
-    assert "--model-revision=robbyant/lingbot-world-v2-14b-causal-fast-diffusers" in heartbeat
+    assert (
+        "--model-revision=robbyant/lingbot-world-v2-14b-causal-fast-diffusers"
+        in heartbeat
+    )
     assert "--vae-fingerprint=taew2_1-d26151e7" in heartbeat
     assert "python3 -m sglang.multimodal_gen.runtime.launch_server" in command
     assert "startup_warmup.py" in command
     assert "--allow-empty-complete" in command
     assert "child=$!" in command
-    assert workload["spec"]["template"]["spec"]["containers"][0][
-        "readinessProbe"
-    ]["httpGet"] == {"path": "/health", "port": "api"}
+    assert workload["spec"]["template"]["spec"]["containers"][0]["readinessProbe"][
+        "httpGet"
+    ] == {"path": "/health", "port": "api"}
 
 
 def test_gpu_workers_publish_epoch_state_and_drain_before_termination():
@@ -424,8 +418,9 @@ def test_optimized_webui_uses_an_isolated_ack_aware_gateway():
     assert '"sessionMaxLifetimeSeconds":70' in env["REALTIME_UI_CONFIG_JSON"]
     assert '"singleExperience":false' in env["REALTIME_UI_CONFIG_JSON"]
     assert "singleExperienceUserIds" not in env["REALTIME_UI_CONFIG_JSON"]
-    assert '"minwm":{"label":"Zing","sinkSize":8,"windowFrames":32,"h264StartupDropFrames":0}' in (
-        env["REALTIME_UI_CONFIG_JSON"]
+    assert (
+        '"minwm":{"label":"Zing","sinkSize":8,"windowFrames":32,"h264StartupDropFrames":0}'
+        in (env["REALTIME_UI_CONFIG_JSON"])
     )
     assert (
         '"lingbot2":{"label":"LingBot2","targetFps":16,"sinkSize":9,"windowFrames":18,"h264StartupDropFrames":8}'
@@ -470,12 +465,12 @@ def test_each_model_uses_the_matching_taehv_checkpoint():
 
     documents = load_documents(("l4-vae.yaml",))
     minwm = find(documents, "Deployment", "minwm-async-vae")
-    minwm_command = " ".join(_container(minwm, "vae")['args'])
+    minwm_command = " ".join(_container(minwm, "vae")["args"])
     assert "taew2_2.pth" in minwm_command
     assert "taew2_1.pth" not in minwm_command
 
     lingbot2 = find(documents, "Deployment", "lingbot2-async-vae")
-    lingbot2_command = " ".join(_container(lingbot2, "vae")['args'])
+    lingbot2_command = " ".join(_container(lingbot2, "vae")["args"])
     assert "taew2_1.pth" in lingbot2_command
     assert "taew2_2.pth" not in lingbot2_command
 
@@ -498,9 +493,7 @@ def test_webui_enables_i2v_and_t2v_in_production_manifest():
 
 def test_east2_model_artifact_uses_a_matching_read_only_s3_mount():
     documents = load_documents()
-    volume = find(
-        documents, "PersistentVolume", "minwm-model-serving-east2-s3-pv"
-    )
+    volume = find(documents, "PersistentVolume", "minwm-model-serving-east2-s3-pv")
     assert volume["spec"]["csi"]["volumeAttributes"]["bucketName"] == (
         "leap-world-model-serving-829115578968-us-east-2"
     )
@@ -525,8 +518,7 @@ def test_east2_model_artifact_uses_a_matching_read_only_s3_mount():
     )
     assert any(
         item["name"] == "checkpoint-archive"
-        and item["persistentVolumeClaim"]["claimName"]
-        == "minwm-model-serving-east2-s3"
+        and item["persistentVolumeClaim"]["claimName"] == "minwm-model-serving-east2-s3"
         and item["persistentVolumeClaim"]["readOnly"]
         for item in pod_spec["volumes"]
     )
@@ -597,9 +589,7 @@ def test_tianpeng_direct_h100_cache_uses_nvme_when_enabled():
     assert pod_spec["nodeSelector"]["karpenter.sh/nodepool"] == (
         "minwm-async-denoiser-h100-8x"
     )
-    assert pod_spec["nodeSelector"]["seedleap.ai/model-cache-storage"] == (
-        "local-nvme"
-    )
+    assert pod_spec["nodeSelector"]["seedleap.ai/model-cache-storage"] == ("local-nvme")
     cache = next(
         volume for volume in pod_spec["volumes"] if volume["name"] == "model-cache"
     )
@@ -728,9 +718,7 @@ def test_one_node_model_startup_is_serialized_across_all_three_denoisers():
             mount["name"] == "startup-lock" for mount in denoiser["volumeMounts"]
         )
         lock_volume = next(
-            volume
-            for volume in pod_spec["volumes"]
-            if volume["name"] == "startup-lock"
+            volume for volume in pod_spec["volumes"] if volume["name"] == "startup-lock"
         )
         assert lock_volume["hostPath"]["path"] == "/var/run/minwm-startup-lock"
 
@@ -1052,7 +1040,9 @@ def test_gpu_workers_register_only_internal_pod_endpoints():
 
 def test_gpu_node_pools_do_not_expire_healthy_nodes_by_age():
     documents = load_documents(("h100-denoiser.yaml", "l4-vae.yaml"))
-    node_pools = [document for document in documents if document.get("kind") == "NodePool"]
+    node_pools = [
+        document for document in documents if document.get("kind") == "NodePool"
+    ]
 
     assert node_pools
     for node_pool in node_pools:
@@ -1156,7 +1146,10 @@ def test_production_deploy_waits_for_every_rollout_and_restores_exact_snapshot()
     assert "wait_for_statefulset_ready_replicas" in deploy_script
     assert "verify_denoiser_nvme_cache" in deploy_script
     assert '[[ "${source}" == /dev/md* ]]' in deploy_script
-    assert 'DENOISER_RESTART_BATCH_SIZE="${DENOISER_RESTART_BATCH_SIZE:-1}"' in deploy_script
+    assert (
+        'DENOISER_RESTART_BATCH_SIZE="${DENOISER_RESTART_BATCH_SIZE:-1}"'
+        in deploy_script
+    )
     assert "kubectl delete --namespace" in deploy_script
     assert "--wait=true" in deploy_script
     assert "--wait=false" not in deploy_script

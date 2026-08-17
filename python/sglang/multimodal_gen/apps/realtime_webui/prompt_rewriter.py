@@ -17,7 +17,6 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-
 ROOT = Path(__file__).resolve().parent
 DEFAULT_CREDENTIALS_PATH = (
     ROOT.parent / "realtime_webui_secrets" / "prompt-rewriter-vertex.json"

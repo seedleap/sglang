@@ -8,7 +8,6 @@ from types import SimpleNamespace
 import pytest
 
 from sglang.multimodal_gen.runtime.utils import realtime_trace
-
 from sglang.multimodal_gen.runtime.utils.realtime_trace import (
     calculate_overlap_ms,
     calculate_overlap_ratio,

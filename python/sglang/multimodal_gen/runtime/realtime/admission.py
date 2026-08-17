@@ -332,9 +332,7 @@ class DynamoDBSessionLeaseStore:
                     {
                         "Update": {
                             "TableName": self.table_name,
-                            "Key": {
-                                "lease_key": {"S": self._user_key(lease.user_id)}
-                            },
+                            "Key": {"lease_key": {"S": self._user_key(lease.user_id)}},
                             "UpdateExpression": "SET expires_at = :expires",
                             "ConditionExpression": "#token = :token",
                             "ExpressionAttributeNames": {"#token": "token"},
@@ -380,9 +378,7 @@ class DynamoDBSessionLeaseStore:
                             "Key": {"lease_key": {"S": self._user_key(lease.user_id)}},
                             "ConditionExpression": "#token = :token",
                             "ExpressionAttributeNames": {"#token": "token"},
-                            "ExpressionAttributeValues": {
-                                ":token": {"S": lease.token}
-                            },
+                            "ExpressionAttributeValues": {":token": {"S": lease.token}},
                         }
                     },
                     {
@@ -391,9 +387,7 @@ class DynamoDBSessionLeaseStore:
                             "Key": {"lease_key": {"S": lease.capacity_slot}},
                             "ConditionExpression": "#token = :token",
                             "ExpressionAttributeNames": {"#token": "token"},
-                            "ExpressionAttributeValues": {
-                                ":token": {"S": lease.token}
-                            },
+                            "ExpressionAttributeValues": {":token": {"S": lease.token}},
                         }
                     },
                 ]

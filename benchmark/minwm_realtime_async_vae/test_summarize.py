@@ -18,7 +18,11 @@ def _run(concurrency, p95, fps, error_rate=0.0):
 
 def test_report_selects_highest_concurrency_that_meets_slo():
     report = summarize_runs(
-        [_run(1, p95=700, fps=18), _run(2, p95=920, fps=16.5), _run(4, p95=1400, fps=12)]
+        [
+            _run(1, p95=700, fps=18),
+            _run(2, p95=920, fps=16.5),
+            _run(4, p95=1400, fps=12),
+        ]
     )
     assert report["max_supported_concurrency"] == 2
 

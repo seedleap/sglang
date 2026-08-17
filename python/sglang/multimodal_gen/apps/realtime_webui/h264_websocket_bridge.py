@@ -17,9 +17,9 @@ import logging
 import os
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from io import BytesIO
-from collections.abc import Callable
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
@@ -96,10 +96,7 @@ def _encoded_image_to_rgb(frame: bytes, *, width: int, height: int) -> bytes:
 def _raw_channel_filter(channel_order: str) -> str:
     if channel_order == "gbr":
         return (
-            "colorchannelmixer="
-            "rr=0:rg=0:rb=1:"
-            "gr=1:gg=0:gb=0:"
-            "br=0:bg=1:bb=0,"
+            "colorchannelmixer=" "rr=0:rg=0:rb=1:" "gr=1:gg=0:gb=0:" "br=0:bg=1:bb=0,"
         )
     return ""
 
@@ -120,7 +117,7 @@ class _QueuedFrame:
 
 @dataclass
 class H264WebSocketSession:
-    manager: "H264WebSocketBridgeManager"
+    manager: H264WebSocketBridgeManager
     websocket: web.WebSocketResponse
     init: dict[str, Any]
     backend: str
@@ -255,10 +252,12 @@ class H264WebSocketSession:
                 )
                 tasks = [
                     asyncio.create_task(
-                        self._receive_upstream(), name=f"h264ws-upstream-{self.session_id}"
+                        self._receive_upstream(),
+                        name=f"h264ws-upstream-{self.session_id}",
                     ),
                     asyncio.create_task(
-                        self._receive_controls(), name=f"h264ws-control-{self.session_id}"
+                        self._receive_controls(),
+                        name=f"h264ws-control-{self.session_id}",
                     ),
                     self.encoder_task,
                 ]
@@ -414,7 +413,9 @@ class H264WebSocketSession:
                     _encoded_image_to_rgb, frame, width=width, height=height
                 )
             else:
-                raise ValueError(f"unsupported realtime frame content type: {content_type}")
+                raise ValueError(
+                    f"unsupported realtime frame content type: {content_type}"
+                )
             queued = _QueuedFrame(
                 rgb=rgb,
                 width=width,
@@ -679,7 +680,11 @@ class H264WebSocketSession:
             if task is not None and not task.done():
                 task.cancel()
         await asyncio.gather(
-            *(task for task in (self.stdout_task, self.stderr_task) if task is not None),
+            *(
+                task
+                for task in (self.stdout_task, self.stderr_task)
+                if task is not None
+            ),
             return_exceptions=True,
         )
         self.stdout_task = None

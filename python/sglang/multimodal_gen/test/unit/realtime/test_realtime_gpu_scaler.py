@@ -9,8 +9,8 @@ from sglang.multimodal_gen.runtime.entrypoints.realtime_gpu_scaler import (
     CapacityRoleSnapshot,
     CapacityScaler,
     CoordinatorCapacityClient,
-    ScalingPolicy,
     KubernetesScaleClient,
+    ScalingPolicy,
 )
 
 
@@ -49,8 +49,7 @@ def test_scaler_patches_only_the_named_deployment_scale_subresource(tmp_path):
 
     request, kwargs = calls[0]
     assert request.full_url.endswith(
-        "/apis/apps/v1/namespaces/minwm-realtime/"
-        "deployments/minwm-async-vae/scale"
+        "/apis/apps/v1/namespaces/minwm-realtime/" "deployments/minwm-async-vae/scale"
     )
     assert request.method == "PATCH"
     assert request.headers["Authorization"] == "Bearer service-account-token"

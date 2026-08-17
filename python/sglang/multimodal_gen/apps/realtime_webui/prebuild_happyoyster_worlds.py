@@ -20,7 +20,7 @@ DEFAULT_OUTPUT = ROOT / "happyoyster_prebuilt_worlds.json"
 PRESET_RE = re.compile(
     r'\{\s*name:\s*"(?P<name>[^"]+)"(?P<body>.*?)'
     r'prompt:\s*"(?P<prompt>(?:\\.|[^"\\])*)"(?P<tail>.*?)'
-    r'referenceUrl:\s*`\$\{PRESET_ASSET_BASE_URL\}/(?P<asset>[^`]+)`.*?\}',
+    r"referenceUrl:\s*`\$\{PRESET_ASSET_BASE_URL\}/(?P<asset>[^`]+)`.*?\}",
     re.DOTALL,
 )
 
@@ -85,7 +85,9 @@ async def build_one(session, base_url: str, preset: dict[str, str], semaphore):
         )
         world_id = str(created.get("encryptedWorldId") or "")
         if not world_id:
-            raise RuntimeError(f'{preset["name"]}: create did not return encryptedWorldId')
+            raise RuntimeError(
+                f'{preset["name"]}: create did not return encryptedWorldId'
+            )
         for _attempt in range(80):
             status = await read_json(
                 await session.get(
@@ -157,9 +159,7 @@ async def run(args):
     pending = [preset for preset in presets if preset["key"] not in worlds]
     async with ClientSession(timeout=timeout) as session:
         tasks = [
-            asyncio.create_task(
-                build_one(session, base_url, preset, semaphore)
-            )
+            asyncio.create_task(build_one(session, base_url, preset, semaphore))
             for preset in pending
         ]
         errors = []

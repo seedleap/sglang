@@ -12,7 +12,6 @@ from dataclasses import dataclass, replace
 from typing import Any, Callable, Literal, Mapping, Protocol
 from uuid import uuid4
 
-
 WorkerRole = Literal["denoiser", "vae"]
 WorkerLifecycle = Literal["ready", "draining", "failed"]
 logger = logging.getLogger(__name__)
@@ -572,9 +571,7 @@ class DynamoDBCoordinatorStore:
         return item.get(key, {}).get("S", default)
 
     @staticmethod
-    def _read_optional_n(
-        item: dict, key: str, default: int | float = 0
-    ) -> int | float:
+    def _read_optional_n(item: dict, key: str, default: int | float = 0) -> int | float:
         value = item.get(key, {}).get("N")
         if value is None:
             return default
@@ -609,26 +606,14 @@ class DynamoDBCoordinatorStore:
             vae_fingerprint=self._read_s(item, "vae_fingerprint"),
             worker_epoch=self._read_optional_s(item, "worker_epoch"),
             lifecycle=self._read_optional_s(item, "lifecycle", "ready"),
-            active_sessions=int(
-                self._read_optional_n(item, "active_sessions")
-            ),
-            runnable_sessions=int(
-                self._read_optional_n(item, "runnable_sessions")
-            ),
-            blocked_sessions=int(
-                self._read_optional_n(item, "blocked_sessions")
-            ),
+            active_sessions=int(self._read_optional_n(item, "active_sessions")),
+            runnable_sessions=int(self._read_optional_n(item, "runnable_sessions")),
+            blocked_sessions=int(self._read_optional_n(item, "blocked_sessions")),
             queue_depth=int(self._read_optional_n(item, "queue_depth")),
-            service_time_ms=float(
-                self._read_optional_n(item, "service_time_ms")
-            ),
-            reservation_endpoint=self._read_optional_s(
-                item, "reservation_endpoint"
-            ),
+            service_time_ms=float(self._read_optional_n(item, "service_time_ms")),
+            reservation_endpoint=self._read_optional_s(item, "reservation_endpoint"),
             drain_deadline=(
-                float(item["drain_deadline"]["N"])
-                if "drain_deadline" in item
-                else None
+                float(item["drain_deadline"]["N"]) if "drain_deadline" in item else None
             ),
             capacity=int(self._read_optional_n(item, "capacity", 1)),
         )
@@ -664,9 +649,7 @@ class DynamoDBCoordinatorStore:
                 slot.capacity - available.get(slot.worker_id, 0),
             )
             effective_active = max(slot.active_sessions, inferred_active)
-            spread = hashlib.sha256(
-                f"{salt}:{slot.worker_id}".encode()
-            ).digest()
+            spread = hashlib.sha256(f"{salt}:{slot.worker_id}".encode()).digest()
             return (
                 effective_active / slot.capacity,
                 slot.queue_depth,
@@ -731,11 +714,7 @@ class DynamoDBCoordinatorStore:
                 "allocation_sort": {"S": f"worker#{heartbeat.worker_id}"},
                 "ttl": {"N": str(heartbeat_expires + 86400)},
                 **(
-                    {
-                        "drain_deadline": {
-                            "N": str(heartbeat.drain_deadline)
-                        }
-                    }
+                    {"drain_deadline": {"N": str(heartbeat.drain_deadline)}}
                     if heartbeat.drain_deadline is not None
                     else {}
                 ),
@@ -869,39 +848,37 @@ class DynamoDBCoordinatorStore:
                 "TableName": self.table_name,
                 "IndexName": "allocation-index",
                 "KeyConditionExpression": "allocation_key = :allocation",
-                "ExpressionAttributeValues": {
-                    ":allocation": {"S": f"CAPACITY#{role}"}
-                },
+                "ExpressionAttributeValues": {":allocation": {"S": f"CAPACITY#{role}"}},
             }
             while True:
                 response = client.query(**query)
                 for item in response.get("Items", []):
                     item_type = self._read_optional_s(item, "item_type")
                     if item_type == "capacity_demand":
-                        if int(
-                            self._read_optional_n(item, "demand_expires_at")
-                        ) > now_epoch:
+                        if (
+                            int(self._read_optional_n(item, "demand_expires_at"))
+                            > now_epoch
+                        ):
                             values["waiting_sessions"] += 1
                         continue
-                    if item_type != "worker" or int(
-                        self._read_optional_n(item, "heartbeat_expires_at")
-                    ) <= now_epoch:
+                    if (
+                        item_type != "worker"
+                        or int(self._read_optional_n(item, "heartbeat_expires_at"))
+                        <= now_epoch
+                    ):
                         continue
                     active = int(self._read_optional_n(item, "active_sessions"))
                     values["active_sessions"] += active
                     values["queued_sessions"] += int(
                         self._read_optional_n(item, "queue_depth")
                     )
-                    lifecycle = self._read_optional_s(
-                        item, "lifecycle", "ready"
-                    )
+                    lifecycle = self._read_optional_s(item, "lifecycle", "ready")
                     if lifecycle == "draining":
                         values["draining_workers"] += 1
                     elif lifecycle == "ready":
                         values["free_slots"] += max(
                             0,
-                            int(self._read_optional_n(item, "capacity", 1))
-                            - active,
+                            int(self._read_optional_n(item, "capacity", 1)) - active,
                         )
                 last_evaluated_key = response.get("LastEvaluatedKey")
                 if not last_evaluated_key:
@@ -943,8 +920,7 @@ class DynamoDBCoordinatorStore:
         while len(slots) < self.candidate_limit:
             response = self._get_client().query(**query)
             slots.extend(
-                self._slot_from_item(item)
-                for item in response.get("Items", [])
+                self._slot_from_item(item) for item in response.get("Items", [])
             )
             last_evaluated_key = response.get("LastEvaluatedKey")
             if not last_evaluated_key:
@@ -1015,9 +991,7 @@ class DynamoDBCoordinatorStore:
             pairs = self._candidate_pairs(
                 denoisers,
                 vaes,
-                identity=(
-                    f"{user_id}:{session_id}:{generation_id}:{query_round}"
-                ),
+                identity=(f"{user_id}:{session_id}:{generation_id}:{query_round}"),
             )
             if not pairs:
                 break
@@ -1204,8 +1178,7 @@ class DynamoDBCoordinatorStore:
             if (
                 not item
                 or item.get("worker_epoch", {}).get("S") != slot.worker_epoch
-                or int(item.get("heartbeat_expires_at", {}).get("N", "0"))
-                <= now_epoch
+                or int(item.get("heartbeat_expires_at", {}).get("N", "0")) <= now_epoch
                 or item.get("lifecycle", {}).get("S", "ready") == "failed"
                 or (
                     item.get("lifecycle", {}).get("S") == "draining"
@@ -1273,9 +1246,7 @@ class DynamoDBCoordinatorStore:
                                 "(attribute_not_exists(drain_deadline) OR "
                                 "drain_deadline > :now)))"
                             ),
-                            "ExpressionAttributeNames": {
-                                "#lifecycle": "lifecycle"
-                            },
+                            "ExpressionAttributeNames": {"#lifecycle": "lifecycle"},
                             "ExpressionAttributeValues": {
                                 ":worker_epoch": {"S": slot.worker_epoch},
                                 ":now": {"N": str(now_epoch)},
@@ -1316,13 +1287,12 @@ class DynamoDBCoordinatorStore:
                     raise CoordinatorRejected(reason) from exc
                 if attempt == max_attempts - 1:
                     raise CoordinatorRejected("LEASE_RENEW_CONFLICT") from exc
-                token_jitter = int(
-                    hashlib.sha256(assignment.token.encode()).hexdigest()[:2], 16
-                ) / 255
+                token_jitter = (
+                    int(hashlib.sha256(assignment.token.encode()).hexdigest()[:2], 16)
+                    / 255
+                )
                 time.sleep(0.01 * (2**attempt) * (1 + token_jitter))
-        return replace(
-            assignment, expires_at=self._lease_clock() + self.ttl_s
-        )
+        return replace(assignment, expires_at=self._lease_clock() + self.ttl_s)
 
     async def release(self, assignment: SessionAssignment) -> None:
         await asyncio.to_thread(self._release_sync, assignment)
@@ -1539,9 +1509,7 @@ class RealtimeCoordinator:
         wait_for_capacity: bool = True,
     ) -> SessionAssignment:
         deadline = (
-            time.monotonic() + self.wait_timeout_s
-            if self.wait_timeout_s > 0
-            else None
+            time.monotonic() + self.wait_timeout_s if self.wait_timeout_s > 0 else None
         )
         excluded_workers: set[tuple[WorkerRole, str]] = set()
         waiting_id: str | None = None
@@ -1620,9 +1588,7 @@ class RealtimeCoordinator:
                             "COORDINATOR_CLEANUP_FAILED", retry_after_s=1.0
                         ) from cleanup_error
                     if failed_slot is not None:
-                        excluded_workers.add(
-                            (failed_slot.role, failed_slot.worker_id)
-                        )
+                        excluded_workers.add((failed_slot.role, failed_slot.worker_id))
                     if (
                         not wait_for_capacity
                         or deadline is None

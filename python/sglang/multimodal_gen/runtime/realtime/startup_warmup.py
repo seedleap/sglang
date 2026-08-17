@@ -5,14 +5,14 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import time
 from io import BytesIO
 from pathlib import Path
-import time
 from uuid import uuid4
 
 import msgspec.msgpack
-from PIL import Image
 import websockets
+from PIL import Image
 from websockets.exceptions import ConnectionClosedOK
 
 

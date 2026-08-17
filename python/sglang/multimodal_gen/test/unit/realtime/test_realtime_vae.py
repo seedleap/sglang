@@ -4,13 +4,13 @@ from types import SimpleNamespace
 
 import torch
 
+from sglang.multimodal_gen.runtime.pipelines_core.stages.realtime.text_encoding import (
+    RealtimeTextEncodingStage,
+)
 from sglang.multimodal_gen.runtime.pipelines_core.stages.realtime.vae import (
     CausalVaeDecodingStage,
     RealtimeImageVAEEncodingStage,
     RealtimeVAEDecodeState,
-)
-from sglang.multimodal_gen.runtime.pipelines_core.stages.realtime.text_encoding import (
-    RealtimeTextEncodingStage,
 )
 
 

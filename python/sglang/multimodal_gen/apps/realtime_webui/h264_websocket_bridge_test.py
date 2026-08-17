@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 
 from aiohttp import web
-
 from h264_websocket_bridge import (
     H264WebSocketBridgeManager,
     H264WebSocketSession,
@@ -231,12 +230,9 @@ def test_encoder_drains_frames_immediately_without_server_side_pacing():
             ]
             assert len(media_batches) == 2
             assert len(encode_timings) == 2
+            assert all(message["repeated_frame"] is False for message in media_batches)
             assert all(
-                message["repeated_frame"] is False for message in media_batches
-            )
-            assert all(
-                message["bridge_encoder_feed_ms"] >= 0
-                for message in encode_timings
+                message["bridge_encoder_feed_ms"] >= 0 for message in encode_timings
             )
         finally:
             encoder_task.cancel()

@@ -148,7 +148,14 @@ def test_cloudwatch_trace_query_coalesces_identical_requests_and_bounds_concurre
             trace_id = queryId.replace("query-", "trace-")
             return {
                 "status": "Complete",
-                "results": [[{"field": "@message", "value": json.dumps({"trace_id": trace_id, "trace_seq": 1})}]],
+                "results": [
+                    [
+                        {
+                            "field": "@message",
+                            "value": json.dumps({"trace_id": trace_id, "trace_seq": 1}),
+                        }
+                    ]
+                ],
             }
 
     async def run():

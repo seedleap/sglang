@@ -11,9 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
-
 from load_test import derive_trace_http_url, run_level
-
 
 REQUIRED_TRACE_EVENTS = {
     "gateway.ws_accepted",
@@ -63,7 +61,9 @@ def validate_production_result(
                 "missing production Trace events: " + ", ".join(missing)
             )
         if int(run.get("direct_vae_frame_batches") or 0) < 1:
-            raise ProductionGateError("direct VAE-to-Gateway media route was not observed")
+            raise ProductionGateError(
+                "direct VAE-to-Gateway media route was not observed"
+            )
 
     display_p95 = _p95((result.get("browser") or {}).get("display_lag_ms"))
     if display_p95 is None:
@@ -87,9 +87,11 @@ def _hardware_count(hardware: dict) -> int | str:
 
 
 def _action_latency(run: dict) -> dict:
-    return run.get("action_to_first_frame_ms") or run.get(
-        "client_observed_action_to_first_frame_ms"
-    ) or {}
+    return (
+        run.get("action_to_first_frame_ms")
+        or run.get("client_observed_action_to_first_frame_ms")
+        or {}
+    )
 
 
 def render_chinese_report(result: dict, *, run_id: str) -> str:

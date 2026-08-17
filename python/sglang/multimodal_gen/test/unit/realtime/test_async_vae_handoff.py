@@ -6,11 +6,11 @@ from types import SimpleNamespace
 
 import torch
 
-from sglang.multimodal_gen.runtime.pipelines.minwm_causal_dmd_pipeline import (
-    _use_remote_realtime_vae,
-)
 from sglang.multimodal_gen.runtime.pipelines.lingbot_world_causal_dmd_pipeline import (
     _use_remote_realtime_vae as lingbot_uses_remote_realtime_vae,
+)
+from sglang.multimodal_gen.runtime.pipelines.minwm_causal_dmd_pipeline import (
+    _use_remote_realtime_vae,
 )
 from sglang.multimodal_gen.runtime.pipelines_core.stages.realtime.latent_handoff import (
     RealtimeLatentHandoffStage,

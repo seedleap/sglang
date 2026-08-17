@@ -3,8 +3,8 @@
 # Install stubs early for platforms where certain dependencies are unavailable
 # (e.g. macOS/MPS has no triton, and torch.mps lacks Stream / set_device /
 # get_device_properties).  This must run before any downstream imports.
-import platform as _platform
 import os as _os
+import platform as _platform
 import sys as _sys
 
 _LIGHTWEIGHT_RUNTIME = _os.environ.get("SGLANG_LIGHTWEIGHT_RUNTIME") == "1"

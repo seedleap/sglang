@@ -202,10 +202,7 @@ def worker_message_allowed(wire: bytes) -> bool:
         message = msgspec.msgpack.decode(wire)
     except msgspec.DecodeError:
         return False
-    return (
-        isinstance(message, dict)
-        and message.get("type") in _WORKER_CONTROL_MESSAGES
-    )
+    return isinstance(message, dict) and message.get("type") in _WORKER_CONTROL_MESSAGES
 
 
 def worker_message_type(wire: bytes) -> str:
@@ -267,9 +264,7 @@ class GatewayOutputRoute:
     _last_frame_batch_index: int = field(default=-1, init=False)
     _seen_chunks: set[int] = field(default_factory=set, init=False)
     _output_closed: asyncio.Event = field(init=False)
-    _chunk_completed: dict[int, asyncio.Event] = field(
-        default_factory=dict, init=False
-    )
+    _chunk_completed: dict[int, asyncio.Event] = field(default_factory=dict, init=False)
     dropped_messages: int = field(default=0, init=False)
     dropped_frames: int = field(default=0, init=False)
     bound: bool = field(default=False, init=False)
@@ -322,9 +317,7 @@ class GatewayOutputRoute:
         if message_type == "media_chunk_complete":
             if chunk_index not in self._seen_chunks:
                 raise OutputProtocolError("completion before frame batch")
-            completed = self._chunk_completed.setdefault(
-                chunk_index, asyncio.Event()
-            )
+            completed = self._chunk_completed.setdefault(chunk_index, asyncio.Event())
             if completed.is_set():
                 raise OutputProtocolError("duplicate completion")
             # Control markers are tiny and are not counted against the media
@@ -366,9 +359,7 @@ class GatewayOutputRoute:
         self._last_frame_batch_index = frame_batch_index
         self._seen_chunks.add(chunk_index)
         if message.get("is_final_frame_batch") is True:
-            self._chunk_completed.setdefault(
-                chunk_index, asyncio.Event()
-            ).set()
+            self._chunk_completed.setdefault(chunk_index, asyncio.Event()).set()
 
     def _put_media_latest(self, output: _QueuedOutput) -> None:
         # Never propagate browser/network backpressure into the VAE worker.

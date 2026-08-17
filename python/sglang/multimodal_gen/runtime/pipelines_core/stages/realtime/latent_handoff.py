@@ -59,7 +59,9 @@ def _prepare_reference_latent_for_handoff(
             "Realtime reference latent and generated latent must have the same rank"
         )
     if reference_latent.shape[0] != generated_latents.shape[0]:
-        raise ValueError("Realtime reference latent and generated latent must match batch")
+        raise ValueError(
+            "Realtime reference latent and generated latent must match batch"
+        )
 
     channel_sliced = False
     temporal_sliced = False
@@ -129,9 +131,7 @@ class RealtimeLatentHandoffStage(PipelineStage):
             "action_version": batch.realtime_action_version,
             "prompt_version": batch.realtime_prompt_version,
             "has_reference": has_reference,
-            "is_final_chunk": bool(
-                batch.extra.get("realtime_is_final_chunk", False)
-            ),
+            "is_final_chunk": bool(batch.extra.get("realtime_is_final_chunk", False)),
             "generated_latent_frames": int(generated_latents.shape[2]),
             "output_format": batch.realtime_output_format,
             "preview_max_width": batch.realtime_preview_max_width,

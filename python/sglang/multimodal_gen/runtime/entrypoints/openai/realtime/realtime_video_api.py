@@ -1194,9 +1194,7 @@ async def _wait_for_realtime_interactive_event_window(
     pending_event_version: int | None = None,
 ) -> asyncio.Task | None:
     request = getattr(session, "request", None)
-    grace_ms = int(
-        getattr(request, "realtime_interactive_event_grace_ms", 0) or 0
-    )
+    grace_ms = int(getattr(request, "realtime_interactive_event_grace_ms", 0) or 0)
     if pending_send_task is None or grace_ms <= 0:
         return pending_send_task
 

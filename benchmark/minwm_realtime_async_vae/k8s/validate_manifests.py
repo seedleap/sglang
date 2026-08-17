@@ -84,13 +84,17 @@ def validate(documents: list[dict]) -> None:
         "minwm-async-denoiser-8gpu-nvme-ec2"
     )
     assert denoiser_nodeclass["spec"]["instanceStorePolicy"] == "RAID0"
-    assert denoiser_nodeclass["spec"]["blockDeviceMappings"][0]["ebs"][
-        "volumeSize"
-    ] == "100Gi"
+    assert (
+        denoiser_nodeclass["spec"]["blockDeviceMappings"][0]["ebs"]["volumeSize"]
+        == "100Gi"
+    )
     for pool in (denoiser, denoiser_8x):
-        assert pool["spec"]["template"]["metadata"]["labels"][
-            "seedleap.ai/model-cache-storage"
-        ] == "local-nvme"
+        assert (
+            pool["spec"]["template"]["metadata"]["labels"][
+                "seedleap.ai/model-cache-storage"
+            ]
+            == "local-nvme"
+        )
     assert [
         interface["networkCardIndex"]
         for interface in denoiser_nodeclass["spec"]["networkInterfaces"]
@@ -143,9 +147,12 @@ def validate(documents: list[dict]) -> None:
             "path": "/mnt/k8s-disks/0/minwm-model-cache",
             "type": "DirectoryOrCreate",
         }
-        assert workload["spec"]["template"]["spec"]["nodeSelector"][
-            "seedleap.ai/model-cache-storage"
-        ] == "local-nvme"
+        assert (
+            workload["spec"]["template"]["spec"]["nodeSelector"][
+                "seedleap.ai/model-cache-storage"
+            ]
+            == "local-nvme"
+        )
     containers = denoiser["spec"]["template"]["spec"]["containers"]
     assert {container["name"] for container in containers} == {"denoiser"}
     command = " ".join(containers[0]["args"])
@@ -169,7 +176,9 @@ def validate(documents: list[dict]) -> None:
 
 def main() -> None:
     validate(load_documents())
-    print("MinWM async-VAE manifests satisfy capacity, availability, and safety policies.")
+    print(
+        "MinWM async-VAE manifests satisfy capacity, availability, and safety policies."
+    )
 
 
 if __name__ == "__main__":

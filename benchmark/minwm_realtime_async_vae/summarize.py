@@ -80,12 +80,8 @@ def summarize_runs(
 
 
 def compare_profiles(baseline: dict, asynchronous: dict) -> dict:
-    baseline_runs = {
-        int(run["concurrency"]): run for run in baseline.get("runs", [])
-    }
-    async_runs = {
-        int(run["concurrency"]): run for run in asynchronous.get("runs", [])
-    }
+    baseline_runs = {int(run["concurrency"]): run for run in baseline.get("runs", [])}
+    async_runs = {int(run["concurrency"]): run for run in asynchronous.get("runs", [])}
     common = sorted(set(baseline_runs) & set(async_runs))
     if not common:
         raise ValueError("baseline and async profiles have no common concurrency")
@@ -104,9 +100,7 @@ def compare_profiles(baseline: dict, asynchronous: dict) -> dict:
         baseline_action = float(
             (baseline_run.get("action_to_first_frame_ms") or {})["p95"]
         )
-        async_action = float(
-            (async_run.get("action_to_first_frame_ms") or {})["p95"]
-        )
+        async_action = float((async_run.get("action_to_first_frame_ms") or {})["p95"])
         baseline_chunk = float(baseline_run["chunk_total_ms"]["p95"])
         async_chunk = float(async_run["chunk_total_ms"]["p95"])
         baseline_throughput = float(baseline_run.get("aggregate_fps") or 0.0)
@@ -121,9 +115,7 @@ def compare_profiles(baseline: dict, asynchronous: dict) -> dict:
                 ),
                 "baseline_chunk_p95_ms": baseline_chunk,
                 "async_chunk_p95_ms": async_chunk,
-                "chunk_improvement_pct": _improvement_pct(
-                    baseline_chunk, async_chunk
-                ),
+                "chunk_improvement_pct": _improvement_pct(baseline_chunk, async_chunk),
                 "baseline_fps": baseline_throughput,
                 "async_fps": async_throughput,
                 "throughput_improvement_pct": _increase_pct(
@@ -244,9 +236,7 @@ def _hardware_row(profile: str, hardware: dict) -> str:
     vae = hardware.get("vae", {})
     instance = hardware.get("instance_type", "-")
     capacity = hardware.get("capacity_type", "-")
-    gpu_count = int(denoiser.get("gpu_count") or 0) + int(
-        vae.get("gpu_count") or 0
-    )
+    gpu_count = int(denoiser.get("gpu_count") or 0) + int(vae.get("gpu_count") or 0)
     return (
         f"| {profile} | {denoiser.get('gpu_type', '-')} | "
         f"{vae.get('backend', '-')} / {vae.get('placement', vae.get('gpu_type', '-'))} | "

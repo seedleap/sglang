@@ -16,9 +16,7 @@ from typing import Any
 
 import msgspec
 from aiohttp import ClientSession, WSMsgType, web
-
 from h264_websocket_bridge import install_h264_websocket_bridge
-
 
 WIDTH = 96
 HEIGHT = 64
@@ -120,7 +118,10 @@ async def _exercise_backend(port: int, backend: str) -> None:
                     event = json.loads(message.data)
                     if event.get("type") == "error":
                         raise AssertionError(event["message"])
-                    if event.get("type") == "status" and event.get("state") == "connected":
+                    if (
+                        event.get("type") == "status"
+                        and event.get("state") == "connected"
+                    ):
                         assert event["bitrate_kbps"] == 3000
                         assert event["crf"] == 20
                         assert event["preset"] == "fast"
@@ -154,7 +155,11 @@ async def _exercise_backend(port: int, backend: str) -> None:
                     media.extend(message.data)
                     if b"ftyp" in media and b"moof" in media and b"mdat" in media:
                         break
-                elif message.type in {WSMsgType.CLOSE, WSMsgType.CLOSED, WSMsgType.ERROR}:
+                elif message.type in {
+                    WSMsgType.CLOSE,
+                    WSMsgType.CLOSED,
+                    WSMsgType.ERROR,
+                }:
                     break
     assert saw_connected, f"{backend}: bridge never connected"
     assert saw_media_batch, f"{backend}: frame metadata was not emitted"

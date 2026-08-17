@@ -122,9 +122,7 @@ def test_taehv_engine_warmup_uses_the_checkpoint_latent_channels(
 
     engine.warmup()
 
-    assert calls == [
-        (decoder, (1, latent_channels, 1, 30, 52), torch.bfloat16, True)
-    ]
+    assert calls == [(decoder, (1, latent_channels, 1, 30, 52), torch.bfloat16, True)]
 
 
 def test_taehv_engine_decodes_model_space_latents_without_native_vae_denorm():

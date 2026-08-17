@@ -14,10 +14,8 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Literal
 from urllib.parse import urlsplit
 
-from pydantic import BaseModel, ConfigDict, Field
-
 from prompt_rewriter import DEFAULT_CREDENTIALS_PATH, VERTEX_SCOPE
-
+from pydantic import BaseModel, ConfigDict, Field
 
 ROOT = Path(__file__).resolve().parent
 SECRETS_ROOT = ROOT.parent / "realtime_webui_secrets"
@@ -221,9 +219,7 @@ class WorldCreator:
         ).expanduser()
         self.image_config_path = Path(
             image_config_path
-            or os.environ.get(
-                "CREATE_WORLD_IMAGE_CONFIG", DEFAULT_IMAGE_CONFIG_PATH
-            )
+            or os.environ.get("CREATE_WORLD_IMAGE_CONFIG", DEFAULT_IMAGE_CONFIG_PATH)
         ).expanduser()
         self.generated_root = Path(generated_root or GENERATED_ROOT).expanduser()
         self.request_timeout_seconds = float(
@@ -238,7 +234,9 @@ class WorldCreator:
 
     @property
     def description_configured(self) -> bool:
-        return self._gemini_client_provider is not None or self.credentials_path.is_file()
+        return (
+            self._gemini_client_provider is not None or self.credentials_path.is_file()
+        )
 
     @property
     def image_configured(self) -> bool:
@@ -260,7 +258,9 @@ class WorldCreator:
             credentials = service_account.Credentials.from_service_account_file(
                 str(self.credentials_path), scopes=[VERTEX_SCOPE]
             )
-            project_id = os.environ.get("CREATE_WORLD_PROJECT_ID") or credentials.project_id
+            project_id = (
+                os.environ.get("CREATE_WORLD_PROJECT_ID") or credentials.project_id
+            )
             if not project_id:
                 raise RuntimeError("World description Vertex project is not configured")
             self._gemini_client = genai.Client(
@@ -359,9 +359,7 @@ class WorldCreator:
             return self._image_client, config
         from openai import AzureOpenAI
 
-        api_key = os.environ.get("CREATE_WORLD_IMAGE_API_KEY") or config.get(
-            "api_key"
-        )
+        api_key = os.environ.get("CREATE_WORLD_IMAGE_API_KEY") or config.get("api_key")
         base_url = os.environ.get("CREATE_WORLD_IMAGE_ENDPOINT") or (
             config.get("client_args") or {}
         ).get("base_url")
@@ -417,7 +415,9 @@ class WorldCreator:
         try:
             return _normalize_generated_image(base64.b64decode(encoded, validate=True))
         except ValueError as exc:
-            raise RuntimeError("World image response contained invalid image data") from exc
+            raise RuntimeError(
+                "World image response contained invalid image data"
+            ) from exc
 
     async def complete(
         self,

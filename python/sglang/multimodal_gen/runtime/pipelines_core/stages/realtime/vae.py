@@ -454,9 +454,9 @@ class CausalVaeDecodingStage(DecodingStage):
             input_tensor=batch.latents,
             chunk_index=batch.block_idx,
             first_chunk=batch.block_idx == 0,
-            decoder_backend="taehv"
-            if taehv_checkpoint_path is not None
-            else "causal_vae",
+            decoder_backend=(
+                "taehv" if taehv_checkpoint_path is not None else "causal_vae"
+            ),
             taehv_checkpoint_path=taehv_checkpoint_path,
             vae_precision=server_args.pipeline_config.vae_precision,
             vae_tiling=server_args.pipeline_config.vae_tiling,

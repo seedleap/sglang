@@ -16,12 +16,12 @@ from sglang.multimodal_gen.configs.pipeline_configs.base import (
     PipelineConfig,
 )
 from sglang.multimodal_gen.configs.pipeline_configs.hunyuan import FastHunyuanConfig
+from sglang.multimodal_gen.configs.pipeline_configs.lingbot_world import (
+    LingBotWorldV2CausalDMDConfig,
+)
 from sglang.multimodal_gen.configs.pipeline_configs.ltx_2 import (
     LTX2PipelineConfig,
     LTX23PipelineConfig,
-)
-from sglang.multimodal_gen.configs.pipeline_configs.lingbot_world import (
-    LingBotWorldV2CausalDMDConfig,
 )
 from sglang.multimodal_gen.configs.pipeline_configs.mova import MOVAPipelineConfig
 from sglang.multimodal_gen.configs.pipeline_configs.qwen_image import (
@@ -121,12 +121,11 @@ class TestRealtimeSessionTimeoutArgs(unittest.TestCase):
             "realtime_session_idle_timeout_s",
             "realtime_session_max_lifetime_s",
         ):
-            with self.subTest(field=field), self.assertRaisesRegex(
-                ValueError, "must be >= 0"
+            with (
+                self.subTest(field=field),
+                self.assertRaisesRegex(ValueError, "must be >= 0"),
             ):
-                _from_dict_without_model_resolution(
-                    {"model_path": "/fake", field: -1}
-                )
+                _from_dict_without_model_resolution({"model_path": "/fake", field: -1})
 
 
 class TestServerArgsPathExpansion(unittest.TestCase):

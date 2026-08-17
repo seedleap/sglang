@@ -12,11 +12,9 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from aiohttp import ClientError, ClientSession, ClientTimeout, WSMsgType, web
-
+from h264_websocket_bridge import install_h264_websocket_bridge
 from prompt_rewriter import PromptRewriter
 from world_creator import WorldCreator
-from h264_websocket_bridge import install_h264_websocket_bridge
-
 
 ROOT = Path(__file__).resolve().parent
 UPSTREAM_HTTP = os.environ.get("REALTIME_UPSTREAM_HTTP", "http://127.0.0.1:30000")
@@ -47,9 +45,9 @@ HAPPYOYSTER_API_BASE_URL = os.environ.get(
     "HAPPYOYSTER_API_BASE_URL",
     "https://llm-0jcmcer24vyvd7rr.cn-beijing.maas.aliyuncs.com/api/v2/apps/happyoyster-1.0/",
 ).rstrip("/")
-HAPPYOYSTER_TOKEN_BASE_URL = os.environ.get(
-    "HAPPYOYSTER_TOKEN_BASE_URL", ""
-).rstrip("/")
+HAPPYOYSTER_TOKEN_BASE_URL = os.environ.get("HAPPYOYSTER_TOKEN_BASE_URL", "").rstrip(
+    "/"
+)
 HAPPYOYSTER_PUBLIC_IMAGE_BASE_URL = os.environ.get(
     "HAPPYOYSTER_PUBLIC_IMAGE_BASE_URL", ""
 ).rstrip("/")
@@ -119,9 +117,7 @@ async def _rewrite_prompt(request):
     previous_prompt = str(body.get("previous_prompt", "")).strip()
     if not instruction or not previous_prompt:
         raise web.HTTPBadRequest(
-            text=json.dumps(
-                {"error": "instruction and previous_prompt are required"}
-            ),
+            text=json.dumps({"error": "instruction and previous_prompt are required"}),
             content_type="application/json",
         )
     if len(instruction) > 2000 or len(previous_prompt) > 20000:
@@ -367,7 +363,9 @@ async def _happyoyster_request(
             payload = await response.json(content_type=None)
             if response.status >= 400:
                 raise RuntimeError(
-                    str(payload.get("message") if isinstance(payload, dict) else payload)
+                    str(
+                        payload.get("message") if isinstance(payload, dict) else payload
+                    )
                 )
             return _unwrap_happyoyster_payload(payload)
     except web.HTTPException:
@@ -394,7 +392,9 @@ async def _happyoyster_config(_request):
 async def _happyoyster_share_image(request):
     if not HAPPYOYSTER_PUBLIC_IMAGE_BASE_URL:
         raise web.HTTPServiceUnavailable(
-            text=json.dumps({"error": "HappyOyster public image URL is not configured"}),
+            text=json.dumps(
+                {"error": "HappyOyster public image URL is not configured"}
+            ),
             content_type="application/json",
         )
     image_bytes = await request.read()
@@ -715,7 +715,9 @@ async def _proxy_websocket(request):
                 task.cancel()
             await asyncio.gather(*done, *pending, return_exceptions=True)
     except ClientError as error:
-        logging.warning("Upstream websocket unavailable: %s", upstream_url, exc_info=error)
+        logging.warning(
+            "Upstream websocket unavailable: %s", upstream_url, exc_info=error
+        )
         raise web.HTTPBadGateway(text="upstream websocket unavailable") from error
     except Exception:
         if downstream is None:
@@ -751,7 +753,9 @@ async def _proxy_backend_websocket(request):
                 task.cancel()
             await asyncio.gather(*done, *pending, return_exceptions=True)
     except ClientError as error:
-        logging.warning("Backend websocket unavailable: %s", upstream_url, exc_info=error)
+        logging.warning(
+            "Backend websocket unavailable: %s", upstream_url, exc_info=error
+        )
         raise web.HTTPBadGateway(text="backend websocket unavailable") from error
     except Exception:
         if downstream is None:
@@ -789,22 +793,20 @@ def create_app():
     app.router.add_get("/runtime-config.js", _runtime_config)
     app.router.add_post("/api/prompt/rewrite", _rewrite_prompt)
     app.router.add_post("/api/world/complete", _complete_world)
-    app.router.add_get(
-        "/api/world/images/{image_id}", _generated_world_image
-    )
+    app.router.add_get("/api/world/images/{image_id}", _generated_world_image)
     app.router.add_get("/api/happyoyster/config", _happyoyster_config)
     app.router.add_post("/api/happyoyster/share-image", _happyoyster_share_image)
     app.router.add_post("/api/happyoyster/worlds/resolve", _happyoyster_resolve_world)
     app.router.add_post("/api/happyoyster/worlds", _happyoyster_create_world)
-    app.router.add_get("/api/happyoyster/worlds/build-status", _happyoyster_world_status)
+    app.router.add_get(
+        "/api/happyoyster/worlds/build-status", _happyoyster_world_status
+    )
     app.router.add_post("/api/happyoyster/prepare", _happyoyster_prepare)
     app.router.add_get(
         "/backends/{backend}/v1/realtime_video/generate",
         _proxy_backend_websocket,
     )
-    app.router.add_route(
-        "*", "/backends/{backend}/v1/{path:.*}", _proxy_backend_http
-    )
+    app.router.add_route("*", "/backends/{backend}/v1/{path:.*}", _proxy_backend_http)
     app.router.add_get("/v1/realtime_video/generate", _proxy_websocket)
     app.router.add_route("*", "/v1/{path:.*}", _proxy_http)
     install_h264_websocket_bridge(

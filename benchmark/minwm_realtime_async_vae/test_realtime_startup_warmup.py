@@ -2,11 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
-from pathlib import Path
 import unittest
+from pathlib import Path
 
 import msgspec.msgpack
-
 
 MODULE_PATH = (
     Path(__file__).parents[2]
@@ -15,7 +14,9 @@ MODULE_PATH = (
 
 
 def _load_module():
-    spec = importlib.util.spec_from_file_location("realtime_startup_warmup", MODULE_PATH)
+    spec = importlib.util.spec_from_file_location(
+        "realtime_startup_warmup", MODULE_PATH
+    )
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
     spec.loader.exec_module(module)

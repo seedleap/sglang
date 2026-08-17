@@ -152,9 +152,7 @@ def test_gateway_output_route_uses_media_completion_as_authoritative_marker():
         route = await registry.register("s", "g", token="secret")
 
         await route.put(_frame(0, 0))
-        completion_waiter = asyncio.create_task(
-            route.wait_until_chunk_completed(0)
-        )
+        completion_waiter = asyncio.create_task(route.wait_until_chunk_completed(0))
         await asyncio.sleep(0)
         assert not completion_waiter.done()
 
@@ -215,9 +213,7 @@ def test_gateway_output_route_keeps_controls_when_shedding_old_media():
 def test_gateway_output_route_bounds_actual_frames_and_reports_queue_metrics():
     async def run():
         registry = GatewayOutputRegistry(queue_depth=4)
-        route = await registry.register(
-            "s", "g", token="secret", trace_id="trace-a"
-        )
+        route = await registry.register("s", "g", token="secret", trace_id="trace-a")
 
         await route.put(_frame(0, 0, num_frames=3))
         await route.put(_frame(0, 1, num_frames=3))

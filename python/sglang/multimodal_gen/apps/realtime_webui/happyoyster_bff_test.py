@@ -64,9 +64,12 @@ class HappyOysterBffTest(unittest.IsolatedAsyncioTestCase):
             )
 
     async def test_resolve_ready_prebuilt_world(self):
-        request = FakeRequest({
-            server.HAPPYOYSTER_WORLD_CACHE: {"dragon-ride": "world-dragon"},
-        }, {"presetKey": "dragon-ride"})
+        request = FakeRequest(
+            {
+                server.HAPPYOYSTER_WORLD_CACHE: {"dragon-ride": "world-dragon"},
+            },
+            {"presetKey": "dragon-ride"},
+        )
         with mock.patch.object(
             server,
             "_happyoyster_request",
