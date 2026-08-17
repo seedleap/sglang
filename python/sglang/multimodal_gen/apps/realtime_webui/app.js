@@ -5320,6 +5320,12 @@ async function connect() {
     if (currentSessionArtifact && currentTrace) {
       currentSessionArtifact.trace_id = currentTrace.traceId;
     }
+    // Mount prepared skills before waiting for every comparison backend. A slow
+    // or reconnecting secondary model must not leave an already-entered world
+    // without its controls. The buttons stay disabled until a live target exists.
+    promptRewriteController.beginSession(init.prompt);
+    worldRulesController.activate(preparedWorldRules);
+    beginPromptLogSession(init.prompt);
     document.activeElement?.blur?.();
     canvas.tabIndex = 0;
     canvas.focus();
@@ -5350,9 +5356,6 @@ async function connect() {
       setHappyOysterStageText("正在创建快乐生蚝 World…", "preparing");
       addHistory("快乐生蚝 World 正在独立构建 · Zing/LingBot2 已先行启动");
     }
-    promptRewriteController.beginSession(init.prompt);
-    worldRulesController.activate(preparedWorldRules);
-    beginPromptLogSession(init.prompt);
     if (!worldExperienceReady) setStatus("Loading world", "live");
   } catch (error) {
     stopWorldExperienceTiming({ recordingReason: "startup_failed" });

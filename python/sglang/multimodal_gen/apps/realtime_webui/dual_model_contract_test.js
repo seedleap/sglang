@@ -264,9 +264,14 @@ assert.match(app, /function drawRecordingComparisonPreview\(/);
 assert.match(app, /createFullscreenController/);
 const placeholderIndex = app.indexOf("await drawInitialReferencePlaceholders(firstFrame);");
 const connectIndex = app.indexOf("dualModelController.connect(init)", placeholderIndex);
+const activateRulesIndex = app.indexOf("worldRulesController.activate(preparedWorldRules)", placeholderIndex);
 assert.ok(
   placeholderIndex >= 0 && connectIndex > placeholderIndex,
   "I2V should retain the selected reference while both models prepare their first generated frame",
+);
+assert.ok(
+  activateRulesIndex > placeholderIndex && activateRulesIndex < connectIndex,
+  "prepared skill controls should mount before waiting for every comparison backend to connect",
 );
 const visiblePlaceholderIndex = app.indexOf("drawVisibleReferencePlaceholders();");
 const firstFrameReadIndex = app.indexOf("enteredFirstFrame = await readFirstFrame()", visiblePlaceholderIndex);
