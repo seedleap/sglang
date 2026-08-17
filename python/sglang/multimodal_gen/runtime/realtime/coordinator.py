@@ -705,7 +705,6 @@ class DynamoDBCoordinatorStore:
         getter = getattr(client, "get_item", None)
         previous = None
         previous_capacity = 0
-        previous_worker_epoch = ""
         previous_heartbeat_generation = ""
         if getter is not None:
             previous = getter(
@@ -715,7 +714,6 @@ class DynamoDBCoordinatorStore:
             ).get("Item")
             if previous and self._read_optional_s(previous, "role") == heartbeat.role:
                 previous_capacity = int(self._read_optional_n(previous, "capacity", 0))
-                previous_worker_epoch = self._read_optional_s(previous, "worker_epoch")
                 previous_heartbeat_generation = self._read_optional_s(
                     previous, "heartbeat_generation"
                 )
@@ -817,20 +815,9 @@ class DynamoDBCoordinatorStore:
             if isinstance(exception_type, type)
         )
         if removed_slot_count:
-            previous_worker_values = {
-                ":previous_capacity": {"N": str(previous_capacity)},
-                **(
-                    {":previous_worker_epoch": {"S": previous_worker_epoch}}
-                    if previous_worker_epoch
-                    else {}
-                ),
-            }
-            previous_slot_epoch_condition = (
-                "(attribute_not_exists(worker_epoch) OR "
-                "worker_epoch = :previous_worker_epoch)"
-                if previous_worker_epoch
-                else "attribute_not_exists(worker_epoch)"
-            )
+            # The conditional worker Put in this same transaction is the sole
+            # ordering fence. Once it wins, these updates must be able to retire
+            # slots left at any stale epoch/capacity by a partial publication.
             retire_updates = [{"Put": put_worker}]
             for slot_index in range(heartbeat.capacity, previous_capacity):
                 retire_updates.append(
@@ -854,15 +841,6 @@ class DynamoDBCoordinatorStore:
                                 "#capacity = :capacity, #ttl = :ttl "
                                 "REMOVE allocation_key, allocation_sort"
                             ),
-                            "ConditionExpression": (
-                                f"{previous_slot_epoch_condition} AND "
-                                "(attribute_not_exists(#capacity) OR "
-                                "#capacity = :previous_capacity OR "
-                                "(#capacity = :capacity AND "
-                                "#lifecycle = :failed AND "
-                                "attribute_not_exists(allocation_key) AND "
-                                "attribute_not_exists(allocation_sort)))"
-                            ),
                             "ExpressionAttributeNames": {
                                 "#capacity": "capacity",
                                 "#lifecycle": "lifecycle",
@@ -873,7 +851,6 @@ class DynamoDBCoordinatorStore:
                                 ":now": {"N": str(now_epoch)},
                                 ":capacity": {"N": str(heartbeat.capacity)},
                                 ":heartbeat_generation": {"S": heartbeat_generation},
-                                **previous_worker_values,
                                 ":ttl": {"N": str(now_epoch + 86400)},
                             },
                         }

@@ -1464,34 +1464,16 @@ def test_dynamodb_capacity_shrink_atomically_retires_slots_and_grows():
                     )
                 ):
                     raise TransactionCanceledException("stale worker snapshot")
-                for update in retirement_updates:
-                    item = self.slots[update["Key"]["pk"]["S"]]
-                    values = update["ExpressionAttributeValues"]
-                    expected_epoch = values.get(":previous_worker_epoch")
-                    if (expected_epoch is None and "worker_epoch" in item) or (
-                        expected_epoch is not None
-                        and item.get("worker_epoch") not in (None, expected_epoch)
-                    ):
-                        raise TransactionCanceledException("stale slot epoch")
-                    already_retired = (
-                        item.get("capacity") == values[":capacity"]
-                        and item.get("lifecycle") == values[":failed"]
-                        and "allocation_key" not in item
-                        and "allocation_sort" not in item
-                    )
-                    if (
-                        "capacity" in item
-                        and item["capacity"] != values[":previous_capacity"]
-                        and not already_retired
-                    ):
-                        raise TransactionCanceledException("stale slot capacity")
                 self.retire_attempts += 1
                 self.order.append("retire-attempt")
                 if self.retire_attempts <= self.retire_failures:
                     raise TransactionCanceledException("transient conflict")
                 self.workers[worker_id] = dict(worker_put["Item"])
                 for update in retirement_updates:
-                    item = self.slots[update["Key"]["pk"]["S"]]
+                    item = self.slots.setdefault(
+                        update["Key"]["pk"]["S"],
+                        {"pk": update["Key"]["pk"], "sk": update["Key"]["sk"]},
+                    )
                     values = update["ExpressionAttributeValues"]
                     item["lifecycle"] = values[":failed"]
                     item["heartbeat_expires_at"] = values[":now"]
@@ -2174,6 +2156,181 @@ def test_dynamodb_epoch_change_partial_slot_publication_self_heals():
         assert healed_slot["lease_token"] == {"S": "active-token"}
         assert healed_slot["lifecycle"] == {"S": "ready"}
         assert healed_slot["allocation_key"] == {"S": "DENOISER#minwm-r1"}
+
+
+@pytest.mark.parametrize(
+    ("published_capacity", "published_epoch"),
+    [(2, "epoch-b"), (3, "epoch-a")],
+    ids=["epoch-change-partial", "grow-partial"],
+)
+def test_dynamodb_partial_publication_immediate_shrink_self_heals(
+    published_capacity,
+    published_epoch,
+):
+    boto3 = pytest.importorskip("boto3")
+    moto = pytest.importorskip("moto")
+
+    with moto.mock_aws():
+        table_name = f"minwm-partial-shrink-{published_capacity}"
+        client = boto3.client("dynamodb", region_name="us-east-1")
+        _create_dynamodb_coordinator_table(client, table_name)
+        worker_id = f"denoiser-partial-{published_capacity}"
+        base_store = DynamoDBCoordinatorStore(
+            table_name,
+            ttl_s=60,
+            worker_ttl_s=30,
+            wall_clock=lambda: 100,
+            client=client,
+        )
+        base_store._heartbeat_sync(
+            _heartbeat(
+                worker_id,
+                "denoiser",
+                capacity=2,
+                worker_epoch="epoch-a",
+            )
+        )
+        active_slot_key = {
+            "pk": {"S": f"SLOT#denoiser#{worker_id}#0001"},
+            "sk": {"S": "LEASE"},
+        }
+        client.update_item(
+            TableName=table_name,
+            Key=active_slot_key,
+            UpdateExpression=(
+                "SET lease_token = :token, user_id = :user, "
+                "session_id = :session, generation_id = :generation, "
+                "lease_expires_at = :expires"
+            ),
+            ExpressionAttributeValues={
+                ":token": {"S": "active-token"},
+                ":user": {"S": "active-user"},
+                ":session": {"S": "active-session"},
+                ":generation": {"S": "active-generation"},
+                ":expires": {"N": "180"},
+            },
+        )
+
+        class RejectSlotPublication:
+            def __init__(self):
+                self.rejected_attempts = 0
+
+            def __getattr__(self, name):
+                return getattr(client, name)
+
+            def transact_write_items(self, **kwargs):
+                if any(
+                    "Update" in item
+                    and "SET item_type" in item["Update"]["UpdateExpression"]
+                    for item in kwargs["TransactItems"]
+                ):
+                    self.rejected_attempts += 1
+                    raise client.exceptions.TransactionCanceledException(
+                        {
+                            "Error": {
+                                "Code": "TransactionCanceledException",
+                                "Message": "injected slot publication failure",
+                            }
+                        },
+                        "TransactWriteItems",
+                    )
+                return client.transact_write_items(**kwargs)
+
+        rejecting_client = RejectSlotPublication()
+        partial_store = DynamoDBCoordinatorStore(
+            table_name,
+            ttl_s=60,
+            worker_ttl_s=30,
+            wall_clock=lambda: 101,
+            client=rejecting_client,
+        )
+        partial_heartbeat = _heartbeat(
+            worker_id,
+            "denoiser",
+            capacity=published_capacity,
+            worker_epoch=published_epoch,
+        )
+        with pytest.raises(client.exceptions.TransactionCanceledException):
+            partial_store._heartbeat_sync(partial_heartbeat)
+        assert rejecting_client.rejected_attempts == 3
+
+        partial_worker = client.get_item(
+            TableName=table_name,
+            Key={
+                "pk": {"S": f"WORKER#{worker_id}"},
+                "sk": {"S": "HEARTBEAT"},
+            },
+            ConsistentRead=True,
+        )["Item"]
+        stale_slot = client.get_item(
+            TableName=table_name,
+            Key=active_slot_key,
+            ConsistentRead=True,
+        )["Item"]
+        assert partial_worker["capacity"] == {"N": str(published_capacity)}
+        assert partial_worker["worker_epoch"] == {"S": published_epoch}
+        assert stale_slot["capacity"] == {"N": "2"}
+        assert stale_slot["worker_epoch"] == {"S": "epoch-a"}
+
+        shrink_store = DynamoDBCoordinatorStore(
+            table_name,
+            ttl_s=60,
+            worker_ttl_s=30,
+            wall_clock=lambda: 102,
+            client=client,
+        )
+        shrink_store._heartbeat_sync(
+            _heartbeat(
+                worker_id,
+                "denoiser",
+                capacity=1,
+                worker_epoch=published_epoch,
+            )
+        )
+        shrunk_worker = client.get_item(
+            TableName=table_name,
+            Key={
+                "pk": {"S": f"WORKER#{worker_id}"},
+                "sk": {"S": "HEARTBEAT"},
+            },
+            ConsistentRead=True,
+        )["Item"]
+        assert shrunk_worker["capacity"] == {"N": "1"}
+        for slot_index in range(1, published_capacity):
+            retired_slot = client.get_item(
+                TableName=table_name,
+                Key={
+                    "pk": {"S": f"SLOT#denoiser#{worker_id}#{slot_index:04d}"},
+                    "sk": {"S": "LEASE"},
+                },
+                ConsistentRead=True,
+            )["Item"]
+            assert retired_slot["capacity"] == {"N": "1"}
+            assert retired_slot["lifecycle"] == {"S": "failed"}
+            assert (
+                retired_slot["heartbeat_generation"]
+                == shrunk_worker["heartbeat_generation"]
+            )
+            assert "allocation_key" not in retired_slot
+            assert "allocation_sort" not in retired_slot
+        retired_active_slot = client.get_item(
+            TableName=table_name,
+            Key=active_slot_key,
+            ConsistentRead=True,
+        )["Item"]
+        assert retired_active_slot["lease_token"] == {"S": "active-token"}
+
+        allocatable = client.query(
+            TableName=table_name,
+            IndexName="allocation-index",
+            KeyConditionExpression="allocation_key = :allocation",
+            ExpressionAttributeValues={":allocation": {"S": "DENOISER#minwm-r1"}},
+        )["Items"]
+        assert {
+            item["slot_index"]["N"]
+            for item in allocatable
+            if item.get("worker_id") == {"S": worker_id}
+        } == {"0"}
 
 
 def test_dynamodb_renew_condition_checks_current_worker_epochs_and_expiry():
