@@ -5,10 +5,12 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Awaitable, Callable
+from urllib.parse import parse_qs, urlsplit
 
 import torch
 from websockets.asyncio.client import connect
@@ -84,16 +86,27 @@ class GatewayOutputClient:
         generation_id: str,
         token: str,
         timeout_s: float = 5.0,
+        completion_ack_timeout_s: float | None = None,
         max_message_bytes: int = 64 * 1024 * 1024,
         connect_factory=connect,
     ) -> None:
         if not url or not session_id or not generation_id or not token:
             raise ValueError("Gateway output identity is required")
+        if timeout_s <= 0:
+            raise ValueError("Gateway output timeout_s must be positive")
         self.url = url
         self.session_id = session_id
         self.generation_id = generation_id
         self.token = token
         self.timeout_s = timeout_s
+        self.completion_ack_timeout_s = _completion_ack_timeout_from_url(
+            url,
+            default=(
+                timeout_s
+                if completion_ack_timeout_s is None
+                else completion_ack_timeout_s
+            ),
+        )
         self.max_message_bytes = max_message_bytes
         self._connect_factory = connect_factory
         self._ws = None
@@ -152,30 +165,66 @@ class GatewayOutputClient:
         async with self._send_lock:
             await self._ws.send(wire)
             if message.get("type") == "media_chunk_complete":
-                response = decode_message(
-                    await asyncio.wait_for(self._ws.recv(), self.timeout_s),
-                    max_message_bytes=self.max_message_bytes,
-                )
-                if response.get("type") != "media_chunk_complete_accepted":
+                try:
+                    raw_response = await asyncio.wait_for(
+                        self._ws.recv(), self.completion_ack_timeout_s
+                    )
+                except TimeoutError:
+                    await self._invalidate_connection()
                     raise RemoteVAEError(
-                        "Gateway did not acknowledge media chunk completion"
+                        "Gateway media completion acknowledgement timed out after "
+                        f"{self.completion_ack_timeout_s:.3f}s"
+                    ) from None
+                except Exception:
+                    await self._invalidate_connection()
+                    raise
+                try:
+                    response = decode_message(
+                        raw_response,
+                        max_message_bytes=self.max_message_bytes,
                     )
-                if (
-                    response.get("session_id") != self.session_id
-                    or response.get("generation_id") != self.generation_id
-                    or response.get("request_id") != message.get("request_id")
-                    or int(response.get("chunk_index", -1))
-                    != int(message.get("chunk_index", -1))
-                ):
-                    raise ProtocolViolation(
-                        "Gateway media completion acknowledgement mismatch"
-                    )
+                    if response.get("type") != "media_chunk_complete_accepted":
+                        raise RemoteVAEError(
+                            "Gateway did not acknowledge media chunk completion"
+                        )
+                    if (
+                        response.get("session_id") != self.session_id
+                        or response.get("generation_id") != self.generation_id
+                        or response.get("request_id") != message.get("request_id")
+                        or int(response.get("chunk_index", -1))
+                        != int(message.get("chunk_index", -1))
+                    ):
+                        raise ProtocolViolation(
+                            "Gateway media completion acknowledgement mismatch"
+                        )
+                except Exception:
+                    await self._invalidate_connection()
+                    raise
+
+    async def _invalidate_connection(self) -> None:
+        websocket = self._ws
+        self._ws = None
+        if websocket is not None:
+            with contextlib.suppress(Exception):
+                await websocket.close()
 
     async def close(self) -> None:
         if self._ws is None:
             return
         await self._ws.close()
         self._ws = None
+
+
+def _completion_ack_timeout_from_url(url: str, *, default: float) -> float:
+    query = parse_qs(urlsplit(url).query)
+    raw = query.get("completion_ack_timeout_s", [None])[-1]
+    try:
+        timeout = float(raw) if raw is not None else float(default)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("completion_ack_timeout_s must be numeric") from exc
+    if not 0 < timeout <= 3600:
+        raise ValueError("completion_ack_timeout_s must be in (0, 3600]")
+    return timeout
 
 
 @dataclass(slots=True)

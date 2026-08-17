@@ -35,6 +35,9 @@ from sglang.multimodal_gen.runtime.realtime.critical_path_metrics import (
     prometheus_latest,
     result_from_exception,
 )
+from sglang.multimodal_gen.runtime.realtime.request_mode import (
+    init_requests_finite_output,
+)
 
 LOGGER = logging.getLogger(__name__)
 H264_WS_MANAGER = web.AppKey("h264_websocket_bridge_manager", object)
@@ -165,29 +168,7 @@ class H264WebSocketSession:
     def __post_init__(self) -> None:
         self.frame_queue = asyncio.Queue(maxsize=self.manager.max_queued_frames)
         self.encoder_start_times_s = deque(maxlen=4096)
-        max_chunks = _bounded_int(
-            self.init.get("max_chunks"),
-            default=0,
-            minimum=0,
-            maximum=1_000_000,
-        )
-        num_frames = _bounded_int(
-            self.init.get("num_frames"),
-            default=0,
-            minimum=0,
-            maximum=1_000_000,
-        )
-        generation_mode = str(
-            self.init.get("generation_mode")
-            or ("i2v" if self.init.get("first_frame") else "t2v")
-        ).lower()
-        # I2V uses num_frames as its per-chunk shape even for the default
-        # open-ended stream. max_chunks is its actual terminal boundary. T2V
-        # instead derives a finite max_chunks from num_frames in the adapter,
-        # after this bridge has already forwarded the init request.
-        self.finite_request = max_chunks > 0 or (
-            generation_mode == "t2v" and num_frames > 0
-        )
+        self.finite_request = init_requests_finite_output(self.init)
         requested_preset = str(
             self.init.get("h264_preset") or self.manager.preset
         ).lower()
@@ -311,6 +292,11 @@ class H264WebSocketSession:
                 close_code = upstream_task.result()
                 if self.pending_header is not None:
                     raise RuntimeError("upstream closed before raw frame payload")
+                if self.finite_request and self.final_completion is None:
+                    raise RuntimeError(
+                        "finite upstream closed without final media completion "
+                        f"({close_code})"
+                    )
                 if self.final_completion is None and close_code not in {1000, 1001}:
                     raise RuntimeError(
                         f"upstream H.264 source closed unexpectedly ({close_code})"
@@ -321,7 +307,14 @@ class H264WebSocketSession:
         except Exception as error:
             LOGGER.exception("H.264 WebSocket session %s failed", self.session_id)
             if not self.websocket.closed:
-                await self._send_json({"type": "error", "message": str(error)})
+                with contextlib.suppress(Exception):
+                    await self._send_json({"type": "error", "message": str(error)})
+                if self.finite_request:
+                    with contextlib.suppress(Exception):
+                        await self.websocket.close(
+                            code=1011,
+                            message=b"upstream output incomplete",
+                        )
         finally:
             self.upstream = None
             for task in tasks:
@@ -653,6 +646,8 @@ class H264WebSocketSession:
     ) -> None:
         """Drain every accepted frame, flush fMP4, then publish terminal EOS."""
 
+        if self.finite_request and self.final_completion is None:
+            raise RuntimeError("finite stream lacks final media completion")
         if self.encoder_task is None:
             raise RuntimeError("H.264 encoder task is unavailable")
         queue_drained = asyncio.create_task(
