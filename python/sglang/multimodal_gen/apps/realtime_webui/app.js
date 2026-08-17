@@ -7,6 +7,10 @@ const JPEG_FRAME_CONTENT_TYPE = "image/jpeg";
 const DECODER_WORKER_URL = "./decoder_worker.js?v=rgb-worker-v10";
 const UI_CONFIG = Object.freeze(globalThis.SGLANG_REALTIME_UI_CONFIG || {});
 const DUAL_MODEL_CONFIG = Object.freeze(UI_CONFIG.dualModels || {});
+const H264_MSE_MIME_TYPE = 'video/mp4; codecs="avc1.4D401F"';
+const H264_WEBSOCKET_REQUESTED = UI_CONFIG.h264WebSocketEnabled === true;
+const H264_WEBSOCKET_ENABLED = H264_WEBSOCKET_REQUESTED
+  && Boolean(globalThis.MediaSource?.isTypeSupported?.(H264_MSE_MIME_TYPE));
 const DEFAULT_LINGBOT2_MODEL = "robbyant/lingbot-world-v2-14b-causal-fast-diffusers";
 const SESSION_ARTIFACT_SCHEMA_VERSION = 1;
 const SESSION_ARTIFACT_EVENT_LIMIT = 20000;
@@ -20,6 +24,74 @@ function configuredNumber(name, fallback) {
 function configuredModelNumber(key, name, fallback) {
   const value = Number(DUAL_MODEL_CONFIG[key]?.[name]);
   return Number.isFinite(value) ? value : fallback;
+}
+
+function h264CompressionInit(init, key) {
+  const bitrateKbps = Math.max(
+    250,
+    Math.min(
+      20000,
+      Math.trunc(configuredModelNumber(
+        key,
+        "h264BitrateKbps",
+        configuredNumber("h264CompressedBitrateKbps", 3000),
+      )),
+    ),
+  );
+  return {
+    ...init,
+    h264_bitrate_kbps: bitrateKbps,
+    h264_crf: configuredModelNumber(
+      key,
+      "h264Crf",
+      configuredNumber("h264CompressedCrf", 20),
+    ),
+    h264_preset: String(
+      DUAL_MODEL_CONFIG[key]?.h264Preset
+      || UI_CONFIG.h264CompressedPreset
+      || "fast",
+    ),
+    h264_gop_seconds: configuredModelNumber(
+      key,
+      "h264GopSeconds",
+      configuredNumber("h264CompressedGopSeconds", 2),
+    ),
+    h264_vbv_buffer_ms: configuredModelNumber(
+      key,
+      "h264VbvBufferMs",
+      configuredNumber("h264CompressedVbvBufferMs", 250),
+    ),
+    h264_startup_drop_frames: Math.max(
+      0,
+      Math.min(
+        120,
+        Math.trunc(configuredModelNumber(
+          key,
+          "h264StartupDropFrames",
+          key === "lingbot2" ? 8 : 0,
+        )),
+      ),
+    ),
+  };
+}
+
+function h264WebSocketEndpoint(key) {
+  const defaultEndpoint = `/api/h264ws/${key}`;
+  const configuredEndpoint = String(
+    DUAL_MODEL_CONFIG[key]?.h264WsUrl || UI_CONFIG.h264WebSocketBaseUrl || "",
+  ).trim();
+  if (!configuredEndpoint) return defaultEndpoint;
+  try {
+    const endpoint = new URL(defaultEndpoint, configuredEndpoint);
+    if (endpoint.protocol === "https:") endpoint.protocol = "wss:";
+    if (endpoint.protocol === "http:") endpoint.protocol = "ws:";
+    if (endpoint.protocol !== "ws:" && endpoint.protocol !== "wss:") {
+      return defaultEndpoint;
+    }
+    return endpoint.toString();
+  } catch {
+    return defaultEndpoint;
+  }
 }
 
 function configuredGenerationModes() {
@@ -174,6 +246,15 @@ function applyRuntimeUiConfig() {
     Object.values(CONTROL_ACTION_META).forEach((meta) => {
       meta.amount = String(UI_CONFIG.actionAmountLabel);
     });
+  }
+  if (H264_WEBSOCKET_ENABLED) {
+    const bitrateKbps = configuredNumber("h264CompressedBitrateKbps", 3000);
+    for (const key of ["minwm", "lingbot2"]) {
+      const chip = document.querySelector(`[data-model-key="${key}"] .stream-chip`);
+      if (chip) chip.textContent = `H.264 · WS · ${(bitrateKbps / 1000).toFixed(1)} Mbps`;
+    }
+  } else if (H264_WEBSOCKET_REQUESTED) {
+    addHistory("当前浏览器不支持 H.264 MSE，已自动回退 WebP WebSocket");
   }
   configureGenerationModeSelect();
 }
@@ -483,6 +564,8 @@ function allWorldPresets() {
 }
 
 let ws = null;
+const h264ModelStats = { minwm: {}, lingbot2: {} };
+const activeH264Models = new Set();
 let selectedPreset = null;
 let selectedReferenceBytes = null;
 let selectedReferenceUrl = "";
@@ -600,7 +683,9 @@ const fullscreenController = window.SGLangFullscreen?.createFullscreenController
 });
 const canvas = $("minwmViewport");
 const ctx = canvas.getContext("2d", { alpha: false });
+const minwmH264Video = $("minwmH264Viewport");
 const lingbot2Canvas = $("lingbot2Viewport");
+const lingbot2H264Video = $("lingbot2H264Viewport");
 const scratchCanvas = document.createElement("canvas");
 const scratchCtx = scratchCanvas.getContext("2d", { alpha: false });
 const recordingCanvas = document.createElement("canvas");
@@ -644,7 +729,7 @@ function canReconnectLingbot2() {
   return (
     !sessionLifetimeExpired &&
     selectedGenerationMode() === "i2v" &&
-    ws?.readyState === WebSocket.OPEN
+    primarySessionConnected()
   );
 }
 
@@ -674,7 +759,7 @@ function scheduleLingbot2Reconnect(reason = "media stream unavailable") {
   }, delayMs);
 }
 
-const lingbot2Session = new RealtimeModelSession({
+const lingbot2FallbackSession = new RealtimeModelSession({
   key: "lingbot2",
   canvas: lingbot2Canvas,
   overlay: $("lingbot2PreviewOverlay"),
@@ -698,6 +783,7 @@ const lingbot2Session = new RealtimeModelSession({
     root.dataset.chunk = stats.lastChunk ?? "";
     root.dataset.frames = String(stats.frames || 0);
     renderModelTelemetry("lingbot2", stats);
+    renderProtocolPerformance("lingbot2", stats);
     markModelEventApplied("lingbot2", stats.lastAppliedEventId);
   },
   onFrame: () => markSessionPlayable("lingbot2"),
@@ -710,6 +796,124 @@ const lingbot2Session = new RealtimeModelSession({
     scheduleLingbot2Reconnect(error.message || "stream failed");
   },
 });
+
+function mirrorH264Video(key) {
+  const video = key === "lingbot2" ? lingbot2H264Video : minwmH264Video;
+  const target = key === "lingbot2" ? lingbot2Canvas : canvas;
+  const width = Number(video?.videoWidth || 0);
+  const height = Number(video?.videoHeight || 0);
+  if (!video || !width || !height) return;
+  if (target.width !== width || target.height !== height) {
+    target.width = width;
+    target.height = height;
+  }
+  const targetContext = target.getContext("2d", { alpha: false });
+  targetContext.drawImage(video, 0, 0, width, height);
+}
+
+function createH264ModelSession(key) {
+  const isLingBot2 = key === "lingbot2";
+  const video = isLingBot2 ? lingbot2H264Video : minwmH264Video;
+  const fallbackCanvas = isLingBot2 ? lingbot2Canvas : canvas;
+  return new H264WebSocketSession({
+    video,
+    overlay: $(`${key}PreviewOverlay`),
+    root: document.querySelector(`[data-model-key="${key}"]`),
+    endpoint: h264WebSocketEndpoint(key),
+    liveEdgeTargetMs: configuredNumber("h264WebSocketLiveEdgeTargetMs", 80),
+    liveEdgeSeekThresholdMs: configuredNumber("h264WebSocketSeekThresholdMs", 420),
+    onState: (state, details = {}) => {
+      setModelConnectionState(key, state);
+      if (state === "connecting") {
+        video.hidden = true;
+        fallbackCanvas.hidden = false;
+      }
+      if (["closed", "error", "unavailable"].includes(state)) {
+        activeH264Models.delete(key);
+        video.hidden = true;
+        fallbackCanvas.hidden = false;
+      }
+      if (state === "error") {
+        addHistory(`${modelLabel(key)} H.264 error · ${details.message || "unknown"}`);
+      }
+    },
+    onPlayable: ({ width, height }) => {
+      activeH264Models.add(key);
+      video.hidden = false;
+      fallbackCanvas.hidden = true;
+      addHistory(`${modelLabel(key)} H.264 WebSocket live · ${width}x${height}`);
+      markSessionPlayable(key);
+    },
+    onPresentedFrame: ({ eventId }) => {
+      mirrorH264Video(key);
+      markModelEventApplied(key, eventId);
+    },
+    onStats: (stats) => {
+      h264ModelStats[key] = { ...h264ModelStats[key], ...stats };
+      const root = document.querySelector(`[data-model-key="${key}"]`);
+      if (root) {
+        root.dataset.chunk = h264ModelStats[key].lastChunk ?? "";
+        root.dataset.frames = String(h264ModelStats[key].frames || 0);
+      }
+      renderModelTelemetry(key, h264ModelStats[key]);
+      renderProtocolPerformance(key, h264ModelStats[key]);
+    },
+    onError: (error) => {
+      addHistory(`${modelLabel(key)} H.264 session failed · ${error.message || error}`);
+    },
+  });
+}
+
+const minwmH264Session = H264_WEBSOCKET_ENABLED
+  ? createH264ModelSession("minwm")
+  : null;
+const lingbot2H264Session = H264_WEBSOCKET_ENABLED
+  ? createH264ModelSession("lingbot2")
+  : null;
+
+function preferredRealtimeSession(key, h264Session, fallbackSession) {
+  let selected = fallbackSession;
+  return {
+    async connect(init, url) {
+      if (h264Session) {
+        try {
+          await h264Session.connect(h264CompressionInit(init, key));
+          selected = h264Session;
+          return;
+        } catch (error) {
+          await h264Session.close("H.264 startup failed", { emitState: false });
+          addHistory(`${modelLabel(key)} H.264 启动失败，自动回退 WebP · ${error.message || error}`);
+          const video = key === "lingbot2" ? lingbot2H264Video : minwmH264Video;
+          const fallbackCanvas = key === "lingbot2" ? lingbot2Canvas : canvas;
+          video.hidden = true;
+          fallbackCanvas.hidden = false;
+        }
+      }
+      selected = fallbackSession;
+      return fallbackSession.connect(init, url);
+    },
+    sendEvent(envelope) { return selected?.sendEvent(envelope) || false; },
+    close(reason) {
+      void h264Session?.close(reason);
+      fallbackSession?.close?.(reason);
+    },
+    setUnavailable(reason) {
+      h264Session?.setUnavailable?.(reason);
+      fallbackSession?.setUnavailable?.(reason);
+    },
+    configure(options) { fallbackSession?.configure?.(options); },
+    snapshot() { return selected?.snapshot?.() || h264ModelStats[key] || {}; },
+    get active() { return Boolean(selected?.active); },
+    get connected() { return Boolean(selected?.connected); },
+    get bufferedAmount() { return Number(selected?.bufferedAmount || 0); },
+  };
+}
+
+const lingbot2Session = preferredRealtimeSession(
+  "lingbot2",
+  lingbot2H264Session,
+  lingbot2FallbackSession,
+);
 const happyOysterSession = new HappyOysterSession({
   video: $("happyoysterViewport"),
   overlay: $("happyoysterPreviewOverlay"),
@@ -752,11 +956,51 @@ function buildHappyOysterInit(init) {
   };
 }
 
+let primaryUsesH264 = false;
 const primarySessionAdapter = {
-  connect: (init, url) => openPrimarySession(init, url),
-  sendEvent: (envelope) => sendPrimaryEventEnvelope(envelope),
-  close: (reason) => abortCurrentSession(reason, { expectedClose: true }),
+  async connect(init, url) {
+    if (minwmH264Session) {
+      try {
+        await minwmH264Session.connect(h264CompressionInit(init, "minwm"));
+        primaryUsesH264 = true;
+        return;
+      } catch (error) {
+        await minwmH264Session.close("H.264 startup failed", { emitState: false });
+        addHistory(`Zing H.264 启动失败，自动回退 WebP · ${error.message || error}`);
+        minwmH264Video.hidden = true;
+        canvas.hidden = false;
+      }
+    }
+    primaryUsesH264 = false;
+    return openPrimarySession(init, url);
+  },
+  sendEvent(envelope) {
+    return primaryUsesH264
+      ? minwmH264Session?.sendEvent(envelope) || false
+      : sendPrimaryEventEnvelope(envelope);
+  },
+  close(reason) {
+    if (primaryUsesH264) {
+      streamEpoch += 1;
+      primaryUsesH264 = false;
+      void minwmH264Session?.close(reason);
+      return;
+    }
+    abortCurrentSession(reason, { expectedClose: true });
+  },
 };
+
+function primarySessionConnected() {
+  return primaryUsesH264
+    ? Boolean(minwmH264Session?.connected)
+    : Boolean(ws && ws.readyState === WebSocket.OPEN);
+}
+
+function primaryTransportBufferedAmount() {
+  return primaryUsesH264
+    ? Number(minwmH264Session?.bufferedAmount || 0)
+    : Number(ws?.bufferedAmount || 0);
+}
 const dualModelController = new DualModelController({
   sessions: {
     minwm: primarySessionAdapter,
@@ -1584,6 +1828,13 @@ function drawIdle() {
 
 function resetStreamStats() {
   pendingHeader = null;
+  h264ModelStats.minwm = {};
+  h264ModelStats.lingbot2 = {};
+  activeH264Models.clear();
+  minwmH264Video.hidden = true;
+  lingbot2H264Video.hidden = true;
+  canvas.hidden = false;
+  lingbot2Canvas.hidden = false;
   clearFrameQueue();
   playbackController.reset({
     mode: selectedPlaybackMode(),
@@ -1753,6 +2004,11 @@ function isWorkerDecodableRawContentType(contentType) {
 }
 
 function updateStats() {
+  if (activeH264Models.has("minwm")) {
+    renderModelTelemetry("minwm", h264ModelStats.minwm);
+    renderProtocolPerformance("minwm", h264ModelStats.minwm);
+    return;
+  }
   const playback = playbackController.snapshot();
   const totalDroppedFrames = playback.droppedFrames + droppedDecodeFrames;
   renderModelTelemetry("minwm", {
@@ -1781,6 +2037,64 @@ function resetModelTelemetry(key) {
     bufferMs: 0,
     queueFrames: 0,
   });
+  renderProtocolPerformance(key, {});
+}
+
+function performanceMs(value) {
+  const number = Number(value);
+  return Number.isFinite(number) && number >= 0
+    ? `${number.toFixed(number < 10 ? 1 : 0)} ms`
+    : "-";
+}
+
+function renderProtocolPerformance(key, stats = {}) {
+  const telemetry = stats.chunkTelemetry || {};
+  const receiveMbps = Number(stats.receiveMbps || 0);
+  const bytesReceived = Number(stats.bytesReceived ?? stats.bytes ?? 0);
+  const sourceFps = Number(stats.serverFps || stats.sourceFps || 0);
+  const deliveryFps = Number(stats.deliveryFps || 0);
+  const renderFps = Number(stats.renderFps || 0);
+  const vaeQueueMs = Number(telemetry.vae_queue_wait_ms || 0);
+  const vaeDecodeMs = Number(
+    telemetry.vae_decode_ms || telemetry.model_vae_decode_ms || 0,
+  );
+  const h264FeedMs = Number(stats.lastBridgeEncoderFeedMs || 0);
+  const bridgeQueueMs = Number(stats.lastBridgeQueueMs || 0);
+  const downlinkMs = Math.max(
+    Number(stats.lastPresentedTransportMs || 0),
+    Number(stats.lastDownlinkMs || 0),
+  );
+  const inputUplinkMs = Number(
+    stats.lastInputUplinkMs || telemetry.input_uplink_ms,
+  );
+  const e2eMs = Number(
+    stats.lastPresentedControlToVideoMs || stats.lastControlToVideoMs || 0,
+  );
+  $(`${key}PerfData`).textContent = bytesReceived > 0
+    ? `${receiveMbps.toFixed(1)} Mb/s`
+    : "-";
+  $(`${key}PerfFps`).textContent = sourceFps > 0 || deliveryFps > 0 || renderFps > 0
+    ? `源 ${sourceFps.toFixed(1)} · 收 ${deliveryFps.toFixed(1)} · 显 ${renderFps.toFixed(1)}`
+    : "-";
+  $(`${key}PerfUplink`).textContent = inputUplinkMs > 0
+    ? performanceMs(inputUplinkMs)
+    : "-";
+  $(`${key}PerfScheduler`).textContent = telemetry.scheduler_forward_ms != null
+    ? performanceMs(telemetry.scheduler_forward_ms)
+    : "-";
+  $(`${key}PerfDenoise`).textContent = telemetry.model_denoise_ms != null
+    ? performanceMs(telemetry.model_denoise_ms)
+    : "-";
+  $(`${key}PerfVae`).textContent = vaeQueueMs > 0 || vaeDecodeMs > 0
+    ? `q ${performanceMs(vaeQueueMs)} · dec ${performanceMs(vaeDecodeMs)}`
+    : "-";
+  $(`${key}PerfH264`).textContent = h264FeedMs > 0 || bridgeQueueMs > 0
+    ? `编码 ${performanceMs(h264FeedMs)} · 排队 ${performanceMs(bridgeQueueMs)}`
+    : "-";
+  $(`${key}PerfDownlink`).textContent = downlinkMs > 0
+    ? performanceMs(downlinkMs)
+    : "-";
+  $(`${key}PerfE2E`).textContent = e2eMs > 0 ? performanceMs(e2eMs) : "-";
 }
 
 function renderModelTelemetry(key, stats = {}) {
@@ -1800,7 +2114,7 @@ function renderModelTelemetry(key, stats = {}) {
   if (droppedFrames) bufferParts.push(`drop ${droppedFrames}`);
   if (frameBatchGapCount) bufferParts.push(`gap ${frameBatchGapCount}`);
   $(`${prefix}ChunkText`).textContent = stats.lastChunk == null ? "-" : `#${stats.lastChunk}`;
-  $(`${prefix}RateText`).textContent = totalFrames > 0
+  $(`${prefix}RateText`).textContent = serverFps > 0 || deliveryFps > 0 || renderFps > 0
     ? `${serverFps.toFixed(1)} source · ${deliveryFps.toFixed(1)} recv · ${renderFps} render`
     : "-";
   $(`${prefix}BufferText`).textContent = bufferParts.join(" · ");
@@ -5689,7 +6003,7 @@ function sendEvent(kind, payload, historyText = null) {
     kind,
     event_id: eventId,
     delivered_models: deliveredModels,
-    ws_buffered_amount: ws?.bufferedAmount || 0,
+    ws_buffered_amount: primaryTransportBufferedAmount(),
   });
   lastSentEventId = eventId;
   updateControlDebugText();
@@ -6798,7 +7112,10 @@ class ControlStateController {
       this.activeActions.delete(action);
     }
     this.updateButtons();
-    this.enqueueTransition();
+    // Send presses immediately so a running model has the largest possible
+    // chance of sampling the held state at its next chunk boundary. Releases
+    // keep the short batching window to compact rapid key/chord changes.
+    this.enqueueTransition({ immediate: active });
     if (this.activeActions.size) this.scheduleStateHeartbeat();
     else this.clearStateHeartbeatTimer();
     return true;
@@ -6808,7 +7125,7 @@ class ControlStateController {
     this.reset({ sendRelease: true });
   }
 
-  enqueueTransition() {
+  enqueueTransition({ immediate = false } = {}) {
     const actions = Array.from(this.activeActions).sort();
     const last = this.pendingTransitions[this.pendingTransitions.length - 1];
     if (last && this.sameActions(last.actions, actions)) return;
@@ -6817,7 +7134,8 @@ class ControlStateController {
       clientTsMs: Math.round(performance.now()),
     });
     this.compactPendingIfNeeded();
-    this.scheduleFlush();
+    if (immediate) this.flush();
+    else this.scheduleFlush();
   }
 
   scheduleFlush() {

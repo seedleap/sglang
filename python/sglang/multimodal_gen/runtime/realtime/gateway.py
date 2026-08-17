@@ -64,6 +64,7 @@ class BrowserPlaybackAckWindow:
         self.enabled = False
         self.last_received_chunk = -1
         self.last_rendered_chunk = -1
+        self.minimum_event_id = 0
         self._sent_chunks: set[int] = set()
         self._shed_chunks: set[int] = set()
         self._changed = asyncio.Condition()
@@ -76,7 +77,20 @@ class BrowserPlaybackAckWindow:
         if message.get("type") == "init":
             self.enabled = message.get("playback_ack_enabled") is True
             return
-        if message.get("type") != "event" or message.get("kind") != "playback_ack":
+        if message.get("type") != "event":
+            return
+        if message.get("kind") in {"camera_actions", "prompt", "scene_cut"}:
+            event_id = self._non_negative_int(message.get("event_id"))
+            if event_id is None:
+                return
+            async with self._changed:
+                if event_id > self.minimum_event_id:
+                    self.minimum_event_id = event_id
+                    self._sent_chunks.clear()
+                    self._shed_chunks.clear()
+                self._changed.notify_all()
+            return
+        if message.get("kind") != "playback_ack":
             return
         payload = message.get("payload")
         if not isinstance(payload, dict):
@@ -108,6 +122,12 @@ class BrowserPlaybackAckWindow:
         chunk_index = self._non_negative_int(message.get("chunk_index"))
         if chunk_index is None:
             return True
+        event_id = self._non_negative_int(message.get("event_id"))
+        if self.minimum_event_id and (
+            event_id is None or event_id < self.minimum_event_id
+        ):
+            self._shed_chunks.add(chunk_index)
+            return False
         if chunk_index in self._shed_chunks:
             return False
         if chunk_index in self._sent_chunks:
@@ -164,6 +184,7 @@ _WORKER_CONTROL_MESSAGES = {
     "session_ready",
     "control_ack",
     "heartbeat",
+    "chunk_telemetry",
 }
 
 

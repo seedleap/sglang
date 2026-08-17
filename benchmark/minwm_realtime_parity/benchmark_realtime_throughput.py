@@ -3,9 +3,9 @@
 
 Run this client against two separately launched servers to compare execution
 profiles.  Keep the checkpoint, hardware, request, and action contract fixed;
-only the server implementation/profile may change.  The client deliberately
-does not retain frame payloads, so a 220-chunk run does not consume gigabytes of
-host memory.
+only the server implementation/profile may change.  The client can retain one
+measured RGB frame for numerical-parity diagnostics without keeping the full
+multi-gigabyte stream in host memory.
 """
 
 from __future__ import annotations
@@ -22,7 +22,6 @@ from pathlib import Path
 from typing import Any
 
 import msgspec.msgpack
-
 from common import (
     action_weights,
     is_realtime_trace_event,
@@ -45,6 +44,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--warmup-chunks", type=int, default=20)
     parser.add_argument("--measured-chunks", type=int, default=200)
     parser.add_argument("--kv-cache-num-frames", type=int)
+    parser.add_argument("--save-first-measured-frame", action="store_true")
     parser.add_argument("--timeout", type=float, default=1800.0)
     return parser.parse_args()
 
@@ -100,6 +100,7 @@ def validate_frame_batch(
     batch_index = int(header.get("frame_batch_index", 0))
     num_batches = int(header.get("num_frame_batches", 1))
     expected_final = batch_index == num_batches - 1
+    is_final = bool(header.get("is_final_frame_batch", expected_final))
     checks = {
         "chunk_index": int(header["chunk_index"]) == chunk_index,
         "positive_num_frames": batch_frames > 0,
@@ -109,9 +110,14 @@ def validate_frame_batch(
         == expected_bytes // batch_frames,
         "raw_size": int(header.get("raw_size", len(payload))) == len(payload),
         "total_size": int(header.get("total_size", len(payload))) == len(payload),
-        "batch_index": 0 <= batch_index < num_batches,
-        "is_final_frame_batch": bool(header.get("is_final_frame_batch", expected_final))
-        == expected_final,
+        # Streamed remote decoding does not know the total until the final batch.
+        # It uses zero as the documented unknown-count sentinel.
+        "batch_index": batch_index >= 0
+        and (num_batches == 0 or batch_index < num_batches),
+        "num_frame_batches": num_batches >= 0,
+        "is_final_frame_batch": (
+            not is_final if num_batches == 0 else is_final == expected_final
+        ),
     }
     failed = [name for name, passed in checks.items() if not passed]
     if failed:
@@ -120,6 +126,59 @@ def validate_frame_batch(
             f"header={header}"
         )
     return batch_index, num_batches, batch_frames
+
+
+def record_frame_batch(
+    state: dict[str, Any],
+    *,
+    chunk_index: int,
+    batch_index: int,
+    num_batches: int,
+    batch_frames: int,
+    expected_frames: int,
+) -> bool:
+    if state["complete"]:
+        raise AssertionError(f"chunk {chunk_index} received a batch after completion")
+    known_num_batches = state["num_batches"]
+    if num_batches:
+        if known_num_batches not in (None, num_batches):
+            raise AssertionError(
+                f"chunk {chunk_index} changed num_frame_batches from "
+                f"{known_num_batches} to {num_batches}"
+            )
+        state["num_batches"] = num_batches
+    elif known_num_batches is not None:
+        raise AssertionError(
+            f"chunk {chunk_index} changed num_frame_batches from "
+            f"{known_num_batches} to unknown"
+        )
+    if batch_index in state["seen"]:
+        raise AssertionError(f"chunk {chunk_index} repeated frame batch {batch_index}")
+    state["seen"].add(batch_index)
+    state["frames"] += batch_frames
+    if state["frames"] > expected_frames:
+        raise AssertionError(
+            f"chunk {chunk_index} produced more than {expected_frames} frames"
+        )
+    if not num_batches:
+        state["complete"] = state["frames"] == expected_frames
+        return state["complete"]
+    if batch_index != num_batches - 1:
+        return False
+    expected_batch_indices = set(range(num_batches))
+    if state["seen"] != expected_batch_indices:
+        raise AssertionError(
+            f"chunk {chunk_index} frame batches are incomplete: "
+            f"seen={sorted(state['seen'])} expected="
+            f"{sorted(expected_batch_indices)}"
+        )
+    if state["frames"] != expected_frames:
+        raise AssertionError(
+            f"chunk {chunk_index} produced {state['frames']} frames, "
+            f"expected {expected_frames}"
+        )
+    state["complete"] = True
+    return True
 
 
 async def receive_run(args: argparse.Namespace, contract: dict, case: dict) -> dict:
@@ -165,17 +224,17 @@ async def receive_run(args: argparse.Namespace, contract: dict, case: dict) -> d
     payload_complete_ns: dict[int, int] = {}
     frame_batches_by_chunk: dict[int, dict[str, Any]] = {}
     measured_payload_sha256 = hashlib.sha256()
+    measured_frame_sha256: dict[str, str] = {}
+    measured_frame_samples: dict[str, str] = {}
     measured_payload_samples: dict[str, str] = {}
+    first_measured_frame_saved = False
     init_started_ns = time.perf_counter_ns()
     async with websockets.connect(
         args.ws_url, max_size=None, ping_interval=None, open_timeout=args.timeout
     ) as websocket:
         await websocket.send(msgspec.msgpack.encode(request))
         init_completed_ns = time.perf_counter_ns()
-        while (
-            len(stats_by_chunk) < total_chunks
-            or len(payload_complete_ns) < total_chunks
-        ):
+        while len(payload_complete_ns) < total_chunks:
             packed = await asyncio.wait_for(websocket.recv(), timeout=args.timeout)
             if not isinstance(packed, bytes):
                 raise TypeError(
@@ -208,52 +267,64 @@ async def receive_run(args: argparse.Namespace, contract: dict, case: dict) -> d
             batch_index, num_batches, batch_frames = validate_frame_batch(
                 header, payload, chunk_index=chunk_index
             )
+            state = frame_batches_by_chunk.setdefault(
+                chunk_index,
+                {
+                    "num_batches": None,
+                    "seen": set(),
+                    "frames": 0,
+                    "complete": False,
+                },
+            )
             if chunk_index >= args.warmup_chunks:
                 measured_payload_sha256.update(payload)
+                bytes_per_frame = int(header["bytes_per_frame"])
+                first_frame_index = int(state["frames"])
+                for frame_offset in range(batch_frames):
+                    start = frame_offset * bytes_per_frame
+                    frame = payload[start : start + bytes_per_frame]
+                    frame_key = f"{chunk_index}:{first_frame_index + frame_offset}"
+                    measured_frame_sha256[frame_key] = hashlib.sha256(frame).hexdigest()
+                    frame_sample_stride = max(1, len(frame) // 1024)
+                    measured_frame_samples[frame_key] = base64.b64encode(
+                        frame[::frame_sample_stride][:1024]
+                    ).decode("ascii")
+                    if (
+                        args.save_first_measured_frame
+                        and not first_measured_frame_saved
+                    ):
+                        Path(args.output).with_name(
+                            "first-measured-frame.rgb"
+                        ).write_bytes(frame)
+                        first_measured_frame_saved = True
                 sample_stride = max(1, len(payload) // 4096)
                 sample = payload[::sample_stride][:4096]
                 measured_payload_samples[f"{chunk_index}:{batch_index}"] = (
                     base64.b64encode(sample).decode("ascii")
                 )
-            state = frame_batches_by_chunk.setdefault(
-                chunk_index,
-                {"num_batches": num_batches, "seen": set(), "frames": 0},
-            )
-            if state["num_batches"] != num_batches:
-                raise AssertionError(
-                    f"chunk {chunk_index} changed num_frame_batches from "
-                    f"{state['num_batches']} to {num_batches}"
-                )
-            if batch_index in state["seen"]:
-                raise AssertionError(
-                    f"chunk {chunk_index} repeated frame batch {batch_index}"
-                )
-            state["seen"].add(batch_index)
-            state["frames"] += batch_frames
-            if batch_index == num_batches - 1:
-                expected_batch_indices = set(range(num_batches))
-                if state["seen"] != expected_batch_indices:
-                    raise AssertionError(
-                        f"chunk {chunk_index} frame batches are incomplete: "
-                        f"seen={sorted(state['seen'])} expected="
-                        f"{sorted(expected_batch_indices)}"
-                    )
-                if state["frames"] != expected_frames:
-                    raise AssertionError(
-                        f"chunk {chunk_index} produced {state['frames']} frames, "
-                        f"expected {expected_frames}"
-                    )
+            if record_frame_batch(
+                state,
+                chunk_index=chunk_index,
+                batch_index=batch_index,
+                num_batches=num_batches,
+                batch_frames=batch_frames,
+                expected_frames=expected_frames,
+            ):
                 payload_complete_ns[chunk_index] = time.perf_counter_ns()
 
     expected_indices = list(range(total_chunks))
-    if sorted(stats_by_chunk) != expected_indices:
+    if stats_by_chunk and sorted(stats_by_chunk) != expected_indices:
         raise AssertionError("chunk_stats indices are not contiguous")
     if sorted(payload_complete_ns) != expected_indices:
         raise AssertionError("frame payload indices are not contiguous")
 
     measured_indices = list(range(args.warmup_chunks, total_chunks))
-    measured_stats = [stats_by_chunk[index] for index in measured_indices]
-    measured_frames = sum(int(stat["num_frames"]) for stat in measured_stats)
+    measured_stats = [
+        stats_by_chunk[index] for index in measured_indices if index in stats_by_chunk
+    ]
+    measured_frames = sum(
+        int(frame_batches_by_chunk[index]["frames"]) for index in measured_indices
+    )
     expected_measured_frames = (
         args.measured_chunks * pixel_frames_per_latent * latent_frames_per_chunk
     )
@@ -315,6 +386,8 @@ async def receive_run(args: argparse.Namespace, contract: dict, case: dict) -> d
         "measured_chunks": args.measured_chunks,
         "measured_frames": measured_frames,
         "measured_payload_sha256": measured_payload_sha256.hexdigest(),
+        "measured_frame_sha256": measured_frame_sha256,
+        "measured_frame_samples_base64": measured_frame_samples,
         "measured_payload_samples_base64": measured_payload_samples,
         "server": server,
         "client": {

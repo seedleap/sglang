@@ -5,8 +5,10 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
 import time
 from contextlib import asynccontextmanager
+from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -17,15 +19,19 @@ from fastapi.responses import JSONResponse
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from starlette.responses import Response
 
+from sglang.multimodal_gen.runtime.realtime.async_vae_client import GatewayOutputClient
 from sglang.multimodal_gen.runtime.realtime.async_vae_protocol import (
+    PAYLOAD_TRANSPORT_SHARED_MEMORY,
+    PAYLOAD_TRANSPORT_WEBSOCKET,
     ProtocolViolation,
+    checksum_payload,
     decode_message,
+    discard_shared_memory_payload,
     encode_message,
     latent_header_from_message,
+    materialize_payload_from_shared_memory,
+    store_payload_in_shared_memory,
     validate_payload,
-)
-from sglang.multimodal_gen.runtime.realtime.async_vae_client import (
-    GatewayOutputClient,
 )
 from sglang.multimodal_gen.runtime.realtime.async_vae_worker import (
     AsyncVAEWorker,
@@ -41,7 +47,6 @@ from sglang.multimodal_gen.runtime.utils.realtime_trace import (
     log_realtime_trace,
     normalize_trace_id,
 )
-
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +76,7 @@ def create_app(
     *,
     max_message_bytes: int,
     reservation_registry: WorkerReservationRegistry | None = None,
+    shared_memory_dir: str | Path | None = None,
 ) -> FastAPI:
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -87,8 +93,16 @@ def create_app(
         return JSONResponse(
             {
                 "status": "ok",
+                "decoder_backend": worker.decoder_backend,
+                "decoder_fidelity": (
+                    "approximate" if worker.decoder_backend == "taehv" else "exact"
+                ),
                 "active_sessions": worker.active_sessions,
                 "max_sessions": worker.max_sessions,
+                "encoded_frames_per_batch": worker.encoded_frames_per_batch,
+                "decode_parallel_size": getattr(
+                    worker.engine, "decode_parallel_size", 1
+                ),
             }
         )
 
@@ -121,6 +135,11 @@ def create_app(
                     opened = SessionOpen(
                         session_id=str(message["session_id"]),
                         generation_id=str(message["generation_id"]),
+                        decoder_backend=str(message.get("decoder_backend") or ""),
+                        response_transport=str(
+                            message.get("response_transport")
+                            or PAYLOAD_TRANSPORT_WEBSOCKET
+                        ),
                         trace_id=normalize_trace_id(
                             message.get("trace_id"),
                             fallback=str(message["session_id"]),
@@ -131,21 +150,35 @@ def create_app(
                         output_url=message.get("output_url"),
                         output_token=message.get("output_token"),
                     )
-                    if reservation_registry is not None:
-                        reservation_token = str(
-                            message.get("coordinator_token") or ""
-                        )
+                    coordinator_token = message.get("coordinator_token")
+                    worker_epoch = message.get("worker_epoch")
+                    if reservation_registry is not None and (
+                        coordinator_token or worker_epoch
+                    ):
+                        if not coordinator_token or not worker_epoch:
+                            raise ProtocolViolation(
+                                "coordinator_token and worker_epoch must be "
+                                "provided together"
+                            )
+                        reservation_token = str(coordinator_token)
                         await reservation_registry.consume(
                             reservation_token,
                             session_id=opened.session_id,
                             generation_id=opened.generation_id,
-                            worker_epoch=str(message.get("worker_epoch") or ""),
+                            worker_epoch=str(worker_epoch),
                             owner_id=reservation_owner,
                         )
                         reservation_consumed = True
                     if bool(opened.output_url) != bool(opened.output_token):
                         raise ProtocolViolation(
                             "output_url and output_token must be provided together"
+                        )
+                    if (
+                        opened.output_url is not None
+                        and opened.response_transport == PAYLOAD_TRANSPORT_SHARED_MEMORY
+                    ):
+                        raise ProtocolViolation(
+                            "shared-memory responses cannot use a Gateway output route"
                         )
                     if opened.output_url is not None:
                         output_client = GatewayOutputClient(
@@ -174,6 +207,12 @@ def create_app(
                             "session_accepted",
                             session_id=opened.session_id,
                             generation_id=opened.generation_id,
+                            decoder_backend=worker.decoder_backend,
+                            decoder_fidelity=(
+                                "approximate"
+                                if worker.decoder_backend == "taehv"
+                                else "exact"
+                            ),
                             credit_chunk_index=0,
                         )
                     )
@@ -188,7 +227,23 @@ def create_app(
                 header = latent_header_from_message(message)
                 if (header.session_id, header.generation_id) != identity:
                     raise ProtocolViolation("latent identity does not match WebSocket")
+                payload_transport = message.get(
+                    "payload_transport", PAYLOAD_TRANSPORT_WEBSOCKET
+                )
                 payload = message.get("payload")
+                if payload_transport == PAYLOAD_TRANSPORT_SHARED_MEMORY:
+                    reference = message.get("payload_reference")
+                    if not isinstance(reference, dict):
+                        raise ProtocolViolation(
+                            "latent shared-memory reference is required"
+                        )
+                    payload = materialize_payload_from_shared_memory(
+                        reference,
+                        root=shared_memory_dir,
+                        max_bytes=max_message_bytes,
+                    )
+                elif payload_transport != PAYLOAD_TRANSPORT_WEBSOCKET:
+                    raise ProtocolViolation("unsupported latent payload transport")
                 if not isinstance(payload, bytes):
                     raise ProtocolViolation("latent payload is required")
                 validate_payload(header, payload)
@@ -216,9 +271,8 @@ def create_app(
                     preview_height = getattr(
                         frame_batch, "preview_height", frame_batch.height
                     )
-                    wire = encode_message(
-                        "frame_batch",
-                        payload=b"".join(frame_batch.payloads),
+                    frame_payload = b"".join(frame_batch.payloads)
+                    frame_fields = dict(
                         session_id=header.session_id,
                         generation_id=header.generation_id,
                         request_id=header.request_id,
@@ -235,13 +289,45 @@ def create_app(
                         num_frames=frame_batch.num_frames,
                         frame_batch_index=frame_batch.frame_batch_index,
                         is_final_frame_batch=frame_batch.is_final,
+                        is_final_chunk=header.is_final_chunk,
                         encode_ms=frame_batch.encode_ms,
+                        server_sent_epoch_ms=time.time() * 1000,
                     )
-                    send_started = time.perf_counter()
-                    if output_client is not None:
-                        await output_client.send(wire)
+                    shared_reference = None
+                    if (
+                        output_client is None
+                        and opened.response_transport == PAYLOAD_TRANSPORT_SHARED_MEMORY
+                    ):
+                        shared_reference = store_payload_in_shared_memory(
+                            frame_payload,
+                            root=shared_memory_dir,
+                        )
+                        wire = encode_message(
+                            "frame_batch",
+                            payload_transport=PAYLOAD_TRANSPORT_SHARED_MEMORY,
+                            payload_reference=shared_reference,
+                            payload_checksum=checksum_payload(frame_payload),
+                            **frame_fields,
+                        )
                     else:
-                        await send(wire)
+                        wire = encode_message(
+                            "frame_batch",
+                            payload_transport=PAYLOAD_TRANSPORT_WEBSOCKET,
+                            payload=frame_payload,
+                            **frame_fields,
+                        )
+                    send_started = time.perf_counter()
+                    try:
+                        if output_client is not None:
+                            await output_client.send(wire)
+                        else:
+                            await send(wire)
+                    except Exception:
+                        discard_shared_memory_payload(
+                            shared_reference,
+                            root=shared_memory_dir,
+                        )
+                        raise
                     log_realtime_trace(
                         logger,
                         trace_session,
@@ -256,23 +342,20 @@ def create_app(
                         output_direct=output_client is not None,
                     )
 
-                async def on_decode_started(*, header=header):
-                    await send(
-                        encode_message(
-                            "latent_accepted",
-                            session_id=header.session_id,
-                            generation_id=header.generation_id,
-                            request_id=header.request_id,
-                            chunk_index=header.chunk_index,
-                            next_credit_chunk_index=header.chunk_index + 1,
-                        )
-                    )
-
                 future = await worker.submit(
                     header,
                     latents,
                     on_frame_batch=on_frame_batch,
-                    on_decode_started=on_decode_started,
+                )
+                await send(
+                    encode_message(
+                        "latent_accepted",
+                        session_id=header.session_id,
+                        generation_id=header.generation_id,
+                        request_id=header.request_id,
+                        chunk_index=header.chunk_index,
+                        next_credit_chunk_index=header.chunk_index + 1,
+                    )
                 )
 
                 async def finish_chunk(future=future, header=header):
@@ -314,6 +397,7 @@ def create_app(
                                     chunk_index=header.chunk_index,
                                     event_id=header.event_id,
                                     num_frames=result.num_frames,
+                                    is_final_chunk=header.is_final_chunk,
                                 )
                             )
                             log_realtime_trace(
@@ -321,8 +405,7 @@ def create_app(
                                 trace_session,
                                 "server.vae_media_completion_accepted",
                                 duration_ms=round(
-                                    (time.perf_counter() - completion_started)
-                                    * 1000,
+                                    (time.perf_counter() - completion_started) * 1000,
                                     3,
                                 ),
                                 **common_trace,
@@ -335,6 +418,7 @@ def create_app(
                                 request_id=header.request_id,
                                 chunk_index=header.chunk_index,
                                 num_frames=result.num_frames,
+                                is_final_chunk=header.is_final_chunk,
                                 queue_wait_ms=result.queue_wait_ms,
                                 decode_ms=result.decode_ms,
                                 encode_ms=result.encode_ms,
@@ -397,47 +481,215 @@ def create_app(
     return app
 
 
-def main() -> None:
-    logging.basicConfig(level=logging.INFO)
-    parser = argparse.ArgumentParser(description="SGLang realtime TAEHV worker")
-    parser.add_argument("--checkpoint-path", required=True)
+def _add_worker_cli_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--decoder-backend", choices=("exact", "taehv"), required=True)
+    parser.add_argument("--checkpoint-path")
+    parser.add_argument("--vae-path")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=18081)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--dtype", choices=("bfloat16", "float16"), default="bfloat16")
-    parser.add_argument("--max-sessions", type=int, default=8)
+    parser.add_argument("--max-sessions", type=int)
     parser.add_argument("--queue-depth-per-session", type=int, default=1)
-    parser.add_argument("--encoded-frames-per-batch", type=int, default=1)
+    parser.add_argument("--encoded-frames-per-batch", type=int)
     parser.add_argument("--encode-workers", type=int, default=4)
     parser.add_argument("--max-message-mb", type=int, default=64)
+    parser.add_argument("--shared-memory-dir")
     parser.add_argument("--worker-epoch")
-    args = parser.parse_args()
+
+
+def _parse_worker_args(argv: list[str] | None):
+    pre_parser = argparse.ArgumentParser(add_help=False)
+    _add_worker_cli_args(pre_parser)
+    known, remaining = pre_parser.parse_known_args(argv)
+    if known.decoder_backend == "taehv":
+        if remaining:
+            pre_parser.error("unrecognized arguments: " + " ".join(remaining))
+        if not known.checkpoint_path:
+            pre_parser.error("--checkpoint-path is required for taehv backend")
+        if known.vae_path:
+            pre_parser.error("--vae-path is only valid for exact backend")
+        return known, None
+
+    if not known.vae_path:
+        pre_parser.error("--vae-path is required for exact backend")
+    if known.checkpoint_path:
+        pre_parser.error("--checkpoint-path is only valid for taehv backend")
+
+    from sglang.multimodal_gen.runtime.server_args import ServerArgs
+
+    parser = argparse.ArgumentParser(
+        parents=[pre_parser],
+        conflict_handler="resolve",
+    )
+    ServerArgs.add_cli_args(parser)
+    raw_args, unknown = parser.parse_known_args(argv)
+    server_args = ServerArgs.from_cli_args(raw_args, unknown)
+    return raw_args, server_args
+
+
+def _resolve_encoded_frames_per_batch(args) -> int:
+    if args.encoded_frames_per_batch is not None:
+        if args.encoded_frames_per_batch < 1:
+            raise ValueError("--encoded-frames-per-batch must be positive")
+        return args.encoded_frames_per_batch
+    return 16 if args.decoder_backend == "exact" else 1
+
+
+def _distributed_launch_state() -> tuple[int, int, int]:
+    return (
+        int(os.environ.get("RANK", "0")),
+        int(os.environ.get("LOCAL_RANK", "0")),
+        int(os.environ.get("WORLD_SIZE", "1")),
+    )
+
+
+def _validate_exact_parallel_launch(server_args, world_size: int) -> None:
+    configured = int(getattr(server_args, "num_gpus", 1) or 1)
+    if configured != world_size:
+        if configured > 1 and world_size == 1:
+            raise ValueError(
+                "multi-GPU exact VAE must be launched with torchrun, for example "
+                "torchrun --standalone --nproc-per-node=2 ... --num-gpus 2"
+            )
+        raise ValueError(
+            f"exact VAE --num-gpus={configured} does not match "
+            f"torchrun WORLD_SIZE={world_size}"
+        )
+    if world_size == 1:
+        return
+
+    expected = {
+        "tp_size": 1,
+        "dp_size": 1,
+        "cfg_parallel_degree": 1,
+        "sp_degree": world_size,
+        "ulysses_degree": world_size,
+        "ring_degree": 1,
+    }
+    mismatches = {
+        name: (getattr(server_args, name, None), value)
+        for name, value in expected.items()
+        if getattr(server_args, name, None) != value
+    }
+    if mismatches:
+        details = ", ".join(
+            f"{name}={actual!r} (expected {expected_value})"
+            for name, (actual, expected_value) in mismatches.items()
+        )
+        raise ValueError(
+            "multi-GPU exact VAE requires one spatial decode group: " + details
+        )
+
+
+def _initialize_exact_parallel(server_args):
+    rank, local_rank, world_size = _distributed_launch_state()
+    _validate_exact_parallel_launch(server_args, world_size)
+    if world_size == 1:
+        return None
+
+    if not torch.cuda.is_available():
+        raise RuntimeError("multi-GPU exact VAE requires CUDA")
+    torch.cuda.set_device(local_rank)
+    from sglang.multimodal_gen.runtime.distributed import (
+        maybe_init_distributed_environment_and_model_parallel,
+    )
+    from sglang.multimodal_gen.runtime.realtime.exact_vae_backend import (
+        ExactVAEParallelController,
+    )
+
+    maybe_init_distributed_environment_and_model_parallel(
+        tp_size=1,
+        sp_size=world_size,
+        cfg_degree=1,
+        ulysses_degree=world_size,
+        ring_degree=1,
+        dp_size=1,
+        distributed_init_method="env://",
+        dist_timeout=server_args.dist_timeout,
+    )
+    return ExactVAEParallelController(
+        rank=rank,
+        world_size=world_size,
+        device=torch.device(f"cuda:{local_rank}"),
+    )
+
+
+def _run_worker(args, exact_server_args) -> None:
+    _, _, world_size = _distributed_launch_state()
 
     dtype = torch.bfloat16 if args.dtype == "bfloat16" else torch.float16
-    engine = TAEHVEngine(args.checkpoint_path, device=args.device, dtype=dtype)
+    if args.decoder_backend == "taehv":
+        if world_size != 1:
+            raise ValueError(
+                "taehv backend does not support torchrun multi-rank launch"
+            )
+        engine = TAEHVEngine(args.checkpoint_path, device=args.device, dtype=dtype)
+        max_sessions = args.max_sessions or 8
+        parallel_controller = None
+    else:
+        if args.max_sessions not in (None, 1):
+            raise ValueError("exact backend requires --max-sessions=1")
+        from sglang.multimodal_gen.runtime.realtime.exact_vae_backend import (
+            ExactCausalVAEEngine,
+        )
+        from sglang.multimodal_gen.runtime.server_args import set_global_server_args
+
+        set_global_server_args(exact_server_args)
+        parallel_controller = _initialize_exact_parallel(exact_server_args)
+        engine = ExactCausalVAEEngine(exact_server_args, args.vae_path)
+        if parallel_controller is not None:
+            engine.set_decode_parallel_size(parallel_controller.world_size)
+        max_sessions = 1
     warmup_started = time.perf_counter()
+    if parallel_controller is not None:
+        torch.distributed.barrier()
     engine.warmup()
+    if parallel_controller is not None:
+        torch.distributed.barrier()
     logger.info(
-        "TAEHV startup warmup completed in %.1f ms",
+        "%s startup warmup completed in %.1f ms",
+        args.decoder_backend,
         (time.perf_counter() - warmup_started) * 1000,
     )
+    if parallel_controller is not None and not parallel_controller.is_driver:
+        from sglang.multimodal_gen.runtime.realtime.exact_vae_backend import (
+            run_exact_vae_follower,
+        )
+
+        run_exact_vae_follower(engine, parallel_controller)
+        return
+    if parallel_controller is not None:
+        engine.attach_parallel_driver(parallel_controller)
+
     worker = AsyncVAEWorker(
         engine,
-        max_sessions=args.max_sessions,
+        max_sessions=max_sessions,
         queue_depth_per_session=args.queue_depth_per_session,
-        encoded_frames_per_batch=args.encoded_frames_per_batch,
+        encoded_frames_per_batch=_resolve_encoded_frames_per_batch(args),
         encode_workers=args.encode_workers,
     )
     reservations = WorkerReservationRegistry(
         worker_epoch=resolve_worker_epoch(args.worker_epoch),
-        capacity=args.max_sessions,
+        capacity=max_sessions,
     )
     app = create_app(
         worker,
         max_message_bytes=args.max_message_mb * 1024 * 1024,
         reservation_registry=reservations,
+        shared_memory_dir=args.shared_memory_dir,
     )
-    uvicorn.run(app, host=args.host, port=args.port, log_level="info")
+    try:
+        uvicorn.run(app, host=args.host, port=args.port, log_level="info")
+    finally:
+        if parallel_controller is not None:
+            parallel_controller.send_stop()
+
+
+def main(argv: list[str] | None = None) -> None:
+    logging.basicConfig(level=logging.INFO)
+    args, exact_server_args = _parse_worker_args(argv)
+    _run_worker(args, exact_server_args)
 
 
 if __name__ == "__main__":

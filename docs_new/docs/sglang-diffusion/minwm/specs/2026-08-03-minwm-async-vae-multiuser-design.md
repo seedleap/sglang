@@ -1,5 +1,9 @@
 # MinWM 实时推理异步 VAE 与多用户多节点架构设计
 
+> 后续更新：decoder backend 的统一调度、exact 单 Session 约束与显式部署参数以
+> [Realtime VAE overlap 后端统一决策](/docs/sglang-diffusion/minwm/specs/2026-08-09-realtime-vae-backend-unification)
+> 为准。本页的多用户容量设计仍以 TAEHV pool 为默认拓扑。
+
 ## 1. 文档状态与已确认决策
 
 本文档定义 `codex/minwm-realtime-api` 分支后续的生产化演进方案，统一解决两个问题：
@@ -50,9 +54,10 @@
   按 `(session_id, generation_id)` 隔离。
 
 仍保留的边界：GPU KV、latent history 与 TAEHV context 不复制；Worker/Spot 故障时绑定
-Session 失败并由用户重试。Wan fallback decoder 的模型级可变 cache 不允许跨 Session
-交错，生产异步 VAE 路径固定使用通过隔离测试的 TAEHV。Denoiser 侧公平性由 SGLang 原生
-Scheduler/FIFO batching 提供，当前没有另造一套 DRR GPU Scheduler。
+Session 失败并由用户重试。Wan exact decoder 的模型级可变 cache 不允许跨 Session
+交错，因此 exact worker 固定容量为一；需要多 Session 交错时显式选择通过隔离测试的
+TAEHV。Denoiser 侧公平性由 SGLang 原生 Scheduler/FIFO batching 提供，当前没有另造一套
+DRR GPU Scheduler。
 
 ## 3. 设计目标与非目标
 

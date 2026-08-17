@@ -1808,7 +1808,7 @@ body.world-studio {
 .world-studio .model-player {
   display: grid;
   min-width: 0;
-  grid-template-rows: 38px minmax(0, 1fr);
+  grid-template-rows: 38px auto minmax(0, 1fr);
   overflow: hidden;
   border: 1px solid var(--ws-line);
   border-radius: 14px;
@@ -1848,11 +1848,50 @@ body.world-studio {
 .world-studio .model-player[data-session-state="error"] .connection-chip { display: inline-flex; }
 .world-studio .model-player[data-session-state="error"] .connection-chip { color: var(--danger); border-color: rgba(244, 126, 104, 0.35); }
 .world-studio .telemetry-detail { display: none !important; }
+.world-studio .protocol-performance {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 1px;
+  border-top: 1px solid rgba(255,255,255,0.035);
+  border-bottom: 1px solid var(--ws-line);
+  background: rgba(4, 9, 9, 0.92);
+}
+.world-studio .protocol-performance > span {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+  padding: 5px 6px 6px;
+  color: var(--ws-muted);
+  font-size: 8px;
+  line-height: 1.1;
+  white-space: nowrap;
+}
+.world-studio .protocol-performance b {
+  overflow: hidden;
+  color: #dce7e4;
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 620;
+  text-overflow: ellipsis;
+}
+.world-studio .protocol-performance .e2e {
+  background: rgba(121, 223, 189, 0.065);
+}
+.world-studio .protocol-performance .h264-performance { grid-column: span 2; }
+.world-studio .protocol-performance .e2e b { color: var(--ws-accent); }
 .world-studio .preview-frame { position: relative; display: grid; width: 100%; aspect-ratio: 16 / 9; place-items: center; overflow: hidden; background: #090d0d; contain: paint; isolation: isolate; }
 .world-studio .preview-frame::before { content: ""; position: absolute; inset: 0; z-index: 2; pointer-events: none; background: linear-gradient(180deg, rgba(255,255,255,0.025), transparent 28%, rgba(0,0,0,0.08)); }
 .world-studio #minwmViewport,
+.world-studio #minwmH264Viewport,
 .world-studio #lingbot2Viewport,
+.world-studio #lingbot2H264Viewport,
 .world-studio #happyoysterViewport { position: relative; z-index: 1; display: block; width: 100%; height: 100%; max-height: none; object-fit: contain; transform: translateZ(0); }
+.world-studio #minwmH264Viewport,
+.world-studio #lingbot2H264Viewport { position: absolute; inset: 0; z-index: 2; background: #090d0d; }
+.world-studio #minwmViewport[hidden],
+.world-studio #minwmH264Viewport[hidden],
+.world-studio #lingbot2Viewport[hidden],
+.world-studio #lingbot2H264Viewport[hidden] { display: none !important; }
 
 .world-studio .runtime-skill-bar {
   display: flex;
@@ -2073,15 +2112,63 @@ body.world-studio {
 .world-studio .model-player[data-session-state="unavailable"] .preview-unavailable-text { display: inline; }
 
 .world-studio .stage:fullscreen {
+  position: relative;
+  display: grid;
   width: 100vw;
   height: 100vh;
+  height: 100dvh;
   max-width: none;
-  overflow: auto;
-  padding: 20px;
+  box-sizing: border-box;
+  grid-template-rows: minmax(0, 1fr) auto;
+  gap: 12px;
+  overflow: hidden;
+  padding: 12px;
   background: var(--ws-bg);
 }
-.world-studio .stage:fullscreen .model-player-grid { min-height: 0; flex: 1; }
-.world-studio .stage:fullscreen .preview-frame { height: 100%; aspect-ratio: auto; }
+.world-studio .stage:fullscreen .comparison-heading {
+  position: absolute;
+  z-index: 12;
+  top: 12px;
+  right: 12px;
+  min-height: 0;
+  margin: 0;
+}
+.world-studio .stage:fullscreen .comparison-heading > div,
+.world-studio .stage:fullscreen .model-slot-config,
+.world-studio .stage:fullscreen .stage-controls,
+.world-studio .stage:fullscreen .prompt-update-heading,
+.world-studio .stage:fullscreen .prompt-helper,
+.world-studio .stage:fullscreen .prompt-log-panel {
+  display: none;
+}
+.world-studio .stage:fullscreen .fullscreen-button {
+  background: rgba(9, 13, 13, 0.78);
+  backdrop-filter: blur(10px);
+}
+.world-studio .stage:fullscreen .model-player-grid {
+  grid-row: 1;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+}
+.world-studio .stage:fullscreen .model-player {
+  min-height: 0;
+  grid-template-rows: 38px auto minmax(0, 1fr);
+}
+.world-studio .stage:fullscreen .preview-frame {
+  height: 100%;
+  min-height: 0;
+  aspect-ratio: auto;
+}
+.world-studio .stage:fullscreen .prompt-update-panel {
+  grid-row: 2;
+  min-height: 0;
+  border: 1px solid var(--ws-line);
+  border-radius: 12px;
+  padding: 8px;
+  background: rgba(13, 18, 18, 0.96);
+}
+.world-studio .stage:fullscreen .prompt-composer textarea { min-height: 58px; }
 .world-studio .stage:fullscreen .model-parameters-grid,
 .world-studio .stage:fullscreen .session-notice { display: none; }
 

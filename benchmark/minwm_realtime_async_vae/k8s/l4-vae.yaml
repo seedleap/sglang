@@ -175,6 +175,7 @@ spec:
           image: REPLACE_WITH_VAE_IMAGE_DIGEST
           imagePullPolicy: IfNotPresent
           args:
+            - --decoder-backend=taehv
             - --checkpoint-path=/opt/taehv/taew2_2.pth
             - --device=cuda
             - --dtype=bfloat16

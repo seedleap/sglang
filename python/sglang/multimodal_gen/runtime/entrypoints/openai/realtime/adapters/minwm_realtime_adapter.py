@@ -48,11 +48,20 @@ if TYPE_CHECKING:
     from sglang.multimodal_gen.runtime.server_args import ServerArgs
 
 MINWM_DEFAULT_DMD_STEPS = 4
+MINWM_CAMERA_CONTROL_MIN_PULSE_ITEMS = 2
 
 
 class MinWMRealtimeState(RealtimeCameraControlState):
     def __init__(self) -> None:
-        super().__init__(min_pulse_items=1, script_maxlen=4096, max_transitions=512)
+        # Zing consumes four latent action labels per regular chunk. A quick
+        # key press and release can both arrive while the current chunk is
+        # already running, so preserve the action for half of the next chunk
+        # instead of reducing it to one weak conditioning step.
+        super().__init__(
+            min_pulse_items=MINWM_CAMERA_CONTROL_MIN_PULSE_ITEMS,
+            script_maxlen=4096,
+            max_transitions=512,
+        )
         self.action_label_queue = ControlScriptQueue(
             "action_labels", max_events=4096, default_item=0
         )

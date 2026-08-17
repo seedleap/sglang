@@ -29,7 +29,7 @@ Coordinator 负责全局准入、Worker 配对、容量槽 Lease 和 Session 生
 | 两阶段预留 | Coordinator 先持久化 Lease，再向 Denoiser/VAE 幂等预留；部分失败回滚 |
 | 粘性与 fencing | Session 固定绑定一个 Denoiser 和一个 VAE；token、generation、Worker epoch 同时校验 |
 | Worker 生命周期 | heartbeat 上报 load/lifecycle/epoch；preStop 进入 Drain；失联或 epoch 变化使 renew 失败 |
-| 异步 VAE | 每 Session 有界 latent 队列；进入全局 Decode actor 后才返 credit；VAE 跨 Session 公平排队 |
+| 异步 VAE | 每 Session 单槽有界 latent 队列；成功入队即返 credit；同步 decode 移出协议事件循环；VAE 跨 Session 公平排队 |
 | 弹性 | 定时 scale-to-zero/预热与 Coordinator shared-capacity 事件扩容同时存在；缩容前检查 active/queued/draining |
 | Trace | 视频 WS 不承载 Trace；浏览器批量 HTTP 上报，查询页按需读取 CloudWatch 最近 5 分钟聚合 |
 | 发布 | digest、模型 `_READY`、DynamoDB schema/TTL、日志保留期门禁；失败时原地 SSA 滚动恢复发布前 spec |

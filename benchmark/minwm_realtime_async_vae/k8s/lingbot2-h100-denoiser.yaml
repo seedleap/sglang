@@ -26,11 +26,14 @@ metadata:
     seedleap.ai/ttl-after-test: required
 spec:
   replicas: 1
+  ordinals:
+    # Preserve the H100-resident worker selected during the two-node scale-in.
+    start: 1
   revisionHistoryLimit: 1
   serviceName: lingbot2-async-denoiser-headless
   podManagementPolicy: Parallel
   updateStrategy:
-    type: RollingUpdate
+    type: OnDelete
   selector:
     matchLabels:
       app.kubernetes.io/name: lingbot2-async-denoiser
@@ -47,6 +50,7 @@ spec:
       nodeSelector:
         karpenter.sh/nodepool: minwm-async-denoiser-h100-8x
         karpenter.sh/capacity-type: spot
+        seedleap.ai/model-cache-storage: local-nvme
       tolerations:
         - key: nvidia.com/gpu
           operator: Equal
@@ -282,7 +286,7 @@ spec:
             - {name: startup-lock, mountPath: /var/run/minwm-startup-lock}
       volumes:
         - name: checkpoint-archive
-          persistentVolumeClaim: {claimName: minwm-async-west-s3, readOnly: true}
+          persistentVolumeClaim: {claimName: minwm-model-serving-east2-s3, readOnly: true}
         - name: shm
           emptyDir: {medium: Memory, sizeLimit: 64Gi}
         - name: startup-lock
@@ -291,7 +295,7 @@ spec:
             type: DirectoryOrCreate
         - name: model-cache
           hostPath:
-            path: /var/lib/minwm-model-cache
+            path: /mnt/k8s-disks/0/minwm-model-cache
             type: DirectoryOrCreate
         - name: worker-epoch
           emptyDir: {}

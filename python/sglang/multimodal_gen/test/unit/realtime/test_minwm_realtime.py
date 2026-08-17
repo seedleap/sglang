@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+from contextlib import contextmanager
 from types import SimpleNamespace
 
 import pytest
@@ -22,12 +23,12 @@ from sglang.multimodal_gen.runtime.entrypoints.openai.protocol import (
     RealtimeEvent,
     RealtimeVideoGenerationsRequest,
 )
-from sglang.multimodal_gen.runtime.entrypoints.openai.realtime.generate_session import (
-    GenerateSession,
-)
 from sglang.multimodal_gen.runtime.entrypoints.openai.realtime.adapters.minwm_realtime_adapter import (
     MinWMRealtimeAdapter,
     MinWMRealtimeState,
+)
+from sglang.multimodal_gen.runtime.entrypoints.openai.realtime.generate_session import (
+    GenerateSession,
 )
 from sglang.multimodal_gen.runtime.models.dits.minwm import (
     MinWMCausalSelfAttention,
@@ -71,6 +72,8 @@ from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.m
     MinWMCausalUniPCDenoisingStage,
     MinWMCausalVaeDecodingStage,
     MinWMChunkLatentPreparationStage,
+    _cuda_graph_attention_plan_signature,
+    _MinWMCudaGraphRunner,
 )
 from sglang.multimodal_gen.runtime.pipelines_core.stages.realtime.vae import (
     CausalVaeDecodingStage,
@@ -81,6 +84,79 @@ from sglang.multimodal_gen.tools.convert_minwm_checkpoint import (
     TRANSFORMER_CONFIG,
     build_transformer_config,
 )
+
+
+def test_minwm_denoising_declares_transformer_residency_use(monkeypatch):
+    transformer = object()
+    calls = []
+
+    @contextmanager
+    def use_component(use, module=None):
+        calls.append((use.component_name, use.phase, module))
+        yield module
+
+    stage = MinWMCausalDMDDenoisingStage.__new__(MinWMCausalDMDDenoisingStage)
+    stage.transformer = transformer
+    stage.transformer_2 = None
+    stage.vae = None
+    stage.pipeline = None
+    stage._component_residency_manager = SimpleNamespace(
+        server_args=SimpleNamespace(),
+        state=SimpleNamespace(stage_name="denoising"),
+        use_component=use_component,
+    )
+    expected = SimpleNamespace(latents=torch.zeros(1))
+    monkeypatch.setattr(stage, "_forward_impl", lambda _batch, _args: expected)
+
+    result = stage.forward(SimpleNamespace(realtime_trace_id=None), SimpleNamespace())
+
+    assert result is expected
+    assert calls == [("transformer", "transformer", transformer)]
+
+
+def test_minwm_runtime_alignment_logs_once_after_cache_init(monkeypatch):
+    from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.minwm import (
+        minwm_causal_denoising,
+    )
+
+    log_calls = []
+    monkeypatch.setattr(
+        minwm_causal_denoising,
+        "logger",
+        SimpleNamespace(info=lambda *args: log_calls.append(args)),
+    )
+    stage = MinWMCausalDMDDenoisingStage.__new__(MinWMCausalDMDDenoisingStage)
+    stage.transformer = SimpleNamespace(
+        config=SimpleNamespace(
+            arch_config=SimpleNamespace(local_attn_size=32),
+        )
+    )
+    stage.sink_size = 8
+    stage.sliding_window_num_frames = 32
+    batch = SimpleNamespace(
+        realtime_causal_sink_size=8,
+        realtime_causal_kv_cache_num_frames=32,
+    )
+    cache_ctx = SimpleNamespace(
+        kv_cache=[
+            SimpleNamespace(
+                rope_position_mode="block_relative",
+                rope_max_frame_gap=12,
+                prompt_first_frame_pin_enabled=True,
+                allow_growth=False,
+                cache_size=32,
+                sink_tokens=8,
+                scene_cut_rope_offset=0,
+                scene_cut_sink_enabled=False,
+            )
+        ]
+    )
+
+    stage._log_runtime_alignment_once(batch, cache_ctx)
+    stage._log_runtime_alignment_once(batch, cache_ctx)
+
+    assert len(log_calls) == 1
+    assert log_calls[0][0].startswith("MINWM_RUNTIME_ALIGNMENT")
 
 
 @pytest.mark.parametrize(
@@ -204,6 +280,17 @@ def test_minwm_realtime_state_preserves_single_key_direction(key, expected_label
     state.receive_camera_state([key], event_id=17)
     assert state.sample_action_labels(4) == [expected_label] * 4
     assert state.latest_sampled_event_id == 17
+
+
+def test_minwm_realtime_state_preserves_short_press_for_half_chunk():
+    state = MinWMRealtimeState()
+    state.receive_camera_state(["w"], event_id=17)
+    state.receive_camera_state([], event_id=18)
+
+    forward = key_state_to_action_label(["w"])
+    assert state.sample_action_labels(4) == [forward, forward, 0, 0]
+    assert state.latest_sampled_event_id == 18
+    assert state.sample_action_labels(4) == [0, 0, 0, 0]
 
 
 def test_minwm_realtime_action_switch_reaches_next_chunk():
@@ -447,6 +534,73 @@ def test_minwm_block_relative_rope_clamps_visible_frame_gaps():
     assert cache.position_ids[:, 0].tolist() == [0, 10, 11, 12, 13, 14]
     assert view.key_position_ids[:, 0].tolist() == [0, 3, 4, 5, 6, 7]
     assert view.query_position_ids[:, 0].tolist() == [7]
+
+
+@pytest.mark.parametrize("rope_max_frame_gap", [11, 12])
+def test_minwm_cuda_graph_refreshes_block_relative_rope_after_window_roll(
+    rope_max_frame_gap,
+):
+    cache = _make_minwm_test_cache(
+        cache_size=6,
+        sink_tokens=1,
+        rope_position_mode="block_relative",
+        rope_max_frame_gap=rope_max_frame_gap,
+    )
+
+    def append_chunk(token_start):
+        frames = [token_start, token_start + 1]
+        _append_minwm_test_frames(cache, frames, token_start=token_start)
+        position_ids = torch.tensor(
+            [[frames[0], 0, 0], [frames[1], 0, 0]], dtype=torch.long
+        )
+        plan = cache.prepare_attention_plan(
+            current_chunk_start=token_start,
+            position_ids=position_ids,
+        )
+        plan.query_cos = plan.query_position_ids.float()
+        plan.query_sin = -plan.query_cos
+        plan.key_cos = plan.key_position_ids.float()
+        plan.key_sin = -plan.key_cos
+        return plan
+
+    append_chunk(0)
+    append_chunk(2)
+    captured = append_chunk(4)
+    static_plan = SimpleNamespace(
+        **{
+            name: None if (value := getattr(captured, name)) is None else value.clone()
+            for name in (
+                "key_position_ids",
+                "query_position_ids",
+                "key_cos",
+                "key_sin",
+                "query_cos",
+                "query_sin",
+            )
+        }
+    )
+
+    current = append_chunk(6)
+    assert not torch.equal(static_plan.query_position_ids, current.query_position_ids)
+    assert _cuda_graph_attention_plan_signature(
+        captured
+    ) == _cuda_graph_attention_plan_signature(current)
+
+    runner = _MinWMCudaGraphRunner(key=())
+    runner.capture_dependencies = static_plan
+    runner._copy_attention_plan_inputs(current)
+
+    for name in (
+        "key_position_ids",
+        "query_position_ids",
+        "key_cos",
+        "key_sin",
+        "query_cos",
+        "query_sin",
+    ):
+        torch.testing.assert_close(
+            getattr(static_plan, name), getattr(current, name), rtol=0, atol=0
+        )
 
 
 def test_minwm_prompt_first_frame_promotes_only_when_leaving_tail():

@@ -3,21 +3,41 @@
 本目录是可重复部署的生产链路，不是直连 Denoiser 的验证拓扑：
 
 ```text
-NLB -> Gateway CPU Pool -> Coordinator CPU Pool -> H100 Spot Denoiser
-                                             \-> L4 Spot TAEHV
+NLB -> Gateway CPU Pool -> Coordinator CPU Pool -> one H100 Spot node
+                                             \-> L4 TAEHV (On-Demand preferred, Spot fallback)
 TAEHV -> owning Gateway -> Browser
 ```
 
 Gateway 和 Coordinator 各至少两个跨 AZ CPU Pod。Coordinator 使用 DynamoDB
 On-Demand 保存短期用户、Session 和 Worker slot Lease；GPU KV、latent history 和
-TAEHV context 只保存在绑定 Worker 本地。H100 与 L4 使用独立 Spot NodePool，并可独立
-缩容到 0。L4 不满足延迟门禁时，使用不在 base kustomization 中的 `l40s-vae.yaml`。
+TAEHV context 只保存在绑定 Worker 本地。H100 与 L4 使用独立 NodePool；生产 GPU
+workload 有最小副本保护，禁止缩容到 0。L4 不满足延迟门禁时，使用不在 base
+kustomization 中的 `l40s-vae.yaml`。
 
-当前模型的生产准入上限为 `4 Session/H100`，8 个 H100 Worker 共 32 个
-Denoiser slot。Coordinator 会按 Worker 的有效占用率、队列深度和服务耗时选择 slot，
-使同一批新 Session 尽量平均分布到 8 张 H100。单 L4 VAE 广播 16 个 Context slot；
-如果只部署 1 个 L4 VAE Worker，整体链路会先受 VAE 的 16 个 slot 限制，需要 2 个
-L4 VAE Worker 才能完整释放 32 个 Denoiser slot。
+GPU 基线为一台 8 卡 H100 Spot `p5.48xlarge`。单机部署两个 Zing SP=2 worker
+（每个 1 个 Session）和一个 LingBot2 SP=4 worker（4 个 Session），共占满 8 卡，
+全局容量为 Zing 2 个 Session + LingBot2 4 个 Session。Coordinator 会按 Worker 的
+有效占用率、队列深度和服务耗时选择 slot。
+
+### H100 本地 NVMe 约束
+
+- H100 NodePool 必须引用 `minwm-async-denoiser-8gpu-nvme-ec2`，并设置
+  `instanceStorePolicy: RAID0`。AL2023 会在 kubelet 启动前把 p5 的本地 NVMe 组成
+  `/dev/md/0`，挂载到 `/mnt/k8s-disks/0`。
+- Zing 与 LingBot2 的共享模型缓存固定使用
+  `/mnt/k8s-disks/0/minwm-model-cache`，禁止回退到根盘的
+  `/var/lib/minwm-model-cache`。原始模型仍从同区域只读 S3 serving artifact staging；
+  节点回收后本地缓存丢失是预期行为。
+- NodePool 和所有 H100 Pod 必须同时带
+  `seedleap.ai/model-cache-storage=local-nvme`；该调度标签是硬门禁，禁止新 Pod 落回
+  尚未启用 Instance Store 的旧节点。
+- gp3 根盘只承载操作系统，固定为 100Gi。发布和验收必须检查 Node 的
+  `ephemeral-storage` 接近 p5 本地盘总容量，并在 Denoiser 内确认
+  `findmnt -T /model-cache` 的底层设备为 `/dev/md/0`，不能仅凭 Linux 中包含
+  `nvme` 的设备名判断——EBS 同样会显示为 NVMe 设备。
+- 修改 NodeClass 会令旧 NodeClaim 进入 Drift。在线切换前必须先保护当前 Pod，且
+  Denoiser 保持 `updateStrategy: OnDelete`；只有下一次节点替换或明确维护窗口才删除
+  旧 Pod，禁止为切换缓存盘主动中断当前用户。
 
 ## 不可变依赖与模型
 
@@ -27,6 +47,8 @@ L4 VAE Worker 才能完整释放 32 个 Denoiser slot。
 - 原始 checkpoint 先由一次性 CPU Spot Publisher 转换为版本化、带 SHA-256 manifest
   的独立 S3 serving artifact；`_READY` 最后写入。Denoiser 只挂载只读 serving
   artifact，启动时不再转换 checkpoint。
+- 生产 serving artifact 从
+  `leap-world-model-serving-829115578968-us-east-2` 只读挂载，避免 H100 冷启动跨区读取。
 - 集群复用已有 NVIDIA device plugin、S3 CSI Driver 和 EC2NodeClass，不重复安装集群级
   组件。
 
@@ -42,11 +64,9 @@ L4 VAE Worker 才能完整释放 32 个 Denoiser slot。
    `_READY`；Publisher 使用独立 300Gi 加密 gp3 NodeClass，结束后随 NodePool 删除。
 4. `deploy_production.sh` 只读检查 DDB、Log Group、模型 `_READY` 和所有镜像 digest，
    然后 server-side apply 完整拓扑。
-   Denoiser StatefulSet 固定使用 `podManagementPolicy: Parallel` 和
-   `updateStrategy: OnDelete`；GPU 版本变更时默认按 2 个 Pod 一批执行
-   `2 -> 2 -> 2 -> 2` 滚动替换。每批两个旧 Pod 完全删除、同名新 Pod 创建并全部
-   Ready 后才进入下一批，
-   因此更新期间至少保留 6 张卡服务，不做逐卡串行更新，也不一次删空整台节点。
+   两个 Denoiser StatefulSet 固定使用 `podManagementPolicy: Parallel` 和
+   `updateStrategy: OnDelete`。扩容时先等待新增副本全部 Ready，再按默认每批 1 个
+   Pod 轮换旧 revision，任何时刻都保留另一台/另一个副本提供服务。
 5. 从 NLB 运行 `browser_probe.cjs` 与 `e2e_production_chain.py`；测试必须证明真实
    Coordinator 配对、VAE 直传、独立 Trace HTTP 查询和 Display Lag 门禁。
 6. 本轮测试完成后保持服务运行供人工验证，不调用清理脚本。收到明确清理指令后才运行
