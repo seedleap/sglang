@@ -276,7 +276,7 @@ def required_inputs_document() -> dict[str, Any]:
                 "payloadBytes": 110277729372,
                 "controlBytes": 8656,
                 "totalBytes": 110277738028,
-            }
+            },
         },
     }
 

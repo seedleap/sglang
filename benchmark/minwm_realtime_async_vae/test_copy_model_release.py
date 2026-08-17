@@ -150,9 +150,7 @@ def test_release_spec_rejects_script_and_source_control_tampering(tmp_path):
     }
 
     scripts_tampered = json.loads(json.dumps(release))
-    scripts_tampered["publisher_scripts"]["copy_model_release.py"]["sha256"] = (
-        "0" * 64
-    )
+    scripts_tampered["publisher_scripts"]["copy_model_release.py"]["sha256"] = "0" * 64
     path = tmp_path / "scripts-tampered.json"
     path.write_text(json.dumps(scripts_tampered), encoding="utf-8")
     with pytest.raises(ValueError, match="publisher scripts"):
@@ -163,9 +161,7 @@ def test_release_spec_rejects_script_and_source_control_tampering(tmp_path):
     path = tmp_path / "control-sha-tampered.json"
     path.write_text(json.dumps(control_sha_tampered), encoding="utf-8")
     with pytest.raises(ValueError, match="source _READY does not match"):
-        load_and_validate_release(
-            path, FakeSourceClient(ready_body, manifest_body)
-        )
+        load_and_validate_release(path, FakeSourceClient(ready_body, manifest_body))
 
     class VersionAwareSource(FakeSourceClient):
         def get_object(self, *, Bucket, Key, VersionId):
@@ -235,9 +231,7 @@ def test_source_validation_hashes_version_pinned_content_before_copy():
 
 def test_execution_bundle_binds_scripts_controls_allowlist_versions_and_destination():
     manifest_body = b'{"schema_version":1,"revision":"r1"}'
-    files = {
-        "weights.bin": {"path": "weights.bin", "size": 7, "sha256": "1" * 64}
-    }
+    files = {"weights.bin": {"path": "weights.bin", "size": 7, "sha256": "1" * 64}}
     release = {
         "release_id": "release-1",
         "release_manifest_created_at": "2026-08-14T01:02:03Z",
@@ -414,9 +408,12 @@ def test_legacy_lingbot2_offline_dry_run_remains_blocked_by_new_bundle_contract(
         (LINGBOT2_RELEASE_ROOT / "offline-dry-run.golden.json").read_text()
     )
 
-    assert offline_plan(
-        release, release_spec_sha256=hashlib.sha256(release_body).hexdigest()
-    ) == expected
+    assert (
+        offline_plan(
+            release, release_spec_sha256=hashlib.sha256(release_body).hexdigest()
+        )
+        == expected
+    )
     assert release["model"]["revision"] == ("59cccf49f2d2dd27418ae7a04b82b10868d455c2")
     assert release["destination"]["bucket"] == (
         "leap-world-model-serving-829115578968-us-east-2"

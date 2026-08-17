@@ -123,9 +123,10 @@ def resolve_model_source(
             raise ValueError("model-s3-uri has an invalid S3 bucket name")
         resolved_prefix = _safe_s3_prefix(parsed.path)
         prefix_parts = PurePosixPath(resolved_prefix).parts
-        if (
-            len(prefix_parts) != 4
-            or prefix_parts[:3] != ("models", model_name, model_version)
+        if len(prefix_parts) != 4 or prefix_parts[:3] != (
+            "models",
+            model_name,
+            model_version,
         ):
             raise ValueError(
                 "model-s3-uri must follow "
@@ -298,10 +299,7 @@ def validate_release_controls(
         ready_value = ready.get(field)
         if info_value is None and ready_value is None:
             continue
-        if (
-            not isinstance(info_value, str)
-            or not SHA256_RE.fullmatch(info_value)
-        ):
+        if not isinstance(info_value, str) or not SHA256_RE.fullmatch(info_value):
             raise ValueError(f"model info has no valid {field}")
         if ready_value != info_value:
             raise ValueError(f"model info and _READY {field} differ")

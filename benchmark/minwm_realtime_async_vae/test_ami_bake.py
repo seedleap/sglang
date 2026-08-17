@@ -1,6 +1,5 @@
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parent
 
 
@@ -8,7 +7,7 @@ def test_bake_keeps_cached_containerd_on_the_ami_root_volume():
     script = (ROOT / "ami/preload_container_image.sh").read_text()
 
     assert "setup-local-disks.eks" in script
-    assert '--no-bind-containerd' in script
+    assert "--no-bind-containerd" in script
     assert 'exec /usr/bin/setup-local-disks.eks "$@" --no-bind-containerd' in script
 
 

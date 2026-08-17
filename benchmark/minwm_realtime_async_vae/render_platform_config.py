@@ -14,7 +14,6 @@ from platform_config import (
     validate_configs,
 )
 
-
 ROOT = Path(__file__).resolve().parent
 DEFAULT_OUTPUT = ROOT / "platform/world-model/golden"
 DEFAULT_REQUIRED_INPUTS = ROOT / "platform/world-model/required-inputs.json"
@@ -37,9 +36,12 @@ def render_documents(
 
 
 def render_required_inputs() -> str:
-    return json.dumps(
-        required_inputs_document(), ensure_ascii=True, indent=2, sort_keys=True
-    ) + "\n"
+    return (
+        json.dumps(
+            required_inputs_document(), ensure_ascii=True, indent=2, sort_keys=True
+        )
+        + "\n"
+    )
 
 
 def parse_args() -> argparse.Namespace:
@@ -84,7 +86,10 @@ def main() -> None:
             path = args.output_dir / name
             if path.read_text(encoding="utf-8") != content:
                 raise SystemExit(f"golden is stale: {path}")
-        if DEFAULT_REQUIRED_INPUTS.read_text(encoding="utf-8") != render_required_inputs():
+        if (
+            DEFAULT_REQUIRED_INPUTS.read_text(encoding="utf-8")
+            != render_required_inputs()
+        ):
             raise SystemExit(f"required inputs are stale: {DEFAULT_REQUIRED_INPUTS}")
         return
 

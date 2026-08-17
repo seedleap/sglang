@@ -421,9 +421,7 @@ def test_accepts_unbound_migration_controls_and_rejects_mismatched_bindings():
     del info["publisher_bundle_sha256"]
     del ready["release_spec_sha256"]
     del ready["publisher_bundle_sha256"]
-    unbound_info_body = json.dumps(
-        info, sort_keys=True, separators=(",", ":")
-    ).encode()
+    unbound_info_body = json.dumps(info, sort_keys=True, separators=(",", ":")).encode()
     ready["info_sha256"] = hashlib.sha256(unbound_info_body).hexdigest()
     validate_release_controls(
         unbound_info_body,

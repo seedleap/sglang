@@ -153,9 +153,8 @@ def load_and_validate_release(
     if expected_scripts != actual_scripts:
         raise ValueError("runtime publisher scripts do not match release spec")
     expected_bundle_sha256 = release.get("publisher_bundle_sha256")
-    if (
-        not isinstance(expected_bundle_sha256, str)
-        or not SHA256_RE.fullmatch(expected_bundle_sha256)
+    if not isinstance(expected_bundle_sha256, str) or not SHA256_RE.fullmatch(
+        expected_bundle_sha256
     ):
         raise ValueError("release has no valid publisher_bundle_sha256")
     if publisher_bundle_sha256() != expected_bundle_sha256:
@@ -416,12 +415,12 @@ def _list_destination_keys(client: Any, bucket: str, prefix: str) -> set[str]:
             return keys
         continuation_token = response.get("NextContinuationToken")
         if not isinstance(continuation_token, str) or not continuation_token:
-            raise ValueError("destination listing is truncated without a continuation token")
+            raise ValueError(
+                "destination listing is truncated without a continuation token"
+            )
 
 
-def _expected_destination_keys(
-    prefix: str, manifest_files: dict[str, Any]
-) -> set[str]:
+def _expected_destination_keys(prefix: str, manifest_files: dict[str, Any]) -> set[str]:
     prefix = prefix.strip("/")
     return {
         f"{prefix}/artifact-manifest.json",
@@ -457,7 +456,9 @@ def _validate_destination_before_copy(
             continue
         response = _destination_head(destination_client, destination["bucket"], key)
         if response is None:
-            raise RuntimeError(f"destination object disappeared during preflight: {path}")
+            raise RuntimeError(
+                f"destination object disappeared during preflight: {path}"
+            )
         _verify_destination(
             response,
             path,
@@ -816,9 +817,7 @@ def main() -> None:
     if args.offline_plan:
         print(
             json.dumps(
-                offline_plan(
-                    release_document, release_spec_sha256=release_spec_sha256
-                ),
+                offline_plan(release_document, release_spec_sha256=release_spec_sha256),
                 sort_keys=True,
             ),
             flush=True,
@@ -828,10 +827,7 @@ def main() -> None:
         raise ValueError(
             "--execute requires --confirm-release-id matching the reviewed release"
         )
-    if (
-        args.execute
-        and args.confirm_release_spec_sha256 != release_spec_sha256
-    ):
+    if args.execute and args.confirm_release_spec_sha256 != release_spec_sha256:
         raise ValueError(
             "--execute requires --confirm-release-spec-sha256 matching the "
             "reviewed release spec bytes"
