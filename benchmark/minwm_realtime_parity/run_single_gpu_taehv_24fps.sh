@@ -66,7 +66,10 @@ set -euo pipefail
 
 readonly LOCAL_ROOT="/work/minwm-taehv24/${MINWM_RUN_ID}"
 readonly LOCAL_RESULTS="${LOCAL_ROOT}/results"
+readonly LOCAL_FAILED="${LOCAL_ROOT}/FAILED"
 readonly REMOTE_RESULTS="${MINWM_RESULTS_ROOT%/}/${MINWM_RUN_ID}"
+readonly LOCAL_ARCHIVE_COPY_PROBE="${LOCAL_ROOT}/ARCHIVE_COPY_PROBE"
+readonly REMOTE_ARCHIVE_COPY_PROBE="${REMOTE_RESULTS}/ARCHIVE_COPY_PROBE"
 readonly REPO_ROOT="${LOCAL_ROOT}/sglang"
 readonly CHECKPOINT="${LOCAL_ROOT}/input/checkpoint/model.pt"
 readonly PRETRAINED="${LOCAL_ROOT}/input/pretrained"
@@ -93,6 +96,7 @@ fi
 server_pid=""
 nsys_session=""
 capture_active=0
+archive_attempted=0
 
 stop_server() {
   if [[ -n "${server_pid}" ]]; then
@@ -111,6 +115,17 @@ stop_server() {
   fi
 }
 
+copy_tree_contents() {
+  local source="$1"
+  local destination="$2"
+  cp -R --no-preserve=all "${source}/." "${destination}/"
+}
+
+archive_results() {
+  archive_attempted=1
+  copy_tree_contents "${LOCAL_RESULTS}" "${REMOTE_RESULTS}"
+}
+
 finish() {
   local status="${1:-$?}"
   trap - EXIT INT TERM
@@ -121,8 +136,11 @@ finish() {
   fi
   stop_server
   if (( status != 0 )); then
-    printf 'status=%d\n' "${status}" > "${LOCAL_RESULTS}/FAILED"
-    cp -a "${LOCAL_RESULTS}/." "${REMOTE_RESULTS}/" 2>/dev/null
+    printf 'status=%d\n' "${status}" > "${LOCAL_FAILED}"
+    if (( archive_attempted == 0 )); then
+      archive_results 2>/dev/null
+    fi
+    cp "${LOCAL_FAILED}" "${REMOTE_RESULTS}/FAILED" 2>/dev/null
   fi
   exit "${status}"
 }
@@ -137,6 +155,12 @@ cp "${LOCAL_ROOT}/STORAGE_WRITE_PROBE" \
   "${REMOTE_RESULTS}/STORAGE_WRITE_PROBE"
 cmp --silent "${LOCAL_ROOT}/STORAGE_WRITE_PROBE" \
   "${REMOTE_RESULTS}/STORAGE_WRITE_PROBE"
+mkdir -p "${LOCAL_ARCHIVE_COPY_PROBE}/nested" "${REMOTE_ARCHIVE_COPY_PROBE}"
+printf 'run_id=%s\narchive_copy_probe=recursive-no-posix-metadata\n' \
+  "${MINWM_RUN_ID}" > "${LOCAL_ARCHIVE_COPY_PROBE}/nested/payload"
+copy_tree_contents "${LOCAL_ARCHIVE_COPY_PROBE}" "${REMOTE_ARCHIVE_COPY_PROBE}"
+cmp --silent "${LOCAL_ARCHIVE_COPY_PROBE}/nested/payload" \
+  "${REMOTE_ARCHIVE_COPY_PROBE}/nested/payload"
 
 wait_for_server() {
   local log_path="$1"
@@ -1174,7 +1198,7 @@ PY
 printf 'status=0\nrun_id=%s\nmode=%s\n' \
   "${MINWM_RUN_ID}" "${MINWM_PROFILE_MODE}" \
   > "${LOCAL_RESULTS}/RUN_COMPLETE"
-cp -a "${LOCAL_RESULTS}/." "${REMOTE_RESULTS}/"
+archive_results
 printf 'MINWM_SINGLE_GPU_TAEHV24_COMPLETE mode=%s results=%s\n' \
   "${MINWM_PROFILE_MODE}" "${REMOTE_RESULTS}"
 cp "${LOCAL_RESULTS}/RUN_COMPLETE" "${REMOTE_RESULTS}/SUCCESS"

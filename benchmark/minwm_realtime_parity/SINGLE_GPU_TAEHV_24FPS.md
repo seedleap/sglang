@@ -107,7 +107,8 @@ kubectl --context <context> apply --dry-run=server -f <generated-yaml>
   `s3-claim` is ROX and is intentionally not a renderer target. A split layout
   fails closed unless it names a distinct, verified RWX S3 results PVC.
   Before any expensive setup, runtime writes and reads back a non-empty
-  `STORAGE_WRITE_PROBE` in the unique result prefix. Runtime
+  `STORAGE_WRITE_PROBE` in the unique result prefix, then recursively copies
+  and reads back a nested `ARCHIVE_COPY_PROBE` without POSIX metadata. Runtime
   exports `MINWM_S3_MOUNT=/s3-input`, derives the mount key from the immutable
   case URI, and refuses to launch the server unless that object is readable and
   matches the recorded byte count and SHA-256. The complete provenance is
@@ -127,4 +128,8 @@ kubectl --context <context> apply --dry-run=server -f <generated-yaml>
   exit nonzero after preserving results when that performance gate fails.
   The runner copies a non-empty local `RUN_COMPLETE` payload to the remote
   `SUCCESS` key only after all artifacts have been archived; it does not rely
-  on S3 CSI metadata-only `touch` semantics.
+  on S3 CSI metadata-only `touch` semantics. Artifact archival recursively
+  copies file contents without preserving POSIX metadata, which Mountpoint S3
+  does not support. Recursive archival is attempted at most once; if it or a
+  later completion step fails, cleanup only publishes the non-empty `FAILED`
+  marker and never retries a partially uploaded tree.

@@ -253,6 +253,15 @@ def test_render_preserves_single_gpu_hardware_and_profile_contract(
     assert runner.index('cp "${LOCAL_ROOT}/STORAGE_WRITE_PROBE"') < runner.index(
         "git clone"
     )
+    assert '"${LOCAL_ROOT}/ARCHIVE_COPY_PROBE"' in runner
+    assert '"${LOCAL_RESULTS}/ARCHIVE_COPY_PROBE"' not in runner
+    assert (
+        'copy_tree_contents "${LOCAL_ARCHIVE_COPY_PROBE}" '
+        '"${REMOTE_ARCHIVE_COPY_PROBE}"' in runner
+    )
+    assert runner.index('copy_tree_contents "${LOCAL_ARCHIVE_COPY_PROBE}"') < (
+        runner.index("git clone")
+    )
     assert 'uri = os.environ["MINWM_FIRST_FRAME_SOURCE_URI"]' in runner
     assert 'Path(os.environ["MINWM_S3_MOUNT"]) / key' in runner
     assert "assert mounted_source.is_file()" in runner
@@ -276,6 +285,18 @@ def test_render_preserves_single_gpu_hardware_and_profile_contract(
     assert "export SGLANG_DIFFUSION_SYNC_STAGE_PROFILING=0" in runner
     assert "PERFORMANCE_PASS" in runner and "PERFORMANCE_FAIL" in runner
     assert '> "${LOCAL_RESULTS}/RUN_COMPLETE"' in runner
+    assert 'cp -R --no-preserve=all "${source}/." "${destination}/"' in runner
+    assert 'cp -a "${LOCAL_RESULTS}/." "${REMOTE_RESULTS}/"' not in runner
+    assert "archive_attempted=0" in runner
+    assert "archive_attempted=1" in runner
+    assert "if (( archive_attempted == 0 )); then" in runner
+    assert runner.index("archive_attempted=1") < runner.index(
+        'copy_tree_contents "${LOCAL_RESULTS}" "${REMOTE_RESULTS}"'
+    )
+    assert runner.count("archive_results") == 3
+    assert '"${LOCAL_RESULTS}/FAILED"' not in runner
+    assert 'readonly LOCAL_FAILED="${LOCAL_ROOT}/FAILED"' in runner
+    assert 'cp "${LOCAL_FAILED}" "${REMOTE_RESULTS}/FAILED" 2>/dev/null' in runner
     assert 'cp "${LOCAL_RESULTS}/RUN_COMPLETE" "${REMOTE_RESULTS}/SUCCESS"' in runner
     assert 'touch "${REMOTE_RESULTS}/SUCCESS"' not in runner
     completion_log = runner.rindex("MINWM_SINGLE_GPU_TAEHV24_COMPLETE")
