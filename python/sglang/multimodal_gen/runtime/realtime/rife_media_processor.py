@@ -13,6 +13,8 @@ from typing import Any
 
 import torch
 
+_RIFE_TRAINING_ONLY_PREFIXES = ("teacher.", "caltime.")
+
 
 def resolve_rife_weight_file(model_path: str | Path) -> Path:
     """Resolve only an explicit local directory/file; never consult a registry."""
@@ -79,7 +81,10 @@ def _load_strict_rife_state(
     for ``module.`` keys.  That is useful for permissive offline conversion,
     but a realtime capability must not become healthy with an empty or partial
     state dict.  Accept exactly one of the two known layouts: every key has the
-    DataParallel prefix, or no key has it.
+    DataParallel prefix, or no key has it.  The official RIFE 4.22.lite
+    checkpoint also contains ``teacher.`` and ``caltime.`` training-only
+    branches.  Strip only those confirmed auxiliary branches, then require the
+    remaining inference state to match IFNet exactly.
     """
 
     try:
@@ -102,8 +107,13 @@ def _load_strict_rife_state(
         (key.removeprefix("module.") if all(module_prefixed) else key): value
         for key, value in state.items()
     }
+    inference_state = {
+        key: value
+        for key, value in normalized.items()
+        if not key.startswith(_RIFE_TRAINING_ONLY_PREFIXES)
+    }
     try:
-        incompatible = model.flownet.load_state_dict(normalized, strict=True)
+        incompatible = model.flownet.load_state_dict(inference_state, strict=True)
     except (RuntimeError, TypeError, ValueError) as exc:
         raise ValueError("RIFE state dict does not exactly match IFNet") from exc
     # ``strict=True`` raises on current PyTorch releases.  Keep this explicit

@@ -401,35 +401,87 @@ def test_rife_processor_loads_the_exact_weight_bytes_that_were_hashed(tmp_path):
     torch.testing.assert_close(processor.model.flownet.weight, torch.ones(1))
 
 
+class _SingleWeightRIFEModel:
+    def __init__(self):
+        self.flownet = torch.nn.Linear(1, 1, bias=False)
+
+    def eval(self):
+        return self
+
+
+def _create_single_weight_rife_processor(tmp_path, state):
+    weight_file = tmp_path / "flownet.pkl"
+    torch.save(state, weight_file)
+    digest = hashlib.sha256(weight_file.read_bytes()).hexdigest()
+    return RIFE2xMediaProcessor(
+        tmp_path,
+        digest,
+        device="cpu",
+        model_factory=_SingleWeightRIFEModel,
+    )
+
+
+def test_strict_local_rife_processor_accepts_official_training_auxiliaries(tmp_path):
+    expected_weight = torch.full((1, 1), 2.0)
+    processor = _create_single_weight_rife_processor(
+        tmp_path,
+        {
+            "module.weight": expected_weight,
+            "module.teacher.block0.conv0.0.1.weight": torch.ones(1),
+            "module.caltime.0.weight": torch.ones(1),
+        },
+    )
+    torch.testing.assert_close(processor.model.flownet.weight, expected_weight)
+
+
+def test_strict_local_rife_processor_rejects_unknown_extra_key(tmp_path):
+    with pytest.raises(ValueError, match="exactly match IFNet"):
+        _create_single_weight_rife_processor(
+            tmp_path,
+            {
+                "module.weight": torch.ones((1, 1)),
+                "module.unrecognized.weight": torch.ones(1),
+            },
+        )
+
+
+def test_strict_local_rife_processor_rejects_missing_inference_key_after_strip(
+    tmp_path,
+):
+    with pytest.raises(ValueError, match="exactly match IFNet"):
+        _create_single_weight_rife_processor(
+            tmp_path,
+            {
+                "module.teacher.block0.conv0.0.1.weight": torch.ones(1),
+                "module.caltime.0.weight": torch.ones(1),
+            },
+        )
+
+
+def test_strict_local_rife_processor_rejects_mixed_module_prefixes(tmp_path):
+    with pytest.raises(ValueError, match="cannot mix prefixed and unprefixed"):
+        _create_single_weight_rife_processor(
+            tmp_path,
+            {
+                "module.weight": torch.ones((1, 1)),
+                "teacher.block0.conv0.0.1.weight": torch.ones(1),
+            },
+        )
+
+
 @pytest.mark.parametrize(
     "state",
     [
         {},
-        {"module.not_a_real_parameter": torch.ones(1)},
-        {"module.weight": torch.ones(1), "other": torch.ones(1)},
+        {"module.weight": torch.ones(1)},
     ],
 )
-def test_strict_local_rife_processor_rejects_incomplete_or_mixed_state(
+def test_strict_local_rife_processor_rejects_empty_or_misshaped_state(
     tmp_path,
     state,
 ):
-    class _Model:
-        def __init__(self):
-            self.flownet = torch.nn.Linear(1, 1, bias=False)
-
-        def eval(self):
-            return self
-
-    weight_file = tmp_path / "flownet.pkl"
-    torch.save(state, weight_file)
-    digest = hashlib.sha256(weight_file.read_bytes()).hexdigest()
     with pytest.raises(ValueError, match="state dict"):
-        RIFE2xMediaProcessor(
-            tmp_path,
-            digest,
-            device="cpu",
-            model_factory=_Model,
-        )
+        _create_single_weight_rife_processor(tmp_path, state)
 
 
 def test_worker_does_not_advertise_rife_before_processor_warmup():
