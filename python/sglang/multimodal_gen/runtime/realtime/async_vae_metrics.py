@@ -37,6 +37,7 @@ _UNIFIED_STAGE_BY_LEGACY_STAGE = {
     "queue_wait": "vae_queue",
     "decode": "vae_decode",
     "post_decode": "post_decode",
+    "rife_interpolation": "frame_interpolation",
     "frame_encode": "frame_encode",
 }
 

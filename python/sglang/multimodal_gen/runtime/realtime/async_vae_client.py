@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import math
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -27,6 +28,12 @@ from sglang.multimodal_gen.runtime.realtime.async_vae_protocol import (
     is_loopback_url,
     materialize_payload_from_shared_memory,
     store_payload_in_shared_memory,
+)
+from sglang.multimodal_gen.runtime.realtime.media_profile import (
+    MediaProfileAcceptance,
+    RealtimeMediaProfile,
+    parse_media_profile,
+    validate_source_timeline_fps,
 )
 
 
@@ -52,6 +59,9 @@ class RemoteFrameBatch:
     source_height: int
     preview_width: int
     preview_height: int
+    media_profile: RealtimeMediaProfile = RealtimeMediaProfile.NATIVE_V1
+    source_timeline_fps: float = 24.0
+    output_timeline_fps: float = 24.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,10 +69,16 @@ class RemoteDecodeResult:
     request_id: str
     chunk_index: int
     num_frames: int
+    source_num_frames: int
+    output_num_frames: int
+    media_profile: RealtimeMediaProfile
+    source_timeline_fps: float
+    output_timeline_fps: float
     queue_wait_ms: float
     decode_ms: float
     post_decode_ms: float
     encode_ms: float
+    rife_interpolation_ms: float
     transfer_ms: float
     serialize_ms: float
     latent_send_ms: float
@@ -294,6 +310,7 @@ class RealtimeVAEClient:
         self._callback_tail: asyncio.Task | None = None
         self._closed = False
         self.decoder_backend: str | None = None
+        self.media_profile_acceptance: MediaProfileAcceptance | None = None
 
     async def open(
         self,
@@ -307,11 +324,21 @@ class RealtimeVAEClient:
         trace_id: str | None = None,
         coordinator_token: str | None = None,
         worker_epoch: str | None = None,
-    ) -> None:
+        media_profile: RealtimeMediaProfile | str = RealtimeMediaProfile.NATIVE_V1,
+        source_timeline_fps: float = 24.0,
+    ) -> MediaProfileAcceptance:
         if self._ws is not None:
-            return
+            if self.media_profile_acceptance is None:
+                raise RemoteVAEError("VAE client negotiation is incomplete")
+            return self.media_profile_acceptance
         if decoder_backend not in {"exact", "taehv"}:
             raise ValueError("decoder_backend must be exact or taehv")
+        requested_media_profile = parse_media_profile(media_profile)
+        source_timeline_fps = (
+            validate_source_timeline_fps(source_timeline_fps)
+            if requested_media_profile is RealtimeMediaProfile.RIFE2X_V1
+            else float(source_timeline_fps)
+        )
         self.decoder_backend = decoder_backend
         self._ws = await self._connect_factory(
             self.url,
@@ -322,27 +349,30 @@ class RealtimeVAEClient:
             ping_interval=20,
             ping_timeout=20,
         )
-        await self._ws.send(
-            encode_message(
-                "session_open",
-                session_id=self.session_id,
-                generation_id=self.generation_id,
-                decoder_backend=decoder_backend,
-                response_transport=(
-                    self.payload_transport
-                    if output_url is None
-                    else PAYLOAD_TRANSPORT_WEBSOCKET
-                ),
-                output_format=output_format,
-                quality=quality,
-                preview_max_width=preview_max_width,
-                output_url=output_url,
-                output_token=output_token,
-                trace_id=trace_id,
-                coordinator_token=coordinator_token,
-                worker_epoch=worker_epoch,
+        open_fields = {
+            "session_id": self.session_id,
+            "generation_id": self.generation_id,
+            "decoder_backend": decoder_backend,
+            "response_transport": (
+                self.payload_transport
+                if output_url is None
+                else PAYLOAD_TRANSPORT_WEBSOCKET
+            ),
+            "output_format": output_format,
+            "quality": quality,
+            "preview_max_width": preview_max_width,
+            "output_url": output_url,
+            "output_token": output_token,
+            "trace_id": trace_id,
+            "coordinator_token": coordinator_token,
+            "worker_epoch": worker_epoch,
+        }
+        if requested_media_profile is RealtimeMediaProfile.RIFE2X_V1:
+            open_fields.update(
+                media_profile=requested_media_profile.value,
+                source_timeline_fps=source_timeline_fps,
             )
-        )
+        await self._ws.send(encode_message("session_open", **open_fields))
         response = decode_message(
             await asyncio.wait_for(self._ws.recv(), self.timeout_s),
             max_message_bytes=self.max_message_bytes,
@@ -361,9 +391,82 @@ class RealtimeVAEClient:
         expected_fidelity = "approximate" if decoder_backend == "taehv" else "exact"
         if response.get("decoder_fidelity") != expected_fidelity:
             raise ProtocolViolation("VAE worker decoder fidelity mismatch")
+        media_fields_present = any(
+            name in response
+            for name in (
+                "requested_media_profile",
+                "effective_media_profile",
+                "source_timeline_fps",
+                "output_timeline_fps",
+            )
+        )
+        if not media_fields_present:
+            if requested_media_profile is not RealtimeMediaProfile.NATIVE_V1:
+                raise ProtocolViolation(
+                    "VAE worker did not negotiate the requested media profile"
+                )
+            # Rolling compatibility for the unchanged native path.  Legacy VAE
+            # workers can only produce native frames, so this is not a silent
+            # capability downgrade.
+            accepted_requested = RealtimeMediaProfile.NATIVE_V1
+            accepted_effective = RealtimeMediaProfile.NATIVE_V1
+            accepted_source_timeline_fps = source_timeline_fps
+            accepted_output_timeline_fps = source_timeline_fps
+            weights_sha256 = None
+        else:
+            accepted_requested = parse_media_profile(
+                response.get("requested_media_profile")
+            )
+            accepted_effective = parse_media_profile(
+                response.get("effective_media_profile")
+            )
+            if accepted_requested is not requested_media_profile:
+                raise ProtocolViolation("VAE worker requested media profile mismatch")
+            if accepted_effective is not requested_media_profile:
+                raise ProtocolViolation("VAE worker silently changed media profile")
+            accepted_source_timeline_fps = validate_source_timeline_fps(
+                response.get("source_timeline_fps")
+            )
+            if abs(accepted_source_timeline_fps - source_timeline_fps) > 1e-6:
+                raise ProtocolViolation("VAE worker source fps mismatch")
+            expected_output_timeline_fps = (
+                source_timeline_fps
+                * requested_media_profile.output_timeline_fps_multiplier
+            )
+            try:
+                accepted_output_timeline_fps = float(
+                    response.get("output_timeline_fps")
+                )
+            except (TypeError, ValueError) as exc:
+                raise ProtocolViolation("VAE worker output fps is invalid") from exc
+            if (
+                not math.isfinite(accepted_output_timeline_fps)
+                or abs(accepted_output_timeline_fps - expected_output_timeline_fps)
+                > 1e-6
+            ):
+                raise ProtocolViolation("VAE worker output fps mismatch")
+            weights_sha256 = response.get("media_weights_sha256")
+        if requested_media_profile is RealtimeMediaProfile.RIFE2X_V1:
+            if (
+                not isinstance(weights_sha256, str)
+                or len(weights_sha256) != 64
+                or any(char not in "0123456789abcdefABCDEF" for char in weights_sha256)
+            ):
+                raise ProtocolViolation("VAE worker RIFE weights digest is missing")
+            weights_sha256 = weights_sha256.lower()
+        else:
+            weights_sha256 = None
+        self.media_profile_acceptance = MediaProfileAcceptance(
+            requested=accepted_requested,
+            effective=accepted_effective,
+            source_timeline_fps=accepted_source_timeline_fps,
+            output_timeline_fps=accepted_output_timeline_fps,
+            weights_sha256=weights_sha256,
+        )
         self._reader_task = asyncio.create_task(
             self._read_loop(), name=f"vae-reader-{self.session_id[:8]}"
         )
+        return self.media_profile_acceptance
 
     async def submit(
         self,
@@ -532,6 +635,61 @@ class RealtimeVAEClient:
         if int(message.get("chunk_index", -1)) != header.chunk_index:
             raise ProtocolViolation("VAE response chunk mismatch")
 
+    def _validated_media_fields(
+        self,
+        message: dict,
+        *,
+        response_kind: str,
+    ) -> tuple[RealtimeMediaProfile, float, float]:
+        acceptance = self.media_profile_acceptance
+        if acceptance is None:
+            raise ProtocolViolation("VAE media profile was not negotiated")
+        required = (
+            "media_profile",
+            "source_timeline_fps",
+            "output_timeline_fps",
+        )
+        if acceptance.interpolation_enabled:
+            missing = [field for field in required if field not in message]
+            if missing:
+                raise ProtocolViolation(
+                    f"remote {response_kind} omitted RIFE fields: {', '.join(missing)}"
+                )
+        profile_value = (
+            message["media_profile"]
+            if "media_profile" in message
+            else acceptance.effective.value
+        )
+        source_value = (
+            message["source_timeline_fps"]
+            if "source_timeline_fps" in message
+            else acceptance.source_timeline_fps
+        )
+        output_value = (
+            message["output_timeline_fps"]
+            if "output_timeline_fps" in message
+            else acceptance.output_timeline_fps
+        )
+        media_profile = parse_media_profile(profile_value)
+        try:
+            source_timeline_fps = float(source_value)
+            output_timeline_fps = float(output_value)
+        except (TypeError, ValueError) as exc:
+            raise ProtocolViolation(
+                f"remote {response_kind} media timing is invalid"
+            ) from exc
+        if not math.isfinite(source_timeline_fps) or not math.isfinite(
+            output_timeline_fps
+        ):
+            raise ProtocolViolation(f"remote {response_kind} media timing is invalid")
+        if (
+            media_profile is not acceptance.effective
+            or abs(source_timeline_fps - acceptance.source_timeline_fps) > 1e-6
+            or abs(output_timeline_fps - acceptance.output_timeline_fps) > 1e-6
+        ):
+            raise ProtocolViolation(f"remote {response_kind} media profile mismatch")
+        return media_profile, source_timeline_fps, output_timeline_fps
+
     def _decode_frame_batch(
         self,
         message: dict,
@@ -571,6 +729,9 @@ class RealtimeVAEClient:
             offset += length
         if offset != len(payload):
             raise ProtocolViolation("remote frame payload length mismatch")
+        media_profile, source_timeline_fps, output_timeline_fps = (
+            self._validated_media_fields(message, response_kind="frame")
+        )
         return RemoteFrameBatch(
             session_id=header.session_id,
             generation_id=header.generation_id,
@@ -588,6 +749,9 @@ class RealtimeVAEClient:
             source_height=int(message.get("source_height") or message["height"]),
             preview_width=int(message.get("preview_width") or message["width"]),
             preview_height=int(message.get("preview_height") or message["height"]),
+            media_profile=media_profile,
+            source_timeline_fps=source_timeline_fps,
+            output_timeline_fps=output_timeline_fps,
         )
 
     async def _finish_pending(self, pending: _PendingDecode, message: dict) -> None:
@@ -612,15 +776,69 @@ class RealtimeVAEClient:
         self._pending.pop(pending.header.request_id, None)
         if pending.result.done():
             return
+        try:
+            media_profile, source_timeline_fps, output_timeline_fps = (
+                self._validated_media_fields(message, response_kind="completion")
+            )
+            num_frames = int(message.get("num_frames") or 0)
+            if media_profile is RealtimeMediaProfile.RIFE2X_V1:
+                required = (
+                    "source_num_frames",
+                    "output_num_frames",
+                    "rife_interpolation_ms",
+                )
+                missing = [field for field in required if field not in message]
+                if missing:
+                    raise ProtocolViolation(
+                        "remote completion omitted RIFE telemetry: "
+                        + ", ".join(missing)
+                    )
+                source_num_frames = int(message["source_num_frames"])
+                output_num_frames = int(message["output_num_frames"])
+                rife_interpolation_ms = float(message["rife_interpolation_ms"])
+                if (
+                    source_num_frames < 0
+                    or output_num_frames != num_frames
+                    or output_num_frames < source_num_frames
+                    or not math.isfinite(rife_interpolation_ms)
+                    or rife_interpolation_ms < 0
+                ):
+                    raise ProtocolViolation(
+                        "remote completion RIFE telemetry is invalid"
+                    )
+            else:
+                source_num_frames = int(message.get("source_num_frames") or num_frames)
+                output_num_frames = int(message.get("output_num_frames") or num_frames)
+                rife_interpolation_ms = float(
+                    message.get("rife_interpolation_ms") or 0.0
+                )
+        except (ProtocolViolation, TypeError, ValueError, OverflowError) as exc:
+            self._fail_pending(
+                pending,
+                (
+                    exc
+                    if isinstance(exc, ProtocolViolation)
+                    else ProtocolViolation(
+                        "remote completion media telemetry is invalid"
+                    )
+                ),
+            )
+            return
         pending.result.set_result(
             RemoteDecodeResult(
                 request_id=pending.header.request_id,
                 chunk_index=pending.header.chunk_index,
-                num_frames=int(message.get("num_frames") or 0),
+                num_frames=num_frames,
+                source_num_frames=source_num_frames,
+                output_num_frames=output_num_frames,
+                media_profile=media_profile,
+                source_timeline_fps=source_timeline_fps,
+                output_timeline_fps=output_timeline_fps,
                 queue_wait_ms=float(message.get("queue_wait_ms") or 0.0),
                 decode_ms=float(message.get("decode_ms") or 0.0),
                 post_decode_ms=float(message.get("post_decode_ms") or 0.0),
                 encode_ms=float(message.get("encode_ms") or 0.0),
+                rife_interpolation_ms=rife_interpolation_ms,
                 transfer_ms=(completed_at - pending.sent_at) * 1000.0,
                 serialize_ms=pending.serialize_ms,
                 latent_send_ms=pending.latent_send_ms,
@@ -669,3 +887,4 @@ class RealtimeVAEClient:
             await self._ws.close()
         self._ws = None
         self._callback_tail = None
+        self.media_profile_acceptance = None

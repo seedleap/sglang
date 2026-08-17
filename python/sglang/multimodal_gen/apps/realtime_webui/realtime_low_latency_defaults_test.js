@@ -223,6 +223,71 @@ assert.match(
 );
 assert.match(
   appJs,
+  /const NATIVE_MEDIA_PROFILE\s*=\s*"native_v1";[\s\S]*const RIFE2X_MEDIA_PROFILE\s*=\s*"rife2x_v1";/,
+  "Zing interpolation should use versioned media profiles",
+);
+assert.match(
+  appJs,
+  /function readFrameInterpolationParams\(key = "minwm"\)[\s\S]*key !== "minwm"[\s\S]*return \{\};[\s\S]*realtime_media_profile: RIFE2X_MEDIA_PROFILE/,
+  "only Zing should be able to request the RIFE media profile",
+);
+assert.match(
+  appJs,
+  /delete lingbotInit\.realtime_media_profile/,
+  "comparison-model requests must strip Zing's opt-in media profile",
+);
+assert.doesNotMatch(
+  appJs,
+  /enable_frame_interpolation:\s*true/,
+  "the realtime UI must not invoke the legacy download-capable postprocessor",
+);
+assert.match(
+  appJs,
+  /return mediaProfileNegotiated && effectiveMediaProfile === RIFE2X_MEDIA_PROFILE[\s\S]*\? 2/,
+  "playback FPS should increase only after an effective server acceptance",
+);
+assert.match(
+  appJs,
+  /message\.type === "session_ready"[\s\S]*acceptMediaProfile\(message\)/,
+  "the UI should consume the server's authoritative media-profile receipt",
+);
+assert.match(
+  appJs,
+  /server accepted RIFE without a verified weights digest/,
+  "the UI should fail closed if an accepted RIFE profile has no weight digest",
+);
+assert.match(
+  appJs,
+  /source_timeline_fps[\s\S]*output_timeline_fps/,
+  "requested FPS should be identified as timeline timing, not measured throughput",
+);
+assert.match(
+  appJs,
+  /插入帧只改善平滑度，不提高实时速度/,
+  "the UI must not claim interpolation raises the model's realtime factor",
+);
+assert.match(
+  appJs,
+  /source_frames_per_chunk_wall_second[\s\S]*output_frames_per_chunk_wall_second/,
+  "RIFE telemetry should distinguish measured wall throughput from timeline FPS",
+);
+assert.match(
+  appJs,
+  /source\/wall[\s\S]*interpolated\/wall[\s\S]*presented[\s\S]*timeline/,
+  "the UI should label source, interpolated, presented, and timeline rates",
+);
+assert.match(
+  appJs,
+  /RIFE 2x requires WebP\/raw until H\.264 timebase support is deployed/,
+  "H.264 plus RIFE must fail closed until its timebase is profile aware",
+);
+assert.match(
+  appJs,
+  /await minwmH264Session\.connect\(h264CompressionInit\(init, "minwm"\)\);[\s\S]*catch \(error\)[\s\S]*return openPrimarySession\(init, url\);/,
+  "a RIFE request rejected by H.264 must fall back to the WebP/raw primary session",
+);
+assert.match(
+  appJs,
   /lowLatencyMaxLeadFrames:\s*12/,
   "live playback should retain a small 24 fps frame cushion before dropping stale frames",
 );
