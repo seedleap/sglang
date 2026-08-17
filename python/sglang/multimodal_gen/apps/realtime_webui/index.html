@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>World Studio · 实时模型对比</title>
-    <link rel="stylesheet" href="./styles.css?v=fullscreen-focus-v1" />
+    <link rel="stylesheet" href="./styles.css?v=world-studio-h264-rules-v5" />
   </head>
   <body class="world-studio">
     <header class="app-header">
@@ -33,6 +33,11 @@
     <div id="recordingReadyToast" class="recording-ready-toast" role="status" aria-live="polite" aria-atomic="true" hidden>
       <span class="recording-ready-toast-icon" aria-hidden="true">✓</span>
       <span><strong>录像已生成</strong><small>可在右上角下载对比版和 Zing 版</small></span>
+    </div>
+
+    <div id="goalAchievementToast" class="goal-achievement-toast" role="status" aria-live="assertive" aria-atomic="true" hidden>
+      <span class="goal-achievement-icon" aria-hidden="true">✦</span>
+      <span><small>目标达成</small><strong id="goalAchievementText">你成功获得「隐藏目标」</strong></span>
     </div>
 
     <main class="shell">
@@ -80,6 +85,44 @@
           <span class="field-heading"><strong>世界描述</strong><span id="worldDescriptionState">未填写</span></span>
           <textarea id="prompt" rows="6" placeholder="一句话也可以，例如：第一人称骑龙飞过雪山……"></textarea>
         </label>
+
+        <details id="worldRulesPanel" class="world-rules-panel">
+          <summary>
+            <span><i aria-hidden="true">✦</i><b>规则定义</b><small>可选</small></span>
+            <span id="worldRulesSummary">未配置</span>
+          </summary>
+          <div class="world-rules-content">
+            <p class="world-rules-intro">只需填写技能或奖励的一种表达，AI 会自动补全按键名称与完整 Prompt。目标会在达到设定游玩时间后按概率自动触发。</p>
+            <section class="rule-editor rule-editor-skills" aria-labelledby="skillRulesTitle">
+              <header>
+                <span><b id="skillRulesTitle">技能</b><small>最多 9 个</small></span>
+                <button id="addSkillRuleBtn" type="button">＋ 添加技能</button>
+              </header>
+              <div id="skillRuleList" class="skill-rule-list"></div>
+              <p id="skillRuleEmpty" class="rule-empty">添加后会生成位于移动键上方的技能按键</p>
+            </section>
+            <section class="rule-editor rule-editor-goal" aria-labelledby="goalRuleTitle">
+              <header>
+                <span><b id="goalRuleTitle">目标</b><small>最多 1 个</small></span>
+              </header>
+              <div class="goal-rule-fields">
+                <label class="goal-min-play-field">
+                  <span>至少游玩（秒）</span>
+                  <input id="goalMinPlaySeconds" type="number" min="0" max="3600" step="1" placeholder="10" inputmode="decimal" />
+                </label>
+                <label class="goal-probability-field">
+                  <span>触发概率</span>
+                  <input id="goalProbability" type="number" min="0" max="1" step="0.01" placeholder="0.2" inputmode="decimal" />
+                </label>
+                <label class="goal-rule-input-field">
+                  <span>达成奖励或触发效果</span>
+                  <textarea id="goalRuleInput" rows="3" maxlength="2000" placeholder="例如：星光徽章；或：天空落下一枚发光徽章，被主角稳稳接住……"></textarea>
+                </label>
+              </div>
+            </section>
+            <p id="worldRulesStatus" class="world-rules-status" role="status" aria-live="polite">规则非必填</p>
+          </div>
+        </details>
 
         <button id="enhanceBtn" class="complete-world" type="button">
           <span class="complete-world-title">
@@ -229,6 +272,12 @@
               </article>
             </div>
 
+            <div id="runtimeSkillBar" class="runtime-skill-bar" aria-label="世界技能快捷键" hidden>
+              <span class="runtime-skill-label"><i aria-hidden="true">✦</i> 世界技能</span>
+              <div id="runtimeSkillButtons" class="runtime-skill-buttons"></div>
+              <small id="runtimeSkillHint">点击或按数字键触发 · 共享 10s CD</small>
+            </div>
+
             <div class="stage-controls" aria-label="世界移动与视角控制">
               <div class="control-cluster" aria-label="移动">
                 <div class="camera-pad move-pad">
@@ -359,10 +408,11 @@
     <script src="./happy_oyster_sdk.js?v=happyoyster-sdk-0.1.0-ticket-only"></script>
     <script src="./happy_oyster_session.js?v=happyoyster-session-v5"></script>
     <script src="./session_lifetime.js?v=session-lifetime-v1"></script>
-    <script src="./prompt_rewrite_controller.js?v=prompt-rewrite-v2"></script>
+    <script src="./prompt_rewrite_controller.js?v=prompt-rewrite-v3"></script>
+    <script src="./world_rules_controller.js?v=world-rules-v3"></script>
     <script src="./fullscreen_controller.js?v=fullscreen-focus-v1"></script>
     <script src="./trace_topology.js?v=realtime-trace-topology-v6"></script>
     <script src="./trace_transport.js?v=realtime-trace-http-v2"></script>
-    <script src="./app.js?v=h264-stage-timing-v1"></script>
+    <script src="./app.js?v=world-studio-h264-rules-v5"></script>
   </body>
 </html>

@@ -154,9 +154,10 @@ assert.match(html, /playback_controller\.js\?v=realtime-playback-v34/);
 assert.match(html, /model_session\.js\?v=dual-h264-telemetry-v1/);
 assert.match(html, /dual_model_controller\.js\?v=dual-model-v6/);
 assert.match(html, /h264_websocket_session\.js\?v=h264-stage-timing-v1/);
-assert.match(html, /prompt_rewrite_controller\.js\?v=prompt-rewrite-v2/);
-assert.match(html, /styles\.css\?v=fullscreen-focus-v1/);
-assert.match(html, /app\.js\?v=h264-stage-timing-v1/);
+assert.match(html, /prompt_rewrite_controller\.js\?v=prompt-rewrite-v3/);
+assert.match(html, /world_rules_controller\.js\?v=world-rules-v3/);
+assert.match(html, /styles\.css\?v=world-studio-h264-rules-v5/);
+assert.match(html, /app\.js\?v=world-studio-h264-rules-v5/);
 assert.match(html, /id="minwmH264Viewport"/);
 assert.match(html, /id="lingbot2H264Viewport"/);
 assert.match(html, /id="minwmPerfScheduler"/);
@@ -182,10 +183,30 @@ assert.match(html, /id="firstFrameState"/, "first-frame completeness should be v
 assert.match(html, /id="referenceDropZone"/, "first-frame picker should expose a drag-and-drop target");
 assert.match(html, /点击或拖入 PNG、JPG、WebP/, "first-frame picker should advertise drag and drop");
 assert.match(html, /id="worldDescriptionState"/, "description completeness should be visible");
+assert.match(html, /<details id="worldRulesPanel" class="world-rules-panel">/, "world rules should be optional and collapsed by default");
+assert.doesNotMatch(html, /<details id="worldRulesPanel"[^>]*\sopen/, "world rules must not occupy sidebar space until expanded");
+assert.match(html, /id="addSkillRuleBtn"/, "world rules should support multiple skills");
+assert.match(html, /id="goalMinPlaySeconds"[^>]*min="0"[^>]*max="3600"/, "goals should configure a minimum play duration");
+assert.match(html, /id="goalProbability"[^>]*min="0"[^>]*max="1"/, "goal probability should be constrained to 0-1");
+assert.match(html, /id="goalRuleInput"/, "a goal should use one reward-or-prompt input");
+assert.doesNotMatch(html, /id="goalName"|id="goalPrompt"/, "a goal must not require separate name and prompt fields");
+assert.match(html, /id="runtimeSkillBar"[^>]*hidden/, "prepared skills should render above movement controls only when active");
+assert.match(html, /id="runtimeSkillHint"[^>]*>[^<]*共享 10s CD/, "skill controls should disclose the shared cooldown");
+assert.match(html, /id="goalAchievementToast"[^>]*hidden/, "goal completion should have an accessible popup");
 assert.match(app, /function clearWorldDraft\(\)/);
 assert.match(app, /async function completeWorldDraft\(\)/);
 assert.match(app, /function setWorldCompletionBusy\(pending, completingFromImage = false\)/);
 assert.match(app, /function setupFirstFrameDropZone\(\)/);
+assert.match(app, /async function prepareWorldRulesForEntry\(description\)/);
+assert.match(app, /fetch\("\.\/api\/world-rule\/complete"/);
+assert.match(app, /worldRulesController\.activate\(preparedWorldRules\)/);
+assert.match(app, /worldRulesController\?\.startSession\(\)/, "goal timing should begin on the first visible world frame");
+assert.match(app, /achievementDelayMs:\s*5000/);
+assert.match(app, /skillCooldownMs:\s*10000/);
+assert.match(app, /skillCooldownRemainingMs/, "all skill controls should observe the shared cooldown");
+assert.doesNotMatch(app, /noteUserPromptSuccess/, "user prompts must not roll timed world goals");
+assert.match(app, /rule === "goal_time_probability"/);
+assert.match(app, /function keyboardSkill\(event\)/);
 assert.match(app, /function appendPromptLog\(prompt, metadata = \{\}\)/);
 assert.match(app, /metadata\.trigger === "rule" \|\| metadata\.phase === "restore"/);
 assert.match(app, /rule === "one_time_timeout_restore"/);
@@ -248,6 +269,9 @@ assert.match(app, /window\.SpeechRecognition \|\| window\.webkitSpeechRecognitio
 assert.match(app, /recognition\.lang = "zh-CN"/);
 assert.match(app, /if \(!window\.isSecureContext\)/);
 assert.match(app, /secureBaseUrl/);
+assert.match(app, /function h264WebSocketEndpoint\(key\)/);
+assert.match(app, /UI_CONFIG\.h264WebSocketBaseUrl/);
+assert.match(app, /endpoint: h264WebSocketEndpoint\(key\)/);
 assert.match(app, /"not-allowed": "麦克风未授权"/);
 assert.match(app, /status\.textContent = next \? "正在聆听" : idleStatus/);
 assert.match(
@@ -308,9 +332,14 @@ assert.match(app, /function drawRecordingComparisonPreview\(/);
 assert.match(app, /createFullscreenController/);
 const placeholderIndex = app.indexOf("await drawInitialReferencePlaceholders(firstFrame);");
 const connectIndex = app.indexOf("dualModelController.connect(init)", placeholderIndex);
+const activateRulesIndex = app.indexOf("worldRulesController.activate(preparedWorldRules)", placeholderIndex);
 assert.ok(
   placeholderIndex >= 0 && connectIndex > placeholderIndex,
   "I2V should retain the selected reference while both models prepare their first generated frame",
+);
+assert.ok(
+  activateRulesIndex > placeholderIndex && activateRulesIndex < connectIndex,
+  "prepared skill controls should mount before waiting for every comparison backend to connect",
 );
 const visiblePlaceholderIndex = app.indexOf("drawVisibleReferencePlaceholders();");
 const firstFrameReadIndex = app.indexOf("enteredFirstFrame = await readFirstFrame()", visiblePlaceholderIndex);

@@ -143,6 +143,54 @@ async def _rewrite_prompt(request):
     return web.json_response(result.model_dump(mode="json"))
 
 
+async def _complete_world_rule(request):
+    """Complete a skill/goal label and prompt without exposing credentials."""
+
+    try:
+        body = await request.json()
+    except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as error:
+        raise web.HTTPBadRequest(
+            text=json.dumps({"error": "request body must be valid JSON"}),
+            content_type="application/json",
+        ) from error
+    if not isinstance(body, dict):
+        raise web.HTTPBadRequest(
+            text=json.dumps({"error": "request body must be a JSON object"}),
+            content_type="application/json",
+        )
+    rule_input = str(body.get("input", "")).strip()
+    previous_prompt = str(body.get("previous_prompt", "")).strip()
+    kind = str(body.get("kind", "")).strip().lower()
+    if not rule_input or not previous_prompt or kind not in {"skill", "goal"}:
+        raise web.HTTPBadRequest(
+            text=json.dumps(
+                {"error": ("input, previous_prompt, and kind=skill|goal are required")}
+            ),
+            content_type="application/json",
+        )
+    if len(rule_input) > 2000 or len(previous_prompt) > 20000:
+        raise web.HTTPRequestEntityTooLarge(
+            max_size=22000,
+            actual_size=len(rule_input) + len(previous_prompt),
+        )
+
+    rewriter = request.app[PROMPT_REWRITER]
+    if not rewriter.configured:
+        raise web.HTTPServiceUnavailable(
+            text=json.dumps({"error": "prompt rewriter is not configured"}),
+            content_type="application/json",
+        )
+    try:
+        result = await rewriter.complete_world_rule(rule_input, previous_prompt, kind)
+    except Exception as error:
+        logging.exception("World rule completion failed")
+        raise web.HTTPBadGateway(
+            text=json.dumps({"error": "rule completion failed; please try again"}),
+            content_type="application/json",
+        ) from error
+    return web.json_response(result.model_dump(mode="json"))
+
+
 async def _complete_world(request):
     """Complete a world from text, an uploaded first frame, or both."""
 
@@ -792,6 +840,7 @@ def create_app():
     app.router.add_get("/", _index)
     app.router.add_get("/runtime-config.js", _runtime_config)
     app.router.add_post("/api/prompt/rewrite", _rewrite_prompt)
+    app.router.add_post("/api/world-rule/complete", _complete_world_rule)
     app.router.add_post("/api/world/complete", _complete_world)
     app.router.add_get("/api/world/images/{image_id}", _generated_world_image)
     app.router.add_get("/api/happyoyster/config", _happyoyster_config)
