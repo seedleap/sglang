@@ -56,6 +56,7 @@ VALID_STAGES = frozenset(
         "vae_queue",
         "vae_decode",
         "post_decode",
+        "frame_interpolation",
         "h264_pre_encode_queue",
         "frame_encode",
         "ffmpeg_mux_write",
@@ -196,7 +197,11 @@ def observe_stage_seconds(
     stage = str(stage or "")
     result = str(result or "")
     scope = str(scope or "")
-    if stage not in VALID_STAGES or result not in VALID_RESULTS or scope not in VALID_SCOPES:
+    if (
+        stage not in VALID_STAGES
+        or result not in VALID_RESULTS
+        or scope not in VALID_SCOPES
+    ):
         return False
     duration = _coerce_duration_seconds(duration_s)
     if duration is None:

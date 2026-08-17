@@ -166,8 +166,8 @@ def test_realtime_webui_presets_do_not_emit_camera_scripts():
         in app_js
     )
     assert "function previewMaxWidthForSize(baseSize)" in app_js
-    assert "const DEFAULT_FRAME_INTERPOLATION_EXP = 1;" in app_js
-    assert "const DEFAULT_FRAME_INTERPOLATION_SCALE = 1.0;" in app_js
+    assert 'const NATIVE_MEDIA_PROFILE = "native_v1";' in app_js
+    assert 'const RIFE2X_MEDIA_PROFILE = "rife2x_v1";' in app_js
     assert "const DEFAULT_UPSCALING_SCALE = 2;" in app_js
     assert "const DEFAULT_PREVIEW_SCALE = 100;" in app_js
     assert 'setPreviewState("waiting")' in app_js
@@ -177,9 +177,10 @@ def test_realtime_webui_presets_do_not_emit_camera_scripts():
     assert 'document.querySelector(".model-player-grid")' in app_js
     assert 'previewFrame.style.setProperty("--preview-scale"' in app_js
     assert "cancelAnimationFrame(previewScaleFrame)" in app_js
-    assert "enable_frame_interpolation: true" in app_js
-    assert "frame_interpolation_exp: DEFAULT_FRAME_INTERPOLATION_EXP" in app_js
-    assert "frame_interpolation_scale: DEFAULT_FRAME_INTERPOLATION_SCALE" in app_js
+    assert "realtime_media_profile: RIFE2X_MEDIA_PROFILE" in app_js
+    assert "mediaProfileNegotiated" in app_js
+    assert 'message.type === "session_ready"' in app_js
+    assert "enable_frame_interpolation: true" not in app_js
     assert "readSuperResolutionParams()" in app_js
     assert "enable_upscaling: true" in app_js
     assert "upscaling_scale: readUpscalingScale()" in app_js

@@ -110,7 +110,14 @@ def build_realtime_sampling_params(
         guidance_scale_2=request.guidance_scale_2,
         negative_prompt=request.negative_prompt,
         enable_teacache=request.enable_teacache,
-        enable_frame_interpolation=request.enable_frame_interpolation,
+        # The negotiated remote media profile owns streaming interpolation.
+        # Never invoke the legacy offline post-process (which may resolve a
+        # model repository) for the strict `rife2x_v1` path.
+        enable_frame_interpolation=(
+            request.enable_frame_interpolation
+            if request.realtime_media_profile == "native_v1"
+            else False
+        ),
         frame_interpolation_exp=request.frame_interpolation_exp,
         frame_interpolation_scale=request.frame_interpolation_scale,
         frame_interpolation_model_path=request.frame_interpolation_model_path,

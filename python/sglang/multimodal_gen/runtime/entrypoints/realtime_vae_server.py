@@ -38,6 +38,11 @@ from sglang.multimodal_gen.runtime.realtime.async_vae_worker import (
     SessionOpen,
     TAEHVEngine,
 )
+from sglang.multimodal_gen.runtime.realtime.media_profile import (
+    RealtimeMediaProfile,
+    parse_media_profile,
+    validate_source_timeline_fps,
+)
 from sglang.multimodal_gen.runtime.realtime.worker_reservation import (
     WorkerReservationRegistry,
     install_worker_reservation_routes,
@@ -90,21 +95,27 @@ def create_app(
 
     @app.get("/health")
     async def health():
-        return JSONResponse(
-            {
-                "status": "ok",
-                "decoder_backend": worker.decoder_backend,
-                "decoder_fidelity": (
-                    "approximate" if worker.decoder_backend == "taehv" else "exact"
-                ),
-                "active_sessions": worker.active_sessions,
-                "max_sessions": worker.max_sessions,
-                "encoded_frames_per_batch": worker.encoded_frames_per_batch,
-                "decode_parallel_size": getattr(
-                    worker.engine, "decode_parallel_size", 1
-                ),
-            }
-        )
+        health_fields = {
+            "status": "ok",
+            "decoder_backend": worker.decoder_backend,
+            "decoder_fidelity": (
+                "approximate" if worker.decoder_backend == "taehv" else "exact"
+            ),
+            "active_sessions": worker.active_sessions,
+            "max_sessions": worker.max_sessions,
+            "encoded_frames_per_batch": worker.encoded_frames_per_batch,
+            "decode_parallel_size": getattr(worker.engine, "decode_parallel_size", 1),
+        }
+        if RealtimeMediaProfile.RIFE2X_V1 in worker.supported_media_profiles:
+            health_fields.update(
+                supported_media_profiles=[
+                    profile.value for profile in worker.supported_media_profiles
+                ],
+                rife_weights_sha256=worker.rife_processor.weights_sha256,
+                media_capability_fingerprint=worker.media_capability_fingerprint,
+                media_pool_rollout="homogeneous_only",
+            )
+        return JSONResponse(health_fields)
 
     @app.get("/metrics")
     async def metrics():
@@ -149,6 +160,10 @@ def create_app(
                         preview_max_width=message.get("preview_max_width"),
                         output_url=message.get("output_url"),
                         output_token=message.get("output_token"),
+                        media_profile=parse_media_profile(message.get("media_profile")),
+                        source_timeline_fps=validate_source_timeline_fps(
+                            message.get("source_timeline_fps", 24.0)
+                        ),
                     )
                     coordinator_token = message.get("coordinator_token")
                     worker_epoch = message.get("worker_epoch")
@@ -190,6 +205,7 @@ def create_app(
                         )
                         await output_client.open()
                     identity = await _bind_socket_session(worker, identity, opened)
+                    media_acceptance = worker.media_acceptance(*identity)
                     trace_session = SimpleNamespace(
                         id=opened.session_id,
                         generation_id=opened.generation_id,
@@ -202,20 +218,26 @@ def create_app(
                         "server.vae_session_open",
                         output_direct=output_client is not None,
                     )
-                    await send(
-                        encode_message(
-                            "session_accepted",
-                            session_id=opened.session_id,
-                            generation_id=opened.generation_id,
-                            decoder_backend=worker.decoder_backend,
-                            decoder_fidelity=(
-                                "approximate"
-                                if worker.decoder_backend == "taehv"
-                                else "exact"
-                            ),
-                            credit_chunk_index=0,
+                    accepted_fields = {
+                        "session_id": opened.session_id,
+                        "generation_id": opened.generation_id,
+                        "decoder_backend": worker.decoder_backend,
+                        "decoder_fidelity": (
+                            "approximate"
+                            if worker.decoder_backend == "taehv"
+                            else "exact"
+                        ),
+                        "credit_chunk_index": 0,
+                    }
+                    if media_acceptance.interpolation_enabled:
+                        accepted_fields.update(
+                            requested_media_profile=(media_acceptance.requested.value),
+                            effective_media_profile=(media_acceptance.effective.value),
+                            source_timeline_fps=media_acceptance.source_timeline_fps,
+                            output_timeline_fps=media_acceptance.output_timeline_fps,
+                            media_weights_sha256=media_acceptance.weights_sha256,
                         )
-                    )
+                    await send(encode_message("session_accepted", **accepted_fields))
                     continue
                 if message_type == "abort":
                     break
@@ -293,6 +315,12 @@ def create_app(
                         encode_ms=frame_batch.encode_ms,
                         server_sent_epoch_ms=time.time() * 1000,
                     )
+                    if media_acceptance.interpolation_enabled:
+                        frame_fields.update(
+                            media_profile=frame_batch.media_profile.value,
+                            source_timeline_fps=frame_batch.source_timeline_fps,
+                            output_timeline_fps=frame_batch.output_timeline_fps,
+                        )
                     shared_reference = None
                     if (
                         output_client is None
@@ -393,18 +421,40 @@ def create_app(
                             duration_ms=round(result.encode_ms, 3),
                             **common_trace,
                         )
+                        if result.media_profile is RealtimeMediaProfile.RIFE2X_V1:
+                            log_realtime_trace(
+                                logger,
+                                trace_session,
+                                "server.vae_rife_interpolation_complete",
+                                duration_ms=round(result.rife_interpolation_ms, 3),
+                                source_num_frames=result.source_num_frames,
+                                output_num_frames=result.output_num_frames,
+                                **common_trace,
+                            )
                         if output_client is not None:
                             completion_started = time.perf_counter()
+                            media_completion_fields = {
+                                "session_id": header.session_id,
+                                "generation_id": header.generation_id,
+                                "request_id": header.request_id,
+                                "chunk_index": header.chunk_index,
+                                "event_id": header.event_id,
+                                "num_frames": result.num_frames,
+                                "is_final_chunk": header.is_final_chunk,
+                            }
+                            if result.media_profile is RealtimeMediaProfile.RIFE2X_V1:
+                                media_completion_fields.update(
+                                    source_num_frames=result.source_num_frames,
+                                    output_num_frames=result.output_num_frames,
+                                    media_profile=result.media_profile.value,
+                                    source_timeline_fps=result.source_timeline_fps,
+                                    output_timeline_fps=result.output_timeline_fps,
+                                    rife_interpolation_ms=result.rife_interpolation_ms,
+                                )
                             await output_client.send(
                                 encode_message(
                                     "media_chunk_complete",
-                                    session_id=header.session_id,
-                                    generation_id=header.generation_id,
-                                    request_id=header.request_id,
-                                    chunk_index=header.chunk_index,
-                                    event_id=header.event_id,
-                                    num_frames=result.num_frames,
-                                    is_final_chunk=header.is_final_chunk,
+                                    **media_completion_fields,
                                 )
                             )
                             log_realtime_trace(
@@ -417,20 +467,29 @@ def create_app(
                                 ),
                                 **common_trace,
                             )
-                        await send(
-                            encode_message(
-                                "chunk_complete",
-                                session_id=header.session_id,
-                                generation_id=header.generation_id,
-                                request_id=header.request_id,
-                                chunk_index=header.chunk_index,
-                                num_frames=result.num_frames,
-                                is_final_chunk=header.is_final_chunk,
-                                queue_wait_ms=result.queue_wait_ms,
-                                decode_ms=result.decode_ms,
-                                post_decode_ms=result.post_decode_ms,
-                                encode_ms=result.encode_ms,
+                        chunk_complete_fields = {
+                            "session_id": header.session_id,
+                            "generation_id": header.generation_id,
+                            "request_id": header.request_id,
+                            "chunk_index": header.chunk_index,
+                            "num_frames": result.num_frames,
+                            "is_final_chunk": header.is_final_chunk,
+                            "queue_wait_ms": result.queue_wait_ms,
+                            "decode_ms": result.decode_ms,
+                            "post_decode_ms": result.post_decode_ms,
+                            "encode_ms": result.encode_ms,
+                        }
+                        if result.media_profile is RealtimeMediaProfile.RIFE2X_V1:
+                            chunk_complete_fields.update(
+                                source_num_frames=result.source_num_frames,
+                                output_num_frames=result.output_num_frames,
+                                media_profile=result.media_profile.value,
+                                source_timeline_fps=result.source_timeline_fps,
+                                output_timeline_fps=result.output_timeline_fps,
+                                rife_interpolation_ms=result.rife_interpolation_ms,
                             )
+                        await send(
+                            encode_message("chunk_complete", **chunk_complete_fields)
                         )
                     except Exception as exc:
                         logger.exception(
@@ -504,12 +563,18 @@ def _add_worker_cli_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--max-message-mb", type=int, default=64)
     parser.add_argument("--shared-memory-dir")
     parser.add_argument("--worker-epoch")
+    parser.add_argument("--rife-model-path")
+    parser.add_argument("--rife-model-sha256")
 
 
 def _parse_worker_args(argv: list[str] | None):
     pre_parser = argparse.ArgumentParser(add_help=False)
     _add_worker_cli_args(pre_parser)
     known, remaining = pre_parser.parse_known_args(argv)
+    if bool(known.rife_model_path) != bool(known.rife_model_sha256):
+        pre_parser.error(
+            "--rife-model-path and --rife-model-sha256 must be provided together"
+        )
     if known.decoder_backend == "taehv":
         if remaining:
             pre_parser.error("unrecognized arguments: " + " ".join(remaining))
@@ -523,6 +588,8 @@ def _parse_worker_args(argv: list[str] | None):
         pre_parser.error("--vae-path is required for exact backend")
     if known.checkpoint_path:
         pre_parser.error("--checkpoint-path is only valid for taehv backend")
+    if known.rife_model_path:
+        pre_parser.error("RIFE realtime media profile is only valid for taehv backend")
 
     from sglang.multimodal_gen.runtime.server_args import ServerArgs
 
@@ -660,6 +727,24 @@ def _run_worker(args, exact_server_args) -> None:
         args.decoder_backend,
         (time.perf_counter() - warmup_started) * 1000,
     )
+    rife_processor = None
+    if args.rife_model_path:
+        from sglang.multimodal_gen.runtime.realtime.rife_media_processor import (
+            RIFE2xMediaProcessor,
+        )
+
+        rife_started = time.perf_counter()
+        rife_processor = RIFE2xMediaProcessor(
+            args.rife_model_path,
+            args.rife_model_sha256,
+            device=args.device,
+        )
+        rife_processor.warmup()
+        logger.info(
+            "RIFE realtime media profile loaded and warmed in %.1f ms (sha256=%s)",
+            (time.perf_counter() - rife_started) * 1000,
+            rife_processor.weights_sha256,
+        )
     if parallel_controller is not None and not parallel_controller.is_driver:
         from sglang.multimodal_gen.runtime.realtime.exact_vae_backend import (
             run_exact_vae_follower,
@@ -676,6 +761,7 @@ def _run_worker(args, exact_server_args) -> None:
         queue_depth_per_session=args.queue_depth_per_session,
         encoded_frames_per_batch=_resolve_encoded_frames_per_batch(args),
         encode_workers=args.encode_workers,
+        rife_processor=rife_processor,
     )
     reservations = WorkerReservationRegistry(
         worker_epoch=resolve_worker_epoch(args.worker_epoch),

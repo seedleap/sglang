@@ -27,6 +27,11 @@ function configuredModelNumber(key, name, fallback) {
 }
 
 function h264CompressionInit(init, key) {
+  if (key === "minwm" && init.realtime_media_profile === "rife2x_v1") {
+    throw new Error(
+      "RIFE 2x requires WebP/raw until H.264 timebase support is deployed",
+    );
+  }
   const bitrateKbps = Math.max(
     250,
     Math.min(
@@ -120,8 +125,14 @@ const DEFAULT_LINGBOT2_SINK_SIZE = configuredModelNumber("lingbot2", "sinkSize",
 const DEFAULT_LINGBOT2_WINDOW_FRAMES = configuredModelNumber("lingbot2", "windowFrames", 18);
 const DEFAULT_PREVIEW_MAX_WIDTH = configuredNumber("previewMaxWidth", 832);
 const MAX_AUTO_PREVIEW_WIDTH = configuredNumber("maxAutoPreviewWidth", 1280);
-const DEFAULT_FRAME_INTERPOLATION_EXP = 1;
-const DEFAULT_FRAME_INTERPOLATION_SCALE = 1.0;
+const NATIVE_MEDIA_PROFILE = "native_v1";
+const RIFE2X_MEDIA_PROFILE = "rife2x_v1";
+let requestedMediaProfile = NATIVE_MEDIA_PROFILE;
+let effectiveMediaProfile = NATIVE_MEDIA_PROFILE;
+let mediaProfileNegotiated = false;
+let negotiatedSourceTimelineFps = 0;
+let negotiatedOutputTimelineFps = 0;
+let rifeChunkTelemetry = {};
 const DEFAULT_SMOOTH_CATCHUP_RATE = Math.min(
   2.5,
   Math.max(1, configuredNumber("smoothCatchupRateMax", 1.1)),
@@ -1070,12 +1081,16 @@ const dualModelController = new DualModelController({
         || DEFAULT_LINGBOT2_MODEL
       ),
       transformInit: (init) => {
+        // This capability belongs to Zing.  Do not copy an opt-in RIFE
+        // request into a comparison backend.
+        const lingbotInit = { ...init };
+        delete lingbotInit.realtime_media_profile;
         const modelParams = readModelRequestParams("lingbot2", {
           generationMode: init.generation_mode,
           firstFrame: init.first_frame,
         });
         const interactiveInit = {
-          ...init,
+          ...lingbotInit,
           ...modelParams,
           realtime_interactive_event_grace_ms: 1800,
         };
@@ -1898,6 +1913,12 @@ function drawIdle() {
 
 function resetStreamStats() {
   pendingHeader = null;
+  requestedMediaProfile = NATIVE_MEDIA_PROFILE;
+  effectiveMediaProfile = NATIVE_MEDIA_PROFILE;
+  mediaProfileNegotiated = false;
+  negotiatedSourceTimelineFps = 0;
+  negotiatedOutputTimelineFps = 0;
+  rifeChunkTelemetry = {};
   h264ModelStats.minwm = {};
   h264ModelStats.lingbot2 = {};
   activeH264Models.clear();
@@ -2090,6 +2111,13 @@ function updateStats() {
     lastDecodeMs,
     lastDisplayLagMs,
     renderFps: fpsSamples.length,
+    ...(mediaProfileNegotiated
+      ? {
+          sourceTimelineFps: negotiatedSourceTimelineFps,
+          outputTimelineFps: negotiatedOutputTimelineFps,
+          chunkTelemetry: rifeChunkTelemetry,
+        }
+      : {}),
     droppedFrames: totalDroppedFrames,
     decodeQueueLength: pendingDecodeBatches,
   });
@@ -2124,6 +2152,12 @@ function renderProtocolPerformance(key, stats = {}) {
   const sourceFps = Number(stats.serverFps || stats.sourceFps || 0);
   const deliveryFps = Number(stats.deliveryFps || 0);
   const renderFps = Number(stats.renderFps || 0);
+  const sourceTimelineFps = Number(
+    stats.sourceTimelineFps || negotiatedSourceTimelineFps || 0,
+  );
+  const outputTimelineFps = Number(
+    stats.outputTimelineFps || negotiatedOutputTimelineFps || 0,
+  );
   const vaeQueueMs = Number(telemetry.vae_queue_wait_ms || 0);
   const vaeDecodeMs = Number(
     telemetry.vae_decode_ms || telemetry.model_vae_decode_ms || 0,
@@ -2148,7 +2182,9 @@ function renderProtocolPerformance(key, stats = {}) {
     ? `${receiveMbps.toFixed(1)} Mb/s`
     : "-";
   $(`${key}PerfFps`).textContent = sourceFps > 0 || deliveryFps > 0 || renderFps > 0
-    ? `源 ${sourceFps.toFixed(1)} · 收 ${deliveryFps.toFixed(1)} · 显 ${renderFps.toFixed(1)}`
+    ? key === "minwm" && mediaProfileNegotiated
+      ? `收 ${deliveryFps.toFixed(1)} · 显 ${renderFps.toFixed(1)} · 时间轴 ${sourceTimelineFps.toFixed(1)}→${outputTimelineFps.toFixed(1)}`
+      : `源 ${sourceFps.toFixed(1)} · 收 ${deliveryFps.toFixed(1)} · 显 ${renderFps.toFixed(1)}`
     : "-";
   $(`${key}PerfUplink`).textContent = inputUplinkMs > 0
     ? performanceMs(inputUplinkMs)
@@ -2190,6 +2226,18 @@ function renderModelTelemetry(key, stats = {}) {
   const serverFps = Number(stats.serverFps || sourceFps);
   const deliveryFps = Number(stats.deliveryFps || sourceFps);
   const bufferMs = Number(stats.bufferMs || 0);
+  const sourceTimelineFps = Number(
+    stats.sourceTimelineFps || negotiatedSourceTimelineFps || 0,
+  );
+  const outputTimelineFps = Number(
+    stats.outputTimelineFps || negotiatedOutputTimelineFps || 0,
+  );
+  const sourceWallFps = Number(
+    stats.chunkTelemetry?.source_frames_per_chunk_wall_second || 0,
+  );
+  const outputWallFps = Number(
+    stats.chunkTelemetry?.output_frames_per_chunk_wall_second || 0,
+  );
   const queueFrames = Number(stats.queueFrames ?? stats.queueLength ?? 0);
   const droppedFrames = Number(stats.droppedFrames || 0);
   const decodeQueueLength = Number(stats.decodeQueueLength || 0);
@@ -2201,7 +2249,9 @@ function renderModelTelemetry(key, stats = {}) {
   if (frameBatchGapCount) bufferParts.push(`gap ${frameBatchGapCount}`);
   $(`${prefix}ChunkText`).textContent = stats.lastChunk == null ? "-" : `#${stats.lastChunk}`;
   $(`${prefix}RateText`).textContent = serverFps > 0 || deliveryFps > 0 || renderFps > 0
-    ? `${serverFps.toFixed(1)} source · ${deliveryFps.toFixed(1)} recv · ${renderFps} render`
+    ? key === "minwm" && mediaProfileNegotiated
+      ? `${sourceWallFps.toFixed(1)} source/wall · ${outputWallFps.toFixed(1)} interpolated/wall · ${renderFps} presented · timeline ${sourceTimelineFps.toFixed(1)}→${outputTimelineFps.toFixed(1)}`
+      : `${serverFps.toFixed(1)} source · ${deliveryFps.toFixed(1)} recv · ${renderFps} render`
     : "-";
   $(`${prefix}BufferText`).textContent = bufferParts.join(" · ");
   $(`${prefix}FramesText`).textContent = `${totalFrames} · ${(Number(stats.bytes || 0) / 1048576).toFixed(1)} MB`;
@@ -2218,8 +2268,9 @@ function requestedInputFps(key = "minwm") {
 }
 
 function frameInterpolationMultiplier(key = "minwm") {
-  return modelControl(key, "frameInterpolation").checked
-    ? 2 ** DEFAULT_FRAME_INTERPOLATION_EXP
+  if (key !== "minwm") return 1;
+  return mediaProfileNegotiated && effectiveMediaProfile === RIFE2X_MEDIA_PROFILE
+    ? 2
     : 1;
 }
 
@@ -2250,6 +2301,50 @@ function syncZingFrameInterpolation({ fromTopbar = true } = {}) {
   else topbar.checked = requestControl.checked;
   tunePreviewQualityForPostprocess("minwm");
   syncPlaybackTargetFps();
+}
+
+function acceptMediaProfile(message) {
+  const requested = String(message.requested_media_profile || NATIVE_MEDIA_PROFILE);
+  const effective = String(message.effective_media_profile || "");
+  const sourceTimelineFps = Number(message.source_timeline_fps || 0);
+  const outputTimelineFps = Number(message.output_timeline_fps || 0);
+  if (requested !== requestedMediaProfile || effective !== requestedMediaProfile) {
+    throw new Error(
+      `media profile mismatch: requested ${requestedMediaProfile}, server accepted ${requested}/${effective || "missing"}`,
+    );
+  }
+  const expectedMultiplier = effective === RIFE2X_MEDIA_PROFILE ? 2 : 1;
+  if (
+    !Number.isFinite(sourceTimelineFps)
+    || !Number.isFinite(outputTimelineFps)
+    || sourceTimelineFps <= 0
+    || Math.abs(outputTimelineFps - sourceTimelineFps * expectedMultiplier) > 0.01
+  ) {
+    throw new Error("server returned invalid media profile timing");
+  }
+  if (
+    effective === RIFE2X_MEDIA_PROFILE
+    && !/^[0-9a-f]{64}$/i.test(String(message.media_weights_sha256 || ""))
+  ) {
+    throw new Error("server accepted RIFE without a verified weights digest");
+  }
+  effectiveMediaProfile = effective;
+  mediaProfileNegotiated = true;
+  negotiatedSourceTimelineFps = sourceTimelineFps;
+  negotiatedOutputTimelineFps = outputTimelineFps;
+  syncPlaybackTargetFps();
+  if (effective === RIFE2X_MEDIA_PROFILE) {
+    addHistory(
+      `Zing RIFE 2x accepted · timeline ${sourceTimelineFps.toFixed(1)}→${outputTimelineFps.toFixed(1)} FPS · 插入帧只改善平滑度，不提高实时速度`,
+    );
+  }
+  recordTrajectoryEvent("media_profile_accepted", {
+    requested_media_profile: requested,
+    effective_media_profile: effective,
+    source_timeline_fps: sourceTimelineFps,
+    output_timeline_fps: outputTimelineFps,
+    media_weights_sha256: message.media_weights_sha256 || null,
+  });
 }
 
 function selectedPlaybackMode(key = "minwm") {
@@ -5762,6 +5857,9 @@ async function connect() {
         numFrames: continuousT2V ? undefined : numFrames,
       }),
     });
+    requestedMediaProfile = String(
+      init.realtime_media_profile || NATIVE_MEDIA_PROFILE,
+    );
     const referenceImage = await createReferenceImageMeta(enteredFirstFrame);
     beginSessionArtifact(init, referenceImage);
     if (currentSessionArtifact && currentTrace) {
@@ -5969,6 +6067,32 @@ function receive(data, epoch) {
       }
       $("connectBtn").disabled = false;
       if (!renderedPreviewFrames) setPreviewState("idle");
+      return;
+    }
+    if (message.type === "session_ready") {
+      acceptMediaProfile(message);
+      return;
+    }
+    if (
+      message.type === "chunk_telemetry"
+      && message.media_profile === RIFE2X_MEDIA_PROFILE
+    ) {
+      rifeChunkTelemetry = { ...message };
+      recordTrajectoryEvent("rife_chunk_telemetry", {
+        chunk_index: Number(message.chunk_index || 0),
+        source_num_frames: Number(message.source_num_frames || 0),
+        output_num_frames: Number(message.output_num_frames || 0),
+        rife_interpolation_ms: Number(message.rife_interpolation_ms || 0),
+        source_frames_per_chunk_wall_second: Number(
+          message.source_frames_per_chunk_wall_second || 0,
+        ),
+        output_frames_per_chunk_wall_second: Number(
+          message.output_frames_per_chunk_wall_second || 0,
+        ),
+        source_realtime_factor: Number(message.source_realtime_factor || 0),
+        output_realtime_factor: Number(message.output_realtime_factor || 0),
+      });
+      updateStats();
       return;
     }
     if (message.type === "frame_batch") {
@@ -6444,12 +6568,10 @@ function tunePreviewQualityForPostprocess(key = "minwm") {
 }
 
 function readFrameInterpolationParams(key = "minwm") {
-  if (!modelControl(key, "frameInterpolation").checked) return {};
-  return {
-    enable_frame_interpolation: true,
-    frame_interpolation_exp: DEFAULT_FRAME_INTERPOLATION_EXP,
-    frame_interpolation_scale: DEFAULT_FRAME_INTERPOLATION_SCALE,
-  };
+  if (key !== "minwm" || !modelControl(key, "frameInterpolation").checked) {
+    return {};
+  }
+  return { realtime_media_profile: RIFE2X_MEDIA_PROFILE };
 }
 
 function readUpscalingScale(key = "minwm") {
