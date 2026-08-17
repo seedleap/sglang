@@ -121,3 +121,6 @@ kubectl --context <context> apply --dry-run=server -f <generated-yaml>
   separately writes `PERFORMANCE_PASS` or `PERFORMANCE_FAIL` from client steady
   ratio-of-sums FPS against 24. Candidate jobs rendered with `--require-24fps`
   exit nonzero after preserving results when that performance gate fails.
+  The runner copies a non-empty local `RUN_COMPLETE` payload to the remote
+  `SUCCESS` key only after all artifacts have been archived; it does not rely
+  on S3 CSI metadata-only `touch` semantics.

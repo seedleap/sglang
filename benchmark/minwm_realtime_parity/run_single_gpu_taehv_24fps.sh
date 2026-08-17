@@ -1156,8 +1156,11 @@ print(json.dumps({
     "torch": torch.__version__,
 }, indent=2, sort_keys=True))
 PY
+printf 'status=0\nrun_id=%s\nmode=%s\n' \
+  "${MINWM_RUN_ID}" "${MINWM_PROFILE_MODE}" \
+  > "${LOCAL_RESULTS}/RUN_COMPLETE"
 cp -a "${LOCAL_RESULTS}/." "${REMOTE_RESULTS}/"
-touch "${REMOTE_RESULTS}/SUCCESS"
 printf 'MINWM_SINGLE_GPU_TAEHV24_COMPLETE mode=%s results=%s\n' \
   "${MINWM_PROFILE_MODE}" "${REMOTE_RESULTS}"
+cp "${LOCAL_RESULTS}/RUN_COMPLETE" "${REMOTE_RESULTS}/SUCCESS"
 trap - EXIT INT TERM

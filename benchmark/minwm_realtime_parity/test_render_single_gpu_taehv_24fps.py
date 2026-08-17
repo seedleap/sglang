@@ -248,6 +248,15 @@ def test_render_preserves_single_gpu_hardware_and_profile_contract(
     assert "export SGLANG_REALTIME_TRACE_SYNC_CUDA=0" in runner
     assert "export SGLANG_DIFFUSION_SYNC_STAGE_PROFILING=0" in runner
     assert "PERFORMANCE_PASS" in runner and "PERFORMANCE_FAIL" in runner
+    assert '> "${LOCAL_RESULTS}/RUN_COMPLETE"' in runner
+    assert 'cp "${LOCAL_RESULTS}/RUN_COMPLETE" "${REMOTE_RESULTS}/SUCCESS"' in runner
+    assert 'touch "${REMOTE_RESULTS}/SUCCESS"' not in runner
+    completion_log = runner.rindex("MINWM_SINGLE_GPU_TAEHV24_COMPLETE")
+    success_publish = runner.rindex(
+        'cp "${LOCAL_RESULTS}/RUN_COMPLETE" "${REMOTE_RESULTS}/SUCCESS"'
+    )
+    disable_traps = runner.rindex("trap - EXIT INT TERM")
+    assert completion_log < success_publish < disable_traps
     assert "trap 'finish $?' EXIT" in runner
     assert "trap 'finish 130' INT" in runner
     assert "trap 'finish 143' TERM" in runner
