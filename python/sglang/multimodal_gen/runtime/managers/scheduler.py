@@ -48,11 +48,11 @@ from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import (
     BatchMetricsWindow,
     OutputBatch,
 )
-from sglang.multimodal_gen.runtime.realtime.critical_path_metrics import (
-    observe_stage_seconds,
-)
 from sglang.multimodal_gen.runtime.post_training.scheduler_post_training_mixin import (
     SchedulerPostTrainingMixin,
+)
+from sglang.multimodal_gen.runtime.realtime.critical_path_metrics import (
+    observe_stage_seconds,
 )
 from sglang.multimodal_gen.runtime.server_args import (
     PortArgs,
