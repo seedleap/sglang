@@ -13,6 +13,16 @@ python3 benchmark/minwm_realtime_parity/k8s/render_single_gpu_taehv_24fps.py \
   --sku b300 --mode baseline --run-tag 20260817-a2 \
   --sglang-git-ref 54bdfea9cd52ac1cd79896e1a7275e18a0257b79 \
   --harness-git-ref <40-character-harness-commit>
+
+python3 benchmark/minwm_realtime_parity/k8s/render_single_gpu_taehv_24fps.py \
+  --sku h100 --mode baseline --run-tag 20260818-h100-a1 \
+  --sglang-git-ref <40-character-candidate-commit> \
+  --harness-git-ref <40-character-harness-commit> --require-24fps
+
+python3 benchmark/minwm_realtime_parity/k8s/render_single_gpu_taehv_24fps.py \
+  --sku h200 --mode baseline --run-tag 20260818-h200-a1 \
+  --sglang-git-ref <40-character-candidate-commit> \
+  --harness-git-ref <40-character-harness-commit> --require-24fps
 ```
 
 Render candidate A/B jobs with the same entry point, full commit hashes, and
@@ -51,7 +61,12 @@ kubectl --context <context> apply --dry-run=server -f <generated-yaml>
 - One requested and limited GPU; Spot-only selectors. B200 uses the
   `minwm-spot/ray` Auto Mode pool on `p6-b200.48xlarge`. B300 uses the
   `aws03-usw2/default` managed Spot node group
-  `minwm-spot-p6-b300-0703` on `p6-b300.48xlarge` in `us-west-2a`.
+  `minwm-spot-p6-b300-0703` on `p6-b300.48xlarge` in `us-west-2a`. The
+  experimental H100/H200 validations use `aws03-usw2/default`, exact
+  `p5.48xlarge` / `p5en.48xlarge` selectors, and managed Spot node groups
+  `minwm-spot-p5-h100-sglang-0718` /
+  `minwm-spot-p5en-h200-sglang-0718`, respectively. All three aws03 profiles use
+  the verified RWX `s3-claim`.
 - Immutable image digest, full SGLang commit, checkpoint version/size/SHA-256,
   first-frame URI/version/size/SHA-256, MinWM provenance commit, TAEHV revision,
   and `taew2_2.pth` SHA-256 are embedded and asserted at runtime. The
@@ -67,11 +82,16 @@ kubectl --context <context> apply --dry-run=server -f <generated-yaml>
   This larger trace deliberately replaces the racy historical claim that a
   client-observed chunk-19 boundary could guarantee a 10-chunk server capture.
 - After server readiness, the same formal Job first runs a protocol smoke with
-  the telemetry-aware profile client. Baseline requires one warmup plus two
-  measured chunks (three complete payload/timing pairs and 32 measured frames);
-  NSYS requires one warmup plus one measured chunk before tracing. These smoke
-  chunks are recorded separately in `protocol-smoke.json` and are excluded from
-  headline throughput and the NSYS capture.
+  the telemetry-aware profile client. B200/B300 use one warmup plus two measured
+  chunks for baseline; NSYS retains one measured smoke chunk. Experimental
+  Hopper uses eight warmup chunks (plus two measured for baseline or one for
+  NSYS), so its no-offload local-TAEHV fit proof crosses the complete
+  32-latent-frame causal-cache window before formal measurement. The runner
+  records and reads back `NO_OFFLOAD_PROTOCOL_FIT_PASS.json`, and also confirms
+  the same server process is alive, before allowing the 20+200 headline segment
+  (or an NSYS capture) to start. These smoke chunks are recorded separately in
+  `protocol-smoke.json` and are excluded from headline throughput and the NSYS
+  capture.
 - Realtime session idle and maximum-lifetime watchdogs are both fixed at 900
   seconds. `SGLANG_REALTIME_TRACE_SYNC_CUDA=0` and
   `SGLANG_DIFFUSION_SYNC_STAGE_PROFILING=0` prevent timing instrumentation from

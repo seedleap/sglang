@@ -3,10 +3,14 @@ set -euo pipefail
 
 : "${MINWM_RUN_ID:?set MINWM_RUN_ID}"
 : "${MINWM_PROFILE_MODE:?set MINWM_PROFILE_MODE to baseline or nsys}"
-: "${MINWM_GPU_SKU:?set MINWM_GPU_SKU to B200 or B300}"
+: "${MINWM_GPU_SKU:?set MINWM_GPU_SKU to B200, B300, H100, or H200}"
 : "${MINWM_HARDWARE_PROFILE:?set the experimental hardware profile}"
 : "${MINWM_EXPECTED_COMPUTE_CAP:?set expected compute capability}"
 : "${MINWM_EXPECTED_MIN_MEMORY_MIB:?set expected minimum visible memory}"
+: "${MINWM_EXPECTED_MAX_MEMORY_MIB:=}"
+: "${MINWM_PROTOCOL_SMOKE_WARMUP_CHUNKS:?set protocol-smoke warmup chunks}"
+: "${MINWM_PROTOCOL_SMOKE_MEASURED_CHUNKS:?set protocol-smoke measured chunks}"
+: "${MINWM_REQUIRE_FULL_WINDOW_NO_OFFLOAD_SMOKE:?set full-window fit gate}"
 : "${MINWM_BASE_IMAGE:?set the immutable base image digest}"
 : "${SGLANG_GIT_REF:?set the immutable SGLang commit}"
 : "${MINWM_GIT_REF:?set the MinWM checkpoint provenance commit}"
@@ -44,7 +48,7 @@ set -euo pipefail
 : "${TAEHV_CHECKPOINT_SHA256:?set the taew2_2 SHA-256}"
 
 [[ "${MINWM_PROFILE_MODE}" == "baseline" || "${MINWM_PROFILE_MODE}" == "nsys" ]]
-[[ "${MINWM_GPU_SKU}" == "B200" || "${MINWM_GPU_SKU}" == "B300" ]]
+[[ ",B200,B300,H100,H200," == *",${MINWM_GPU_SKU},"* ]]
 [[ "${MINWM_RUN_ID}" =~ ^[a-z0-9][a-z0-9.-]+$ ]]
 [[ "${MINWM_RESULTS_ROOT}" == /s3-results/world-model/evals/minwm/performance/* ]]
 [[ "${MINWM_STORAGE_LAYOUT}" == "shared" || "${MINWM_STORAGE_LAYOUT}" == "split" ]]
@@ -56,6 +60,14 @@ set -euo pipefail
 [[ "${MINWM_HARNESS_REF_VERIFIED}" == "true" ]]
 [[ "${MINWM_REQUIRE_24FPS}" == "true" || "${MINWM_REQUIRE_24FPS}" == "false" ]]
 [[ "${MINWM_REQUIRE_CANDIDATE_EVIDENCE}" == "true" || "${MINWM_REQUIRE_CANDIDATE_EVIDENCE}" == "false" ]]
+[[ "${MINWM_EXPECTED_MIN_MEMORY_MIB}" =~ ^[0-9]+$ ]]
+if [[ -n "${MINWM_EXPECTED_MAX_MEMORY_MIB}" ]]; then
+  [[ "${MINWM_EXPECTED_MAX_MEMORY_MIB}" =~ ^[0-9]+$ ]]
+  (( MINWM_EXPECTED_MIN_MEMORY_MIB <= MINWM_EXPECTED_MAX_MEMORY_MIB ))
+fi
+[[ "${MINWM_PROTOCOL_SMOKE_WARMUP_CHUNKS}" =~ ^[1-9][0-9]*$ ]]
+[[ "${MINWM_PROTOCOL_SMOKE_MEASURED_CHUNKS}" =~ ^[1-9][0-9]*$ ]]
+[[ "${MINWM_REQUIRE_FULL_WINDOW_NO_OFFLOAD_SMOKE}" == "true" || "${MINWM_REQUIRE_FULL_WINDOW_NO_OFFLOAD_SMOKE}" == "false" ]]
 [[ "${MINWM_RUNNER_SHA256}" =~ ^[0-9a-f]{64}$ ]]
 [[ "${MINWM_PROFILE_CLIENT_SHA256}" =~ ^[0-9a-f]{64}$ ]]
 [[ "${MINWM_COMMON_SHA256}" =~ ^[0-9a-f]{64}$ ]]
@@ -468,6 +480,101 @@ if required and not passed:
 PY
 }
 
+record_no_offload_protocol_fit() {
+  local result_path="$1" log_path="$2" marker_path="$3"
+  kill -0 "${server_pid}"
+  python3 - "${result_path}" "${log_path}" "${LOCAL_RESULTS}/gpu.csv" \
+    "${marker_path}" <<'PY'
+import csv
+import json
+import os
+import sys
+
+result = json.load(open(sys.argv[1]))
+server_log = open(sys.argv[2]).read()
+with open(sys.argv[3], newline="") as handle:
+    gpu_rows = list(csv.reader(handle))
+assert len(gpu_rows) == 1, gpu_rows
+gpu_name, gpu_memory_mib, gpu_compute_cap = [item.strip() for item in gpu_rows[0]]
+
+warmup_chunks = int(os.environ["MINWM_PROTOCOL_SMOKE_WARMUP_CHUNKS"])
+measured_chunks = int(os.environ["MINWM_PROTOCOL_SMOKE_MEASURED_CHUNKS"])
+latent_frames_per_chunk = int(
+    result["comparison_contract"]["latent_frames_per_chunk"]
+)
+warmup_latent_frames = warmup_chunks * latent_frames_per_chunk
+full_window_required = (
+    os.environ["MINWM_REQUIRE_FULL_WINDOW_NO_OFFLOAD_SMOKE"] == "true"
+)
+if full_window_required:
+    assert warmup_latent_frames >= 32, warmup_latent_frames
+
+server_args_marker = "server_args: "
+server_args_lines = [
+    line for line in server_log.splitlines() if server_args_marker in line
+]
+assert server_args_lines, "missing structured server_args log"
+server_args = json.loads(server_args_lines[0].split(server_args_marker, 1)[1])
+assert server_args["vae_cpu_offload"] is False, server_args
+assert server_args["realtime_vae_backend"] == "local", server_args
+assert "Preloading TAEHV decoder weights" in server_log
+
+assert result["warmup_chunks"] == warmup_chunks, result
+assert result["measured_chunks"] == measured_chunks, result
+assert result["received_payload_chunks"] == warmup_chunks + measured_chunks, result
+assert result["received_server_timing_chunks"] == warmup_chunks + measured_chunks, result
+assert gpu_name.find(os.environ["MINWM_GPU_SKU"]) >= 0, gpu_name
+assert gpu_compute_cap == os.environ["MINWM_EXPECTED_COMPUTE_CAP"], gpu_compute_cap
+memory_mib = int(gpu_memory_mib)
+assert int(os.environ["MINWM_EXPECTED_MIN_MEMORY_MIB"]) <= memory_mib
+max_memory_mib = os.environ["MINWM_EXPECTED_MAX_MEMORY_MIB"]
+if max_memory_mib:
+    assert memory_mib <= int(max_memory_mib)
+
+evidence = {
+    "formal_same_process_eligible": True,
+    "full_window_required": full_window_required,
+    "gpu": {
+        "compute_cap": gpu_compute_cap,
+        "memory_total_mib": memory_mib,
+        "name": gpu_name,
+    },
+    "local_streaming_taehv": True,
+    "measured_chunks": measured_chunks,
+    "no_offload_protocol_fit_pass": True,
+    "processed_latent_frames": (
+        (warmup_chunks + measured_chunks) * latent_frames_per_chunk
+    ),
+    "same_server_process_alive_after_smoke": True,
+    "vae_cpu_offload": False,
+    "warmup_chunks": warmup_chunks,
+    "warmup_latent_frames": warmup_latent_frames,
+}
+with open(sys.argv[4], "w") as handle:
+    json.dump(evidence, handle, indent=2, sort_keys=True)
+    handle.write("\n")
+print(json.dumps(evidence, sort_keys=True))
+PY
+}
+
+assert_no_offload_protocol_fit() {
+  local marker_path="$1"
+  kill -0 "${server_pid}"
+  python3 - "${marker_path}" <<'PY'
+import json
+import sys
+
+evidence = json.load(open(sys.argv[1]))
+assert evidence["no_offload_protocol_fit_pass"] is True, evidence
+assert evidence["formal_same_process_eligible"] is True, evidence
+assert evidence["same_server_process_alive_after_smoke"] is True, evidence
+assert evidence["local_streaming_taehv"] is True, evidence
+assert evidence["vae_cpu_offload"] is False, evidence
+if evidence["full_window_required"]:
+    assert evidence["warmup_latent_frames"] >= 32, evidence
+PY
+}
+
 clone_at() {
   local repository="$1" destination="$2" revision="$3"
   git clone --filter=blob:none --no-checkout \
@@ -494,6 +601,9 @@ gpu_compute_cap="$(xargs <<< "${gpu_compute_cap}")"
 [[ "${gpu_name}" == *"${MINWM_GPU_SKU}"* ]]
 [[ "${gpu_compute_cap}" == "${MINWM_EXPECTED_COMPUTE_CAP}" ]]
 (( gpu_memory_mib >= MINWM_EXPECTED_MIN_MEMORY_MIB ))
+if [[ -n "${MINWM_EXPECTED_MAX_MEMORY_MIB}" ]]; then
+  (( gpu_memory_mib <= MINWM_EXPECTED_MAX_MEMORY_MIB ))
+fi
 [[ "${MINWM_VAE_CPU_OFFLOAD:-false}" == "false" ]]
 
 python3 - <<'PY' | tee "${LOCAL_RESULTS}/runtime-before-install.json"
@@ -560,10 +670,15 @@ contract = {
             os.environ["MINWM_REQUIRE_CANDIDATE_EVIDENCE"] == "true"
         ),
         "protocol_smoke_in_headline": False,
-        "protocol_smoke_measured_chunks": (
-            2 if os.environ["MINWM_PROFILE_MODE"] == "baseline" else 1
+        "protocol_smoke_measured_chunks": int(
+            os.environ["MINWM_PROTOCOL_SMOKE_MEASURED_CHUNKS"]
         ),
-        "protocol_smoke_warmup_chunks": 1,
+        "protocol_smoke_warmup_chunks": int(
+            os.environ["MINWM_PROTOCOL_SMOKE_WARMUP_CHUNKS"]
+        ),
+        "require_full_window_no_offload_smoke": (
+            os.environ["MINWM_REQUIRE_FULL_WINDOW_NO_OFFLOAD_SMOKE"] == "true"
+        ),
         "realtime_session_idle_timeout_s": 900,
         "realtime_session_max_lifetime_s": 900,
         "segment_compile": True,
@@ -597,6 +712,15 @@ contract = {
         "base_image": os.environ["MINWM_BASE_IMAGE"],
         "profile": os.environ["MINWM_HARDWARE_PROFILE"],
         "sku": os.environ["MINWM_GPU_SKU"],
+        "expected_compute_cap": os.environ["MINWM_EXPECTED_COMPUTE_CAP"],
+        "expected_memory_mib": {
+            "min": int(os.environ["MINWM_EXPECTED_MIN_MEMORY_MIB"]),
+            "max": (
+                int(os.environ["MINWM_EXPECTED_MAX_MEMORY_MIB"])
+                if os.environ["MINWM_EXPECTED_MAX_MEMORY_MIB"]
+                else None
+            ),
+        },
     },
     "harness": {
         "cases_sha256": os.environ["MINWM_CASES_SHA256"],
@@ -846,15 +970,24 @@ if [[ "${MINWM_PROFILE_MODE}" == "baseline" ]]; then
     --profile-name "${MINWM_GPU_SKU,,}-local-taehv-protocol-smoke" \
     --sink-size 8 \
     --kv-cache-num-frames 32 \
-    --warmup-chunks 1 \
-    --measured-chunks 2 \
+    --warmup-chunks "${MINWM_PROTOCOL_SMOKE_WARMUP_CHUNKS}" \
+    --measured-chunks "${MINWM_PROTOCOL_SMOKE_MEASURED_CHUNKS}" \
     --timeout 3600 \
     --output "${baseline_dir}/protocol-smoke.json" \
     | tee "${baseline_dir}/protocol-smoke-client.log"
-  assert_profile_result "${baseline_dir}/protocol-smoke.json" 1 2
+  assert_profile_result \
+    "${baseline_dir}/protocol-smoke.json" \
+    "${MINWM_PROTOCOL_SMOKE_WARMUP_CHUNKS}" \
+    "${MINWM_PROTOCOL_SMOKE_MEASURED_CHUNKS}"
   assert_runtime_alignment "${baseline_dir}/server.log"
   grep -F 'Preloading TAEHV decoder weights' "${baseline_dir}/server.log" \
     > "${baseline_dir}/taehv-load-evidence.txt"
+  no_offload_fit_marker="${baseline_dir}/NO_OFFLOAD_PROTOCOL_FIT_PASS.json"
+  record_no_offload_protocol_fit \
+    "${baseline_dir}/protocol-smoke.json" \
+    "${baseline_dir}/server.log" \
+    "${no_offload_fit_marker}"
+  assert_no_offload_protocol_fit "${no_offload_fit_marker}"
   python3 "${PROFILE_CLIENT}" \
     --cases "${CASES}" \
     --case "${CASE}" \
@@ -908,15 +1041,24 @@ else
     --profile-name "${MINWM_GPU_SKU,,}-local-taehv-nsys-protocol-smoke" \
     --sink-size 8 \
     --kv-cache-num-frames 32 \
-    --warmup-chunks 1 \
-    --measured-chunks 1 \
+    --warmup-chunks "${MINWM_PROTOCOL_SMOKE_WARMUP_CHUNKS}" \
+    --measured-chunks "${MINWM_PROTOCOL_SMOKE_MEASURED_CHUNKS}" \
     --timeout 3600 \
     --output "${nsys_dir}/protocol-smoke.json" \
     > "${nsys_dir}/protocol-smoke-client.log" 2>&1
-  assert_profile_result "${nsys_dir}/protocol-smoke.json" 1 1
+  assert_profile_result \
+    "${nsys_dir}/protocol-smoke.json" \
+    "${MINWM_PROTOCOL_SMOKE_WARMUP_CHUNKS}" \
+    "${MINWM_PROTOCOL_SMOKE_MEASURED_CHUNKS}"
   assert_runtime_alignment "${nsys_dir}/server.log"
   grep -F 'Preloading TAEHV decoder weights' "${nsys_dir}/server.log" \
     > "${nsys_dir}/taehv-load-evidence.txt"
+  no_offload_fit_marker="${nsys_dir}/NO_OFFLOAD_PROTOCOL_FIT_PASS.json"
+  record_no_offload_protocol_fit \
+    "${nsys_dir}/protocol-smoke.json" \
+    "${nsys_dir}/server.log" \
+    "${no_offload_fit_marker}"
+  assert_no_offload_protocol_fit "${no_offload_fit_marker}"
 
   capture_log_start_line="$(( $(wc -l < "${nsys_dir}/server.log") + 1 ))"
   nsys start \

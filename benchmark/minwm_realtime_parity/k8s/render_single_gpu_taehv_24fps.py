@@ -114,7 +114,10 @@ HARDWARE = {
         "profile": "experimental-sm100-high-memory",
         "compute_cap": "10.0",
         "min_memory_mib": "180000",
+        "max_memory_mib": "",
         "gpu_sku": "B200",
+        "protocol_smoke_warmup_chunks": "1",
+        "require_full_window_no_offload_smoke": "false",
     },
     "b300": {
         "context": "aws03-usw2",
@@ -140,7 +143,66 @@ HARDWARE = {
         "profile": "experimental-sm103-high-memory",
         "compute_cap": "10.3",
         "min_memory_mib": "250000",
+        "max_memory_mib": "",
         "gpu_sku": "B300",
+        "protocol_smoke_warmup_chunks": "1",
+        "require_full_window_no_offload_smoke": "false",
+    },
+    "h100": {
+        "context": "aws03-usw2",
+        "namespace": "default",
+        "instance_type": "p5.48xlarge",
+        "nodepool": "minwm-spot-p5-h100-sglang-0718",
+        "zone": None,
+        "node_selector": {
+            "eks.amazonaws.com/capacityType": "SPOT",
+            "eks.amazonaws.com/nodegroup": "minwm-spot-p5-h100-sglang-0718",
+            "node.kubernetes.io/instance-type": "p5.48xlarge",
+            "seedleap.ai/workload": "wan22-ti2v",
+        },
+        "taint_key": "seedleap.ai/workload",
+        "taint_value": "wan22-ti2v",
+        "storage": {
+            "layout": "shared",
+            "input_pvc": "s3-claim",
+            "results_pvc": "s3-claim",
+            "verified_results_access": "RWX",
+        },
+        "profile": "experimental-sm90-h100-no-offload",
+        "compute_cap": "9.0",
+        "min_memory_mib": "80000",
+        "max_memory_mib": "90000",
+        "gpu_sku": "H100",
+        "protocol_smoke_warmup_chunks": "8",
+        "require_full_window_no_offload_smoke": "true",
+    },
+    "h200": {
+        "context": "aws03-usw2",
+        "namespace": "default",
+        "instance_type": "p5en.48xlarge",
+        "nodepool": "minwm-spot-p5en-h200-sglang-0718",
+        "zone": None,
+        "node_selector": {
+            "eks.amazonaws.com/capacityType": "SPOT",
+            "eks.amazonaws.com/nodegroup": "minwm-spot-p5en-h200-sglang-0718",
+            "node.kubernetes.io/instance-type": "p5en.48xlarge",
+            "seedleap.ai/workload": "wan22-ti2v",
+        },
+        "taint_key": "seedleap.ai/workload",
+        "taint_value": "wan22-ti2v",
+        "storage": {
+            "layout": "shared",
+            "input_pvc": "s3-claim",
+            "results_pvc": "s3-claim",
+            "verified_results_access": "RWX",
+        },
+        "profile": "experimental-sm90-h200-no-offload",
+        "compute_cap": "9.0",
+        "min_memory_mib": "140000",
+        "max_memory_mib": "150000",
+        "gpu_sku": "H200",
+        "protocol_smoke_warmup_chunks": "8",
+        "require_full_window_no_offload_smoke": "true",
     },
 }
 
@@ -277,6 +339,16 @@ def render(
             "seedleap.ai/capacity-type": "spot",
             "seedleap.ai/cluster-context": hardware["context"],
             "seedleap.ai/vae-cpu-offload": "false",
+            "seedleap.ai/expected-compute-cap": hardware["compute_cap"],
+            "seedleap.ai/expected-memory-mib": (
+                f"{hardware['min_memory_mib']}-"
+                f"{hardware['max_memory_mib'] or 'unbounded'}"
+            ),
+            "seedleap.ai/no-offload-protocol-gate": (
+                "full-window"
+                if hardware["require_full_window_no_offload_smoke"] == "true"
+                else "standard"
+            ),
             "seedleap.ai/execution-policy": "serial-quiet-headline",
             "seedleap.ai/storage-layout": hardware["storage"]["layout"],
             "seedleap.ai/input-pvc": hardware["storage"]["input_pvc"],
@@ -305,14 +377,18 @@ def render(
                 "terminationGracePeriodSeconds": 120,
                 "securityContext": {"seLinuxOptions": {"type": "spc_t"}},
                 "nodeSelector": copy.deepcopy(hardware["node_selector"]),
-                "tolerations": [
-                    {
-                        "key": hardware["taint_key"],
-                        "operator": "Equal",
-                        "value": hardware["taint_value"],
-                        "effect": "NoSchedule",
-                    }
-                ],
+                "tolerations": (
+                    [
+                        {
+                            "key": hardware["taint_key"],
+                            "operator": "Equal",
+                            "value": hardware["taint_value"],
+                            "effect": "NoSchedule",
+                        }
+                    ]
+                    if hardware["taint_key"] is not None
+                    else []
+                ),
                 "containers": [],
                 "volumes": [
                     {
@@ -346,6 +422,12 @@ def render(
         "MINWM_HARDWARE_PROFILE": hardware["profile"],
         "MINWM_EXPECTED_COMPUTE_CAP": hardware["compute_cap"],
         "MINWM_EXPECTED_MIN_MEMORY_MIB": hardware["min_memory_mib"],
+        "MINWM_EXPECTED_MAX_MEMORY_MIB": hardware["max_memory_mib"],
+        "MINWM_PROTOCOL_SMOKE_WARMUP_CHUNKS": hardware["protocol_smoke_warmup_chunks"],
+        "MINWM_PROTOCOL_SMOKE_MEASURED_CHUNKS": ("2" if mode == "baseline" else "1"),
+        "MINWM_REQUIRE_FULL_WINDOW_NO_OFFLOAD_SMOKE": hardware[
+            "require_full_window_no_offload_smoke"
+        ],
         "MINWM_STORAGE_LAYOUT": hardware["storage"]["layout"],
         "MINWM_INPUT_PVC": hardware["storage"]["input_pvc"],
         "MINWM_RESULTS_PVC": hardware["storage"]["results_pvc"],

@@ -40,6 +40,7 @@ Use this decision table when Codex renders a job:
 | SM120 and >=65,536 MiB | omitted / `false` | High-memory speed default |
 | SM100 and >=180,000 MiB | `false` | `experimental-sm100-high-memory`; B200 validation only |
 | SM103 and >=250,000 MiB | `false` | `experimental-sm103-high-memory`; B300 validation only |
+| SM90 in an explicitly bounded H100/H200 validation Job | `false` only after the required same-process fit smoke passes | device-specific `experimental-sm90-*-no-offload`; never a deployment default |
 | Any other capacity or compute capability, including a 48 GB Ada card | `true` initially | Experimental; do not disable until the same device passes the acceptance gates |
 
 Always record the queried GPU name, total MiB, compute capability, and the final
@@ -79,6 +80,45 @@ The request must set `realtime_causal_kv_cache_num_frames=32` and
 effect.
 
 ## Hardware profiles
+
+### `experimental-sm90-h100-no-offload` and `experimental-sm90-h200-no-offload`
+
+This profile is a benchmark-only exception to the conservative unclassified-
+hardware default. It does not classify all SM90 devices as safe for no-offload
+deployment. A generated Job must first gate on the reported compute capability
+and a bounded physical-memory range, then use the exact server process intended
+for the formal run to complete a local-TAEHV no-offload protocol smoke.
+
+For Hopper, the smoke uses 8 warmup chunks. Baseline adds 2 measured smoke
+chunks, while NSYS retains its 1 measured smoke chunk. Four latent frames are
+generated per chunk, so the warmup alone crosses the complete
+32-latent-frame causal-cache window. The smoke must prove all of the following
+before the 20+200 headline segment may start:
+
+- the one-GPU server is still alive with `vae_cpu_offload=false`;
+- the reported GPU name, SM version, and total MiB match the rendered bounds;
+- local StreamingTAEHV loaded in the server process;
+- all expected raw-RGB payload and server-timing chunks completed;
+- the Tianpeng runtime-alignment assertions passed.
+
+The runner records this evidence in
+`NO_OFFLOAD_PROTOCOL_FIT_PASS.json` and reads the marker back immediately before
+the formal segment. A failed or missing marker is fail-closed. A successful
+marker authorizes only the following formal segment in that same server process;
+it does not promote the hardware to a stable no-offload profile.
+
+The current isolated Spot validation targets are managed node groups in
+`aws03-usw2/default`, both using the verified RWX `s3-claim`:
+
+| Requested device | Exact instance / managed node group | Required physical memory | Compute capability |
+| --- | --- | --- | --- |
+| H100 | `p5.48xlarge` / `minwm-spot-p5-h100-sglang-0718` | 80,000-90,000 MiB | `9.0` |
+| H200 | `p5en.48xlarge` / `minwm-spot-p5en-h200-sglang-0718` | 140,000-150,000 MiB | `9.0` |
+
+Both manifests use exact node-group and instance selectors plus the
+`seedleap.ai/workload=wan22-ti2v` taint/toleration. The actual in-workload
+`nvidia-smi` result remains authoritative; sharing SM90 does not allow one
+device to inherit the other's memory range.
 
 ### `blackwell-32g`
 

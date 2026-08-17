@@ -48,6 +48,13 @@ def _copy_tree_contents_function() -> str:
     return runner[start:end]
 
 
+def _no_offload_protocol_fit_functions() -> str:
+    runner = RUNNER_PATH.read_text()
+    start = runner.index("record_no_offload_protocol_fit() {")
+    end = runner.index("\n\nclone_at()", start)
+    return runner[start:end]
+
+
 def _run_copy_tree_contents(
     tmp_path: Path,
     source: Path,
@@ -176,6 +183,73 @@ def test_copy_tree_contents_propagates_command_failures_with_errexit_disabled(
     assert result.returncode != 0
 
 
+@pytest.mark.parametrize(("warmup_chunks", "passes"), ((8, True), (7, False)))
+def test_hopper_no_offload_fit_requires_a_full_cache_window(
+    tmp_path: Path, warmup_chunks: int, passes: bool
+) -> None:
+    result_path = tmp_path / "protocol-smoke.json"
+    log_path = tmp_path / "server.log"
+    gpu_path = tmp_path / "gpu.csv"
+    marker_path = tmp_path / "NO_OFFLOAD_PROTOCOL_FIT_PASS.json"
+    result_path.write_text(
+        json.dumps(
+            {
+                "comparison_contract": {"latent_frames_per_chunk": 4},
+                "warmup_chunks": warmup_chunks,
+                "measured_chunks": 2,
+                "received_payload_chunks": warmup_chunks + 2,
+                "received_server_timing_chunks": warmup_chunks + 2,
+            }
+        )
+    )
+    log_path.write_text(
+        'server_args: {"vae_cpu_offload": false, '
+        '"realtime_vae_backend": "local"}\n'
+        "Preloading TAEHV decoder weights\n"
+    )
+    gpu_path.write_text("NVIDIA H100 80GB HBM3, 81559, 9.0\n")
+    script = f"""
+set -euo pipefail
+server_pid=$$
+LOCAL_RESULTS="$1"
+{_no_offload_protocol_fit_functions()}
+record_no_offload_protocol_fit "$2" "$3" "$4"
+assert_no_offload_protocol_fit "$4"
+"""
+    completed = subprocess.run(
+        [
+            "bash",
+            "-c",
+            script,
+            "no-offload-fit-test",
+            str(tmp_path),
+            str(result_path),
+            str(log_path),
+            str(marker_path),
+        ],
+        check=False,
+        capture_output=True,
+        env={
+            **os.environ,
+            "MINWM_EXPECTED_COMPUTE_CAP": "9.0",
+            "MINWM_EXPECTED_MAX_MEMORY_MIB": "90000",
+            "MINWM_EXPECTED_MIN_MEMORY_MIB": "80000",
+            "MINWM_GPU_SKU": "H100",
+            "MINWM_PROTOCOL_SMOKE_MEASURED_CHUNKS": "2",
+            "MINWM_PROTOCOL_SMOKE_WARMUP_CHUNKS": str(warmup_chunks),
+            "MINWM_REQUIRE_FULL_WINDOW_NO_OFFLOAD_SMOKE": "true",
+        },
+        text=True,
+    )
+
+    assert (completed.returncode == 0) is passes, completed.stderr
+    assert marker_path.is_file() is passes
+    if passes:
+        evidence = json.loads(marker_path.read_text())
+        assert evidence["warmup_latent_frames"] == 32
+        assert evidence["no_offload_protocol_fit_pass"] is True
+
+
 def _write_nsys_sqlite_fixture(
     path: Path,
     *,
@@ -260,7 +334,7 @@ def _write_nsys_sqlite_fixture(
     con.close()
 
 
-@pytest.mark.parametrize("sku", ("b200", "b300"))
+@pytest.mark.parametrize("sku", ("b200", "b300", "h100", "h200"))
 @pytest.mark.parametrize("mode", ("baseline", "nsys"))
 def test_render_preserves_single_gpu_hardware_and_profile_contract(
     sku: str, mode: str
@@ -315,18 +389,58 @@ def test_render_preserves_single_gpu_hardware_and_profile_contract(
     node_selector = pod_spec["nodeSelector"]
     assert node_selector == hardware["node_selector"]
 
-    expected_toleration = {
-        "key": hardware["taint_key"],
-        "operator": "Equal",
-        "value": hardware["taint_value"],
-        "effect": "NoSchedule",
-    }
-    assert expected_toleration in pod_spec["tolerations"]
+    if hardware["taint_key"] is None:
+        assert pod_spec["tolerations"] == []
+    else:
+        expected_toleration = {
+            "key": hardware["taint_key"],
+            "operator": "Equal",
+            "value": hardware["taint_value"],
+            "effect": "NoSchedule",
+        }
+        assert expected_toleration in pod_spec["tolerations"]
     if sku == "b200":
         assert node_selector["seedleap.ai/capacity-pool"] == "minwm-test-b200-karpenter"
-    else:
+    elif sku in {"b300", "h100", "h200"}:
         assert node_selector["eks.amazonaws.com/capacityType"] == "SPOT"
         assert node_selector["eks.amazonaws.com/nodegroup"] == hardware["nodepool"]
+    if sku in {"b200", "b300"}:
+        assert hardware["max_memory_mib"] == ""
+    else:
+        expected = {
+            "h100": {
+                "profile": "experimental-sm90-h100-no-offload",
+                "min_memory_mib": "80000",
+                "max_memory_mib": "90000",
+                "instance_type": "p5.48xlarge",
+                "nodepool": "minwm-spot-p5-h100-sglang-0718",
+            },
+            "h200": {
+                "profile": "experimental-sm90-h200-no-offload",
+                "min_memory_mib": "140000",
+                "max_memory_mib": "150000",
+                "instance_type": "p5en.48xlarge",
+                "nodepool": "minwm-spot-p5en-h200-sglang-0718",
+            },
+        }[sku]
+        assert hardware["context"] == "aws03-usw2"
+        assert hardware["namespace"] == "default"
+        assert hardware["profile"] == expected["profile"]
+        assert hardware["compute_cap"] == "9.0"
+        assert hardware["min_memory_mib"] == expected["min_memory_mib"]
+        assert hardware["max_memory_mib"] == expected["max_memory_mib"]
+        assert hardware["protocol_smoke_warmup_chunks"] == "8"
+        assert hardware["require_full_window_no_offload_smoke"] == "true"
+        assert node_selector == {
+            "eks.amazonaws.com/capacityType": "SPOT",
+            "eks.amazonaws.com/nodegroup": expected["nodepool"],
+            "node.kubernetes.io/instance-type": expected["instance_type"],
+            "seedleap.ai/workload": "wan22-ti2v",
+        }
+        assert (
+            job["metadata"]["annotations"]["seedleap.ai/no-offload-protocol-gate"]
+            == "full-window"
+        )
 
     if mode == "nsys":
         assert container["securityContext"] == {"capabilities": {"add": ["SYS_ADMIN"]}}
@@ -341,6 +455,20 @@ def test_render_preserves_single_gpu_hardware_and_profile_contract(
     assert environment["MINWM_HARNESS_REF_VERIFIED"] == "true"
     assert environment["MINWM_REQUIRE_24FPS"] == "false"
     assert environment["MINWM_REQUIRE_CANDIDATE_EVIDENCE"] == "false"
+    assert environment["MINWM_EXPECTED_COMPUTE_CAP"] == hardware["compute_cap"]
+    assert environment["MINWM_EXPECTED_MIN_MEMORY_MIB"] == hardware["min_memory_mib"]
+    assert environment["MINWM_EXPECTED_MAX_MEMORY_MIB"] == hardware["max_memory_mib"]
+    assert (
+        environment["MINWM_PROTOCOL_SMOKE_WARMUP_CHUNKS"]
+        == hardware["protocol_smoke_warmup_chunks"]
+    )
+    assert environment["MINWM_PROTOCOL_SMOKE_MEASURED_CHUNKS"] == (
+        "2" if mode == "baseline" else "1"
+    )
+    assert (
+        environment["MINWM_REQUIRE_FULL_WINDOW_NO_OFFLOAD_SMOKE"]
+        == hardware["require_full_window_no_offload_smoke"]
+    )
     assert environment["MINWM_BASE_IMAGE"] == BASE_IMAGE
     assert environment["MINWM_GIT_REF"] == MINWM_GIT_REF
     assert len(environment["MINWM_GIT_REF"]) == 40
@@ -413,7 +541,27 @@ def test_render_preserves_single_gpu_hardware_and_profile_contract(
     assert 'assert result["received_payload_chunks"] == expected_total' in runner
     assert 'assert result["received_server_timing_chunks"] == expected_total' in runner
     assert '"protocol_smoke_in_headline": False' in runner
-    assert '"protocol_smoke_warmup_chunks": 1' in runner
+    assert 'os.environ["MINWM_PROTOCOL_SMOKE_WARMUP_CHUNKS"]' in runner
+    assert 'os.environ["MINWM_PROTOCOL_SMOKE_MEASURED_CHUNKS"]' in runner
+    assert "gpu_memory_mib <= MINWM_EXPECTED_MAX_MEMORY_MIB" in runner
+    assert "NO_OFFLOAD_PROTOCOL_FIT_PASS.json" in runner
+    assert 'assert evidence["no_offload_protocol_fit_pass"] is True' in runner
+    assert 'assert evidence["formal_same_process_eligible"] is True' in runner
+    assert 'assert evidence["warmup_latent_frames"] >= 32' in runner
+    assert runner.index("record_no_offload_protocol_fit \\") < runner.index(
+        '--profile-name "${MINWM_GPU_SKU,,}-local-taehv-main-segment"'
+    )
+    fit_assertion = 'assert_no_offload_protocol_fit "${no_offload_fit_marker}"'
+    assert runner.count(fit_assertion) == 2
+    if mode == "baseline":
+        assert runner.index(
+            fit_assertion, runner.index('if [[ "${MINWM_PROFILE_MODE}"')
+        ) < runner.index('--profile-name "${MINWM_GPU_SKU,,}-local-taehv-main-segment"')
+    else:
+        nsys_branch = runner.index("else\n  readonly NSYS_URL=")
+        assert runner.index(fit_assertion, nsys_branch) < runner.index(
+            '--profile-name "${MINWM_GPU_SKU,,}-local-taehv-main-segment-nsys"'
+        )
     assert "--realtime-session-idle-timeout-s 900" in runner
     assert "--realtime-session-max-lifetime-s 900" in runner
     assert "export SGLANG_REALTIME_TRACE_SYNC_CUDA=0" in runner
@@ -461,14 +609,20 @@ def test_render_preserves_single_gpu_hardware_and_profile_contract(
     if mode == "baseline":
         assert '--output "${baseline_dir}/protocol-smoke.json"' in runner
         assert (
-            'assert_profile_result "${baseline_dir}/protocol-smoke.json" 1 2' in runner
+            '"${baseline_dir}/protocol-smoke.json" \\\n'
+            '    "${MINWM_PROTOCOL_SMOKE_WARMUP_CHUNKS}" \\\n'
+            '    "${MINWM_PROTOCOL_SMOKE_MEASURED_CHUNKS}"' in runner
         )
         assert (
             'assert_profile_result "${baseline_dir}/throughput.json" 20 200' in runner
         )
     else:
         assert '--output "${nsys_dir}/protocol-smoke.json"' in runner
-        assert 'assert_profile_result "${nsys_dir}/protocol-smoke.json" 1 1' in runner
+        assert (
+            '"${nsys_dir}/protocol-smoke.json" \\\n'
+            '    "${MINWM_PROTOCOL_SMOKE_WARMUP_CHUNKS}" \\\n'
+            '    "${MINWM_PROTOCOL_SMOKE_MEASURED_CHUNKS}"' in runner
+        )
         assert 'assert_profile_result "${nsys_dir}/throughput.json" 8 8' in runner
         assert '"capture_chunk_count": 16' in runner
         assert 'stage_name = "stage_MinWMCausalDMDDenoisingStage"' in runner
