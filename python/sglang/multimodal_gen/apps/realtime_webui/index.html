@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>World Studio · 实时模型对比</title>
-    <link rel="stylesheet" href="./styles.css?v=world-studio-h264-rules-v2" />
+    <link rel="stylesheet" href="./styles.css?v=world-studio-h264-rules-v3" />
   </head>
   <body class="world-studio">
     <header class="app-header">
@@ -267,7 +267,7 @@
             <div id="runtimeSkillBar" class="runtime-skill-bar" aria-label="世界技能快捷键" hidden>
               <span class="runtime-skill-label"><i aria-hidden="true">✦</i> 世界技能</span>
               <div id="runtimeSkillButtons" class="runtime-skill-buttons"></div>
-              <small>点击或按数字键触发</small>
+              <small id="runtimeSkillHint">点击或按数字键触发 · 共享 10s CD</small>
             </div>
 
             <div class="stage-controls" aria-label="世界移动与视角控制">
@@ -401,10 +401,10 @@
     <script src="./happy_oyster_session.js?v=happyoyster-session-v5"></script>
     <script src="./session_lifetime.js?v=session-lifetime-v1"></script>
     <script src="./prompt_rewrite_controller.js?v=prompt-rewrite-v3"></script>
-    <script src="./world_rules_controller.js?v=world-rules-v2"></script>
+    <script src="./world_rules_controller.js?v=world-rules-v3"></script>
     <script src="./fullscreen_controller.js?v=fullscreen-focus-v1"></script>
     <script src="./trace_topology.js?v=realtime-trace-topology-v6"></script>
     <script src="./trace_transport.js?v=realtime-trace-http-v2"></script>
-    <script src="./app.js?v=world-studio-h264-rules-v3"></script>
+    <script src="./app.js?v=world-studio-h264-rules-v4"></script>
   </body>
 </html>

@@ -3,6 +3,7 @@
   const DEFAULT_GOAL_PROBABILITY = 0.2;
   const DEFAULT_GOAL_MIN_PLAY_SECONDS = 10;
   const MAX_GOAL_MIN_PLAY_SECONDS = 3600;
+  const DEFAULT_SHARED_SKILL_COOLDOWN_MS = 10000;
   const GOAL_ACHIEVEMENT_DELAY_MS = 5000;
 
   function normalizedText(value) {
@@ -87,6 +88,8 @@
       random = Math.random,
       setTimer = global.setTimeout.bind(global),
       clearTimer = global.clearTimeout.bind(global),
+      now = () => Date.now(),
+      skillCooldownMs = DEFAULT_SHARED_SKILL_COOLDOWN_MS,
       achievementDelayMs = GOAL_ACHIEVEMENT_DELAY_MS,
       onAchievement = () => {},
       onGoalResult = () => {},
@@ -98,6 +101,8 @@
       this.random = random;
       this.setTimer = setTimer;
       this.clearTimer = clearTimer;
+      this.now = now;
+      this.skillCooldownMs = Math.max(0, Number(skillCooldownMs) || 0);
       this.achievementDelayMs = achievementDelayMs;
       this.onAchievement = onAchievement;
       this.onGoalResult = onGoalResult;
@@ -109,6 +114,8 @@
       this.goalPending = false;
       this.goalTriggerTimer = null;
       this.achievementTimer = null;
+      this.skillCooldownTimer = null;
+      this.skillCooldownDeadlineMs = 0;
       this.sessionGeneration = 0;
       this.sessionStarted = false;
       this.pendingSkillIds = new Set();
@@ -184,8 +191,11 @@
       this.sessionGeneration += 1;
       if (this.goalTriggerTimer !== null) this.clearTimer(this.goalTriggerTimer);
       if (this.achievementTimer !== null) this.clearTimer(this.achievementTimer);
+      if (this.skillCooldownTimer !== null) this.clearTimer(this.skillCooldownTimer);
       this.goalTriggerTimer = null;
       this.achievementTimer = null;
+      this.skillCooldownTimer = null;
+      this.skillCooldownDeadlineMs = 0;
       this.goalTriggered = false;
       this.goalAttempted = false;
       this.goalPending = false;
@@ -195,12 +205,42 @@
       this.onStateChange(this.snapshot());
     }
 
+    skillCooldownRemainingMs() {
+      return Math.max(0, this.skillCooldownDeadlineMs - Number(this.now()));
+    }
+
+    beginSharedSkillCooldown() {
+      if (this.skillCooldownTimer !== null) this.clearTimer(this.skillCooldownTimer);
+      this.skillCooldownTimer = null;
+      if (this.skillCooldownMs <= 0) {
+        this.skillCooldownDeadlineMs = 0;
+        return;
+      }
+      const generation = this.sessionGeneration;
+      this.skillCooldownDeadlineMs = Number(this.now()) + this.skillCooldownMs;
+      this.skillCooldownTimer = this.setTimer(() => {
+        if (generation !== this.sessionGeneration) return;
+        this.skillCooldownTimer = null;
+        this.skillCooldownDeadlineMs = 0;
+        this.onStateChange(this.snapshot());
+      }, this.skillCooldownMs);
+      this.onStateChange(this.snapshot());
+    }
+
     async triggerSkill(skillId) {
       const skill = this.activeRules.skills.find((item) => item.id === skillId);
       if (!skill) throw new Error("这个技能不在当前世界中");
+      const cooldownRemainingMs = this.skillCooldownRemainingMs();
+      if (cooldownRemainingMs > 0) {
+        return {
+          ignored: true,
+          reason: "shared_cooldown",
+          remaining_ms: cooldownRemainingMs,
+        };
+      }
       if (this.pendingSkillIds.has(skill.id)) return { ignored: true };
       this.pendingSkillIds.add(skill.id);
-      this.onStateChange(this.snapshot());
+      this.beginSharedSkillCooldown();
       try {
         const result = await this.dispatchPrepared(skill.prepared, {
           trigger: "skill",
@@ -261,6 +301,7 @@
     }
 
     snapshot() {
+      const skillCooldownRemainingMs = this.skillCooldownRemainingMs();
       return {
         skills: this.activeRules.skills.map((skill) => ({
           ...skill,
@@ -272,6 +313,9 @@
         goalPending: this.goalPending,
         goalScheduled: this.goalTriggerTimer !== null,
         sessionStarted: this.sessionStarted,
+        sharedSkillCooldownMs: this.skillCooldownMs,
+        skillCooldownRemainingMs,
+        skillCooldownActive: skillCooldownRemainingMs > 0,
       };
     }
   }
@@ -282,6 +326,7 @@
     module.exports = {
       DEFAULT_GOAL_PROBABILITY,
       DEFAULT_GOAL_MIN_PLAY_SECONDS,
+      DEFAULT_SHARED_SKILL_COOLDOWN_MS,
       GOAL_ACHIEVEMENT_DELAY_MS,
       MAX_GOAL_MIN_PLAY_SECONDS,
       MAX_WORLD_SKILLS,

@@ -1926,6 +1926,9 @@ body.world-studio {
 .world-studio .runtime-skill-button kbd { display: grid; width: 18px; height: 18px; place-items: center; border: 1px solid rgba(121, 223, 189, 0.24); border-radius: 5px; background: rgba(121, 223, 189, 0.09); color: var(--ws-accent); font: 700 8px ui-monospace, SFMono-Regular, Menlo, monospace; }
 .world-studio .runtime-skill-button:hover:not(:disabled) { border-color: var(--ws-accent); background: rgba(121, 223, 189, 0.12); box-shadow: 0 7px 18px rgba(0,0,0,0.22), 0 0 0 3px rgba(121,223,189,0.04); transform: translateY(-1px); }
 .world-studio .runtime-skill-button.is-pending { color: var(--ws-accent); cursor: wait; opacity: 0.72; }
+.world-studio .runtime-skill-button.is-cooldown { border-color: rgba(231, 197, 143, 0.22); color: #c8baa3; opacity: 0.62; }
+.world-studio .runtime-skill-button.is-cooldown kbd { border-color: rgba(231, 197, 143, 0.24); background: rgba(231, 197, 143, 0.07); color: #d8c39e; }
+.world-studio .runtime-skill-bar.is-cooldown > small { color: #c3a979; }
 .world-studio .runtime-skill-button:disabled { cursor: not-allowed; opacity: 0.45; }
 .world-studio .runtime-skill-bar > small { flex: 0 0 auto; color: #697570; font-size: 8px; }
 

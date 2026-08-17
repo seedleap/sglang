@@ -648,6 +648,7 @@ let renderedTraceChunks = new Set();
 const decodeRequests = new Map();
 let controlStateController = null;
 let worldRulesController = null;
+let runtimeSkillCooldownUiTimer = 0;
 let lastSentEventId = 0;
 let lastSampledEventId = 0;
 const pendingModelEvents = new Map();
@@ -1213,6 +1214,7 @@ worldRulesController = new WorldRulesController({
       metadata,
     );
   },
+  skillCooldownMs: 10000,
   achievementDelayMs: 5000,
   onAchievement: (goal) => showGoalAchievement(goal.name),
   onGoalResult: (result, goal) => {
@@ -5181,9 +5183,27 @@ function renderRuntimeSkillBar(snapshot = null) {
   snapshot = snapshot || worldRulesController?.snapshot() || { skills: [] };
   const bar = $("runtimeSkillBar");
   const container = $("runtimeSkillButtons");
+  const hint = $("runtimeSkillHint");
   if (!bar || !container) return;
+  const cooldownRemainingMs = Math.max(0, Number(snapshot.skillCooldownRemainingMs || 0));
+  const cooldownActive = cooldownRemainingMs > 0;
+  const cooldownSeconds = Math.max(1, Math.ceil(cooldownRemainingMs / 1000));
+  if (cooldownActive && !runtimeSkillCooldownUiTimer) {
+    runtimeSkillCooldownUiTimer = window.setInterval(() => {
+      renderRuntimeSkillBar(worldRulesController?.snapshot());
+    }, 200);
+  } else if (!cooldownActive && runtimeSkillCooldownUiTimer) {
+    window.clearInterval(runtimeSkillCooldownUiTimer);
+    runtimeSkillCooldownUiTimer = 0;
+  }
   container.innerHTML = "";
   bar.hidden = snapshot.skills.length === 0;
+  bar.classList.toggle("is-cooldown", cooldownActive);
+  if (hint) {
+    hint.textContent = cooldownActive
+      ? `全部技能共享冷却 · ${cooldownSeconds}s`
+      : "点击或按数字键触发 · 共享 10s CD";
+  }
   const canTrigger = worldExperienceReady
     && sessionPlayable
     && !sessionLifetimeExpired
@@ -5193,13 +5213,20 @@ function renderRuntimeSkillBar(snapshot = null) {
     button.className = "runtime-skill-button";
     button.type = "button";
     button.dataset.skillId = skill.id;
-    button.disabled = !canTrigger || skill.pending;
+    button.disabled = !canTrigger || skill.pending || cooldownActive;
     button.classList.toggle("is-pending", Boolean(skill.pending));
-    button.title = skill.instruction;
+    button.classList.toggle("is-cooldown", cooldownActive);
+    button.title = cooldownActive
+      ? `全部技能冷却中，还剩 ${cooldownSeconds} 秒`
+      : skill.instruction;
     const shortcut = document.createElement("kbd");
     shortcut.textContent = String(index + 1);
     const label = document.createElement("span");
-    label.textContent = skill.pending ? `${skill.name}…` : skill.name;
+    label.textContent = skill.pending
+      ? `${skill.name}…`
+      : cooldownActive
+        ? `${skill.name} · ${cooldownSeconds}s`
+        : skill.name;
     button.append(shortcut, label);
     button.onclick = () => triggerWorldSkill(skill.id);
     container.appendChild(button);
@@ -5207,16 +5234,33 @@ function renderRuntimeSkillBar(snapshot = null) {
 }
 
 async function triggerWorldSkill(skillId) {
-  const skill = worldRulesController.snapshot().skills.find((item) => item.id === skillId);
+  const rulesSnapshot = worldRulesController.snapshot();
+  const skill = rulesSnapshot.skills.find((item) => item.id === skillId);
   if (!skill || !worldExperienceReady || !sessionPlayable || !hasLiveWorldRuleTarget()) {
     setPromptRewriteStatus("模型连接已断开，请重新进入世界", "error");
     renderRuntimeSkillBar();
     return;
   }
+  if (rulesSnapshot.skillCooldownRemainingMs > 0) {
+    setPromptRewriteStatus(
+      `全部技能冷却中，还剩 ${Math.ceil(rulesSnapshot.skillCooldownRemainingMs / 1000)} 秒`,
+      "working",
+    );
+    renderRuntimeSkillBar(rulesSnapshot);
+    return;
+  }
   setPromptRewriteStatus(`正在触发技能「${skill.name}」…`, "working");
   try {
     const result = await worldRulesController.triggerSkill(skillId);
-    if (result?.ignored) return;
+    if (result?.ignored) {
+      if (result.reason === "shared_cooldown") {
+        setPromptRewriteStatus(
+          `全部技能冷却中，还剩 ${Math.ceil(Number(result.remaining_ms || 0) / 1000)} 秒`,
+          "working",
+        );
+      }
+      return;
+    }
     setPromptRewriteStatus(
       result.change_type === "one_time"
         ? `已触发「${skill.name}」· 一次性，10 秒后恢复`

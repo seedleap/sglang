@@ -2,6 +2,7 @@ const assert = require("assert");
 
 const {
   DEFAULT_GOAL_MIN_PLAY_SECONDS,
+  DEFAULT_SHARED_SKILL_COOLDOWN_MS,
   GOAL_ACHIEVEMENT_DELAY_MS,
   WorldRulesController,
   normalizeWorldRulesDraft,
@@ -38,6 +39,7 @@ async function main() {
   const timers = [];
   const achievements = [];
   const goalResults = [];
+  let nowMs = 1000;
   const controller = new WorldRulesController({
     completeRule: async (request) => {
       completionCalls.push(request);
@@ -60,6 +62,7 @@ async function main() {
       return timer;
     },
     clearTimer: () => {},
+    now: () => nowMs,
     onAchievement: (goal) => achievements.push(goal.name),
     onGoalResult: (result, goal) => goalResults.push({ result, goal }),
   });
@@ -86,19 +89,28 @@ async function main() {
   assert.equal(dispatches[0].metadata.trigger, "skill");
   assert.equal(dispatches[0].metadata.skillName, "召唤飞船");
   assert.equal(dispatches.length, 1, "skills must not roll the goal probability");
+  assert.equal(timers[0].delay, DEFAULT_SHARED_SKILL_COOLDOWN_MS);
+  assert.equal(controller.snapshot().skillCooldownRemainingMs, 10000);
+  const blockedSkillResult = await controller.triggerSkill("snow");
+  assert.equal(blockedSkillResult.ignored, true);
+  assert.equal(blockedSkillResult.reason, "shared_cooldown");
+  assert.equal(dispatches.length, 1, "all skills should share the same cooldown");
+  nowMs += DEFAULT_SHARED_SKILL_COOLDOWN_MS;
+  timers[0].callback();
+  assert.equal(controller.snapshot().skillCooldownActive, false);
 
   controller.startSession();
-  assert.equal(timers[0].delay, 12000, "goal timing starts when gameplay becomes visible");
+  assert.equal(timers[1].delay, 12000, "goal timing starts when gameplay becomes visible");
   assert.equal(dispatches.length, 1, "the goal prompt must wait for its configured play time");
-  await timers[0].callback();
+  await timers[1].callback();
   assert.equal(dispatches[1].metadata.rule, "goal_time_probability");
   assert.equal(dispatches[1].metadata.source, "elapsed_time");
   assert.equal(dispatches[1].metadata.minPlaySeconds, 12);
   assert.equal(dispatches[1].metadata.goalName, "星光徽章");
   assert.equal(goalResults[0].result.triggered, true);
-  assert.equal(timers[1].delay, GOAL_ACHIEVEMENT_DELAY_MS);
+  assert.equal(timers[2].delay, GOAL_ACHIEVEMENT_DELAY_MS);
   assert.deepEqual(achievements, []);
-  timers[1].callback();
+  timers[2].callback();
   assert.deepEqual(achievements, ["星光徽章"]);
   assert.equal(dispatches.length, 2, "one goal may only trigger once per world session");
   controller.endSession();
