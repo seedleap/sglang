@@ -6,9 +6,10 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-from collections.abc import Mapping
+import io
+from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import torch
 
@@ -40,20 +41,38 @@ def validate_rife_weights(
     model_path: str | Path,
     expected_sha256: str,
 ) -> tuple[Path, str]:
+    weight_file, actual, _ = _read_validated_rife_weights(
+        model_path,
+        expected_sha256,
+    )
+    return weight_file, actual
+
+
+def _read_validated_rife_weights(
+    model_path: str | Path,
+    expected_sha256: str,
+) -> tuple[Path, str, bytes]:
+    """Read once so the state dict is loaded from the bytes that were hashed."""
+
     expected = str(expected_sha256 or "").lower()
     if len(expected) != 64 or any(char not in "0123456789abcdef" for char in expected):
         raise ValueError("RIFE weights SHA256 must contain exactly 64 hex characters")
     weight_file = resolve_rife_weight_file(model_path)
-    actual = sha256_file(weight_file)
+    payload = weight_file.read_bytes()
+    actual = hashlib.sha256(payload).hexdigest()
     if not hmac.compare_digest(actual, expected):
         raise ValueError(
             f"RIFE weights SHA256 mismatch for {weight_file}: "
             f"expected {expected}, got {actual}"
         )
-    return weight_file, actual
+    return weight_file, actual, payload
 
 
-def _load_strict_rife_state(model: Any, weight_file: Path) -> None:
+def _load_strict_rife_state(
+    model: Any,
+    weight_payload: bytes,
+    weight_file: Path,
+) -> None:
     """Load a complete IFNet state dict or fail before advertising capability.
 
     The vendored legacy loader intentionally uses ``strict=False`` and filters
@@ -64,7 +83,11 @@ def _load_strict_rife_state(model: Any, weight_file: Path) -> None:
     """
 
     try:
-        state = torch.load(weight_file, map_location="cpu", weights_only=True)
+        state = torch.load(
+            io.BytesIO(weight_payload),
+            map_location="cpu",
+            weights_only=True,
+        )
     except Exception as exc:
         raise ValueError(f"unable to read RIFE state dict: {weight_file}") from exc
     if not isinstance(state, Mapping) or not state:
@@ -113,7 +136,11 @@ class RIFE2xMediaProcessor:
     ) -> None:
         if max_batch_pairs < 1:
             raise ValueError("RIFE max_batch_pairs must be positive")
-        self.weight_file, self.weights_sha256 = validate_rife_weights(
+        (
+            self.weight_file,
+            self.weights_sha256,
+            weight_payload,
+        ) = _read_validated_rife_weights(
             model_path,
             expected_sha256,
         )
@@ -129,7 +156,7 @@ class RIFE2xMediaProcessor:
         self.model = model_factory()
         if not hasattr(self.model, "flownet"):
             raise ValueError("RIFE model factory must expose flownet")
-        _load_strict_rife_state(self.model, self.weight_file)
+        _load_strict_rife_state(self.model, weight_payload, self.weight_file)
         self.model.eval()
         self.model.flownet = self.model.flownet.to(self.device)
 

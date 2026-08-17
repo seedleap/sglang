@@ -26,6 +26,33 @@ function configuredModelNumber(key, name, fallback) {
   return Number.isFinite(value) ? value : fallback;
 }
 
+function fallbackStreamTransportLabel(key, init = {}) {
+  const requestedFormat = init.realtime_output_format;
+  const selectedFormat = modelControl(key, "transportFormat")?.value;
+  const format = String(
+    requestedFormat ?? selectedFormat ?? DEFAULT_PREVIEW_OUTPUT_FORMAT,
+  ).toLowerCase();
+  if (format === "jpeg") return "JPEG";
+  if (format === "raw") return "Raw RGB";
+  if (format === "") return "Lossless delta";
+  return "WebP";
+}
+
+function setStreamChipTransport(key, useH264, fallbackInit = {}) {
+  const chip = document.querySelector(`[data-model-key="${key}"] .stream-chip`);
+  if (!chip) return;
+  if (!useH264) {
+    chip.textContent = `${fallbackStreamTransportLabel(key, fallbackInit)} · WS`;
+    return;
+  }
+  const bitrateKbps = configuredModelNumber(
+    key,
+    "h264BitrateKbps",
+    configuredNumber("h264CompressedBitrateKbps", 3000),
+  );
+  chip.textContent = `H.264 · WS · ${(bitrateKbps / 1000).toFixed(1)} Mbps`;
+}
+
 function h264CompressionInit(init, key) {
   if (key === "minwm" && init.realtime_media_profile === "rife2x_v1") {
     throw new Error(
@@ -260,10 +287,8 @@ function applyRuntimeUiConfig() {
     });
   }
   if (H264_WEBSOCKET_ENABLED) {
-    const bitrateKbps = configuredNumber("h264CompressedBitrateKbps", 3000);
     for (const key of ["minwm", "lingbot2"]) {
-      const chip = document.querySelector(`[data-model-key="${key}"] .stream-chip`);
-      if (chip) chip.textContent = `H.264 · WS · ${(bitrateKbps / 1000).toFixed(1)} Mbps`;
+      setStreamChipTransport(key, true);
     }
   } else if (H264_WEBSOCKET_REQUESTED) {
     addHistory("当前浏览器不支持 H.264 MSE，已自动回退 WebP WebSocket");
@@ -929,6 +954,7 @@ function preferredRealtimeSession(key, h264Session, fallbackSession) {
         try {
           await h264Session.connect(h264CompressionInit(init, key));
           selected = h264Session;
+          setStreamChipTransport(key, true);
           return;
         } catch (error) {
           await h264Session.close("H.264 startup failed", { emitState: false });
@@ -937,6 +963,7 @@ function preferredRealtimeSession(key, h264Session, fallbackSession) {
           const fallbackCanvas = key === "lingbot2" ? lingbot2Canvas : canvas;
           video.hidden = true;
           fallbackCanvas.hidden = false;
+          setStreamChipTransport(key, false, init);
         }
       }
       selected = fallbackSession;
@@ -1016,12 +1043,14 @@ const primarySessionAdapter = {
       try {
         await minwmH264Session.connect(h264CompressionInit(init, "minwm"));
         primaryUsesH264 = true;
+        setStreamChipTransport("minwm", true);
         return;
       } catch (error) {
         await minwmH264Session.close("H.264 startup failed", { emitState: false });
         addHistory(`Zing H.264 启动失败，自动回退 WebP · ${error.message || error}`);
         minwmH264Video.hidden = true;
         canvas.hidden = false;
+        setStreamChipTransport("minwm", false, init);
       }
     }
     primaryUsesH264 = false;
@@ -6082,6 +6111,7 @@ function receive(data, epoch) {
         chunk_index: Number(message.chunk_index || 0),
         source_num_frames: Number(message.source_num_frames || 0),
         output_num_frames: Number(message.output_num_frames || 0),
+        actor_wait_ms: Number(message.actor_wait_ms || 0),
         rife_interpolation_ms: Number(message.rife_interpolation_ms || 0),
         source_frames_per_chunk_wall_second: Number(
           message.source_frames_per_chunk_wall_second || 0,

@@ -75,6 +75,7 @@ class RemoteDecodeResult:
     source_timeline_fps: float
     output_timeline_fps: float
     queue_wait_ms: float
+    actor_wait_ms: float
     decode_ms: float
     post_decode_ms: float
     encode_ms: float
@@ -314,6 +315,7 @@ class RealtimeVAEClient:
         self._closed = False
         self.decoder_backend: str | None = None
         self.media_profile_acceptance: MediaProfileAcceptance | None = None
+        self._rife_media_started = False
 
     async def open(
         self,
@@ -693,6 +695,27 @@ class RealtimeVAEClient:
             raise ProtocolViolation(f"remote {response_kind} media profile mismatch")
         return media_profile, source_timeline_fps, output_timeline_fps
 
+    def _validate_rife_frame_counts(
+        self,
+        source_num_frames: int,
+        output_num_frames: int,
+    ) -> None:
+        if source_num_frames < 0 or output_num_frames < 0:
+            raise ProtocolViolation("remote completion RIFE frame counts are invalid")
+        if source_num_frames == 0:
+            if output_num_frames != 0:
+                raise ProtocolViolation(
+                    "remote completion RIFE empty chunk must have zero output"
+                )
+            return
+        expected_output = source_num_frames * 2 - (0 if self._rife_media_started else 1)
+        if output_num_frames != expected_output:
+            raise ProtocolViolation(
+                "remote completion RIFE frame-count mismatch: "
+                f"expected {expected_output}, got {output_num_frames}"
+            )
+        self._rife_media_started = True
+
     def _decode_frame_batch(
         self,
         message: dict,
@@ -788,6 +811,7 @@ class RealtimeVAEClient:
                 required = (
                     "source_num_frames",
                     "output_num_frames",
+                    "actor_wait_ms",
                     "rife_interpolation_ms",
                 )
                 missing = [field for field in required if field not in message]
@@ -798,20 +822,26 @@ class RealtimeVAEClient:
                     )
                 source_num_frames = int(message["source_num_frames"])
                 output_num_frames = int(message["output_num_frames"])
+                actor_wait_ms = float(message["actor_wait_ms"])
                 rife_interpolation_ms = float(message["rife_interpolation_ms"])
                 if (
-                    source_num_frames < 0
-                    or output_num_frames != num_frames
-                    or output_num_frames < source_num_frames
+                    output_num_frames != num_frames
+                    or not math.isfinite(actor_wait_ms)
+                    or actor_wait_ms < 0
                     or not math.isfinite(rife_interpolation_ms)
                     or rife_interpolation_ms < 0
                 ):
                     raise ProtocolViolation(
                         "remote completion RIFE telemetry is invalid"
                     )
+                self._validate_rife_frame_counts(
+                    source_num_frames,
+                    output_num_frames,
+                )
             else:
                 source_num_frames = int(message.get("source_num_frames") or num_frames)
                 output_num_frames = int(message.get("output_num_frames") or num_frames)
+                actor_wait_ms = float(message.get("actor_wait_ms") or 0.0)
                 rife_interpolation_ms = float(
                     message.get("rife_interpolation_ms") or 0.0
                 )
@@ -838,6 +868,7 @@ class RealtimeVAEClient:
                 source_timeline_fps=source_timeline_fps,
                 output_timeline_fps=output_timeline_fps,
                 queue_wait_ms=float(message.get("queue_wait_ms") or 0.0),
+                actor_wait_ms=actor_wait_ms,
                 decode_ms=float(message.get("decode_ms") or 0.0),
                 post_decode_ms=float(message.get("post_decode_ms") or 0.0),
                 encode_ms=float(message.get("encode_ms") or 0.0),
@@ -891,3 +922,4 @@ class RealtimeVAEClient:
         self._ws = None
         self._callback_tail = None
         self.media_profile_acceptance = None
+        self._rife_media_started = False

@@ -50,6 +50,9 @@ from sglang.multimodal_gen.runtime.realtime.async_vae_client import (
     RemoteDecodeHandle,
     RemoteFrameBatch,
 )
+from sglang.multimodal_gen.runtime.realtime.async_vae_protocol import (
+    ProtocolViolation,
+)
 from sglang.multimodal_gen.runtime.realtime.critical_path_metrics import (
     observe_stage_ms,
     observe_stage_seconds,
@@ -602,6 +605,7 @@ async def _send_chunk_telemetry(
                 media_profile=remote_result.media_profile.value,
                 source_timeline_fps=remote_result.source_timeline_fps,
                 output_timeline_fps=remote_result.output_timeline_fps,
+                actor_wait_ms=round(remote_result.actor_wait_ms, 3),
                 rife_interpolation_ms=round(remote_result.rife_interpolation_ms, 3),
                 source_frames_per_chunk_wall_second=round(source_wall_fps, 3),
                 output_frames_per_chunk_wall_second=round(output_wall_fps, 3),
@@ -884,6 +888,7 @@ async def _complete_remote_chunk(
         "media_profile": remote_result.media_profile.value,
         "source_timeline_fps": remote_result.source_timeline_fps,
         "output_timeline_fps": remote_result.output_timeline_fps,
+        "actor_wait_ms": remote_result.actor_wait_ms,
         "rife_interpolation_ms": remote_result.rife_interpolation_ms,
     }
     if overlap_ms is not None and overlap_ratio is not None:
@@ -1704,7 +1709,14 @@ async def _listen_generate_request(
                 session.id,
                 e,
             )
-            await write_error_msg("invalid generate request", ws)
+            await write_error_msg(
+                (
+                    str(e)
+                    if isinstance(e, ProtocolViolation)
+                    else "invalid generate request"
+                ),
+                ws,
+            )
             continue
 
 

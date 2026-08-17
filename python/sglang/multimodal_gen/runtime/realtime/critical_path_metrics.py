@@ -54,6 +54,7 @@ VALID_STAGES = frozenset(
         "denoiser_compute",
         "latent_transfer",
         "vae_queue",
+        "vae_actor_wait",
         "vae_decode",
         "post_decode",
         "frame_interpolation",

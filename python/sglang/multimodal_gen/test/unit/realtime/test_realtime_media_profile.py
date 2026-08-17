@@ -4,12 +4,22 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import threading
+from types import SimpleNamespace
 
+import msgspec.msgpack
 import pytest
 import torch
+from fastapi import WebSocketDisconnect
 from fastapi.testclient import TestClient
 from prometheus_client import generate_latest
 
+from sglang.multimodal_gen.runtime.entrypoints.openai.realtime import (
+    realtime_video_api,
+)
+from sglang.multimodal_gen.runtime.entrypoints.openai.realtime.generate_session import (
+    GenerateSession,
+)
 from sglang.multimodal_gen.runtime.entrypoints.realtime_vae_server import (
     _parse_worker_args,
     create_app,
@@ -89,6 +99,22 @@ class _NegotiationSocket:
         self.closed = True
 
 
+class _InitSocket:
+    def __init__(self, payload: bytes) -> None:
+        self.payload = payload
+        self.sent: list[bytes] = []
+
+    async def receive_bytes(self) -> bytes:
+        if self.payload is not None:
+            payload = self.payload
+            self.payload = None
+            return payload
+        raise WebSocketDisconnect()
+
+    async def send_bytes(self, payload: bytes) -> None:
+        self.sent.append(payload)
+
+
 def _frames(*values: float) -> torch.Tensor:
     channels = torch.tensor(values, dtype=torch.float32).view(1, 1, -1, 1, 1)
     return channels.expand(1, 3, -1, 2, 2).contiguous()
@@ -98,18 +124,22 @@ def _header(
     chunk_index: int,
     *,
     event_id: int | None,
+    action_version: int = 0,
     prompt_version: int,
+    session_id: str = "session",
+    generation_id: str = "generation",
 ) -> LatentChunkHeader:
     return LatentChunkHeader(
-        session_id="session",
-        generation_id="generation",
-        request_id=f"request-{chunk_index}",
+        session_id=session_id,
+        generation_id=generation_id,
+        request_id=f"{session_id}-request-{chunk_index}",
         chunk_index=chunk_index,
         dtype="bfloat16",
         shape=(1, 4, 1, 1, 1),
         byte_length=8,
         checksum="test",
         event_id=event_id,
+        action_version=action_version,
         prompt_version=prompt_version,
         has_reference=True,
     )
@@ -129,8 +159,8 @@ def test_media_profile_parser_is_strict_and_typed():
         parse_media_profile("rife-latest")
 
 
-def test_remote_legacy_2x_request_maps_to_negotiated_rife():
-    assert (
+def test_remote_legacy_interpolation_fails_closed_without_changing_native_defaults():
+    with pytest.raises(ProtocolViolation, match="upgrade the client"):
         resolve_remote_media_profile(
             "native_v1",
             legacy_enabled=True,
@@ -138,8 +168,6 @@ def test_remote_legacy_2x_request_maps_to_negotiated_rife():
             legacy_scale=1.0,
             legacy_model_path=None,
         )
-        is RealtimeMediaProfile.RIFE2X_V1
-    )
     assert (
         resolve_remote_media_profile(
             "native_v1",
@@ -162,19 +190,31 @@ def test_remote_legacy_2x_request_maps_to_negotiated_rife():
         ({"legacy_model_path": "/client/weights"}, "configured only"),
     ],
 )
-def test_remote_legacy_mapping_rejects_unsupported_or_client_owned_weights(
+def test_explicit_rife_rejects_conflicting_legacy_options(
     overrides,
     error,
 ):
     kwargs = {
-        "legacy_enabled": True,
+        "legacy_enabled": False,
         "legacy_exp": 1,
         "legacy_scale": 1.0,
         "legacy_model_path": None,
         **overrides,
     }
     with pytest.raises(ProtocolViolation, match=error):
-        resolve_remote_media_profile("native_v1", **kwargs)
+        resolve_remote_media_profile("rife2x_v1", **kwargs)
+
+
+def test_explicit_rife_accepts_null_dormant_legacy_numbers():
+    assert (
+        resolve_remote_media_profile(
+            "rife2x_v1",
+            legacy_enabled=False,
+            legacy_exp=None,
+            legacy_scale=None,
+        )
+        is RealtimeMediaProfile.RIFE2X_V1
+    )
 
 
 def test_explicit_rife_rejects_client_weight_path_without_legacy_flag():
@@ -184,6 +224,54 @@ def test_explicit_rife_rejects_client_weight_path_without_legacy_flag():
             legacy_enabled=False,
             legacy_model_path="/client/weights",
         )
+
+
+@pytest.mark.parametrize(
+    "transport_fields",
+    [
+        {"realtime_output_format": "webp"},
+        {
+            "realtime_output_format": "raw",
+            "h264_bitrate_kbps": 3000,
+            "h264_gop_seconds": 2,
+        },
+    ],
+    ids=("webp", "h264-bridge"),
+)
+def test_remote_legacy_init_is_rejected_before_session_or_media_messages(
+    monkeypatch,
+    transport_fields,
+):
+    async def scenario():
+        monkeypatch.setattr(
+            realtime_video_api,
+            "get_global_server_args",
+            lambda: SimpleNamespace(realtime_vae_backend="taehv_remote"),
+        )
+        socket = _InitSocket(
+            encode_message(
+                "init",
+                prompt="legacy interpolation request",
+                enable_frame_interpolation=True,
+                **transport_fields,
+            )
+        )
+        session = GenerateSession()
+        with pytest.raises(WebSocketDisconnect):
+            await realtime_video_api._listen_generate_request(socket, session)
+
+        assert session.request is None
+        assert session.vae_client is None
+        messages = [msgspec.msgpack.decode(payload) for payload in socket.sent]
+        assert len(messages) == 1
+        assert messages[0]["type"] == "error"
+        assert "realtime_media_profile=rife2x_v1" in messages[0]["content"]
+        assert not any(
+            message.get("type") in {"session_ready", "frame_batch"}
+            for message in messages
+        )
+
+    asyncio.run(scenario())
 
 
 def test_rife_weights_require_absolute_local_path_and_exact_digest(tmp_path):
@@ -278,6 +366,39 @@ def test_strict_local_rife_processor_batches_midpoints(tmp_path):
         result[0, 0, :, 0, 0],
         torch.tensor([0.1, 0.3, 0.6]),
     )
+
+
+def test_rife_processor_loads_the_exact_weight_bytes_that_were_hashed(tmp_path):
+    weight_file = tmp_path / "flownet.pkl"
+
+    class _Flownet(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.zeros(1))
+
+    class _Model:
+        def __init__(self):
+            self.flownet = _Flownet()
+
+        def eval(self):
+            return self
+
+    torch.save({"module.weight": torch.ones(1)}, weight_file)
+    digest = hashlib.sha256(weight_file.read_bytes()).hexdigest()
+
+    def replacing_factory():
+        # Simulate a writable mount or symlink target changing after digest
+        # validation but before state loading.
+        torch.save({"module.weight": torch.zeros(1)}, weight_file)
+        return _Model()
+
+    processor = RIFE2xMediaProcessor(
+        tmp_path,
+        digest,
+        device="cpu",
+        model_factory=replacing_factory,
+    )
+    torch.testing.assert_close(processor.model.flownet.weight, torch.ones(1))
 
 
 @pytest.mark.parametrize(
@@ -407,20 +528,179 @@ def test_worker_rife2x_preserves_seam_and_resets_on_event_or_prompt_cutover():
         assert (second.source_num_frames, second.output_num_frames) == (2, 4)
         assert _red_values(second) == [217, 230, 242, 255]
         # An event or prompt boundary must never synthesize a blended seam.
+        # It holds the new first frame in that slot to preserve 2x cadence.
         assert (event_cutover.source_num_frames, event_cutover.output_num_frames) == (
             2,
-            3,
+            4,
         )
-        assert _red_values(event_cutover)[0] == 51
+        assert _red_values(event_cutover)[:2] == [51, 51]
         assert (prompt_cutover.source_num_frames, prompt_cutover.output_num_frames) == (
             2,
-            3,
+            4,
         )
-        assert _red_values(prompt_cutover)[0] == 153
+        assert _red_values(prompt_cutover)[:2] == [153, 153]
+        assert (
+            sum(
+                result.output_num_frames
+                for result in (first, second, event_cutover, prompt_cutover)
+            )
+            == 2
+            * sum(
+                result.source_num_frames
+                for result in (first, second, event_cutover, prompt_cutover)
+            )
+            - 1
+        )
         assert [shape[2] for shape in processor.calls] == [3, 3, 2, 2]
         metrics = generate_latest()
+        assert b'stage="actor_wait"' in metrics
         assert b'stage="rife_interpolation"' in metrics
+        assert b'stage="vae_actor_wait"' in metrics
         assert b'stage="frame_interpolation"' in metrics
+        await worker.close_all()
+
+    asyncio.run(scenario())
+
+
+def test_worker_rife_resets_seam_on_action_change_without_event_id():
+    async def scenario():
+        processor = _AveragingRIFE()
+        worker = AsyncVAEWorker(
+            _FrameEngine(
+                [
+                    _frames(0.0, 0.4),
+                    _frames(0.6, 0.8),
+                    _frames(0.9, 1.0),
+                    _frames(0.0, 0.4),
+                ]
+            ),
+            max_sessions=1,
+            encoded_frames_per_batch=16,
+            rife_processor=processor,
+        )
+        await worker.open(
+            SessionOpen(
+                "session",
+                "generation",
+                media_profile=RealtimeMediaProfile.RIFE2X_V1,
+            )
+        )
+        latent = torch.zeros((1, 4, 1, 1, 1), dtype=torch.bfloat16)
+        first = await worker.decode(
+            _header(
+                0,
+                event_id=None,
+                action_version=0,
+                prompt_version=0,
+            ),
+            latent,
+        )
+        action_cutover = await worker.decode(
+            _header(
+                1,
+                event_id=None,
+                action_version=1,
+                prompt_version=0,
+            ),
+            latent,
+        )
+        same_action = await worker.decode(
+            _header(
+                2,
+                event_id=None,
+                action_version=1,
+                prompt_version=0,
+            ),
+            latent,
+        )
+        second_action_cutover = await worker.decode(
+            _header(
+                3,
+                event_id=None,
+                action_version=2,
+                prompt_version=0,
+            ),
+            latent,
+        )
+
+        assert (first.source_num_frames, first.output_num_frames) == (2, 3)
+        # event_id=None is valid.  action_version remains an authoritative
+        # control boundary and must suppress the old-tail/new-head midpoint.
+        assert (action_cutover.source_num_frames, action_cutover.output_num_frames) == (
+            2,
+            4,
+        )
+        assert _red_values(action_cutover) == [153, 153, 179, 204]
+        # Once the action version is stable again, the next chunk restores the
+        # cross-chunk seam and therefore emits 2N frames.
+        assert (same_action.source_num_frames, same_action.output_num_frames) == (2, 4)
+        assert _red_values(same_action) == [217, 230, 242, 255]
+        assert (
+            second_action_cutover.source_num_frames,
+            second_action_cutover.output_num_frames,
+        ) == (2, 4)
+        assert _red_values(second_action_cutover) == [0, 0, 51, 102]
+        results = (first, action_cutover, same_action, second_action_cutover)
+        assert (
+            sum(result.output_num_frames for result in results)
+            == 2 * sum(result.source_num_frames for result in results) - 1
+        )
+        await worker.close_all()
+
+    asyncio.run(scenario())
+
+
+def test_worker_preserves_cutover_hold_across_an_empty_source_chunk():
+    async def scenario():
+        processor = _AveragingRIFE()
+        worker = AsyncVAEWorker(
+            _FrameEngine(
+                [
+                    _frames(0.0, 0.4),
+                    torch.empty((1, 3, 0, 2, 2), dtype=torch.float32),
+                    _frames(0.6, 0.8),
+                ]
+            ),
+            max_sessions=1,
+            encoded_frames_per_batch=16,
+            rife_processor=processor,
+        )
+        await worker.open(
+            SessionOpen(
+                "session",
+                "generation",
+                media_profile=RealtimeMediaProfile.RIFE2X_V1,
+            )
+        )
+        latent = torch.zeros((1, 4, 1, 1, 1), dtype=torch.bfloat16)
+        first = await worker.decode(
+            _header(0, event_id=None, action_version=0, prompt_version=0),
+            latent,
+        )
+        empty_cutover = await worker.decode(
+            _header(1, event_id=None, action_version=1, prompt_version=0),
+            latent,
+        )
+        first_nonempty_after_cutover = await worker.decode(
+            _header(2, event_id=None, action_version=1, prompt_version=0),
+            latent,
+        )
+
+        assert (first.source_num_frames, first.output_num_frames) == (2, 3)
+        assert (empty_cutover.source_num_frames, empty_cutover.output_num_frames) == (
+            0,
+            0,
+        )
+        assert (
+            first_nonempty_after_cutover.source_num_frames,
+            first_nonempty_after_cutover.output_num_frames,
+        ) == (2, 4)
+        assert _red_values(first_nonempty_after_cutover) == [153, 153, 179, 204]
+        results = (first, empty_cutover, first_nonempty_after_cutover)
+        assert (
+            sum(result.output_num_frames for result in results)
+            == 2 * sum(result.source_num_frames for result in results) - 1
+        )
         await worker.close_all()
 
     asyncio.run(scenario())
@@ -464,6 +744,281 @@ def test_worker_clamps_rife_inputs_to_normalized_rgb_range():
         assert processor.ranges == [(0.0, 1.0)]
         assert _red_values(result) == [0, 128, 255]
         await worker.close_all()
+
+    asyncio.run(scenario())
+
+
+def test_rife_cancellation_waits_for_native_call_before_next_session_enters():
+    class _BlockingRIFE(_AveragingRIFE):
+        def __init__(self) -> None:
+            super().__init__()
+            self.first_started = threading.Event()
+            self.second_started = threading.Event()
+            self.release_first = threading.Event()
+            self._lock = threading.Lock()
+            self._active = 0
+            self.max_active = 0
+
+        def interpolate_midpoints(self, source_frames: torch.Tensor) -> torch.Tensor:
+            with self._lock:
+                call_index = len(self.calls) + 1
+                self.calls.append(tuple(source_frames.shape))
+                self._active += 1
+                self.max_active = max(self.max_active, self._active)
+            try:
+                if call_index == 1:
+                    self.first_started.set()
+                    if not self.release_first.wait(timeout=5):
+                        raise TimeoutError("test RIFE call was not released")
+                else:
+                    self.second_started.set()
+                return (
+                    source_frames[:, :3, :-1].float() + source_frames[:, :3, 1:].float()
+                ) / 2
+            finally:
+                with self._lock:
+                    self._active -= 1
+
+    async def scenario():
+        processor = _BlockingRIFE()
+        worker = AsyncVAEWorker(
+            _FrameEngine([_frames(0.0, 0.5), _frames(0.2, 0.8)]),
+            max_sessions=2,
+            encoded_frames_per_batch=16,
+            rife_processor=processor,
+        )
+        await worker.open(
+            SessionOpen(
+                "session-1",
+                "generation-1",
+                media_profile=RealtimeMediaProfile.RIFE2X_V1,
+            )
+        )
+        await worker.open(
+            SessionOpen(
+                "session-2",
+                "generation-2",
+                media_profile=RealtimeMediaProfile.RIFE2X_V1,
+            )
+        )
+        first_state = worker._sessions[("session-1", "generation-1")]
+        second_state = worker._sessions[("session-2", "generation-2")]
+        emitted_first: list[int] = []
+
+        async def on_first_frame(batch):
+            emitted_first.append(batch.num_frames)
+
+        latent = torch.zeros((1, 4, 1, 1, 1), dtype=torch.bfloat16)
+        first_decode = asyncio.create_task(
+            worker.decode(
+                _header(
+                    0,
+                    event_id=1,
+                    prompt_version=0,
+                    session_id="session-1",
+                    generation_id="generation-1",
+                ),
+                latent,
+                on_frame_batch=on_first_frame,
+            )
+        )
+        close_first = None
+        second_decode = None
+        try:
+            assert await asyncio.wait_for(
+                asyncio.to_thread(processor.first_started.wait, 1),
+                timeout=2,
+            )
+            second_decode = asyncio.create_task(
+                worker.decode(
+                    _header(
+                        0,
+                        event_id=1,
+                        prompt_version=0,
+                        session_id="session-2",
+                        generation_id="generation-2",
+                    ),
+                    latent,
+                )
+            )
+            for _ in range(100):
+                if second_state.processing:
+                    break
+                await asyncio.sleep(0.005)
+            assert second_state.processing
+
+            close_first = asyncio.create_task(worker.close("session-1", "generation-1"))
+            await asyncio.sleep(0.05)
+            assert not close_first.done()
+            assert not processor.second_started.is_set()
+            assert processor.max_active == 1
+            assert first_state.previous_source_frame is None
+            assert emitted_first == []
+
+            # A repeated abort/close signal must not punch through the drain
+            # barrier while the first native thread is still using the actor.
+            assert first_state.runner is not None
+            first_state.runner.cancel()
+            await asyncio.sleep(0.05)
+            assert not close_first.done()
+            assert not processor.second_started.is_set()
+            assert processor.max_active == 1
+            assert first_state.previous_source_frame is None
+            assert emitted_first == []
+
+            processor.release_first.set()
+            await asyncio.wait_for(close_first, timeout=2)
+            with pytest.raises(asyncio.CancelledError):
+                await first_decode
+            second = await asyncio.wait_for(second_decode, timeout=2)
+            assert (second.source_num_frames, second.output_num_frames) == (2, 3)
+            assert second.actor_wait_ms >= 40
+            assert second.decode_ms < second.actor_wait_ms
+            assert processor.second_started.is_set()
+            assert processor.max_active == 1
+            assert first_state.previous_source_frame is None
+            assert emitted_first == []
+        finally:
+            processor.release_first.set()
+            pending = [
+                task
+                for task in (close_first, first_decode, second_decode)
+                if task is not None and not task.done()
+            ]
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+            await worker.close_all()
+
+    asyncio.run(scenario())
+
+
+def test_sync_iterator_cancellation_keeps_shared_actor_serialized():
+    class _BlockingIteratorEngine:
+        backend = "taehv"
+        rgb_quantization = "round"
+
+        def __init__(self) -> None:
+            self.outputs = [_frames(0.0, 0.5), _frames(0.2, 0.8)]
+            self.first_started = threading.Event()
+            self.second_started = threading.Event()
+            self.release_first = threading.Event()
+            self._lock = threading.Lock()
+            self._active = 0
+            self.frame_calls = 0
+            self.max_active = 0
+
+        def create_decoder(self, identity):
+            return identity
+
+        def iter_decode(self, decoder, latents, *, first_chunk):
+            del decoder, latents, first_chunk
+            engine = self
+            output = self.outputs.pop(0)
+
+            class _OneFrameIterator:
+                def __init__(self) -> None:
+                    self.yielded = False
+
+                def __iter__(self):
+                    return self
+
+                def __next__(self):
+                    if self.yielded:
+                        raise StopIteration
+                    self.yielded = True
+                    with engine._lock:
+                        engine.frame_calls += 1
+                        call_index = engine.frame_calls
+                        engine._active += 1
+                        engine.max_active = max(engine.max_active, engine._active)
+                    try:
+                        if call_index == 1:
+                            engine.first_started.set()
+                            if not engine.release_first.wait(timeout=5):
+                                raise TimeoutError("test iterator was not released")
+                        else:
+                            engine.second_started.set()
+                        return output.clone()
+                    finally:
+                        with engine._lock:
+                            engine._active -= 1
+
+            return _OneFrameIterator()
+
+    async def scenario():
+        engine = _BlockingIteratorEngine()
+        worker = AsyncVAEWorker(
+            engine,
+            max_sessions=2,
+            encoded_frames_per_batch=16,
+        )
+        await worker.open(SessionOpen("session-1", "generation-1"))
+        await worker.open(SessionOpen("session-2", "generation-2"))
+        second_state = worker._sessions[("session-2", "generation-2")]
+        latent = torch.zeros((1, 4, 1, 1, 1), dtype=torch.bfloat16)
+        first_decode = asyncio.create_task(
+            worker.decode(
+                _header(
+                    0,
+                    event_id=1,
+                    prompt_version=0,
+                    session_id="session-1",
+                    generation_id="generation-1",
+                ),
+                latent,
+            )
+        )
+        close_first = None
+        second_decode = None
+        try:
+            assert await asyncio.wait_for(
+                asyncio.to_thread(engine.first_started.wait, 1),
+                timeout=2,
+            )
+            second_decode = asyncio.create_task(
+                worker.decode(
+                    _header(
+                        0,
+                        event_id=1,
+                        prompt_version=0,
+                        session_id="session-2",
+                        generation_id="generation-2",
+                    ),
+                    latent,
+                )
+            )
+            for _ in range(100):
+                if second_state.processing:
+                    break
+                await asyncio.sleep(0.005)
+            assert second_state.processing
+
+            close_first = asyncio.create_task(worker.close("session-1", "generation-1"))
+            await asyncio.sleep(0.05)
+            assert not close_first.done()
+            assert not engine.second_started.is_set()
+            assert engine.max_active == 1
+
+            engine.release_first.set()
+            await asyncio.wait_for(close_first, timeout=2)
+            with pytest.raises(asyncio.CancelledError):
+                await first_decode
+            second = await asyncio.wait_for(second_decode, timeout=2)
+            assert (second.source_num_frames, second.output_num_frames) == (2, 2)
+            assert second.actor_wait_ms >= 40
+            assert second.decode_ms >= second.actor_wait_ms
+            assert engine.second_started.is_set()
+            assert engine.max_active == 1
+        finally:
+            engine.release_first.set()
+            pending = [
+                task
+                for task in (close_first, first_decode, second_decode)
+                if task is not None and not task.done()
+            ]
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+            await worker.close_all()
 
     asyncio.run(scenario())
 
@@ -552,6 +1107,7 @@ def test_client_uses_only_server_accepted_rife_profile_and_timing():
                 media_profile="rife2x_v1",
                 source_timeline_fps=12,
                 output_timeline_fps=24,
+                actor_wait_ms=2.25,
                 rife_interpolation_ms=4.5,
                 post_decode_ms=3.25,
             )
@@ -559,6 +1115,7 @@ def test_client_uses_only_server_accepted_rife_profile_and_timing():
         result = await handle.wait()
         assert (result.source_num_frames, result.output_num_frames) == (2, 3)
         assert result.post_decode_ms == 3.25
+        assert result.actor_wait_ms == 2.25
         assert result.rife_interpolation_ms == 4.5
         await client.close()
         assert socket.closed
@@ -634,6 +1191,23 @@ def test_client_fails_closed_when_rife_chunk_omits_or_forges_media_fields():
             },
             response_kind="frame",
         )
+
+
+def test_client_rejects_silently_downgraded_rife_frame_counts():
+    client = RealtimeVAEClient(
+        "ws://vae",
+        session_id="session",
+        generation_id="generation",
+        transport="websocket",
+    )
+    with pytest.raises(ProtocolViolation, match="expected 3, got 2"):
+        client._validate_rife_frame_counts(2, 2)
+    # An empty source chunk neither starts nor advances the media cadence.
+    client._validate_rife_frame_counts(0, 0)
+    client._validate_rife_frame_counts(2, 3)
+    with pytest.raises(ProtocolViolation, match="expected 4, got 3"):
+        client._validate_rife_frame_counts(2, 3)
+    client._validate_rife_frame_counts(2, 4)
 
 
 @pytest.mark.parametrize(
@@ -781,6 +1355,7 @@ def test_vae_server_reports_authoritative_profile_capability_and_acceptance():
                 3,
             )
             assert complete["rife_interpolation_ms"] >= 0
+            assert complete["actor_wait_ms"] >= 0
             websocket.send_bytes(
                 encode_message(
                     "abort",
