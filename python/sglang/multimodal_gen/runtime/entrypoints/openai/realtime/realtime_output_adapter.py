@@ -20,6 +20,8 @@ from sglang.multimodal_gen.runtime.utils.realtime_video import (
     RAW_RGB_CHANNELS,
     RAW_RGB_CONTENT_TYPE,
     WEBP_FRAME_CONTENT_TYPE,
+    cancel_async_raw_rgb_frame_reference,
+    materialize_async_raw_rgb_frame_batches,
 )
 
 if TYPE_CHECKING:
@@ -73,6 +75,11 @@ class RealtimeFrameSendStats(TypedDict):
     num_batches: int
     frame_shape: tuple[int, int, int] | None
     content_type: str
+
+
+def _consume_background_task_result(task: asyncio.Task[object]) -> None:
+    if not task.cancelled():
+        task.exception()
 
 
 def empty_frame_send_stats(content_type: str = "") -> RealtimeFrameSendStats:
@@ -349,7 +356,12 @@ def _should_build_payload_off_loop(
 ) -> bool:
     if content_type != RAW_RGB_CONTENT_TYPE or not transport_frames:
         return False
-    return output_format in ENCODED_PREVIEW_FORMATS or output_format is None
+    return (
+        output_format in ENCODED_PREVIEW_FORMATS
+        or output_format is None
+        or sum(len(frame) for frame in transport_frames)
+        >= FRAME_BATCH_PACK_OFFLOAD_BYTES
+    )
 
 
 def _is_encoded_preview_transport(
@@ -448,6 +460,32 @@ class RawRGBRealtimeOutputAdapter:
     ) -> RealtimeFrameSendStats:
         """send frames through ws"""
         content_type = result.raw_frame_content_type
+        shared_memory_ref = getattr(result, "raw_frame_shared_memory_ref", None)
+        if result.raw_frame_batches is None and shared_memory_ref is not None:
+            try:
+                _validate_async_raw_frame_reference(shared_memory_ref, session, batch)
+            except Exception:
+                cancel_async_raw_rgb_frame_reference(shared_memory_ref)
+                result.raw_frame_shared_memory_ref = None
+                raise
+            materialize_task = asyncio.create_task(
+                asyncio.to_thread(
+                    materialize_async_raw_rgb_frame_batches,
+                    shared_memory_ref,
+                )
+            )
+            try:
+                result.raw_frame_batches = await asyncio.shield(materialize_task)
+            except asyncio.CancelledError:
+                # The thread must finish so a disconnect cannot leak the shared file.
+                try:
+                    cancel_async_raw_rgb_frame_reference(shared_memory_ref)
+                except Exception:
+                    pass
+                materialize_task.add_done_callback(_consume_background_task_result)
+                raise
+            finally:
+                result.raw_frame_shared_memory_ref = None
         if result.raw_frame_batches is None:
             return empty_frame_send_stats(content_type)
         if batch.block_idx == 0:
@@ -608,3 +646,21 @@ class RawRGBRealtimeOutputAdapter:
 
         stats["ws_write_ms"] = stats["header_write_ms"] + stats["raw_write_ms"]
         return stats
+
+
+def _validate_async_raw_frame_reference(
+    reference: dict,
+    session: GenerateSession,
+    batch: Req,
+) -> None:
+    expected = {
+        "session_id": getattr(session, "id", None),
+        "generation_id": getattr(session, "generation_id", None),
+        "request_id": batch.request_id,
+        "chunk_index": int(batch.block_idx),
+    }
+    mismatched = [key for key, value in expected.items() if reference.get(key) != value]
+    if mismatched:
+        raise ValueError(
+            "asynchronous raw RGB reference identity mismatch: " + ", ".join(mismatched)
+        )

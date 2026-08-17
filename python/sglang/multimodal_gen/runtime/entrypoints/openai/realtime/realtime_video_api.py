@@ -61,6 +61,9 @@ from sglang.multimodal_gen.runtime.realtime_vae_config import (
 from sglang.multimodal_gen.runtime.scheduler_client import async_scheduler_client
 from sglang.multimodal_gen.runtime.server_args import get_global_server_args
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
+from sglang.multimodal_gen.runtime.utils.realtime_video import (
+    cancel_async_raw_rgb_frame_reference,
+)
 from sglang.multimodal_gen.runtime.utils.realtime_trace import (
     calculate_overlap_ms,
     calculate_overlap_ratio,
@@ -991,6 +994,7 @@ async def _generate_loop_local(ws: WebSocket, session: GenerateSession):
     pending_send_task = None
     pending_event_version = None
     while not session.reached_max_chunks():
+        current_result: OutputBatch | None = None
         try:
             pending_send_task = await _wait_for_realtime_interactive_event_window(
                 session,
@@ -1057,6 +1061,7 @@ async def _generate_loop_local(ws: WebSocket, session: GenerateSession):
             )
 
             _, result = await process_generation_batch(async_scheduler_client, batch)
+            current_result = result
             _sync_batch_realtime_metadata(batch, result)
             scheduler_forward_ms = timer.mark_ms()
             log_realtime_trace(
@@ -1087,15 +1092,21 @@ async def _generate_loop_local(ws: WebSocket, session: GenerateSession):
                     stage_metrics,
                 )
             )
+            pending_send_task.add_done_callback(
+                partial(_cancel_unconsumed_output_ref, result=result)
+            )
+            current_result = None
             pending_event_version = scheduled_event_version
 
         except asyncio.CancelledError:
+            _cancel_unconsumed_output_ref(result=current_result)
             if pending_send_task is not None:
                 pending_send_task.cancel()
                 await _await_realtime_task(pending_send_task)
             logger.info("generation completed, session_id=%s", session.id)
             break
         except WebSocketDisconnect:
+            _cancel_unconsumed_output_ref(result=current_result)
             if pending_send_task is not None:
                 pending_send_task.cancel()
                 await _await_realtime_task(pending_send_task)
@@ -1104,6 +1115,7 @@ async def _generate_loop_local(ws: WebSocket, session: GenerateSession):
             )
             break
         except Exception as e:
+            _cancel_unconsumed_output_ref(result=current_result)
             if pending_send_task is not None:
                 pending_send_task.cancel()
                 await _await_realtime_task(pending_send_task)
@@ -1186,6 +1198,21 @@ async def _send_output_and_log(
             stage_metrics=stage_metrics,
         )
     return send_stats
+
+
+def _cancel_unconsumed_output_ref(
+    _task: asyncio.Task | None = None,
+    *,
+    result: OutputBatch | None,
+) -> None:
+    if result is None or result.raw_frame_shared_memory_ref is None:
+        return
+    try:
+        cancel_async_raw_rgb_frame_reference(result.raw_frame_shared_memory_ref)
+    except Exception:
+        logger.exception("failed to cancel unconsumed raw-frame reference")
+    finally:
+        result.raw_frame_shared_memory_ref = None
 
 
 async def _wait_for_realtime_interactive_event_window(
