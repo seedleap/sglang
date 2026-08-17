@@ -1,6 +1,8 @@
 (function (global) {
   const MAX_WORLD_SKILLS = 9;
   const DEFAULT_GOAL_PROBABILITY = 0.2;
+  const DEFAULT_GOAL_MIN_PLAY_SECONDS = 10;
+  const MAX_GOAL_MIN_PLAY_SECONDS = 3600;
   const GOAL_ACHIEVEMENT_DELAY_MS = 5000;
 
   function normalizedText(value) {
@@ -14,6 +16,19 @@
       throw new Error("目标触发概率必须是 0–1 之间的数字");
     }
     return probability;
+  }
+
+  function normalizeMinPlaySeconds(value) {
+    if (value === "" || value == null) return DEFAULT_GOAL_MIN_PLAY_SECONDS;
+    const seconds = Number(value);
+    if (
+      !Number.isFinite(seconds)
+      || seconds < 0
+      || seconds > MAX_GOAL_MIN_PLAY_SECONDS
+    ) {
+      throw new Error(`目标最早触发时间必须是 0–${MAX_GOAL_MIN_PLAY_SECONDS} 秒之间的数字`);
+    }
+    return seconds;
   }
 
   function normalizeWorldRulesDraft(draft = {}) {
@@ -37,6 +52,9 @@
     if (goalInput) {
       goal = {
         probability: normalizeProbability(rawGoal.probability),
+        min_play_seconds: normalizeMinPlaySeconds(
+          rawGoal.min_play_seconds ?? rawGoal.minPlaySeconds,
+        ),
         input: goalInput,
       };
     }
@@ -71,6 +89,8 @@
       clearTimer = global.clearTimeout.bind(global),
       achievementDelayMs = GOAL_ACHIEVEMENT_DELAY_MS,
       onAchievement = () => {},
+      onGoalResult = () => {},
+      onGoalError = () => {},
       onStateChange = () => {},
     }) {
       this.completeRule = completeRule;
@@ -80,11 +100,17 @@
       this.clearTimer = clearTimer;
       this.achievementDelayMs = achievementDelayMs;
       this.onAchievement = onAchievement;
+      this.onGoalResult = onGoalResult;
+      this.onGoalError = onGoalError;
       this.onStateChange = onStateChange;
       this.activeRules = { skills: [], goal: null };
       this.goalTriggered = false;
+      this.goalAttempted = false;
       this.goalPending = false;
+      this.goalTriggerTimer = null;
       this.achievementTimer = null;
+      this.sessionGeneration = 0;
+      this.sessionStarted = false;
       this.pendingSkillIds = new Set();
     }
 
@@ -128,11 +154,42 @@
       return this.snapshot();
     }
 
+    startSession() {
+      if (this.goalTriggerTimer !== null) this.clearTimer(this.goalTriggerTimer);
+      this.goalTriggerTimer = null;
+      this.sessionStarted = true;
+      const goal = this.activeRules.goal;
+      if (!goal || this.goalAttempted || this.goalTriggered) {
+        this.onStateChange(this.snapshot());
+        return this.snapshot();
+      }
+      const generation = this.sessionGeneration;
+      const delayMs = Math.max(0, Number(goal.min_play_seconds || 0) * 1000);
+      this.goalTriggerTimer = this.setTimer(async () => {
+        this.goalTriggerTimer = null;
+        try {
+          const result = await this.maybeTriggerGoal("elapsed_time", generation);
+          if (generation === this.sessionGeneration && !result?.canceled) {
+            this.onGoalResult(result, goal);
+          }
+        } catch (error) {
+          if (generation === this.sessionGeneration) this.onGoalError(error, goal);
+        }
+      }, delayMs);
+      this.onStateChange(this.snapshot());
+      return this.snapshot();
+    }
+
     endSession() {
+      this.sessionGeneration += 1;
+      if (this.goalTriggerTimer !== null) this.clearTimer(this.goalTriggerTimer);
       if (this.achievementTimer !== null) this.clearTimer(this.achievementTimer);
+      this.goalTriggerTimer = null;
       this.achievementTimer = null;
       this.goalTriggered = false;
+      this.goalAttempted = false;
       this.goalPending = false;
+      this.sessionStarted = false;
       this.pendingSkillIds.clear();
       this.activeRules = { skills: [], goal: null };
       this.onStateChange(this.snapshot());
@@ -151,28 +208,28 @@
           skillName: skill.name,
           instruction: skill.instruction,
         });
-        if (result?.ignored) return result;
-        try {
-          const goal = await this.maybeTriggerGoal("skill");
-          return { ...result, goal };
-        } catch (goalError) {
-          return { ...result, goalError };
-        }
+        return result;
       } finally {
         this.pendingSkillIds.delete(skill.id);
         this.onStateChange(this.snapshot());
       }
     }
 
-    async noteUserPromptSuccess() {
-      return this.maybeTriggerGoal("live_direction");
-    }
-
-    async maybeTriggerGoal(source = "unknown") {
+    async maybeTriggerGoal(source = "elapsed_time", generation = this.sessionGeneration) {
       const goal = this.activeRules.goal;
-      if (!goal || this.goalTriggered || this.goalPending) return { triggered: false };
+      if (
+        generation !== this.sessionGeneration
+        || !goal
+        || this.goalTriggered
+        || this.goalAttempted
+        || this.goalPending
+      ) {
+        return { triggered: false, canceled: generation !== this.sessionGeneration };
+      }
+      this.goalAttempted = true;
       const roll = Number(this.random());
       if (goal.probability <= 0 || roll >= goal.probability) {
+        this.onStateChange(this.snapshot());
         return { triggered: false, roll };
       }
       this.goalPending = true;
@@ -180,12 +237,16 @@
       try {
         const result = await this.dispatchPrepared(goal.prepared, {
           trigger: "rule",
-          rule: "goal_probability",
+          rule: "goal_time_probability",
           goalName: goal.name,
           probability: goal.probability,
+          minPlaySeconds: goal.min_play_seconds,
           source,
           instruction: goal.instruction,
         });
+        if (generation !== this.sessionGeneration || goal !== this.activeRules.goal) {
+          return { triggered: false, canceled: true, roll };
+        }
         if (result?.ignored) return { triggered: false, ignored: true, roll };
         this.goalTriggered = true;
         this.achievementTimer = this.setTimer(() => {
@@ -207,7 +268,10 @@
         })),
         goal: this.activeRules.goal,
         goalTriggered: this.goalTriggered,
+        goalAttempted: this.goalAttempted,
         goalPending: this.goalPending,
+        goalScheduled: this.goalTriggerTimer !== null,
+        sessionStarted: this.sessionStarted,
       };
     }
   }
@@ -217,7 +281,9 @@
   if (typeof module !== "undefined" && module.exports) {
     module.exports = {
       DEFAULT_GOAL_PROBABILITY,
+      DEFAULT_GOAL_MIN_PLAY_SECONDS,
       GOAL_ACHIEVEMENT_DELAY_MS,
+      MAX_GOAL_MIN_PLAY_SECONDS,
       MAX_WORLD_SKILLS,
       WorldRulesController,
       normalizeWorldRulesDraft,

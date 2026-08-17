@@ -171,6 +171,7 @@ const SESSION_MAX_LIFETIME_SECONDS = Math.max(
   Math.trunc(configuredNumber("sessionMaxLifetimeSeconds", 60)),
 );
 const SESSION_MAX_LIFETIME_MS = SESSION_MAX_LIFETIME_SECONDS * 1000;
+const MAX_GOAL_MIN_PLAY_SECONDS = Math.max(0, SESSION_MAX_LIFETIME_SECONDS - 1);
 const EXPERIENCE_BUSY_MESSAGE = `当前正有人体验，请等待${SESSION_MAX_LIFETIME_SECONDS}s`;
 const GAMEPLAY_RECORDING_FPS = Math.max(
   8,
@@ -1085,8 +1086,8 @@ function promptLogRuleLabel(rule, afterMs, entry = {}) {
   if (rule === "session_start") return "进入世界，建立初始持久状态";
   if (rule === "preset_runtime_update") return "切换世界预设，重建持久状态";
   if (rule === "rewrite_failure_restore") return "新指令改写失败，恢复持久状态";
-  if (rule === "goal_probability") {
-    return `目标概率命中 ${Number(entry.probability || 0)} · ${entry.goalName || "隐藏目标"}`;
+  if (rule === "goal_time_probability") {
+    return `游玩 ${Number(entry.minPlaySeconds || 0)} 秒后目标概率命中 ${Number(entry.probability || 0)} · ${entry.goalName || "隐藏目标"}`;
   }
   if (rule === "one_time_timeout_restore") {
     return `一次性指令持续 ${Math.round(Number(afterMs || 10000) / 1000)} 秒后恢复`;
@@ -1122,6 +1123,7 @@ function appendPromptLog(prompt, metadata = {}) {
     afterMs: Number(metadata.afterMs || 0),
     goalName: trigger === "rule" ? String(metadata.goalName || "") : "",
     probability: trigger === "rule" ? Number(metadata.probability || 0) : 0,
+    minPlaySeconds: trigger === "rule" ? Number(metadata.minPlaySeconds || 0) : 0,
   });
   if (promptLogEntries.length > PROMPT_LOG_LIMIT) {
     promptLogEntries.splice(0, promptLogEntries.length - PROMPT_LOG_LIMIT);
@@ -1213,6 +1215,27 @@ worldRulesController = new WorldRulesController({
   },
   achievementDelayMs: 5000,
   onAchievement: (goal) => showGoalAchievement(goal.name),
+  onGoalResult: (result, goal) => {
+    if (result?.triggered) {
+      const changeType = result.result?.change_type === "persistent"
+        ? "persistent"
+        : "one_time";
+      setPromptRewriteStatus("目标规则已自动触发 · 5 秒后显示达成提示", changeType);
+      addHistory(
+        `goal auto-triggered · ${goal.name} · ${goal.min_play_seconds}s · probability ${goal.probability}`,
+      );
+      return;
+    }
+    if (!result?.canceled) {
+      addHistory(
+        `goal probability missed · ${goal.name} · roll ${Number(result?.roll || 0).toFixed(4)} / ${goal.probability}`,
+      );
+    }
+  },
+  onGoalError: (error, goal) => {
+    addHistory(`goal auto-trigger failed · ${goal.name} · ${error.message || error}`);
+    setPromptRewriteStatus("目标规则自动发送失败", "error");
+  },
   onStateChange: (snapshot) => renderRuntimeSkillBar(snapshot),
 });
 let playbackAckTimer = 0;
@@ -1249,6 +1272,7 @@ function markWorldExperienceReady(modelKey) {
   sessionLifetimeGuard.start();
   startSessionCountdown();
   startRecording({ source: "first_visible_frame" });
+  worldRulesController?.startSession();
   setStatus("Live", "live");
   $("sessionNotice").hidden = true;
   renderRuntimeSkillBar();
@@ -4910,14 +4934,23 @@ function setWorldRulesStatus(message, state = "") {
 }
 
 function readWorldRulesDraft() {
+  const goalInput = $("goalRuleInput").value;
+  const goalMinPlaySeconds = $("goalMinPlaySeconds").value;
+  if (goalInput.trim() && goalMinPlaySeconds !== "") {
+    const seconds = Number(goalMinPlaySeconds);
+    if (!Number.isFinite(seconds) || seconds < 0 || seconds > MAX_GOAL_MIN_PLAY_SECONDS) {
+      throw new Error(`目标至少游玩时间必须在 0–${MAX_GOAL_MIN_PLAY_SECONDS} 秒之间`);
+    }
+  }
   return {
     skills: skillRuleElements().map((item) => ({
       id: item.dataset.skillRuleId,
       input: item.querySelector("[data-rule-field='input']").value,
     })),
     goal: {
+      min_play_seconds: goalMinPlaySeconds,
       probability: $("goalProbability").value,
-      input: $("goalRuleInput").value,
+      input: goalInput,
     },
   };
 }
@@ -4975,7 +5008,10 @@ function updateWorldRulesDraftUi() {
   const hasGoal = Boolean($("goalRuleInput").value.trim());
   const parts = [];
   if (skillCount) parts.push(`${skillCount} 个技能`);
-  if (hasGoal) parts.push("1 个目标");
+  if (hasGoal) {
+    const minPlaySeconds = $("goalMinPlaySeconds").value.trim() || "10";
+    parts.push(`1 个目标 · ≥${minPlaySeconds}s`);
+  }
   $("worldRulesSummary").textContent = parts.length ? parts.join(" · ") : "未配置";
 
   if (!parts.length) {
@@ -5056,6 +5092,9 @@ function applyWorldRulesDraft(draft = null) {
   $("skillRuleList").innerHTML = "";
   const skills = Array.isArray(draft?.skills) ? draft.skills : [];
   skills.slice(0, 9).forEach((skill) => addSkillRule(skill, { focus: false }));
+  $("goalMinPlaySeconds").value = draft?.goal?.min_play_seconds == null
+    ? (draft?.goal?.minPlaySeconds == null ? "" : String(draft.goal.minPlaySeconds))
+    : String(draft.goal.min_play_seconds);
   $("goalProbability").value = draft?.goal?.probability == null
     ? ""
     : String(draft.goal.probability);
@@ -5114,7 +5153,7 @@ async function prepareWorldRulesForEntry(description) {
       state.dataset.state = "ready";
     });
     preparedWorldRulesCache = { signature, prepared };
-    setWorldRulesStatus(`${ruleCount} 条规则已补全，进入后可立即触发`, "ready");
+    setWorldRulesStatus(`${ruleCount} 条规则已补全；技能可立即使用，目标将按时间自动触发`, "ready");
     return prepared;
   } catch (error) {
     $("worldRulesPanel").open = true;
@@ -5179,16 +5218,11 @@ async function triggerWorldSkill(skillId) {
     const result = await worldRulesController.triggerSkill(skillId);
     if (result?.ignored) return;
     setPromptRewriteStatus(
-      result.goal?.triggered
-        ? `已触发「${skill.name}」和世界目标 · 5 秒后显示达成提示`
-        : result.change_type === "one_time"
-          ? `已触发「${skill.name}」· 一次性，10 秒后恢复`
-          : `已触发「${skill.name}」· 持久状态`,
+      result.change_type === "one_time"
+        ? `已触发「${skill.name}」· 一次性，10 秒后恢复`
+        : `已触发「${skill.name}」· 持久状态`,
       result.change_type,
     );
-    if (result.goalError) {
-      addHistory(`goal trigger failed · ${result.goalError.message || result.goalError}`);
-    }
     canvas.focus({ preventScroll: true });
   } catch (error) {
     setPromptRewriteStatus(error.message || "技能触发失败，请重试", "error");
@@ -6747,7 +6781,8 @@ $("addSkillRuleBtn").onclick = () => {
   addSkillRule();
   handleWorldRulesDraftInput();
 };
-for (const id of ["goalProbability", "goalRuleInput"]) {
+$("goalMinPlaySeconds").max = String(MAX_GOAL_MIN_PLAY_SECONDS);
+for (const id of ["goalMinPlaySeconds", "goalProbability", "goalRuleInput"]) {
   $(id).addEventListener("input", handleWorldRulesDraftInput);
 }
 $("stopBtn").onclick = () => {
@@ -6826,14 +6861,6 @@ async function sendRuntimePromptUpdate() {
     } else {
       setPromptRewriteStatus("已发送 · 持久指令", "persistent");
     }
-    void worldRulesController.noteUserPromptSuccess().then((goalResult) => {
-      if (goalResult?.triggered) {
-        setPromptRewriteStatus("目标已触发 · 5 秒后显示达成提示", "one_time");
-      }
-    }).catch((error) => {
-      addHistory(`goal trigger failed · ${error.message || error}`);
-      setPromptRewriteStatus("新指令已发送，但目标触发失败", "error");
-    });
   } catch (error) {
     markRecordingPromptFailed(error.message || error);
     setPromptRewriteStatus(error.message || "指令改写失败，请重试", "error");
