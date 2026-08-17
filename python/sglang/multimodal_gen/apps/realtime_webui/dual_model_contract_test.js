@@ -41,6 +41,16 @@ assert.match(html, /id="lingbot2WindowFrames" type="number" value="18"/, "LingBo
 assert.match(app, /const DEFAULT_LINGBOT2_TARGET_FPS\s*=\s*configuredModelNumber\("lingbot2", "targetFps", 16\)/);
 assert.match(app, /const DEFAULT_LINGBOT2_SINK_SIZE\s*=\s*configuredModelNumber\("lingbot2", "sinkSize", 9\)/);
 assert.match(app, /const DEFAULT_LINGBOT2_WINDOW_FRAMES\s*=\s*configuredModelNumber\("lingbot2", "windowFrames", 18\)/);
+assert.match(
+  app,
+  /this\.enqueueTransition\(\{ immediate: active \}\)/,
+  "key presses should bypass the transition batching delay",
+);
+assert.match(
+  app,
+  /if \(immediate\) this\.flush\(\);\s*else this\.scheduleFlush\(\);/,
+  "key releases should retain the transition batching window",
+);
 assert.doesNotMatch(
   app,
   /for \(const key of \["minwm", "lingbot2"\]\) \{\s*modelControl\(key, "fps"\)\.value = UI_CONFIG\.targetFps/s,
@@ -58,6 +68,22 @@ assert.match(html, /id="minwmDisplayLagText"/, "MinWM should expose independent 
 assert.match(html, /id="lingbot2DisplayLagText"/, "LingBot2 should expose independent display lag");
 assert.match(html, /<span>FPS<b id="minwmRateText">-<\/b><\/span>/, "MinWM should show its own FPS");
 assert.match(html, /<span>FPS<b id="lingbot2RateText">-<\/b><\/span>/, "LingBot2 should show its own FPS");
+assert.match(html, /<span>FPS<b id="minwmPerfFps">-<\/b><\/span>/, "MinWM should show stage FPS");
+assert.match(html, /<span>FPS<b id="lingbot2PerfFps">-<\/b><\/span>/, "LingBot2 should show stage FPS");
+assert.match(html, /下行带宽<b id="minwmPerfData">-<\/b>/, "Zing should show measured downlink bandwidth");
+assert.match(html, /H\.264 编码<b id="minwmPerfH264">-<\/b>/, "Zing should show H.264 timing separately");
+assert.match(html, /网络下行<b id="minwmPerfDownlink">-<\/b>/, "Zing should show downlink latency separately");
+assert.match(html, /H\.264 编码<b id="lingbot2PerfH264">-<\/b>/, "LingBot2 should show H.264 timing separately");
+assert.match(html, /网络下行<b id="lingbot2PerfDownlink">-<\/b>/, "LingBot2 should show downlink latency separately");
+assert.doesNotMatch(html, /H\.264\/下行/, "H.264 and downlink metrics must not share one field");
+assert.match(app, /\$\(`\$\{key\}PerfH264`\)\.textContent/);
+assert.match(app, /\$\(`\$\{key\}PerfDownlink`\)\.textContent/);
+assert.match(app, /activeH264Models\.has\("minwm"\)/, "H.264 stats should not be overwritten by WebP playback stats");
+assert.match(
+  app,
+  /"h264StartupDropFrames",[\s\S]*?key === "lingbot2" \? 8 : 0/,
+  "LingBot2 should hide eight startup transition frames without changing Zing",
+);
 for (const id of [
   "size", "fps", "numFrames", "seed", "steps", "guidance", "sinkSize",
   "windowFrames", "transportFormat", "transportQuality", "playbackMode",
@@ -100,18 +126,35 @@ assert.match(
   /\.stage:fullscreen \.model-parameters-grid,[\s\S]*?\.stage:fullscreen \.session-notice\s*\{[\s\S]*?display:\s*none/,
   "fullscreen must hide model parameters and notices while preserving both videos",
 );
+assert.match(
+  css,
+  /\.world-studio \.stage:fullscreen\s*\{[\s\S]*?grid-template-rows:\s*minmax\(0, 1fr\) auto/,
+  "fullscreen should reserve the flexible row for video and one compact row for prompt input",
+);
+for (const selector of ["model-slot-config", "stage-controls", "prompt-update-heading", "prompt-helper", "prompt-log-panel"]) {
+  assert.match(
+    css,
+    new RegExp(`\\.world-studio \\.stage:fullscreen \\.${selector}`),
+    `fullscreen should hide ${selector}`,
+  );
+}
 assert.match(html, /playback_controller\.js\?v=realtime-playback-v34/);
-assert.match(html, /model_session\.js\?v=dual-model-v10/);
+assert.match(html, /model_session\.js\?v=dual-h264-telemetry-v1/);
 assert.match(html, /dual_model_controller\.js\?v=dual-model-v6/);
+assert.match(html, /h264_websocket_session\.js\?v=lingbot-startup-v2/);
 assert.match(html, /prompt_rewrite_controller\.js\?v=prompt-rewrite-v2/);
-assert.match(html, /styles\.css\?v=world-studio-v7/);
-assert.match(html, /app\.js\?v=world-studio-v27/);
+assert.match(html, /styles\.css\?v=fullscreen-focus-v1/);
+assert.match(html, /app\.js\?v=fullscreen-focus-v1/);
+assert.match(html, /id="minwmH264Viewport"/);
+assert.match(html, /id="lingbot2H264Viewport"/);
+assert.match(html, /id="minwmPerfScheduler"/);
+assert.match(html, /id="lingbot2PerfScheduler"/);
 assert.doesNotMatch(
   app,
   /window\.location\.hostname === "localhost"/,
   "localhost previews should use the same-origin dual-backend proxy",
 );
-assert.match(html, /fullscreen_controller\.js\?v=dual-fullscreen-v1/);
+assert.match(html, /fullscreen_controller\.js\?v=fullscreen-focus-v1/);
 assert.doesNotMatch(
   html,
   /assets\/presets\/lingbot_testset_20_20260810\/presets\.js\?v=20260810/,

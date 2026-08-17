@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>World Studio · 实时模型对比</title>
-    <link rel="stylesheet" href="./styles.css?v=world-studio-v7" />
+    <link rel="stylesheet" href="./styles.css?v=fullscreen-focus-v1" />
   </head>
   <body class="world-studio">
     <header class="app-header">
@@ -142,8 +142,20 @@
                     <span class="telemetry-detail">Lag<b id="minwmDisplayLagText">-</b></span>
                   </div>
                 </header>
+                <div class="protocol-performance" aria-label="Zing 各阶段实时耗时">
+                  <span>下行带宽<b id="minwmPerfData">-</b></span>
+                  <span>FPS<b id="minwmPerfFps">-</b></span>
+                  <span>输入上行<b id="minwmPerfUplink">-</b></span>
+                  <span>Scheduler<b id="minwmPerfScheduler">-</b></span>
+                  <span>Denoise<b id="minwmPerfDenoise">-</b></span>
+                  <span>VAE<b id="minwmPerfVae">-</b></span>
+                  <span class="h264-performance">H.264 编码<b id="minwmPerfH264">-</b></span>
+                  <span>网络下行<b id="minwmPerfDownlink">-</b></span>
+                  <span class="e2e">输入→画面<b id="minwmPerfE2E">-</b></span>
+                </div>
                 <div class="preview-frame">
                   <canvas id="minwmViewport" width="1280" height="720" tabindex="0"></canvas>
+                  <video id="minwmH264Viewport" autoplay playsinline muted tabindex="0" hidden></video>
                   <div id="minwmPreviewOverlay" class="preview-overlay" aria-hidden="true">
                     <span class="preview-loader"></span>
                     <span class="preview-unavailable-text">暂不可用</span>
@@ -165,8 +177,20 @@
                     <span class="telemetry-detail">Lag<b id="lingbot2DisplayLagText">-</b></span>
                   </div>
                 </header>
+                <div class="protocol-performance" aria-label="LingBot2 各阶段实时耗时">
+                  <span>下行带宽<b id="lingbot2PerfData">-</b></span>
+                  <span>FPS<b id="lingbot2PerfFps">-</b></span>
+                  <span>输入上行<b id="lingbot2PerfUplink">-</b></span>
+                  <span>Scheduler<b id="lingbot2PerfScheduler">-</b></span>
+                  <span>Denoise<b id="lingbot2PerfDenoise">-</b></span>
+                  <span>VAE<b id="lingbot2PerfVae">-</b></span>
+                  <span class="h264-performance">H.264 编码<b id="lingbot2PerfH264">-</b></span>
+                  <span>网络下行<b id="lingbot2PerfDownlink">-</b></span>
+                  <span class="e2e">输入→画面<b id="lingbot2PerfE2E">-</b></span>
+                </div>
                 <div class="preview-frame">
                   <canvas id="lingbot2Viewport" width="1280" height="720" tabindex="0"></canvas>
+                  <video id="lingbot2H264Viewport" autoplay playsinline muted tabindex="0" hidden></video>
                   <div id="lingbot2PreviewOverlay" class="preview-overlay" aria-hidden="true">
                     <span class="preview-loader"></span>
                     <span class="preview-unavailable-text">暂不可用</span>
@@ -321,15 +345,16 @@
     </main>
     <script src="./runtime-config.js"></script>
     <script src="./playback_controller.js?v=realtime-playback-v34"></script>
-    <script src="./model_session.js?v=dual-model-v10"></script>
+    <script src="./model_session.js?v=dual-h264-telemetry-v1"></script>
     <script src="./dual_model_controller.js?v=dual-model-v6"></script>
+    <script src="./h264_websocket_session.js?v=lingbot-startup-v2"></script>
     <script src="./happy_oyster_sdk.js?v=happyoyster-sdk-0.1.0-ticket-only"></script>
     <script src="./happy_oyster_session.js?v=happyoyster-session-v5"></script>
     <script src="./session_lifetime.js?v=session-lifetime-v1"></script>
     <script src="./prompt_rewrite_controller.js?v=prompt-rewrite-v2"></script>
-    <script src="./fullscreen_controller.js?v=dual-fullscreen-v1"></script>
+    <script src="./fullscreen_controller.js?v=fullscreen-focus-v1"></script>
     <script src="./trace_topology.js?v=realtime-trace-topology-v6"></script>
     <script src="./trace_transport.js?v=realtime-trace-http-v2"></script>
-    <script src="./app.js?v=world-studio-v27"></script>
+    <script src="./app.js?v=fullscreen-focus-v1"></script>
   </body>
 </html>

@@ -12,7 +12,9 @@ ROOT = Path(__file__).resolve().parent
 BASE_MANIFESTS = (
     "namespace.yaml",
     "west-s3-volume.yaml",
+    "east2-model-serving-s3-volume.yaml",
     "observability.yaml",
+    "8gpu-nodeclass.yaml",
     "coordinator.yaml",
     "gateway.yaml",
     "worker-discovery.yaml",
@@ -65,11 +67,32 @@ def validate(documents: list[dict]) -> None:
     assert requirement_values(vae_spot, "karpenter.sh/capacity-type") == ["spot"]
     assert vae["spec"]["weight"] > vae_spot["spec"]["weight"]
     assert requirement_values(denoiser, "node.kubernetes.io/instance-type") == [
-        "p5.48xlarge"
+        "p5.48xlarge",
     ]
     assert requirement_values(denoiser_8x, "node.kubernetes.io/instance-type") == [
-        "p5.48xlarge"
+        "p5.48xlarge",
     ]
+    denoiser_nodeclass = find(
+        documents, "EC2NodeClass", "minwm-async-denoiser-8gpu-nvme-ec2"
+    )
+    assert denoiser_8x["spec"]["template"]["spec"]["nodeClassRef"]["name"] == (
+        "minwm-async-denoiser-8gpu-nvme-ec2"
+    )
+    assert denoiser["spec"]["template"]["spec"]["nodeClassRef"]["name"] == (
+        "minwm-async-denoiser-8gpu-nvme-ec2"
+    )
+    assert denoiser_nodeclass["spec"]["instanceStorePolicy"] == "RAID0"
+    assert denoiser_nodeclass["spec"]["blockDeviceMappings"][0]["ebs"][
+        "volumeSize"
+    ] == "100Gi"
+    for pool in (denoiser, denoiser_8x):
+        assert pool["spec"]["template"]["metadata"]["labels"][
+            "seedleap.ai/model-cache-storage"
+        ] == "local-nvme"
+    assert [
+        interface["networkCardIndex"]
+        for interface in denoiser_nodeclass["spec"]["networkInterfaces"]
+    ] == list(range(8))
     assert requirement_values(denoiser_8x, "topology.kubernetes.io/zone") == [
         "us-east-2a",
         "us-east-2b",
@@ -79,7 +102,7 @@ def validate(documents: list[dict]) -> None:
         vae, "node.kubernetes.io/instance-type"
     ))
     assert 1 <= int(denoiser["spec"]["limits"]["nvidia.com/gpu"]) <= 8
-    assert int(denoiser_8x["spec"]["limits"]["nvidia.com/gpu"]) == 16
+    assert int(denoiser_8x["spec"]["limits"]["nvidia.com/gpu"]) == 8
     assert 1 <= int(vae["spec"]["limits"]["nvidia.com/gpu"]) <= 8
 
     workloads = (
@@ -100,6 +123,26 @@ def validate(documents: list[dict]) -> None:
         assert resources["limits"]["nvidia.com/gpu"] == expected_gpus
 
     denoiser = find(documents, "StatefulSet", "minwm-async-denoiser")
+    lingbot = find(documents, "StatefulSet", "lingbot2-async-denoiser")
+    assert denoiser["spec"]["replicas"] == "REPLACE_WITH_DENOISER_BASE_REPLICAS"
+    assert lingbot["spec"]["replicas"] == 1
+    assert denoiser["spec"]["ordinals"]["start"] == 2
+    assert lingbot["spec"]["ordinals"]["start"] == 1
+    assert denoiser["spec"]["updateStrategy"]["type"] == "OnDelete"
+    assert lingbot["spec"]["updateStrategy"]["type"] == "OnDelete"
+    for workload in (denoiser, lingbot):
+        model_cache = next(
+            volume
+            for volume in workload["spec"]["template"]["spec"]["volumes"]
+            if volume["name"] == "model-cache"
+        )
+        assert model_cache["hostPath"] == {
+            "path": "/mnt/k8s-disks/0/minwm-model-cache",
+            "type": "DirectoryOrCreate",
+        }
+        assert workload["spec"]["template"]["spec"]["nodeSelector"][
+            "seedleap.ai/model-cache-storage"
+        ] == "local-nvme"
     containers = denoiser["spec"]["template"]["spec"]["containers"]
     assert {container["name"] for container in containers} == {"denoiser"}
     command = " ".join(containers[0]["args"])

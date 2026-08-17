@@ -236,6 +236,7 @@ def create_app(
                         frame_batch_index=frame_batch.frame_batch_index,
                         is_final_frame_batch=frame_batch.is_final,
                         encode_ms=frame_batch.encode_ms,
+                        server_sent_epoch_ms=time.time() * 1000,
                     )
                     send_started = time.perf_counter()
                     if output_client is not None:

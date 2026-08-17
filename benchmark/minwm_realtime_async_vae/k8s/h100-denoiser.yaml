@@ -18,6 +18,7 @@ spec:
       labels:
         seedleap.ai/capacity-pool: minwm-async-denoiser-h100
         seedleap.ai/denoiser-worker: "true"
+        seedleap.ai/model-cache-storage: local-nvme
         seedleap.ai/test-run: minwm-async-vae-benchmark
     spec:
       # Spot interruption is handled by Karpenter's interruption queue. Avoid an
@@ -26,7 +27,7 @@ spec:
       nodeClassRef:
         group: karpenter.k8s.aws
         kind: EC2NodeClass
-        name: minwm-test-h100-single-ec2
+        name: minwm-async-denoiser-8gpu-nvme-ec2
       requirements:
         - key: karpenter.sh/capacity-type
           operator: In
@@ -52,10 +53,10 @@ metadata:
     seedleap.ai/ttl-after-test: required
 spec:
   limits:
-    # Keep room for a second Spot p5 as a warm, model-cached failover node.
-    # Production workers still request only eight GPUs in total.
-    cpu: "384"
-    nvidia.com/gpu: "16"
+    # One 8-GPU H100 Spot node runs two Zing SP=2 workers and one LingBot2 SP=4
+    # worker, consuming all eight GPUs.
+    cpu: "192"
+    nvidia.com/gpu: "8"
   disruption:
     consolidationPolicy: WhenEmpty
     consolidateAfter: 1m
@@ -64,6 +65,7 @@ spec:
       labels:
         seedleap.ai/capacity-pool: minwm-async-denoiser-h100-8x
         seedleap.ai/denoiser-worker: "true"
+        seedleap.ai/model-cache-storage: local-nvme
         seedleap.ai/test-run: minwm-async-vae-benchmark
     spec:
       # Spot interruption is handled by Karpenter's interruption queue. Avoid an
@@ -72,7 +74,7 @@ spec:
       nodeClassRef:
         group: karpenter.k8s.aws
         kind: EC2NodeClass
-        name: minwm-test-h100-ec2
+        name: minwm-async-denoiser-8gpu-nvme-ec2
       requirements:
         - key: karpenter.sh/capacity-type
           operator: In
@@ -119,6 +121,9 @@ metadata:
     seedleap.ai/ttl-after-test: required
 spec:
   replicas: REPLACE_WITH_DENOISER_BASE_REPLICAS
+  ordinals:
+    # Preserve the H100-resident workers selected during the two-node scale-in.
+    start: 2
   revisionHistoryLimit: 1
   serviceName: minwm-async-denoiser-headless
   podManagementPolicy: Parallel
@@ -140,6 +145,7 @@ spec:
       nodeSelector:
         karpenter.sh/nodepool: REPLACE_WITH_DENOISER_NODEPOOL
         karpenter.sh/capacity-type: spot
+        seedleap.ai/model-cache-storage: local-nvme
       tolerations:
         - key: nvidia.com/gpu
           operator: Equal
@@ -355,7 +361,7 @@ spec:
             - {name: startup-lock, mountPath: /var/run/minwm-startup-lock}
       volumes:
         - name: checkpoint-archive
-          persistentVolumeClaim: {claimName: minwm-async-west-s3, readOnly: true}
+          persistentVolumeClaim: {claimName: minwm-model-serving-east2-s3, readOnly: true}
         - name: shm
           emptyDir: {medium: Memory, sizeLimit: 64Gi}
         - name: startup-lock
@@ -364,7 +370,7 @@ spec:
             type: DirectoryOrCreate
         - name: model-cache
           hostPath:
-            path: /var/lib/minwm-model-cache
+            path: /mnt/k8s-disks/0/minwm-model-cache
             type: DirectoryOrCreate
         - name: worker-epoch
           emptyDir: {}

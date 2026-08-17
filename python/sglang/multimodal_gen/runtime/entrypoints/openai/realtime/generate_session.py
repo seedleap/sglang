@@ -94,6 +94,7 @@ class GenerateSession:
         self.gateway_output_token: str | None = None
         self.pending_control_refresh: tuple[str, int | None] | None = None
         self.control_refresh_task: Any = None
+        self.input_event_timings: dict[int, tuple[float, float]] = {}
 
     def set_adapter(self, adapter: BaseRealtimeModelAdapter):
         self.adapter = adapter
@@ -124,6 +125,7 @@ class GenerateSession:
         self.vae_client = None
         self.pending_control_refresh = None
         self.control_refresh_task = None
+        self.input_event_timings.clear()
         self.playable_at = None
         self.playback_ack_enabled = False
         self.last_received_chunk = -1
@@ -132,6 +134,43 @@ class GenerateSession:
         self.denoise_intervals.clear()
         self.vae_intervals.clear()
         self.realtime_session.dispose()
+
+    def record_input_event(
+        self,
+        event_id: int | None,
+        client_sent_epoch_ms: float | None,
+        server_received_epoch_ms: float,
+    ) -> None:
+        if event_id is None or event_id <= 0 or not client_sent_epoch_ms:
+            return
+        self.input_event_timings[int(event_id)] = (
+            float(client_sent_epoch_ms),
+            float(server_received_epoch_ms),
+        )
+        while len(self.input_event_timings) > 128:
+            self.input_event_timings.pop(next(iter(self.input_event_timings)))
+
+    def consume_input_timing(self, event_id: int | None) -> dict[str, float] | None:
+        """Consume the first user input included in a generated event burst."""
+        if event_id is None or event_id <= 0:
+            return None
+        consumed = [
+            candidate
+            for candidate in self.input_event_timings
+            if candidate <= int(event_id)
+        ]
+        if not consumed:
+            return None
+        first_event_id = min(consumed)
+        client_sent, server_received = self.input_event_timings[first_event_id]
+        for candidate in consumed:
+            self.input_event_timings.pop(candidate, None)
+        return {
+            "input_event_id": float(first_event_id),
+            "client_sent_epoch_ms": client_sent,
+            "server_received_epoch_ms": server_received,
+            "input_uplink_ms": max(0.0, server_received - client_sent),
+        }
 
     def mark_playable(self) -> None:
         if self.playable_at is None:

@@ -1,0 +1,65 @@
+apiVersion: karpenter.k8s.aws/v1
+kind: EC2NodeClass
+metadata:
+  name: minwm-async-denoiser-8gpu-nvme-ec2
+  labels:
+    app.kubernetes.io/part-of: minwm-realtime
+    seedleap.ai/environment: production
+spec:
+  amiFamily: AL2023
+  amiSelectorTerms:
+    - name: amazon-eks-node-al2023-x86_64-nvidia-*
+      owner: amazon
+  # p5.48xlarge exposes 8 x 3.8TB local NVMe devices. Karpenter formats them
+  # as RAID0 and mounts the array at /mnt/k8s-disks/0 before kubelet starts.
+  # Model artifacts are disposable node-local cache, so they belong here
+  # instead of on the gp3 root volume.
+  instanceStorePolicy: RAID0
+  blockDeviceMappings:
+    - deviceName: /dev/xvda
+      ebs:
+        deleteOnTermination: true
+        encrypted: true
+        volumeSize: 100Gi
+        volumeType: gp3
+  metadataOptions:
+    httpEndpoint: enabled
+    httpProtocolIPv6: disabled
+    httpPutResponseHopLimit: 1
+    httpTokens: required
+  # p6-b200 has eight network cards, the lowest common denominator across
+  # p5/p5e/p5en/p6-b200. Intra-node SP uses NVLink/NVSwitch; these EFA devices
+  # preserve future multi-node capability without excluding B200 capacity.
+  networkInterfaces:
+    - deviceIndex: 0
+      interfaceType: interface
+      networkCardIndex: 0
+    - deviceIndex: 1
+      interfaceType: efa-only
+      networkCardIndex: 1
+    - deviceIndex: 1
+      interfaceType: efa-only
+      networkCardIndex: 2
+    - deviceIndex: 1
+      interfaceType: efa-only
+      networkCardIndex: 3
+    - deviceIndex: 1
+      interfaceType: efa-only
+      networkCardIndex: 4
+    - deviceIndex: 1
+      interfaceType: efa-only
+      networkCardIndex: 5
+    - deviceIndex: 1
+      interfaceType: efa-only
+      networkCardIndex: 6
+    - deviceIndex: 1
+      interfaceType: efa-only
+      networkCardIndex: 7
+  role: KarpenterNodeRole-leap-world
+  securityGroupSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: leap-world
+  subnetSelectorTerms:
+    - id: subnet-0b3e75dab2f514ab3
+    - id: subnet-0bcfc20f6b0e5f29c
+    - id: subnet-0245e620ed4f40137

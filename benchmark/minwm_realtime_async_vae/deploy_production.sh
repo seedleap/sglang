@@ -46,8 +46,8 @@ if [[ "${MODEL_ID}" != "wan22-5b-stage3-dmd-47-0808-2fb2cfec2a2" || \
 fi
 
 aws s3api head-object \
-  --region us-west-2 \
-  --bucket leap-world-us-west-2 \
+  --region us-east-2 \
+  --bucket leap-world-model-serving-829115578968-us-east-2 \
   --key "world-model/minwm/serving-artifacts/${MODEL_ID}/${MODEL_ARTIFACT_REVISION}/model/_READY" \
   >/dev/null
 
@@ -113,6 +113,7 @@ TABLE_STATE="${RELEASE_STATE_DIR}/coordinator-table.json"
 TTL_STATE="${RELEASE_STATE_DIR}/coordinator-ttl.json"
 RELEASE_APPLIED=0
 DENOISER_TEMPLATE_CHANGED=0
+LINGBOT_TEMPLATE_CHANGED=0
 DENOISER_PROTECTED_NODES=""
 SNAPSHOT_WORKLOADS=(
   deployment/minwm-realtime-adot
@@ -178,6 +179,43 @@ raise SystemExit(1)
   return 1
 }
 
+wait_for_statefulset_ready_replicas() {
+  local workload="$1"
+  local timeout_seconds
+  local deadline
+  timeout_seconds="$(python3 - "${ROLLOUT_TIMEOUT}" <<'PY'
+import re
+import sys
+
+match = re.fullmatch(r"([1-9][0-9]*)([smh])", sys.argv[1])
+if match is None:
+    raise SystemExit("ROLLOUT_TIMEOUT must use s, m, or h")
+value = int(match.group(1))
+multiplier = {"s": 1, "m": 60, "h": 3600}[match.group(2)]
+print(value * multiplier)
+PY
+)"
+  deadline=$((SECONDS + timeout_seconds))
+  while (( SECONDS <= deadline )); do
+    if kubectl get "${workload}" --namespace "${NAMESPACE}" --output json | \
+      python3 -c '
+import json
+import sys
+
+state = json.load(sys.stdin)
+desired = int(state.get("spec", {}).get("replicas") or 0)
+ready = int(state.get("status", {}).get("readyReplicas") or 0)
+raise SystemExit(0 if desired > 0 and ready >= desired else 1)
+'; then
+      return 0
+    fi
+    sleep 5
+  done
+  kubectl get "${workload}" --namespace "${NAMESPACE}" --output wide >&2
+  echo "timed out waiting for scale-out capacity: ${workload}" >&2
+  return 1
+}
+
 wait_for_rollout() {
   local workload="$1"
   local strategy=""
@@ -192,6 +230,39 @@ wait_for_rollout() {
       --namespace "${NAMESPACE}" \
       --timeout "${ROLLOUT_TIMEOUT}"
   fi
+}
+
+verify_denoiser_nvme_cache() {
+  local selector
+  local pod
+  local node
+  local nodeclass
+  local source
+  for selector in \
+    app.kubernetes.io/name=minwm-async-denoiser \
+    app.kubernetes.io/name=lingbot2-async-denoiser; do
+    while IFS= read -r pod; do
+      [[ -n "${pod}" ]] || continue
+      node="$(kubectl get pod "${pod}" --namespace "${NAMESPACE}" \
+        --output jsonpath='{.spec.nodeName}')"
+      nodeclass="$(kubectl get node "${node}" \
+        --output jsonpath='{.metadata.labels.karpenter\.k8s\.aws/ec2nodeclass}')"
+      if [[ "${nodeclass}" != "minwm-async-denoiser-8gpu-nvme-ec2" ]]; then
+        echo "${pod} is not running on the production NVMe NodeClass: ${nodeclass}" >&2
+        return 1
+      fi
+      source="$(kubectl exec --namespace "${NAMESPACE}" "${pod}" \
+        --container denoiser -- findmnt --noheadings --output SOURCE \
+        --target /model-cache)"
+      if ! [[ "${source}" == /dev/md* ]]; then
+        echo "${pod} model cache is not backed by local NVMe RAID0: ${source}" >&2
+        return 1
+      fi
+    done < <(
+      kubectl get pods --namespace "${NAMESPACE}" --selector "${selector}" \
+        --output name
+    )
+  done
 }
 
 statefulset_template_hash() {
@@ -265,11 +336,24 @@ restart_statefulset_in_batches() {
   local pod
   local pods=()
   local batch=()
+  local update_revision
+  update_revision="$(kubectl get statefulset/"${name}" --namespace "${NAMESPACE}" \
+    --output jsonpath='{.status.updateRevision}')"
   while IFS= read -r pod; do
     [[ -n "${pod}" ]] && pods+=("${pod}")
   done < <(
     kubectl get pods --namespace "${NAMESPACE}" --selector "${selector}" \
-      --output name | sort
+      --output json | python3 -c '
+import json
+import sys
+
+revision = sys.argv[1]
+items = json.load(sys.stdin).get("items", [])
+for item in sorted(items, key=lambda value: value["metadata"]["name"]):
+    labels = item.get("metadata", {}).get("labels", {})
+    if labels.get("controller-revision-hash") != revision:
+        print("pod/" + item["metadata"]["name"])
+' "${update_revision}"
   )
   if (( ${#pods[@]} == 0 )); then
     return 0
@@ -506,6 +590,13 @@ if [[ -s "$(snapshot_path statefulset/minwm-async-denoiser)" ]]; then
 else
   OLD_DENOISER_TEMPLATE_HASH=""
 fi
+if [[ -s "$(snapshot_path statefulset/lingbot2-async-denoiser)" ]]; then
+  OLD_LINGBOT_TEMPLATE_HASH="$(
+    statefulset_template_hash <"$(snapshot_path statefulset/lingbot2-async-denoiser)"
+  )"
+else
+  OLD_LINGBOT_TEMPLATE_HASH=""
+fi
 RELEASE_APPLIED=1
 
 kubectl apply --server-side --force-conflicts \
@@ -519,10 +610,28 @@ if [[ -n "${OLD_DENOISER_TEMPLATE_HASH}" && \
       "${OLD_DENOISER_TEMPLATE_HASH}" != "${NEW_DENOISER_TEMPLATE_HASH}" ]]; then
   DENOISER_TEMPLATE_CHANGED=1
 fi
-if (( DENOISER_TEMPLATE_CHANGED == 1 )); then
+NEW_LINGBOT_TEMPLATE_HASH="$(
+  kubectl get statefulset/lingbot2-async-denoiser --namespace "${NAMESPACE}" \
+    --output json | statefulset_template_hash
+)"
+if [[ -n "${OLD_LINGBOT_TEMPLATE_HASH}" && \
+      "${OLD_LINGBOT_TEMPLATE_HASH}" != "${NEW_LINGBOT_TEMPLATE_HASH}" ]]; then
+  LINGBOT_TEMPLATE_CHANGED=1
+fi
+if (( DENOISER_TEMPLATE_CHANGED == 1 || LINGBOT_TEMPLATE_CHANGED == 1 )); then
   protect_denoiser_nodes
+fi
+if (( DENOISER_TEMPLATE_CHANGED == 1 )); then
+  # Preserve the old workers until every scale-out replica is Ready.
+  wait_for_statefulset_ready_replicas statefulset/minwm-async-denoiser
   restart_statefulset_in_batches minwm-async-denoiser \
     app.kubernetes.io/name=minwm-async-denoiser
+fi
+if (( LINGBOT_TEMPLATE_CHANGED == 1 )); then
+  # Keep the original LingBot worker serving until its peer is Ready.
+  wait_for_statefulset_ready_replicas statefulset/lingbot2-async-denoiser
+  restart_statefulset_in_batches lingbot2-async-denoiser \
+    app.kubernetes.io/name=lingbot2-async-denoiser
 fi
 
 wait_for_rollout "deployment/minwm-realtime-adot"
@@ -531,6 +640,7 @@ wait_for_rollout "deployment/minwm-realtime-gateway"
 wait_for_rollout "deployment/minwm-realtime-gpu-capacity-scaler"
 wait_for_rollout "statefulset/minwm-async-denoiser"
 wait_for_rollout "statefulset/lingbot2-async-denoiser"
+verify_denoiser_nvme_cache
 unprotect_denoiser_nodes
 wait_for_rollout "deployment/minwm-async-vae"
 wait_for_rollout "deployment/lingbot2-async-vae"

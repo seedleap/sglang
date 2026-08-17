@@ -91,32 +91,55 @@ def test_kustomize_does_not_namespace_cluster_scoped_resources():
         assert "namespace" not in nodepool["metadata"]
 
 
-def test_h100_pool_uses_one_fully_utilized_eight_gpu_node():
-    documents = load_documents(("h100-denoiser.yaml",))
+def test_h100_pool_uses_one_fully_utilized_spot_node():
+    documents = load_documents(("8gpu-nodeclass.yaml", "h100-denoiser.yaml"))
     single = find(documents, "NodePool", "minwm-async-denoiser-h100")
     packed = find(documents, "NodePool", "minwm-async-denoiser-h100-8x")
     deployment = find(documents, "StatefulSet", "minwm-async-denoiser")
 
     assert requirement_values(single, "node.kubernetes.io/instance-type") == [
-        "p5.48xlarge"
+        "p5.48xlarge",
     ]
     assert requirement_values(packed, "node.kubernetes.io/instance-type") == [
-        "p5.48xlarge"
+        "p5.48xlarge",
     ]
+    nodeclass = find(
+        documents, "EC2NodeClass", "minwm-async-denoiser-8gpu-nvme-ec2"
+    )
+    assert packed["spec"]["template"]["spec"]["nodeClassRef"]["name"] == (
+        "minwm-async-denoiser-8gpu-nvme-ec2"
+    )
+    assert single["spec"]["template"]["spec"]["nodeClassRef"]["name"] == (
+        "minwm-async-denoiser-8gpu-nvme-ec2"
+    )
+    assert nodeclass["spec"]["instanceStorePolicy"] == "RAID0"
+    assert nodeclass["metadata"]["labels"]["seedleap.ai/environment"] == "production"
+    assert "seedleap.ai/ttl-after-test" not in nodeclass["metadata"]["labels"]
+    assert nodeclass["spec"]["blockDeviceMappings"][0]["ebs"]["volumeSize"] == (
+        "100Gi"
+    )
+    assert [
+        interface["networkCardIndex"]
+        for interface in nodeclass["spec"]["networkInterfaces"]
+    ] == list(range(8))
     assert requirement_values(packed, "topology.kubernetes.io/zone") == [
         "us-east-2a",
         "us-east-2b",
         "us-east-2c",
     ]
     assert int(single["spec"]["limits"]["cpu"]) >= 192
-    assert int(packed["spec"]["limits"]["cpu"]) >= 384
-    assert int(packed["spec"]["limits"]["nvidia.com/gpu"]) >= 16
+    assert int(packed["spec"]["limits"]["cpu"]) >= 192
+    assert int(packed["spec"]["limits"]["nvidia.com/gpu"]) == 8
+    assert requirement_values(packed, "karpenter.sh/capacity-type") == ["spot"]
     assert deployment["spec"]["replicas"] == "REPLACE_WITH_DENOISER_BASE_REPLICAS"
     selector = deployment["spec"]["template"]["spec"]["nodeSelector"]
     assert selector == {
         "karpenter.sh/nodepool": "REPLACE_WITH_DENOISER_NODEPOOL",
         "karpenter.sh/capacity-type": "spot",
+        "seedleap.ai/model-cache-storage": "local-nvme",
     }
+    assert "topologySpreadConstraints" not in deployment["spec"]["template"]["spec"]
+    assert deployment["spec"]["ordinals"]["start"] == 2
     denoiser = _container(deployment, "denoiser")
     command = " ".join(denoiser["args"])
     assert denoiser["resources"]["requests"]["nvidia.com/gpu"] == "2"
@@ -243,6 +266,9 @@ def test_lingbot_denoiser_is_coordinator_managed_sp4_with_remote_vae():
     heartbeat = " ".join(_init_container(workload, "denoiser-heartbeat")["args"])
 
     assert workload["spec"]["replicas"] == 1
+    assert workload["spec"]["ordinals"]["start"] == 1
+    assert workload["spec"]["updateStrategy"]["type"] == "OnDelete"
+    assert "affinity" not in workload["spec"]["template"]["spec"]
     assert denoiser["resources"]["requests"]["nvidia.com/gpu"] == 4
     assert denoiser["resources"]["limits"]["nvidia.com/gpu"] == 4
     assert "--num-gpus 4" in command
@@ -394,6 +420,15 @@ def test_optimized_webui_uses_an_isolated_ack_aware_gateway():
         "https://zing-world-studio.loopit.me"
     )
     assert '"sessionMaxLifetimeSeconds":70' in env["REALTIME_UI_CONFIG_JSON"]
+    assert '"singleExperience":false' in env["REALTIME_UI_CONFIG_JSON"]
+    assert "singleExperienceUserIds" not in env["REALTIME_UI_CONFIG_JSON"]
+    assert '"minwm":{"label":"Zing","sinkSize":8,"windowFrames":32,"h264StartupDropFrames":0}' in (
+        env["REALTIME_UI_CONFIG_JSON"]
+    )
+    assert (
+        '"lingbot2":{"label":"LingBot2","targetFps":16,"sinkSize":9,"windowFrames":18,"h264StartupDropFrames":8}'
+        in env["REALTIME_UI_CONFIG_JSON"]
+    )
     assert (
         '"secureBaseUrl":"https://zing-world-studio.loopit.me"'
         in env["REALTIME_UI_CONFIG_JSON"]
@@ -459,13 +494,16 @@ def test_webui_enables_i2v_and_t2v_in_production_manifest():
     assert env["AWS_DEFAULT_REGION"] == "REPLACE_WITH_AWS_REGION"
 
 
-def test_west_model_artifact_uses_a_matching_read_only_s3_mount():
+def test_east2_model_artifact_uses_a_matching_read_only_s3_mount():
     documents = load_documents()
-    volume = find(documents, "PersistentVolume", "minwm-async-west-s3-pv")
+    volume = find(
+        documents, "PersistentVolume", "minwm-model-serving-east2-s3-pv"
+    )
     assert volume["spec"]["csi"]["volumeAttributes"]["bucketName"] == (
-        "leap-world-us-west-2"
+        "leap-world-model-serving-829115578968-us-east-2"
     )
     assert volume["spec"]["accessModes"] == ["ReadOnlyMany"]
+    assert "region us-east-2" in volume["spec"]["mountOptions"]
 
     deployment = find(documents, "StatefulSet", "minwm-async-denoiser")
     pod_spec = deployment["spec"]["template"]["spec"]
@@ -487,7 +525,8 @@ def test_west_model_artifact_uses_a_matching_read_only_s3_mount():
     )
     assert any(
         item["name"] == "checkpoint-archive"
-        and item["persistentVolumeClaim"]["claimName"] == "minwm-async-west-s3"
+        and item["persistentVolumeClaim"]["claimName"]
+        == "minwm-model-serving-east2-s3"
         and item["persistentVolumeClaim"]["readOnly"]
         for item in pod_spec["volumes"]
     )
@@ -517,7 +556,7 @@ def test_runtime_uses_one_owned_read_only_s3_claim_and_preconverted_model():
         for volume in pod_spec["volumes"]
         if "persistentVolumeClaim" in volume
     }
-    assert claims == {"minwm-async-west-s3"}
+    assert claims == {"minwm-model-serving-east2-s3"}
     assert all(mount["name"] != "s3" for mount in container["volumeMounts"])
 
 
@@ -541,7 +580,29 @@ def test_model_is_staged_once_per_spot_node_before_workers_mmap_it():
     assert 'mv "${staging}" "${CACHED_MODEL}"' in command
     cache = next(volume for volume in pod_spec["volumes"] if volume["name"] == "model-cache")
     assert cache["hostPath"] == {
-        "path": "/var/lib/minwm-model-cache",
+        "path": "/mnt/k8s-disks/0/minwm-model-cache",
+        "type": "DirectoryOrCreate",
+    }
+
+
+def test_tianpeng_direct_h100_cache_uses_nvme_when_enabled():
+    workload = find(
+        load_documents(("tianpeng-direct.yaml",)),
+        "StatefulSet",
+        "tianpeng-direct-async-denoiser",
+    )
+    pod_spec = workload["spec"]["template"]["spec"]
+    assert pod_spec["nodeSelector"]["karpenter.sh/nodepool"] == (
+        "minwm-async-denoiser-h100-8x"
+    )
+    assert pod_spec["nodeSelector"]["seedleap.ai/model-cache-storage"] == (
+        "local-nvme"
+    )
+    cache = next(
+        volume for volume in pod_spec["volumes"] if volume["name"] == "model-cache"
+    )
+    assert cache["hostPath"] == {
+        "path": "/mnt/k8s-disks/0/minwm-model-cache",
         "type": "DirectoryOrCreate",
     }
 
@@ -557,11 +618,12 @@ def test_production_resources_are_isolated_in_a_dedicated_namespace():
         "Namespace",
         "PersistentVolume",
         "ClusterRole",
-            "ClusterRoleBinding",
-            "NodePool",
-            "ValidatingAdmissionPolicy",
-            "ValidatingAdmissionPolicyBinding",
-        }
+        "ClusterRoleBinding",
+        "EC2NodeClass",
+        "NodePool",
+        "ValidatingAdmissionPolicy",
+        "ValidatingAdmissionPolicyBinding",
+    }
     for document in documents:
         if document["kind"] not in cluster_scoped:
             assert document["metadata"].get("namespace") == "minwm-realtime"
@@ -806,6 +868,7 @@ def test_capacity_scaler_uses_the_shared_coordinator_snapshot():
     assert "--denoiser-min-replicas=REPLACE_WITH_DENOISER_BASE_REPLICAS" in args
     assert "--vae-min-replicas=REPLACE_WITH_VAE_BASE_REPLICAS" in args
     assert "--denoiser-max-replicas=REPLACE_WITH_DENOISER_PEAK_REPLICAS" in args
+    assert "--denoiser-sessions-per-replica=1" in args
     assert "--vae-max-replicas=REPLACE_WITH_VAE_PEAK_REPLICAS" in args
     assert "--idle-observations-before-scale-down=24" in args
     assert container["image"] == "REPLACE_WITH_GATEWAY_IMAGE_DIGEST"
@@ -813,6 +876,9 @@ def test_capacity_scaler_uses_the_shared_coordinator_snapshot():
     deploy_script = (ROOT.parent / "deploy_production.sh").read_text()
     assert "GPU_EVENT_SCALER_SUSPEND" in deploy_script
     assert "GPU_EVENT_SCALER_REPLICAS" in deploy_script
+    assert 'DENOISER_BASE_REPLICAS="${DENOISER_BASE_REPLICAS:-2}"' in deploy_script
+    assert 'DENOISER_PEAK_REPLICAS="${DENOISER_PEAK_REPLICAS:-2}"' in deploy_script
+    assert "leap-world-model-serving-829115578968-us-east-2" in deploy_script
 
 
 def test_all_runtime_images_are_role_specific_and_immutable():
@@ -1101,6 +1167,9 @@ def test_production_deploy_waits_for_every_rollout_and_restores_exact_snapshot()
     deploy_script = (ROOT.parent / "deploy_production.sh").read_text()
 
     assert "restart_statefulset_in_batches" in deploy_script
+    assert "wait_for_statefulset_ready_replicas" in deploy_script
+    assert "verify_denoiser_nvme_cache" in deploy_script
+    assert '[[ "${source}" == /dev/md* ]]' in deploy_script
     assert 'DENOISER_RESTART_BATCH_SIZE="${DENOISER_RESTART_BATCH_SIZE:-1}"' in deploy_script
     assert "kubectl delete --namespace" in deploy_script
     assert "--wait=true" in deploy_script

@@ -47,6 +47,7 @@ spec:
       nodeSelector:
         karpenter.sh/nodepool: minwm-async-denoiser-h100-8x
         karpenter.sh/capacity-type: spot
+        seedleap.ai/model-cache-storage: local-nvme
       tolerations:
         - key: nvidia.com/gpu
           operator: Equal
@@ -264,7 +265,7 @@ spec:
             type: DirectoryOrCreate
         - name: model-cache
           hostPath:
-            path: /var/lib/minwm-model-cache
+            path: /mnt/k8s-disks/0/minwm-model-cache
             type: DirectoryOrCreate
         - name: worker-epoch
           emptyDir: {}

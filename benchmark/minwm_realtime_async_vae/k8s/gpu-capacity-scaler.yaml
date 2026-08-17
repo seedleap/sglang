@@ -33,7 +33,7 @@ spec:
             - --poll-interval-s=5
             - --denoiser-min-replicas=REPLACE_WITH_DENOISER_BASE_REPLICAS
             - --denoiser-max-replicas=REPLACE_WITH_DENOISER_PEAK_REPLICAS
-            - --denoiser-sessions-per-replica=4
+            - --denoiser-sessions-per-replica=1
             - --vae-min-replicas=REPLACE_WITH_VAE_BASE_REPLICAS
             - --vae-max-replicas=REPLACE_WITH_VAE_PEAK_REPLICAS
             - --vae-sessions-per-replica=16
