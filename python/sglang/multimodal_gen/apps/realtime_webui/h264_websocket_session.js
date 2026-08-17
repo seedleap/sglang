@@ -37,6 +37,13 @@
     });
   }
 
+  function resultFromError(error) {
+    const value = String(error?.code || error?.name || error?.message || "").toLowerCase();
+    if (value.includes("timeout")) return "timeout";
+    if (value.includes("cancel")) return "cancelled";
+    return "error";
+  }
+
   class H264WebSocketSession {
     constructor({
       video,
@@ -53,6 +60,8 @@
       onError = () => {},
       WebSocketImpl = global.WebSocket,
       MediaSourceImpl = global.MediaSource,
+      metricFlushMs = 250,
+      maxMetricBatch = 32,
     }) {
       if (!video) throw new Error("H264WebSocketSession requires a video element");
       this.video = video;
@@ -72,6 +81,8 @@
       this.onError = onError;
       this.WebSocketImpl = WebSocketImpl;
       this.MediaSourceImpl = MediaSourceImpl;
+      this.metricFlushMs = Math.max(0, Number(metricFlushMs) || 0);
+      this.maxMetricBatch = Math.max(1, Number(maxMetricBatch) || 32);
       this.socket = null;
       this.mediaSource = null;
       this.sourceBuffer = null;
@@ -97,6 +108,8 @@
       this.networkSample = null;
       this.statsTimer = 0;
       this.frameCallback = 0;
+      this.metricBuffer = [];
+      this.metricFlushTimer = 0;
       this.lastRenderedChunk = null;
       this.traceId = "";
       this.mediaFps = 24;
@@ -154,6 +167,8 @@
       this.networkSample = null;
       this.lastStats = {};
       this.lastRenderedChunk = null;
+      this._clearMetricFlushTimer();
+      this.metricBuffer = [];
       this._setState("connecting", { codec: "h264", protocol: "websocket" });
 
       const mediaSource = new this.MediaSourceImpl();
@@ -196,7 +211,14 @@
         }, this.startupTimeoutMs);
         socket.onopen = () => {
           if (generation !== this.generation) return;
-          socket.send(JSON.stringify({ ...init, first_frame: firstFrame }));
+          const serializeStartedAt = performance.now();
+          const payload = JSON.stringify({ ...init, first_frame: firstFrame });
+          socket.send(payload);
+          this._queueMetric(
+            "client_serialize_queue",
+            performance.now() - serializeStartedAt,
+            { codec: "h264", scope: "request" },
+          );
         };
         socket.onmessage = (message) => {
           if (generation !== this.generation) return;
@@ -262,8 +284,61 @@
           this.controlSentEpochByEvent.delete(this.controlSentEpochByEvent.keys().next().value);
         }
       }
-      this.socket.send(JSON.stringify({ ...envelope, trace_id: this.traceId }));
+      const serializeStartedAt = performance.now();
+      const payload = JSON.stringify({ ...envelope, trace_id: this.traceId });
+      this.socket.send(payload);
+      this._queueMetric(
+        "client_serialize_queue",
+        performance.now() - serializeStartedAt,
+        { codec: "h264", scope: "request" },
+      );
       return true;
+    }
+
+    _queueMetric(stage, durationMs, {
+      result = "success",
+      codec = "h264",
+      scope = "request",
+    } = {}) {
+      const duration = Number(durationMs);
+      if (!Number.isFinite(duration) || duration < 0) return;
+      if (!this.socket || this.socket.readyState !== OPEN) return;
+      this.metricBuffer.push({
+        stage,
+        duration_ms: duration,
+        result,
+        codec,
+        scope,
+      });
+      if (this.metricBuffer.length >= this.maxMetricBatch || this.metricFlushMs === 0) {
+        this._flushClientMetrics();
+        return;
+      }
+      if (this.metricFlushTimer) return;
+      this.metricFlushTimer = global.setTimeout(() => {
+        this.metricFlushTimer = 0;
+        this._flushClientMetrics();
+      }, this.metricFlushMs);
+    }
+
+    _flushClientMetrics() {
+      if (!this.metricBuffer.length) return;
+      if (!this.socket || this.socket.readyState !== OPEN) return;
+      const events = this.metricBuffer.splice(0, this.maxMetricBatch);
+      const payload = events.length === 1
+        ? { type: "client_metric", ...events[0] }
+        : { type: "client_metric_batch", events };
+      try {
+        this.socket.send(JSON.stringify(payload));
+      } catch {
+        this.metricBuffer.unshift(...events);
+      }
+    }
+
+    _clearMetricFlushTimer() {
+      if (!this.metricFlushTimer) return;
+      global.clearTimeout(this.metricFlushTimer);
+      this.metricFlushTimer = 0;
     }
 
     async close(reason = "H.264 WebSocket session closed", { emitState = true } = {}) {
@@ -272,6 +347,15 @@
       this.generation += 1;
       if (this.statsTimer) global.clearInterval(this.statsTimer);
       this.statsTimer = 0;
+      for (const item of this.appendQueue) {
+        this._queueMetric(
+          "client_receive_queue",
+          Math.max(0, performance.now() - Number(item.receivedAtMs || performance.now())),
+          { result: "cancelled", codec: "h264", scope: "frame" },
+        );
+      }
+      this._flushClientMetrics();
+      this._clearMetricFlushTimer();
       if (this.frameCallback && typeof this.video.cancelVideoFrameCallback === "function") {
         try { this.video.cancelVideoFrameCallback(this.frameCallback); } catch {}
       }
@@ -326,6 +410,10 @@
       });
       this.appendQueueBytes += data.byteLength;
       if (webSocketDownlinkMs > 0) {
+        this._queueMetric("client_downlink", webSocketDownlinkMs, {
+          codec: "h264",
+          scope: "frame",
+        });
         this._emitStats({ lastWebSocketDownlinkMs: webSocketDownlinkMs });
       }
       this._appendNext();
@@ -340,7 +428,21 @@
       this.activeAppendItem = item;
       try {
         sourceBuffer.appendBuffer(item.data);
+        this._queueMetric(
+          "client_receive_queue",
+          Math.max(0, item.appendStartedAtMs - item.receivedAtMs),
+          { codec: "h264", scope: "frame" },
+        );
       } catch (error) {
+        this._queueMetric(
+          "client_receive_queue",
+          Math.max(0, performance.now() - item.receivedAtMs),
+          {
+            result: resultFromError(error),
+            codec: "h264",
+            scope: "frame",
+          },
+        );
         this.activeAppendItem = null;
         this._fail(error);
       }
@@ -351,6 +453,13 @@
       if (!item) return;
       this.activeAppendItem = null;
       const completedAtMs = performance.now();
+      const appendedMetadata = this.mediaBatches.find((metadata) => !metadata.appendCompletedAtMs);
+      if (appendedMetadata) appendedMetadata.appendCompletedAtMs = completedAtMs;
+      this._queueMetric(
+        "client_video_decode",
+        Math.max(0, completedAtMs - item.appendStartedAtMs),
+        { codec: "h264", scope: "frame" },
+      );
       this._emitStats({
         lastMseQueueMs: Math.max(0, item.appendStartedAtMs - item.receivedAtMs),
         lastMseAppendMs: Math.max(0, completedAtMs - item.appendStartedAtMs),
@@ -411,6 +520,7 @@
           bridgeQueueMs: Number(event.bridge_queue_ms || 0),
           bridgeEncoderFeedMs: Number(event.bridge_encoder_feed_ms || 0),
           metadataReceivedAtMs: performance.now(),
+          appendCompletedAtMs: 0,
         });
         if (this.mediaBatches.length > 1024) this.mediaBatches.shift();
         this._emitStats({
@@ -471,6 +581,13 @@
         const controlKind = String(event.kind || "");
         const isInteractiveControl = Number(event.event_id || 0) > 0
           && ["camera_actions", "prompt", "scene_cut"].includes(controlKind);
+        if (clientSentEpochMs && isInteractiveControl) {
+          this._queueMetric(
+            "client_uplink",
+            Math.max(0, (roundTripMs - serverProcessingMs) / 2),
+            { codec: "h264", scope: "request" },
+          );
+        }
         this._emitStats({
           ...(clientSentEpochMs && isInteractiveControl
             ? { lastInputUplinkMs: Math.max(0, (roundTripMs - serverProcessingMs) / 2) }
@@ -534,6 +651,17 @@
             : {}),
         };
         this._emitStats(stats);
+        if (metadata.appendCompletedAtMs || metadata.metadataReceivedAtMs) {
+          this._queueMetric(
+            "client_render_wait",
+            Math.max(
+              0,
+              Number(now || performance.now())
+                - Number(metadata.appendCompletedAtMs || metadata.metadataReceivedAtMs),
+            ),
+            { codec: "h264", scope: "frame" },
+          );
+        }
         this.onPresentedFrame({
           presentedAt: Number(now || 0),
           width: Number(presentation.width || this.video.videoWidth || 0),
@@ -648,6 +776,8 @@
 
     _fail(error) {
       if (this.expectedClose) return;
+      this._flushClientMetrics();
+      this._clearMetricFlushTimer();
       this._setState("error", { message: error.message || String(error) });
       this.onError(error);
     }

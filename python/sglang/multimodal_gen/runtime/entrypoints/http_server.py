@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 
 import httpx
 import torch
-from fastapi import APIRouter, FastAPI, Request
+from fastapi import APIRouter, FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 
 from sglang.multimodal_gen.configs.sample.sampling_params import SamplingParams
@@ -38,6 +38,10 @@ from sglang.multimodal_gen.runtime.realtime.worker_reservation import (
     install_worker_reservation_routes,
     resolve_worker_epoch,
 )
+from sglang.multimodal_gen.runtime.realtime.critical_path_metrics import (
+    prometheus_content_type,
+    prometheus_latest,
+)
 from sglang.multimodal_gen.runtime.scheduler_client import async_scheduler_client
 from sglang.multimodal_gen.runtime.server_args import ServerArgs, get_global_server_args
 from sglang.multimodal_gen.runtime.server_warmup import (
@@ -57,6 +61,7 @@ VERTEX_ROUTE = os.environ.get("AIP_PREDICT_ROUTE", "/vertex_generate")
 SERVER_WARMUP_BYPASS_PATHS = (
     "/health",
     "/health_generate",
+    "/metrics",
     "/model_info",
     "/server_info",
 )
@@ -241,6 +246,11 @@ async def model_info_endpoint(request: Request):
 async def health_generate():
     # TODO : health generate endpoint
     return {"status": "ok"}
+
+
+@health_router.get("/metrics")
+async def metrics():
+    return Response(prometheus_latest(), media_type=prometheus_content_type())
 
 
 @health_router.get("/stats")

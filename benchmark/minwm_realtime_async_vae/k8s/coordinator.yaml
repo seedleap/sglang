@@ -18,7 +18,7 @@ spec:
   ports:
     - name: http
       port: 18081
-      targetPort: http
+      targetPort: metrics
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -86,18 +86,20 @@ spec:
               value: http://minwm-realtime-adot:4317
             - name: OTEL_RESOURCE_ATTRIBUTES
               value: service.namespace=minwm,deployment.environment=production
+            - {name: WORLD_MODEL_METRIC_SERVICE, value: coordinator}
+            - {name: WORLD_MODEL_METRIC_LANE, value: production}
           ports:
-            - name: http
+            - name: metrics
               containerPort: 18081
           startupProbe:
-            httpGet: {path: /healthz, port: http}
+            httpGet: {path: /healthz, port: metrics}
             periodSeconds: 2
             failureThreshold: 30
           readinessProbe:
-            httpGet: {path: /healthz, port: http}
+            httpGet: {path: /healthz, port: metrics}
             periodSeconds: 5
           livenessProbe:
-            httpGet: {path: /healthz, port: http}
+            httpGet: {path: /healthz, port: metrics}
             periodSeconds: 15
           resources:
             requests: {cpu: 250m, memory: 256Mi}

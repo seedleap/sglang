@@ -12,6 +12,12 @@ from dataclasses import dataclass, replace
 from typing import Any, Callable, Literal, Mapping, Protocol
 from uuid import uuid4
 
+from sglang.multimodal_gen.runtime.realtime.critical_path_metrics import (
+    observe_coordinator_capacity_reservation_seconds,
+    observe_coordinator_worker_selection_seconds,
+    result_from_exception,
+)
+
 WorkerRole = Literal["denoiser", "vae"]
 WorkerLifecycle = Literal["ready", "draining", "failed"]
 logger = logging.getLogger(__name__)
@@ -1516,14 +1522,28 @@ class RealtimeCoordinator:
         try:
             while True:
                 try:
-                    assignment = await self._acquire_before_deadline(
-                        deadline=deadline,
-                        user_id=user_id,
-                        session_id=session_id,
-                        generation_id=generation_id,
-                        model_revision=model_revision,
-                        vae_fingerprint=vae_fingerprint,
-                        excluded_workers=frozenset(excluded_workers),
+                    selection_started = time.perf_counter()
+                    try:
+                        assignment = await self._acquire_before_deadline(
+                            deadline=deadline,
+                            user_id=user_id,
+                            session_id=session_id,
+                            generation_id=generation_id,
+                            model_revision=model_revision,
+                            vae_fingerprint=vae_fingerprint,
+                            excluded_workers=frozenset(excluded_workers),
+                        )
+                    except BaseException as exc:
+                        observe_coordinator_worker_selection_seconds(
+                            time.perf_counter() - selection_started,
+                            model=model_revision,
+                            result=result_from_exception(exc),
+                        )
+                        raise
+                    observe_coordinator_worker_selection_seconds(
+                        time.perf_counter() - selection_started,
+                        model=model_revision,
+                        result="success",
                     )
                 except TimeoutError as exc:
                     raise CoordinatorRejected(
@@ -1565,13 +1585,29 @@ class RealtimeCoordinator:
                             ttl_s=ttl_s,
                         )
                         remaining = self._remaining(deadline)
-                        if remaining is None:
-                            await reserve
-                        elif remaining <= 0:
-                            reserve.close()
-                            raise TimeoutError
-                        else:
-                            await asyncio.wait_for(reserve, timeout=remaining)
+                        reservation_started = time.perf_counter()
+                        try:
+                            if remaining is None:
+                                await reserve
+                            elif remaining <= 0:
+                                reserve.close()
+                                raise TimeoutError
+                            else:
+                                await asyncio.wait_for(reserve, timeout=remaining)
+                        except BaseException as exc:
+                            observe_coordinator_capacity_reservation_seconds(
+                                time.perf_counter() - reservation_started,
+                                model=model_revision,
+                                result=result_from_exception(exc),
+                                worker_role=slot.role,
+                            )
+                            raise
+                        observe_coordinator_capacity_reservation_seconds(
+                            time.perf_counter() - reservation_started,
+                            model=model_revision,
+                            result="success",
+                            worker_role=slot.role,
+                        )
                 except BaseException as exc:
                     cleanup_error = None
                     try:

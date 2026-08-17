@@ -280,7 +280,7 @@ def test_lingbot_denoiser_is_coordinator_managed_sp4_with_remote_vae():
     assert "child=$!" in command
     assert workload["spec"]["template"]["spec"]["containers"][0]["readinessProbe"][
         "httpGet"
-    ] == {"path": "/health", "port": "api"}
+    ] == {"path": "/health", "port": "metrics"}
 
 
 def test_gpu_workers_publish_epoch_state_and_drain_before_termination():
@@ -676,7 +676,7 @@ def test_denoiser_restarts_as_one_batch_with_two_bounded_cold_load_slots():
     assert env["POD_NAME"]["valueFrom"]["fieldRef"]["fieldPath"] == ("metadata.name")
     assert denoiser["startupProbe"]["httpGet"] == {
         "path": "/health",
-        "port": "api",
+        "port": "metrics",
     }
     assert any(mount["name"] == "startup-lock" for mount in denoiser["volumeMounts"])
     lock_volume = next(
@@ -734,8 +734,62 @@ def test_public_nlb_selects_only_the_gateway_control_plane():
         "app.kubernetes.io/name": "minwm-realtime-gateway"
     }
     assert service["spec"]["ports"] == [
-        {"name": "http", "port": 80, "targetPort": "http"}
+        {"name": "http", "port": 80, "targetPort": "metrics"}
     ]
+
+
+def test_world_model_apps_expose_the_metrics_named_container_port():
+    for filename, kind, workload_name, container_name, port in (
+        (
+            "gateway.yaml",
+            "Deployment",
+            "minwm-realtime-gateway",
+            "gateway",
+            18080,
+        ),
+        (
+            "webui-opt-gateway-isolated.yaml",
+            "Deployment",
+            "minwm-webui-opt-gateway-20260813",
+            "gateway",
+            18080,
+        ),
+        (
+            "coordinator.yaml",
+            "Deployment",
+            "minwm-realtime-coordinator",
+            "coordinator",
+            18081,
+        ),
+        (
+            "h100-denoiser.yaml",
+            "StatefulSet",
+            "minwm-async-denoiser",
+            "denoiser",
+            30000,
+        ),
+        (
+            "lingbot2-h100-denoiser.yaml",
+            "StatefulSet",
+            "lingbot2-async-denoiser",
+            "denoiser",
+            30000,
+        ),
+        ("l4-vae.yaml", "Deployment", "minwm-async-vae", "vae", 18081),
+        ("l4-vae.yaml", "Deployment", "lingbot2-async-vae", "vae", 18081),
+        (
+            "webui-opt-isolated.yaml",
+            "Deployment",
+            "minwm-dual-webui-opt-20260812",
+            "webui",
+            18080,
+        ),
+    ):
+        workload = find(load_documents((filename,)), kind, workload_name)
+        container = _container(workload, container_name)
+        assert container["ports"] == [{"name": "metrics", "containerPort": port}]
+        for probe_name in ("startupProbe", "readinessProbe", "livenessProbe"):
+            assert container[probe_name]["httpGet"]["port"] == "metrics"
 
 
 def test_coordinator_is_an_independent_durable_cpu_control_plane():

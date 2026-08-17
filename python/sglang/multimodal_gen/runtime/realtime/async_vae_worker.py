@@ -82,9 +82,19 @@ class DecodeResult:
     queue_wait_ms: float
     decode_ms: float
     encode_ms: float
+    post_decode_ms: float = 0.0
 
 
 FrameBatchCallback = Callable[[EncodedFrameBatch], Awaitable[None]]
+
+
+def _codec_from_content_type(content_type: str) -> str:
+    normalized = content_type.lower()
+    if "webp" in normalized:
+        return "webp"
+    if "jpeg" in normalized or "jpg" in normalized:
+        return "jpeg"
+    return "none"
 
 
 def _next_item(iterator) -> tuple[bool, Any]:
@@ -353,6 +363,10 @@ class AsyncVAEWorker:
                 drop_leading_frames = 1
 
         decode_started = time.perf_counter()
+        decode_resume_at = decode_started
+        decode_active_s = 0.0
+        decode_ms = 0.0
+        post_decode_ms = 0.0
         encode_tasks: list[asyncio.Task[tuple[EncodedFrameBatch, ...]]] = []
         callback_tail: asyncio.Task | None = None
         frame_batch_index = 0
@@ -377,56 +391,82 @@ class AsyncVAEWorker:
                 int(frames.shape[2]) + self.encoded_frames_per_batch - 1
             ) // self.encoded_frames_per_batch
 
-        async with self._actor_lock:
-            if job.on_decode_started is not None:
-                started = job.on_decode_started()
-                if inspect.isawaitable(started):
-                    await started
-            async for raw_frames in self._iter_decoded_frames(
-                state.decoder,
-                source,
-                first_chunk=first_chunk,
-            ):
-                frames = self._normalize_frames(raw_frames)
-                if remaining_drop:
-                    drop_count = min(remaining_drop, int(frames.shape[2]))
-                    frames = frames[:, :, drop_count:]
-                    remaining_drop -= drop_count
-                if frames.shape[2] == 0:
-                    continue
+        try:
+            async with self._actor_lock:
+                if job.on_decode_started is not None:
+                    started = job.on_decode_started()
+                    if inspect.isawaitable(started):
+                        await started
+                    decode_resume_at = time.perf_counter()
+                async for raw_frames in self._iter_decoded_frames(
+                    state.decoder,
+                    source,
+                    first_chunk=first_chunk,
+                ):
+                    post_started = time.perf_counter()
+                    decode_active_s += max(0.0, post_started - decode_resume_at)
+                    frames = self._normalize_frames(raw_frames)
+                    post_decode_ms += (time.perf_counter() - post_started) * 1000.0
+                    if remaining_drop:
+                        drop_count = min(remaining_drop, int(frames.shape[2]))
+                        frames = frames[:, :, drop_count:]
+                        remaining_drop -= drop_count
+                    if frames.shape[2] == 0:
+                        decode_resume_at = time.perf_counter()
+                        continue
 
-                pending_frames.append(frames)
-                pending_frame_count += int(frames.shape[2])
-                if pending_frame_count < self.encoded_frames_per_batch:
-                    continue
+                    pending_frames.append(frames)
+                    pending_frame_count += int(frames.shape[2])
+                    if pending_frame_count < self.encoded_frames_per_batch:
+                        decode_resume_at = time.perf_counter()
+                        continue
 
-                merged = (
-                    pending_frames[0]
-                    if len(pending_frames) == 1
-                    else torch.cat(pending_frames, dim=2)
-                )
-                while int(merged.shape[2]) >= self.encoded_frames_per_batch:
-                    schedule_encode(
-                        merged[:, :, : self.encoded_frames_per_batch].contiguous()
+                    merged = (
+                        pending_frames[0]
+                        if len(pending_frames) == 1
+                        else torch.cat(pending_frames, dim=2)
                     )
-                    merged = merged[:, :, self.encoded_frames_per_batch :]
-                pending_frames = [merged.contiguous()] if merged.shape[2] else []
-                pending_frame_count = int(merged.shape[2])
+                    while int(merged.shape[2]) >= self.encoded_frames_per_batch:
+                        schedule_encode(
+                            merged[:, :, : self.encoded_frames_per_batch].contiguous()
+                        )
+                        merged = merged[:, :, self.encoded_frames_per_batch :]
+                    pending_frames = [merged.contiguous()] if merged.shape[2] else []
+                    pending_frame_count = int(merged.shape[2])
+                    decode_resume_at = time.perf_counter()
 
-            if pending_frames:
-                schedule_encode(
-                    pending_frames[0]
-                    if len(pending_frames) == 1
-                    else torch.cat(pending_frames, dim=2).contiguous()
-                )
+                decode_active_s += max(0.0, time.perf_counter() - decode_resume_at)
+                if pending_frames:
+                    schedule_encode(
+                        pending_frames[0]
+                        if len(pending_frames) == 1
+                        else torch.cat(pending_frames, dim=2).contiguous()
+                    )
 
-        decode_ms = (time.perf_counter() - decode_started) * 1000.0
-        encoded_groups = await asyncio.gather(*encode_tasks) if encode_tasks else []
-        encoded = tuple(batch for group in encoded_groups for batch in group)
-        encode_ms = sum(batch.encode_ms for batch in encoded)
+            decode_ms = decode_active_s * 1000.0
+            encoded_groups = await asyncio.gather(*encode_tasks) if encode_tasks else []
+            encoded = tuple(batch for group in encoded_groups for batch in group)
+            encode_ms = sum(batch.encode_ms for batch in encoded)
+        except BaseException as exc:
+            result = "cancelled" if isinstance(exc, asyncio.CancelledError) else "error"
+            observe_stage("queue_wait", queue_wait_ms, result=result)
+            elapsed_decode_ms = max(
+                0.0,
+                (time.perf_counter() - decode_started) * 1000.0 - post_decode_ms,
+            )
+            if elapsed_decode_ms > 0:
+                observe_stage("decode", elapsed_decode_ms, result=result)
+            if post_decode_ms > 0:
+                observe_stage("post_decode", post_decode_ms, result=result)
+            raise
+
+        codec = _codec_from_content_type(encoded[0].content_type) if encoded else "none"
         observe_stage("queue_wait", queue_wait_ms)
         observe_stage("decode", decode_ms)
-        observe_stage("frame_encode", encode_ms)
+        if post_decode_ms > 0:
+            observe_stage("post_decode", post_decode_ms)
+        if encode_ms > 0:
+            observe_stage("frame_encode", encode_ms, codec=codec, scope="frame")
 
         return DecodeResult(
             disposition=AcceptDisposition.ACCEPT,
@@ -435,6 +475,7 @@ class AsyncVAEWorker:
             queue_wait_ms=queue_wait_ms,
             decode_ms=decode_ms,
             encode_ms=encode_ms,
+            post_decode_ms=post_decode_ms,
         )
 
     async def _iter_decoded_frames(self, decoder, source, *, first_chunk):

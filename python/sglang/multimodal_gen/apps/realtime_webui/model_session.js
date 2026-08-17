@@ -13,6 +13,22 @@
     return Array.isArray(finalTransition?.actions) && finalTransition.actions.length > 0;
   }
 
+  function codecFromHeader(header = {}) {
+    const codec = String(header.codec || header.encoding || "").toLowerCase();
+    const contentType = String(header.content_type || "").toLowerCase();
+    if (codec.includes("h264") || contentType.includes("h264") || contentType.includes("avc")) return "h264";
+    if (codec.includes("webp") || contentType.includes("webp")) return "webp";
+    if (codec.includes("jpeg") || codec.includes("jpg") || contentType.includes("jpeg")) return "jpeg";
+    return "none";
+  }
+
+  function resultFromError(error) {
+    const value = String(error?.code || error?.name || error?.message || "").toLowerCase();
+    if (value.includes("timeout")) return "timeout";
+    if (value.includes("cancel")) return "cancelled";
+    return "error";
+  }
+
   class RealtimeModelSession {
     constructor({
       key,
@@ -33,6 +49,8 @@
       startupTimeoutMs = 12000,
       stallTimeoutMs = 7000,
       maxDecodeQueueBatches = 4,
+      metricFlushMs = 250,
+      maxMetricBatch = 32,
       onState = () => {},
       onStats = () => {},
       onFrame = () => {},
@@ -55,6 +73,8 @@
       this.startupTimeoutMs = Math.max(0, Number(startupTimeoutMs) || 0);
       this.stallTimeoutMs = Math.max(0, Number(stallTimeoutMs) || 0);
       this.maxDecodeQueueBatches = Math.max(1, Number(maxDecodeQueueBatches) || 4);
+      this.metricFlushMs = Math.max(0, Number(metricFlushMs) || 0);
+      this.maxMetricBatch = Math.max(1, Number(maxMetricBatch) || 32);
       this.awaitingStableFrame = false;
       this.mediaWatchdogTimer = null;
       this.hasVisibleFrame = false;
@@ -98,6 +118,8 @@
       this.playbackAckEnabled = false;
       this.controlSentEpochByEvent = new Map();
       this.lastNetworkSample = null;
+      this.metricBuffer = [];
+      this.metricFlushTimer = null;
       this.stats = {
         frames: 0,
         bytes: 0,
@@ -143,6 +165,8 @@
       this.renderSamples = [];
       this.controlSentEpochByEvent.clear();
       this.lastNetworkSample = null;
+      this.clearMetricFlushTimer();
+      this.metricBuffer = [];
       this.awaitingStableFrame = this.startupMinChunk > 0;
       this.stats = {
         frames: 0,
@@ -179,10 +203,16 @@
         socket.onopen = () => {
           if (epoch !== this.epoch) return;
           opened = true;
-          socket.send(this.pack({
+          const serializeStartedAt = this.now();
+          const initPayload = this.pack({
             ...init,
             playback_ack_enabled: this.playbackAckEnabled,
-          }));
+          });
+          socket.send(initPayload);
+          this.queueMetric("client_serialize_queue", this.now() - serializeStartedAt, {
+            codec: "none",
+            scope: "request",
+          });
           this.armMediaWatchdog(epoch, "startup");
           if (!this.awaitingStableFrame) this.setState("live");
           this.scheduleRender();
@@ -226,7 +256,13 @@
 
     sendEvent(envelope) {
       if (!this.socket || this.socket.readyState !== this.WebSocketCtor.OPEN) return false;
-      this.socket.send(this.pack({ ...envelope, trace_id: this.traceId }));
+      const serializeStartedAt = this.now();
+      const payload = this.pack({ ...envelope, trace_id: this.traceId });
+      this.socket.send(payload);
+      this.queueMetric("client_serialize_queue", this.now() - serializeStartedAt, {
+        codec: "none",
+        scope: "request",
+      });
       this.stats.lastSentEventId = Number(envelope.event_id || this.stats.lastSentEventId);
       const eventId = Number(envelope.event_id || 0);
       if (eventId > 0 && ["camera_actions", "prompt", "scene_cut"].includes(envelope.kind)) {
@@ -248,10 +284,71 @@
       return true;
     }
 
+    queueMetric(stage, durationMs, {
+      result = "success",
+      codec = "none",
+      scope = "request",
+    } = {}) {
+      const duration = Number(durationMs);
+      if (!Number.isFinite(duration) || duration < 0) return;
+      if (!this.socket || this.socket.readyState !== this.WebSocketCtor.OPEN) return;
+      this.metricBuffer.push({
+        stage,
+        duration_ms: duration,
+        result,
+        codec,
+        scope,
+      });
+      if (this.metricBuffer.length >= this.maxMetricBatch || this.metricFlushMs === 0) {
+        this.flushClientMetrics();
+        return;
+      }
+      if (this.metricFlushTimer) return;
+      this.metricFlushTimer = this.setTimer(() => {
+        this.metricFlushTimer = null;
+        this.flushClientMetrics();
+      }, this.metricFlushMs);
+    }
+
+    flushClientMetrics() {
+      if (!this.metricBuffer.length) return;
+      if (!this.socket || this.socket.readyState !== this.WebSocketCtor.OPEN) return;
+      const events = this.metricBuffer.splice(0, this.maxMetricBatch);
+      const payload = events.length === 1
+        ? { type: "client_metric", ...events[0] }
+        : { type: "client_metric_batch", events };
+      try {
+        this.socket.send(this.pack(payload));
+      } catch {
+        this.metricBuffer.unshift(...events);
+      }
+    }
+
+    clearMetricFlushTimer() {
+      if (!this.metricFlushTimer) return;
+      this.clearTimer(this.metricFlushTimer);
+      this.metricFlushTimer = null;
+    }
+
     close(reason = "session closed", { notify = true } = {}) {
       this.clearMediaWatchdog();
       if (this.playbackAckTimer) this.clearTimer(this.playbackAckTimer);
       this.playbackAckTimer = null;
+      for (const dropped of this.decodeQueue) {
+        if (!dropped?.header) continue;
+        const now = this.now();
+        this.queueMetric(
+          "client_receive_queue",
+          Math.max(0, now - Number(dropped.header.__received_at || now)),
+          {
+            result: "cancelled",
+            codec: codecFromHeader(dropped.header),
+            scope: "frame",
+          },
+        );
+      }
+      this.flushClientMetrics();
+      this.clearMetricFlushTimer();
       this.epoch += 1;
       const socket = this.socket;
       this.socket = null;
@@ -313,6 +410,10 @@
             (serverReceivedEpochMs - clientSentEpochMs)
             + (serverSentEpochMs - clientReceivedEpochMs)
           ) / 2;
+          this.queueMetric("client_uplink", this.stats.lastInputUplinkMs, {
+            codec: "none",
+            scope: "request",
+          });
           this.emitStats();
         }
       } else if (message.type === "chunk_telemetry") {
@@ -346,7 +447,19 @@
 
     trimDecodeQueue() {
       while (this.decodeQueue.length > this.maxDecodeQueueBatches) {
-        this.decodeQueue.shift();
+        const dropped = this.decodeQueue.shift();
+        if (dropped?.header) {
+          const now = this.now();
+          this.queueMetric(
+            "client_receive_queue",
+            Math.max(0, now - Number(dropped.header.__received_at || now)),
+            {
+              result: "cancelled",
+              codec: codecFromHeader(dropped.header),
+              scope: "frame",
+            },
+          );
+        }
       }
     }
 
@@ -374,6 +487,10 @@
           0,
           Date.now() - serverSentEpochMs + Number(this.stats.serverClockOffsetMs || 0),
         );
+        this.queueMetric("client_downlink", this.stats.lastDownlinkMs, {
+          codec: codecFromHeader(header),
+          scope: "frame",
+        });
       }
       this.schedulePlaybackAck();
     }
@@ -382,22 +499,39 @@
       if (this.decodeInProgress) return;
       const item = this.decodeQueue.shift();
       if (!item) return;
+      const codec = codecFromHeader(item.header);
+      let startedAt = 0;
       this.decodeInProgress = true;
       try {
-        const startedAt = this.now();
+        startedAt = this.now();
+        this.queueMetric(
+          "client_receive_queue",
+          Math.max(0, startedAt - Number(item.header.__received_at || startedAt)),
+          { codec, scope: "frame" },
+        );
         const frames = await this.decodeBatch(item.header, item.payload);
+        const decodedAt = this.now();
         if (item.epoch !== this.epoch) {
+          this.queueMetric("client_video_decode", decodedAt - startedAt, {
+            result: "cancelled",
+            codec,
+            scope: "frame",
+          });
           frames.forEach(closeFrame);
           return;
         }
-        const decodedAt = this.now();
         const decodeMs = decodedAt - startedAt;
+        this.queueMetric("client_video_decode", decodeMs, {
+          codec,
+          scope: "frame",
+        });
         const prepared = frames.map((frame) => ({
           ...frame,
           eventId: Number(frame.eventId ?? item.header.event_id ?? 0),
           receivedAt: frame.receivedAt || item.header.__received_at,
           decodedAt,
           decodeMs: frame.decodeMs ?? decodeMs,
+          codec,
         }));
         const result = this.playback.enqueueDecodedFrames(item.header, prepared, decodedAt);
         for (const dropped of result.droppedFrames || []) closeFrame(dropped);
@@ -423,6 +557,13 @@
         this.emitStats();
         this.scheduleRender();
       } catch (error) {
+        if (startedAt > 0) {
+          this.queueMetric("client_video_decode", this.now() - startedAt, {
+            result: resultFromError(error),
+            codec,
+            scope: "frame",
+          });
+        }
         this.fail(error);
       } finally {
         this.decodeInProgress = false;
@@ -506,7 +647,18 @@
           return;
         }
         this.awaitingStableFrame = false;
+        const renderSubmittedAt = this.now();
         this.drawFrame(frame.image);
+        this.requestFrame((presentedAt) => {
+          this.queueMetric(
+            "client_render_wait",
+            Math.max(0, Number(presentedAt || this.now()) - renderSubmittedAt),
+            {
+              codec: frame.codec || "none",
+              scope: "frame",
+            },
+          );
+        });
         this.renderSamples.push(now);
         this.renderSamples = this.renderSamples.filter((sample) => now - sample < 1000);
         this.stats.renderedFrames += 1;
@@ -605,6 +757,21 @@
       this.clearMediaWatchdog();
       this.setState("error", { message: error.message || String(error) });
       this.onError(error, this.key);
+      for (const dropped of this.decodeQueue) {
+        if (!dropped?.header) continue;
+        const now = this.now();
+        this.queueMetric(
+          "client_receive_queue",
+          Math.max(0, now - Number(dropped.header.__received_at || now)),
+          {
+            result: "cancelled",
+            codec: codecFromHeader(dropped.header),
+            scope: "frame",
+          },
+        );
+      }
+      this.flushClientMetrics();
+      this.clearMetricFlushTimer();
       const socket = this.socket;
       this.socket = null;
       this.epoch += 1;

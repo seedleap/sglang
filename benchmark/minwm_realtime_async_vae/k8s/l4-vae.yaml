@@ -195,8 +195,11 @@ spec:
               value: http://minwm-realtime-adot:4317
             - name: OTEL_RESOURCE_ATTRIBUTES
               value: service.namespace=minwm,deployment.environment=production,worker.role=vae
+            - {name: WORLD_MODEL_METRIC_SERVICE, value: vae}
+            - {name: WORLD_MODEL_METRIC_MODEL, value: minwm}
+            - {name: WORLD_MODEL_METRIC_LANE, value: production}
           ports:
-            - {name: vae, containerPort: 18081}
+            - {name: metrics, containerPort: 18081}
           lifecycle:
             preStop:
               exec:
@@ -216,17 +219,17 @@ spec:
                       sleep 2
                     done
           startupProbe:
-            httpGet: {path: /health, port: vae}
+            httpGet: {path: /health, port: metrics}
             periodSeconds: 10
             timeoutSeconds: 5
             failureThreshold: 180
           readinessProbe:
-            httpGet: {path: /health, port: vae}
+            httpGet: {path: /health, port: metrics}
             periodSeconds: 5
             timeoutSeconds: 3
             failureThreshold: 6
           livenessProbe:
-            httpGet: {path: /health, port: vae}
+            httpGet: {path: /health, port: metrics}
             initialDelaySeconds: 30
             periodSeconds: 30
             timeoutSeconds: 5
@@ -345,8 +348,11 @@ spec:
               value: http://minwm-realtime-adot:4317
             - name: OTEL_RESOURCE_ATTRIBUTES
               value: service.namespace=minwm,deployment.environment=production,worker.role=vae,model.name=lingbot2
+            - {name: WORLD_MODEL_METRIC_SERVICE, value: vae}
+            - {name: WORLD_MODEL_METRIC_MODEL, value: lingbot2}
+            - {name: WORLD_MODEL_METRIC_LANE, value: production}
           ports:
-            - {name: vae, containerPort: 18081}
+            - {name: metrics, containerPort: 18081}
           lifecycle:
             preStop:
               exec:
@@ -366,17 +372,17 @@ spec:
                       sleep 2
                     done
           startupProbe:
-            httpGet: {path: /health, port: vae}
+            httpGet: {path: /health, port: metrics}
             periodSeconds: 10
             timeoutSeconds: 5
             failureThreshold: 180
           readinessProbe:
-            httpGet: {path: /health, port: vae}
+            httpGet: {path: /health, port: metrics}
             periodSeconds: 5
             timeoutSeconds: 3
             failureThreshold: 6
           livenessProbe:
-            httpGet: {path: /health, port: vae}
+            httpGet: {path: /health, port: metrics}
             initialDelaySeconds: 30
             periodSeconds: 30
             timeoutSeconds: 5
