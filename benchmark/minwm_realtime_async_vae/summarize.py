@@ -8,7 +8,7 @@ import json
 import math
 import statistics
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable
 
 
 def percentile(values: Iterable[float], quantile: float) -> float:
@@ -82,38 +82,84 @@ def run_meets_output_slo(
     )
 
 
+def _concurrency_ladder(
+    runs: list[dict], expected_concurrencies: Iterable[int] | None
+) -> tuple[list[dict], list[int], dict[int, dict]]:
+    ordered = sorted(runs, key=lambda item: int(item["concurrency"]))
+    by_concurrency: dict[int, dict] = {}
+    for run in ordered:
+        concurrency = int(run["concurrency"])
+        if concurrency < 1:
+            raise ValueError("concurrency levels must be positive")
+        if concurrency in by_concurrency:
+            raise ValueError(f"duplicate concurrency result: {concurrency}")
+        by_concurrency[concurrency] = run
+
+    if expected_concurrencies is None:
+        ladder = sorted(by_concurrency)
+    else:
+        ladder = sorted(int(value) for value in expected_concurrencies)
+        if any(value < 1 for value in ladder):
+            raise ValueError("expected concurrency levels must be positive")
+        if len(ladder) != len(set(ladder)):
+            raise ValueError("expected concurrency levels must be unique")
+    return ordered, ladder, by_concurrency
+
+
+def _max_supported_prefix(
+    ladder: list[int],
+    by_concurrency: dict[int, dict],
+    predicate: Callable[[dict], bool],
+) -> int:
+    """Return the highest continuously passing declared test level.
+
+    Capacity is a monotone claim. Once a declared lower concurrency is missing
+    or fails its gate, a higher run cannot revive the claim merely because of
+    sampling variance. This also makes interrupted test ladders fail closed.
+    """
+
+    supported = 0
+    for concurrency in ladder:
+        run = by_concurrency.get(concurrency)
+        if run is None or not predicate(run):
+            break
+        supported = concurrency
+    return supported
+
+
 def summarize_runs(
     runs: list[dict],
     *,
     action_p95_slo_ms: float = 1000.0,
     min_fps: float = 16.0,
     min_output_wall_fps: float = 24.0,
+    expected_concurrencies: Iterable[int] | None = None,
 ) -> dict:
-    ordered = sorted(runs, key=lambda item: int(item["concurrency"]))
-    supported = [
-        run
-        for run in ordered
-        if run_meets_slo(
+    ordered, ladder, by_concurrency = _concurrency_ladder(runs, expected_concurrencies)
+    max_supported_concurrency = _max_supported_prefix(
+        ladder,
+        by_concurrency,
+        lambda run: run_meets_slo(
             run,
             action_p95_slo_ms=action_p95_slo_ms,
             min_fps=min_fps,
-        )
-    ]
-    output_supported = [
-        run
-        for run in ordered
-        if run_meets_output_slo(
+        ),
+    )
+    max_supported_output_concurrency = _max_supported_prefix(
+        ladder,
+        by_concurrency,
+        lambda run: run_meets_output_slo(
             run,
             min_output_wall_fps=min_output_wall_fps,
-        )
-    ]
+        ),
+    )
     return {
-        "max_supported_concurrency": (
-            int(supported[-1]["concurrency"]) if supported else 0
-        ),
-        "max_supported_output_concurrency": (
-            int(output_supported[-1]["concurrency"]) if output_supported else 0
-        ),
+        "max_supported_concurrency": max_supported_concurrency,
+        "max_supported_output_concurrency": max_supported_output_concurrency,
+        "expected_concurrency_levels": ladder,
+        "missing_concurrency_levels": [
+            concurrency for concurrency in ladder if concurrency not in by_concurrency
+        ],
         "action_p95_slo_ms": action_p95_slo_ms,
         "min_fps": min_fps,
         "min_output_wall_fps": min_output_wall_fps,
@@ -207,10 +253,12 @@ def build_report(
         "baseline": summarize_runs(
             baseline["runs"],
             min_output_wall_fps=min_output_wall_fps,
+            expected_concurrencies=baseline.get("requested_concurrency_levels"),
         ),
         "async": summarize_runs(
             asynchronous["runs"],
             min_output_wall_fps=min_output_wall_fps,
+            expected_concurrencies=asynchronous.get("requested_concurrency_levels"),
         ),
         "comparison": compare_profiles(baseline, asynchronous),
         "hardware": {

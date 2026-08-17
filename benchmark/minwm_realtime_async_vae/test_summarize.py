@@ -1,3 +1,5 @@
+import pytest
+
 from summarize import (
     build_report,
     latency_summary,
@@ -50,7 +52,7 @@ def test_rife_slo_uses_source_fps_instead_of_interpolated_output_fps():
     assert report["max_supported_concurrency"] == 0
 
 
-def test_output_ux_gate_uses_measured_wall_fps_not_timeline_72():
+def test_output_ux_gate_uses_measured_wall_fps_and_monotone_ladder():
     slow_delivery = _run(2, p95=800, fps=23.9)
     slow_delivery["min_session_source_fps"] = 12.0
     slow_delivery["min_session_output_wall_fps"] = 23.9
@@ -67,10 +69,33 @@ def test_output_ux_gate_uses_measured_wall_fps_not_timeline_72():
     sustained_delivery["min_session_output_wall_fps"] = 24.1
     report = summarize_runs([slow_delivery, sustained_delivery])
 
-    # Model/source and output UX capacities are intentionally independent.
+    # Model/source and output UX gates are independent, but both capacity
+    # claims must stop at the first failed level in the test ladder.
     assert report["max_supported_concurrency"] == 0
-    assert report["max_supported_output_concurrency"] == 4
+    assert report["max_supported_output_concurrency"] == 0
     assert report["min_output_wall_fps"] == 24.0
+
+
+def test_capacity_ladder_fails_closed_when_declared_level_is_missing():
+    one = _run(1, p95=700, fps=25)
+    four = _run(4, p95=700, fps=25)
+
+    report = summarize_runs(
+        [one, four],
+        expected_concurrencies=[1, 2, 4],
+    )
+
+    assert report["max_supported_concurrency"] == 1
+    assert report["max_supported_output_concurrency"] == 1
+    assert report["missing_concurrency_levels"] == [2]
+
+
+def test_capacity_ladder_rejects_duplicate_trials_instead_of_cherry_picking():
+    first = _run(2, p95=700, fps=25)
+    second = _run(2, p95=700, fps=23)
+
+    with pytest.raises(ValueError, match="duplicate concurrency result: 2"):
+        summarize_runs([first, second])
 
 
 def test_output_ux_gate_fails_closed_without_per_session_wall_evidence():

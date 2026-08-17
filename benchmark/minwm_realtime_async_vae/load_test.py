@@ -1054,6 +1054,8 @@ async def async_main(args: argparse.Namespace) -> None:
     levels = [int(value) for value in args.concurrency.split(",") if value.strip()]
     if not levels or any(value < 1 for value in levels):
         raise ValueError("concurrency levels must be positive")
+    if len(levels) != len(set(levels)):
+        raise ValueError("concurrency levels must be unique")
     if media_profile_multiplier(args.realtime_media_profile) > 1:
         expected_digest = (args.expected_media_weights_sha256 or "").lower()
         if len(expected_digest) != 64 or any(
@@ -1078,6 +1080,7 @@ async def async_main(args: argparse.Namespace) -> None:
     output = {
         "schema_version": "minwm-realtime-load/v1",
         "profile": args.profile,
+        "requested_concurrency_levels": levels,
         "request": {
             "model": args.model,
             "generation_mode": args.generation_mode,
