@@ -17,6 +17,7 @@ import logging
 import os
 import time
 import uuid
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from io import BytesIO
@@ -26,6 +27,14 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 import msgspec
 from aiohttp import WSMsgType, web
 from PIL import Image
+
+from sglang.multimodal_gen.runtime.realtime.critical_path_metrics import (
+    observe_client_metric_event,
+    observe_stage_seconds,
+    prometheus_content_type,
+    prometheus_latest,
+    result_from_exception,
+)
 
 LOGGER = logging.getLogger(__name__)
 H264_WS_MANAGER = web.AppKey("h264_websocket_bridge_manager", object)
@@ -149,9 +158,11 @@ class H264WebSocketSession:
     encoder_vbv_buffer_ms: int = field(init=False)
     encoder_gop_seconds: int = field(init=False)
     frame_queue: asyncio.Queue[_QueuedFrame] = field(init=False)
+    encoder_start_times_s: deque[float] = field(init=False)
 
     def __post_init__(self) -> None:
         self.frame_queue = asyncio.Queue(maxsize=self.manager.max_queued_frames)
+        self.encoder_start_times_s = deque(maxlen=4096)
         requested_preset = str(
             self.init.get("h264_preset") or self.manager.preset
         ).lower()
@@ -303,6 +314,9 @@ class H264WebSocketSession:
             except json.JSONDecodeError:
                 await self._send_json({"type": "error", "message": "invalid JSON"})
                 continue
+            if envelope.get("type") in {"client_metric", "client_metric_batch"}:
+                self._observe_client_metric(envelope)
+                continue
             if envelope.get("type") != "event":
                 await self._send_json(
                     {"type": "error", "message": "control envelope type must be event"}
@@ -432,9 +446,19 @@ class H264WebSocketSession:
                 server_sent_epoch_ms=float(header.get("server_sent_epoch_ms") or 0),
             )
             if self.frame_queue.full():
-                self.frame_queue.get_nowait()
+                dropped = self.frame_queue.get_nowait()
                 self.frame_queue.task_done()
                 self.dropped_frames += 1
+                observe_stage_seconds(
+                    "h264_pre_encode_queue",
+                    max(0.0, time.time() * 1000 - dropped.bridge_received_epoch_ms)
+                    / 1000.0,
+                    service="world-studio-webui",
+                    model=self.backend,
+                    result="cancelled",
+                    codec="h264",
+                    scope="frame",
+                )
             self.frame_queue.put_nowait(queued)
 
     async def _encode_frames(self) -> None:
@@ -453,6 +477,15 @@ class H264WebSocketSession:
                 ):
                     self.dropped_frames += 1
                     self.latency_dropped_frames += 1
+                    observe_stage_seconds(
+                        "h264_pre_encode_queue",
+                        queue_age_ms / 1000.0,
+                        service="world-studio-webui",
+                        model=self.backend,
+                        result="cancelled",
+                        codec="h264",
+                        scope="frame",
+                    )
                     self.frame_queue.task_done()
                     frame = await self.frame_queue.get()
                     continue
@@ -473,7 +506,18 @@ class H264WebSocketSession:
                 if self.ffmpeg is None or self.ffmpeg.stdin is None:
                     raise RuntimeError("H.264 encoder is unavailable")
                 frame_index = self.frames
+                encode_started_s = time.perf_counter()
                 encode_started_epoch_ms = time.time() * 1000
+                observe_stage_seconds(
+                    "h264_pre_encode_queue",
+                    max(0.0, encode_started_epoch_ms - frame.bridge_received_epoch_ms)
+                    / 1000.0,
+                    service="world-studio-webui",
+                    model=self.backend,
+                    result="success",
+                    codec="h264",
+                    scope="frame",
+                )
                 # Publish the frame mapping before feeding ffmpeg.  The stdout
                 # pump can then drain a large keyframe immediately without
                 # contending with stdin.drain() for the WebSocket send lock.
@@ -507,8 +551,27 @@ class H264WebSocketSession:
                             "repeated_frames": self.repeated_frames,
                         }
                     )
-                self.ffmpeg.stdin.write(frame.rgb)
-                await self.ffmpeg.stdin.drain()
+                feed_started = time.perf_counter()
+                try:
+                    self.encoder_start_times_s.append(encode_started_s)
+                    self.ffmpeg.stdin.write(frame.rgb)
+                    await self.ffmpeg.stdin.drain()
+                except BaseException as exc:
+                    if (
+                        self.encoder_start_times_s
+                        and self.encoder_start_times_s[-1] == encode_started_s
+                    ):
+                        self.encoder_start_times_s.pop()
+                    observe_stage_seconds(
+                        "frame_encode",
+                        time.perf_counter() - feed_started,
+                        service="world-studio-webui",
+                        model=self.backend,
+                        result=result_from_exception(exc),
+                        codec="h264",
+                        scope="frame",
+                    )
+                    raise
                 feed_completed_epoch_ms = time.time() * 1000
                 # stdin.drain() measures how long the bridge waited for FFmpeg
                 # to accept this frame.  Report it as a separate update: the
@@ -615,7 +678,18 @@ class H264WebSocketSession:
         if process is None or process.stdout is None:
             return
         while data := await process.stdout.read(64 * 1024):
+            packet_ready_s = time.perf_counter()
             self.media_bytes += len(data)
+            if self.encoder_start_times_s:
+                observe_stage_seconds(
+                    "frame_encode",
+                    packet_ready_s - self.encoder_start_times_s.popleft(),
+                    service="world-studio-webui",
+                    model=self.backend,
+                    result="success",
+                    codec="h264",
+                    scope="frame",
+                )
             async with self.send_lock:
                 # Frame metadata is emitted before FFmpeg is fed, while this
                 # header is emitted at the actual WebSocket payload boundary.
@@ -624,15 +698,37 @@ class H264WebSocketSession:
                 payload_sent_epoch_ms = time.time() * 1000
                 payload_sequence = self.media_payload_sequence
                 self.media_payload_sequence += 1
-                await self.websocket.send_json(
-                    {
-                        "type": "media_payload",
-                        "sequence": payload_sequence,
-                        "num_bytes": len(data),
-                        "server_sent_epoch_ms": payload_sent_epoch_ms,
-                    }
+                write_started = time.perf_counter()
+                try:
+                    await self.websocket.send_json(
+                        {
+                            "type": "media_payload",
+                            "sequence": payload_sequence,
+                            "num_bytes": len(data),
+                            "server_sent_epoch_ms": payload_sent_epoch_ms,
+                        }
+                    )
+                    await self.websocket.send_bytes(data)
+                except BaseException as exc:
+                    observe_stage_seconds(
+                        "ffmpeg_mux_write",
+                        time.perf_counter() - write_started,
+                        service="world-studio-webui",
+                        model=self.backend,
+                        result=result_from_exception(exc),
+                        codec="h264",
+                        scope="frame",
+                    )
+                    raise
+                observe_stage_seconds(
+                    "ffmpeg_mux_write",
+                    time.perf_counter() - write_started,
+                    service="world-studio-webui",
+                    model=self.backend,
+                    result="success",
+                    codec="h264",
+                    scope="frame",
                 )
-                await self.websocket.send_bytes(data)
 
     async def _log_stderr(self) -> None:
         process = self.ffmpeg
@@ -664,9 +760,38 @@ class H264WebSocketSession:
         async with self.send_lock:
             await self.websocket.send_json(payload)
 
+    def _observe_client_metric(self, message: dict[str, Any]) -> None:
+        if message.get("type") == "client_metric":
+            observe_client_metric_event(
+                message,
+                service="world-studio-webui",
+                model=self.backend,
+            )
+            return
+        events = message.get("events")
+        if not isinstance(events, list):
+            return
+        for event in events[:64]:
+            observe_client_metric_event(
+                event,
+                service="world-studio-webui",
+                model=self.backend,
+            )
+
     async def _stop_ffmpeg(self) -> None:
         process = self.ffmpeg
         self.ffmpeg = None
+        cancelled_at = time.perf_counter()
+        while self.encoder_start_times_s:
+            observe_stage_seconds(
+                "frame_encode",
+                cancelled_at - self.encoder_start_times_s.popleft(),
+                service="world-studio-webui",
+                model=self.backend,
+                result="cancelled",
+                codec="h264",
+                scope="frame",
+            )
         if process is not None:
             if process.stdin is not None:
                 with contextlib.suppress(Exception):
@@ -824,6 +949,13 @@ async def _h264_websocket(request: web.Request) -> web.WebSocketResponse:
     return websocket
 
 
+async def _metrics(_request: web.Request) -> web.Response:
+    return web.Response(
+        body=prometheus_latest(),
+        headers={"Content-Type": prometheus_content_type()},
+    )
+
+
 def install_h264_websocket_bridge(
     app: web.Application,
     *,
@@ -836,5 +968,6 @@ def install_h264_websocket_bridge(
         upstream_session_key,
         upstream_resolver,
     )
+    app.router.add_get("/metrics", _metrics)
     app.router.add_get("/api/h264ws", _h264_websocket)
     app.router.add_get("/api/h264ws/{backend}", _h264_websocket)

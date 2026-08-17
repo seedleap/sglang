@@ -103,26 +103,28 @@ spec:
               value: /run/secrets/realtime-webui/prompt-rewriter-vertex.json
             - name: CREATE_WORLD_IMAGE_CONFIG
               value: /run/secrets/realtime-webui/world-image-model-config.json
+            - {name: WORLD_MODEL_METRIC_SERVICE, value: world-studio-webui}
+            - {name: WORLD_MODEL_METRIC_LANE, value: production}
           ports:
-            - name: http
+            - name: metrics
               containerPort: 18080
           startupProbe:
             httpGet:
               path: /runtime-config.js
-              port: http
+              port: metrics
             periodSeconds: 2
             failureThreshold: 30
           readinessProbe:
             httpGet:
               path: /runtime-config.js
-              port: http
+              port: metrics
             periodSeconds: 5
             timeoutSeconds: 2
             failureThreshold: 6
           livenessProbe:
             httpGet:
               path: /
-              port: http
+              port: metrics
             periodSeconds: 15
             timeoutSeconds: 2
           resources:
@@ -188,7 +190,7 @@ spec:
   ports:
     - name: http
       port: 80
-      targetPort: http
+      targetPort: metrics
     - name: https
       port: 443
-      targetPort: http
+      targetPort: metrics

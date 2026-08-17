@@ -50,6 +50,11 @@ from sglang.multimodal_gen.runtime.realtime.async_vae_client import (
     RemoteDecodeHandle,
     RemoteFrameBatch,
 )
+from sglang.multimodal_gen.runtime.realtime.critical_path_metrics import (
+    observe_stage_ms,
+    observe_stage_seconds,
+    result_from_exception,
+)
 from sglang.multimodal_gen.runtime.realtime.worker_reservation import (
     WorkerReservationRegistry,
     WorkerReservationRejected,
@@ -493,6 +498,42 @@ def _collect_realtime_result_stage_metrics(result: Any) -> dict[str, float]:
     return collected
 
 
+def _metric_model_for_server(server_args: Any) -> str:
+    return str(
+        getattr(server_args, "model_id", None)
+        or getattr(server_args, "model_path", None)
+        or "unknown"
+    )
+
+
+def _observe_realtime_result_stage_metrics(
+    result: Any,
+    *,
+    server_args: Any,
+) -> None:
+    model = _metric_model_for_server(server_args)
+    for stage_name, duration_ms, _ in _iter_realtime_result_stage_metrics(result):
+        event_name = _realtime_stage_event_name(stage_name)
+        if event_name == "server.model_denoise_complete":
+            observe_stage_ms(
+                "denoiser_compute",
+                duration_ms,
+                service="denoiser",
+                model=model,
+                result="success",
+                scope="chunk",
+            )
+        elif event_name == "server.vae_encode_complete":
+            observe_stage_ms(
+                "vae_encode",
+                duration_ms,
+                service="denoiser",
+                model=model,
+                result="success",
+                scope="chunk",
+            )
+
+
 async def _send_chunk_telemetry(
     ws: WebSocket,
     session: GenerateSession,
@@ -531,6 +572,7 @@ async def _send_chunk_telemetry(
         telemetry.update(
             vae_queue_wait_ms=round(remote_result.queue_wait_ms, 3),
             vae_decode_ms=round(remote_result.decode_ms, 3),
+            vae_post_decode_ms=round(remote_result.post_decode_ms, 3),
             vae_encode_ms=round(remote_result.encode_ms, 3),
             vae_transfer_ms=round(remote_result.transfer_ms, 3),
             latent_serialize_ms=round(remote_result.serialize_ms, 3),
@@ -762,6 +804,14 @@ async def _complete_remote_chunk(
     log_realtime_trace(
         logger,
         session,
+        "server.post_decode_complete",
+        **common,
+        duration_ms=round(remote_result.post_decode_ms, 3),
+        source=f"remote_{getattr(session, 'vae_decoder_backend', None) or 'vae'}",
+    )
+    log_realtime_trace(
+        logger,
+        session,
         "server.frame_encode_complete",
         **common,
         duration_ms=round(remote_result.encode_ms, 3),
@@ -784,6 +834,7 @@ async def _complete_remote_chunk(
         "event_id": getattr(batch, "realtime_event_id", None),
         "vae_queue_wait_ms": round(remote_result.queue_wait_ms, 3),
         "vae_decode_ms": round(remote_result.decode_ms, 3),
+        "vae_post_decode_ms": round(remote_result.post_decode_ms, 3),
         "frame_encode_ms": round(remote_result.encode_ms, 3),
         "latent_to_gateway_complete_ms": round(remote_result.transfer_ms, 3),
         "latent_serialize_ms": round(remote_result.serialize_ms, 3),
@@ -888,10 +939,30 @@ async def _generate_loop_async_vae(ws, session: GenerateSession, server_args):
 
             timer = RealtimeStageTimer()
             chunk_started = time.perf_counter()
-            chunk = session.new_chunk()
-            batch = adapter.prepare_next_request(session, server_args, chunk)
-            session.bind_chunk_request(chunk, batch)
+            prepare_started = time.perf_counter()
+            try:
+                chunk = session.new_chunk()
+                batch = adapter.prepare_next_request(session, server_args, chunk)
+                session.bind_chunk_request(chunk, batch)
+            except BaseException as exc:
+                observe_stage_seconds(
+                    "chunk_prepare",
+                    time.perf_counter() - prepare_started,
+                    service="denoiser",
+                    model=_metric_model_for_server(server_args),
+                    result=result_from_exception(exc),
+                    scope="chunk",
+                )
+                raise
             request_prepare_ms = timer.mark_ms()
+            observe_stage_ms(
+                "chunk_prepare",
+                request_prepare_ms,
+                service="denoiser",
+                model=_metric_model_for_server(server_args),
+                result="success",
+                scope="chunk",
+            )
             log_realtime_trace(
                 logger,
                 session,
@@ -915,6 +986,7 @@ async def _generate_loop_async_vae(ws, session: GenerateSession, server_args):
             )
             scheduler_forward_ms = timer.mark_ms()
             _emit_realtime_result_stage_traces(session, chunk, batch, result)
+            _observe_realtime_result_stage_metrics(result, server_args=server_args)
             stage_metrics = _collect_realtime_result_stage_metrics(result)
             if result.realtime_latents is None or result.realtime_handoff is None:
                 raise RuntimeError("remote VAE path received no latent handoff")
@@ -929,10 +1001,30 @@ async def _generate_loop_async_vae(ws, session: GenerateSession, server_args):
             )
 
             vae_started = time.perf_counter()
-            handle = await client.submit(
-                result.realtime_latents,
-                result.realtime_handoff,
-                on_frame_batch=on_frame_batch,
+            latent_transfer_started = time.perf_counter()
+            try:
+                handle = await client.submit(
+                    result.realtime_latents,
+                    result.realtime_handoff,
+                    on_frame_batch=on_frame_batch,
+                )
+            except BaseException as exc:
+                observe_stage_seconds(
+                    "latent_transfer",
+                    time.perf_counter() - latent_transfer_started,
+                    service="denoiser",
+                    model=_metric_model_for_server(server_args),
+                    result=result_from_exception(exc),
+                    scope="chunk",
+                )
+                raise
+            observe_stage_seconds(
+                "latent_transfer",
+                time.perf_counter() - latent_transfer_started,
+                service="denoiser",
+                model=_metric_model_for_server(server_args),
+                result="success",
+                scope="chunk",
             )
             log_realtime_trace(
                 logger,
@@ -1020,6 +1112,7 @@ async def _generate_loop_local(ws: WebSocket, session: GenerateSession):
             timer = RealtimeStageTimer()
             chunk_started = time.perf_counter()
 
+            prepare_started = time.perf_counter()
             chunk = session.new_chunk()
             log_realtime_trace(
                 logger,
@@ -1029,12 +1122,23 @@ async def _generate_loop_local(ws: WebSocket, session: GenerateSession):
                 chunk_index=chunk.index,
             )
             scheduled_event_version = session.interactive_event_version
-            batch = adapter.prepare_next_request(
-                session,
-                server_args,
-                chunk,
-            )
-            session.bind_chunk_request(chunk, batch)
+            try:
+                batch = adapter.prepare_next_request(
+                    session,
+                    server_args,
+                    chunk,
+                )
+                session.bind_chunk_request(chunk, batch)
+            except BaseException as exc:
+                observe_stage_seconds(
+                    "chunk_prepare",
+                    time.perf_counter() - prepare_started,
+                    service="denoiser",
+                    model=_metric_model_for_server(server_args),
+                    result=result_from_exception(exc),
+                    scope="chunk",
+                )
+                raise
             if batch.condition_inputs:
                 logger.debug(
                     "consume realtime conditions, session_id=%s, block_idx=%s, kinds=%s",
@@ -1043,6 +1147,14 @@ async def _generate_loop_local(ws: WebSocket, session: GenerateSession):
                     sorted(batch.condition_inputs),
                 )
             request_prepare_ms = timer.mark_ms()
+            observe_stage_ms(
+                "chunk_prepare",
+                request_prepare_ms,
+                service="denoiser",
+                model=_metric_model_for_server(server_args),
+                result="success",
+                scope="chunk",
+            )
             log_realtime_trace(
                 logger,
                 session,
@@ -1068,6 +1180,7 @@ async def _generate_loop_local(ws: WebSocket, session: GenerateSession):
                 scheduler_forward_ms=round(scheduler_forward_ms, 3),
             )
             _emit_realtime_result_stage_traces(session, chunk, batch, result)
+            _observe_realtime_result_stage_metrics(result, server_args=server_args)
             stage_metrics = _collect_realtime_result_stage_metrics(result)
 
             # finish
@@ -1356,6 +1469,9 @@ async def _listen_events(ws: WebSocket, session: GenerateSession):
             data = msgspec.msgpack.decode(message)
             if not isinstance(data, dict):
                 raise ValueError("realtime event must be a map")
+            if data.get("type") in {"client_metric", "client_metric_batch"}:
+                session.mark_client_activity()
+                continue
             realtime_event = RealtimeEvent.model_validate(data)
             if realtime_event.kind == "heartbeat":
                 session.mark_client_activity()

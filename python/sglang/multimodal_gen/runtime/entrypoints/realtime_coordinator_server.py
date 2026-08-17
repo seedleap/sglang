@@ -24,6 +24,10 @@ from sglang.multimodal_gen.runtime.realtime.coordinator import (
     WorkerHeartbeat,
     WorkerSlot,
 )
+from sglang.multimodal_gen.runtime.realtime.critical_path_metrics import (
+    prometheus_content_type,
+    prometheus_latest,
+)
 from sglang.multimodal_gen.runtime.utils.realtime_trace import (
     log_realtime_trace,
     normalize_trace_id,
@@ -72,6 +76,10 @@ def create_app(coordinator: RealtimeCoordinator) -> FastAPI:
     @app.get("/healthz")
     async def healthz():
         return {"status": "ok"}
+
+    @app.get("/metrics")
+    async def metrics():
+        return Response(prometheus_latest(), media_type=prometheus_content_type())
 
     @app.get("/v1/capacity")
     async def capacity():

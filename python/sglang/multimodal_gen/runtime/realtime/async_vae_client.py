@@ -59,6 +59,7 @@ class RemoteDecodeResult:
     num_frames: int
     queue_wait_ms: float
     decode_ms: float
+    post_decode_ms: float
     encode_ms: float
     transfer_ms: float
     serialize_ms: float
@@ -569,6 +570,7 @@ class RealtimeVAEClient:
                 num_frames=int(message.get("num_frames") or 0),
                 queue_wait_ms=float(message.get("queue_wait_ms") or 0.0),
                 decode_ms=float(message.get("decode_ms") or 0.0),
+                post_decode_ms=float(message.get("post_decode_ms") or 0.0),
                 encode_ms=float(message.get("encode_ms") or 0.0),
                 transfer_ms=(completed_at - pending.sent_at) * 1000.0,
                 serialize_ms=pending.serialize_ms,

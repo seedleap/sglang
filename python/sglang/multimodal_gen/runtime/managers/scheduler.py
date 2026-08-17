@@ -48,6 +48,9 @@ from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import (
     BatchMetricsWindow,
     OutputBatch,
 )
+from sglang.multimodal_gen.runtime.realtime.critical_path_metrics import (
+    observe_stage_seconds,
+)
 from sglang.multimodal_gen.runtime.post_training.scheduler_post_training_mixin import (
     SchedulerPostTrainingMixin,
 )
@@ -399,6 +402,32 @@ class Scheduler(SchedulerWarmupMixin, SchedulerPostTrainingMixin, SchedulerDisag
             if isinstance(req, Req):
                 req = self._take_pending_realtime_replacement(req, now=now)
             self.waiting_queue.append((identity, req, now))
+
+    def _observe_realtime_scheduler_queue(
+        self,
+        req: Any,
+        enqueue_time: float,
+        *,
+        now: float | None = None,
+        result: str = "success",
+    ) -> None:
+        if (
+            not isinstance(req, Req)
+            or req.is_warmup
+            or not getattr(req, "realtime_session_id", None)
+        ):
+            return
+        model = getattr(self.server_args, "model_id", None) or getattr(
+            self.server_args, "model_path", None
+        )
+        observe_stage_seconds(
+            "scheduler_queue",
+            (now if now is not None else time.monotonic()) - enqueue_time,
+            service="denoiser",
+            model=model,
+            result=result,
+            scope="chunk",
+        )
 
     @staticmethod
     def _attach_realtime_request_metadata(output: OutputBatch, request: Any) -> None:
@@ -978,10 +1007,12 @@ class Scheduler(SchedulerWarmupMixin, SchedulerPostTrainingMixin, SchedulerDisag
 
         if not self._dynamic_batching_enabled():
             identity, req, enqueue_time = self.waiting_queue.popleft()
+            now = time.monotonic()
+            self._observe_realtime_scheduler_queue(req, enqueue_time, now=now)
             if isinstance(req, Req):
                 self._record_batch_dispatch_metrics(
                     batch_size=1,
-                    queue_wait_ms=(time.monotonic() - enqueue_time) * 1000.0,
+                    queue_wait_ms=(now - enqueue_time) * 1000.0,
                     effective_max_batch_size=1,
                     stop_reason="dynamic_disabled",
                 )
@@ -996,6 +1027,8 @@ class Scheduler(SchedulerWarmupMixin, SchedulerPostTrainingMixin, SchedulerDisag
         # (e.g., image-conditioned i2i request), dispatch it immediately.
         if not self._can_dynamic_batch(req, req):
             identity, req, head_enqueue_time = self.waiting_queue.popleft()
+            now = time.monotonic()
+            self._observe_realtime_scheduler_queue(req, head_enqueue_time, now=now)
             reject_reasons: list[str] = []
             if self._batch_metrics_enabled:
                 reason = self._get_dynamic_batch_reject_reason(req, req)
@@ -1003,7 +1036,7 @@ class Scheduler(SchedulerWarmupMixin, SchedulerPostTrainingMixin, SchedulerDisag
                     reject_reasons.append(f"head:{reason}")
             self._record_batch_dispatch_metrics(
                 batch_size=1,
-                queue_wait_ms=(time.monotonic() - head_enqueue_time) * 1000.0,
+                queue_wait_ms=(now - head_enqueue_time) * 1000.0,
                 effective_max_batch_size=1,
                 reject_reasons=reject_reasons,
                 stop_reason=reject_reasons[0] if reject_reasons else "head_ineligible",
@@ -1050,9 +1083,13 @@ class Scheduler(SchedulerWarmupMixin, SchedulerPostTrainingMixin, SchedulerDisag
             return None
 
         batch_items: list[tuple[bytes | None, Any]] = [None] * batch_len
+        dispatch_now = time.monotonic()
         for pos, idx in enumerate(reversed(compatible_indices)):
-            item_identity, item_req, _ = self.waiting_queue[idx]
+            item_identity, item_req, item_enqueue_time = self.waiting_queue[idx]
             batch_items[batch_len - 1 - pos] = (item_identity, item_req)
+            self._observe_realtime_scheduler_queue(
+                item_req, item_enqueue_time, now=dispatch_now
+            )
             del self.waiting_queue[idx]
         stop_reason = self._batch_admission.limit_reason_for_batch(compatible_reqs)
         if stop_reason is None:
