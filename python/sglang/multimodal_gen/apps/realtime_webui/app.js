@@ -7,6 +7,13 @@ const JPEG_FRAME_CONTENT_TYPE = "image/jpeg";
 const DECODER_WORKER_URL = "./decoder_worker.js?v=rgb-worker-v10";
 const UI_CONFIG = Object.freeze(globalThis.SGLANG_REALTIME_UI_CONFIG || {});
 const DUAL_MODEL_CONFIG = Object.freeze(UI_CONFIG.dualModels || {});
+const ALL_MODEL_KEYS = Object.freeze(["minwm", "lingbot2", "happyoyster"]);
+const CONFIGURED_MODEL_SLOTS = Array.isArray(UI_CONFIG.modelSlots)
+  ? UI_CONFIG.modelSlots
+    .map((key) => String(key))
+    .filter((key, index, keys) => ALL_MODEL_KEYS.includes(key) && keys.indexOf(key) === index)
+  : null;
+const MODEL_SLOTS_LOCKED = UI_CONFIG.lockModelSlots === true;
 const H264_MSE_MIME_TYPE = 'video/mp4; codecs="avc1.4D401F"';
 const H264_WEBSOCKET_REQUESTED = UI_CONFIG.h264WebSocketEnabled === true;
 const H264_WEBSOCKET_ENABLED = H264_WEBSOCKET_REQUESTED
@@ -221,22 +228,65 @@ const RECORDING_READY_TOAST_MS = 5000;
 function applyRuntimeUiConfig() {
   for (const key of ["minwm", "lingbot2"]) {
     const isLingBot2 = key === "lingbot2";
-    modelControl(key, "fps").value = String(
+    const size = DUAL_MODEL_CONFIG[key]?.size || UI_CONFIG.size;
+    if (size) modelControl(key, "size").value = String(size);
+    modelControl(key, "fps").value = String(configuredModelNumber(
+      key,
+      "targetFps",
       isLingBot2 ? DEFAULT_LINGBOT2_TARGET_FPS : DEFAULT_TARGET_FPS,
-    );
-    modelControl(key, "guidance").value = String(
+    ));
+    modelControl(key, "guidance").value = String(configuredModelNumber(
+      key,
+      "guidanceScale",
       configuredNumber("guidanceScale", Number(modelControl(key, "guidance").value)),
-    );
-    modelControl(key, "sinkSize").value = String(
+    ));
+    modelControl(key, "sinkSize").value = String(configuredModelNumber(
+      key,
+      "sinkSize",
       isLingBot2
         ? DEFAULT_LINGBOT2_SINK_SIZE
         : configuredNumber("sinkSize", Number(modelControl(key, "sinkSize").value)),
-    );
-    modelControl(key, "windowFrames").value = String(
+    ));
+    modelControl(key, "windowFrames").value = String(configuredModelNumber(
+      key,
+      "windowFrames",
       isLingBot2
         ? DEFAULT_LINGBOT2_WINDOW_FRAMES
         : configuredNumber("windowFrames", Number(modelControl(key, "windowFrames").value)),
-    );
+    ));
+    const continuous = DUAL_MODEL_CONFIG[key]?.continuous;
+    if (typeof continuous === "boolean") modelControl(key, "continuous").checked = continuous;
+  }
+  for (const key of ALL_MODEL_KEYS) {
+    const label = modelLabel(key);
+    document.querySelectorAll(`[data-model-key="${key}"] .model-player-title strong`)
+      .forEach((node) => { node.textContent = label; });
+    document.querySelectorAll(`select[id^="modelSlot"] option[value="${key}"]`)
+      .forEach((option) => { option.textContent = label; });
+  }
+  if (CONFIGURED_MODEL_SLOTS?.length === 1) {
+    const label = modelLabel(CONFIGURED_MODEL_SLOTS[0]);
+    const workspace = document.querySelector(".workspace");
+    const stage = document.querySelector(".stage");
+    const heading = document.querySelector(".comparison-heading");
+    const promptHelp = document.querySelector(".prompt-update-heading small");
+    document.title = `World Studio · ${label}`;
+    workspace?.setAttribute("aria-label", `${label} 实时生成`);
+    stage?.setAttribute("aria-label", `${label} 实时生成`);
+    if (heading) {
+      const eyebrow = heading.querySelector("span");
+      const title = heading.querySelector("h2");
+      const description = heading.querySelector("p");
+      if (eyebrow) eyebrow.textContent = "LIVE WORLD";
+      if (title) title.textContent = label;
+      if (description) description.textContent = "实时生成 · 实时交互";
+    }
+    if (promptHelp) promptHelp.textContent = `AI 改写后发送至 ${label}`;
+    const fullscreenButton = $("fullscreenBtn");
+    if (fullscreenButton) {
+      fullscreenButton.setAttribute("aria-label", `全屏查看 ${label}`);
+      fullscreenButton.title = `全屏查看 ${label}`;
+    }
   }
   if (UI_CONFIG.titleSuffix) {
     const suffix = String(UI_CONFIG.titleSuffix);
@@ -250,7 +300,7 @@ function applyRuntimeUiConfig() {
   }
   if (H264_WEBSOCKET_ENABLED) {
     const bitrateKbps = configuredNumber("h264CompressedBitrateKbps", 3000);
-    for (const key of ["minwm", "lingbot2"]) {
+    for (const key of ALL_MODEL_KEYS) {
       const chip = document.querySelector(`[data-model-key="${key}"] .stream-chip`);
       if (chip) chip.textContent = `H.264 · WS · ${(bitrateKbps / 1000).toFixed(1)} Mbps`;
     }
@@ -509,8 +559,30 @@ const CUSTOM_WORLD_STORE_NAME = "worlds";
 let customWorldPresets = [];
 let customWorldDbPromise = null;
 let customWorldLoadPromise = null;
-const MODEL_SLOT_DEFAULTS = ["minwm", "lingbot2", "happyoyster"];
-let activeModelSlotCount = 2;
+const MODEL_SLOT_DEFAULTS = Object.freeze(
+  CONFIGURED_MODEL_SLOTS?.length ? CONFIGURED_MODEL_SLOTS : ["minwm", "lingbot2", "happyoyster"],
+);
+let activeModelSlotCount = Math.min(
+  MODEL_SLOT_DEFAULTS.length,
+  CONFIGURED_MODEL_SLOTS?.length || 2,
+);
+
+function configureModelSlotControls() {
+  const slotConfig = document.querySelector(".model-slot-config");
+  if (slotConfig) slotConfig.hidden = MODEL_SLOTS_LOCKED || MODEL_SLOT_DEFAULTS.length < 2;
+  for (let index = 0; index < ALL_MODEL_KEYS.length; index += 1) {
+    const select = $(`modelSlot${index}`);
+    if (!select) continue;
+    const configured = MODEL_SLOT_DEFAULTS[index];
+    if (configured) select.value = configured;
+    Array.from(select.options).forEach((option) => {
+      const allowed = MODEL_SLOT_DEFAULTS.includes(option.value);
+      option.disabled = !allowed;
+      option.hidden = !allowed;
+    });
+  }
+  activeModelSlotCount = Math.min(activeModelSlotCount, MODEL_SLOT_DEFAULTS.length);
+}
 
 function selectedModelKeys() {
   const keys = [];
@@ -528,7 +600,7 @@ function modelSelected(key) {
 function syncModelSlotUi() {
   const selected = selectedModelKeys();
   const grid = document.querySelector(".model-player-grid");
-  for (const key of MODEL_SLOT_DEFAULTS) {
+  for (const key of ALL_MODEL_KEYS) {
     const player = document.querySelector(`[data-model-key="${key}"]`);
     if (player) player.hidden = !selected.includes(key);
   }
@@ -537,9 +609,11 @@ function syncModelSlotUi() {
     if (player && grid) grid.appendChild(player);
   }
   grid?.classList.toggle("is-three-up", selected.length === 3);
-  $("modelSlot2Wrap").hidden = activeModelSlotCount < 3;
-  $("addModelSlotBtn").hidden = activeModelSlotCount >= 3;
-  $("removeModelSlotBtn").hidden = activeModelSlotCount < 3;
+  grid?.classList.toggle("is-single-model", selected.length === 1);
+  const slotControlsLocked = MODEL_SLOTS_LOCKED || MODEL_SLOT_DEFAULTS.length < 2;
+  $("modelSlot2Wrap").hidden = slotControlsLocked || activeModelSlotCount < 3;
+  $("addModelSlotBtn").hidden = slotControlsLocked || activeModelSlotCount >= Math.min(3, MODEL_SLOT_DEFAULTS.length);
+  $("removeModelSlotBtn").hidden = slotControlsLocked || activeModelSlotCount < 3;
 }
 
 function ensureUniqueModelSlot(changedIndex) {
@@ -2294,13 +2368,17 @@ function updateRecordButton() {
 function updateRecordingDownloadButton() {
   const button = $("recordDownloadBtn");
   if (!button) return;
-  const ready = recordingDownloads.length === 2;
+  const expectedCount = Math.max(
+    1,
+    recordingTracks.length || Math.min(activeModelSlotCount, MODEL_SLOT_DEFAULTS.length),
+  );
+  const ready = recordingDownloads.length === expectedCount;
   button.hidden = !ready;
   button.disabled = !ready || recordingSaving;
   button.setAttribute("aria-disabled", !ready || recordingSaving ? "true" : "false");
   button.title = ready
     ? `同步下载 ${recordingDownloads.map((item) => item.fileName).join("、")}`
-    : "两份录像生成后可下载";
+    : `${expectedCount} 份录像生成后可下载`;
 }
 
 function setRecordingDownloads(outputs = []) {
@@ -3019,9 +3097,10 @@ async function stopRecording({ reason = "manual" } = {}) {
         : await buildMp4RecordingBlob(track),
     })));
     await saveRecordingArtifactFiles(outputs, { deferDownload: true });
-    addHistory(`both gameplay recordings ready · ${recordingFrameIndex} synchronized frames · ${extension}`);
+    const recordingCount = outputs.length;
+    addHistory(`${recordingCount} gameplay recording${recordingCount === 1 ? "" : "s"} ready · ${recordingFrameIndex} synchronized frames · ${extension}`);
     if (["session_timeout", "session_closed", "primary_disconnected"].includes(reason)) {
-      showSessionNotice("两份游玩录像已生成，可点击右上角同步下载");
+      showSessionNotice(`${recordingCount} 份游玩录像已生成，可点击右上角下载`);
       showRecordingReadyToast();
     }
   } catch (error) {
@@ -6137,6 +6216,8 @@ function sendEvent(kind, payload, historyText = null) {
 }
 
 function modelLabel(key) {
+  const configured = DUAL_MODEL_CONFIG[key]?.label || DUAL_MODEL_CONFIG[key]?.displayName;
+  if (configured) return String(configured);
   if (key === "lingbot2") return "LingBot2";
   if (key === "happyoyster") return "快乐生蚝";
   return "Zing";
@@ -6774,6 +6855,7 @@ function unpack(buf) {
 }
 
 applyRuntimeUiConfig();
+configureModelSlotControls();
 syncModelSlotUi();
 renderPresets();
 void ensureCustomWorldPresetsLoaded();
@@ -6801,19 +6883,22 @@ function closeForModelSlotChange() {
   closeSession("model comparison selection changed");
   setStatus("Selection changed");
 }
-for (let slotIndex = 0; slotIndex < MODEL_SLOT_DEFAULTS.length; slotIndex += 1) {
-  $(`modelSlot${slotIndex}`).addEventListener("change", () => {
+for (let slotIndex = 0; slotIndex < ALL_MODEL_KEYS.length; slotIndex += 1) {
+  const slotSelect = $(`modelSlot${slotIndex}`);
+  if (!slotSelect) continue;
+  slotSelect.addEventListener("change", () => {
     closeForModelSlotChange();
     ensureUniqueModelSlot(slotIndex);
   });
 }
 $("addModelSlotBtn").onclick = () => {
+  if (MODEL_SLOTS_LOCKED) return;
   const sessionActive = Boolean(
     ws
     || dualModelController.activeKeys.size > 0
     || happyOysterSession.connected
   );
-  activeModelSlotCount = 3;
+  activeModelSlotCount = Math.min(3, MODEL_SLOT_DEFAULTS.length);
   ensureUniqueModelSlot(2);
   if (!sessionActive || !modelSelected("happyoyster")) return;
   setModelConnectionState("happyoyster", "preparing");
@@ -6826,6 +6911,7 @@ $("addModelSlotBtn").onclick = () => {
   });
 };
 $("removeModelSlotBtn").onclick = () => {
+  if (MODEL_SLOTS_LOCKED) return;
   closeForModelSlotChange();
   activeModelSlotCount = 2;
   syncModelSlotUi();

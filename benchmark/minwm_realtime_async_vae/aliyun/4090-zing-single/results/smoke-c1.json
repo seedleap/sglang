@@ -1,0 +1,61 @@
+{
+  "hardware": {},
+  "profile": "async",
+  "request": {
+    "completion_signal": "final-frame",
+    "first_frame": "python/sglang/multimodal_gen/apps/realtime_webui/assets/dragon-ride.jpg",
+    "fps": 24,
+    "generation_mode": "i2v",
+    "measured_chunks": 2,
+    "model": "/work/model",
+    "sink": 8,
+    "size": "832x480",
+    "steps": 4,
+    "warmup_chunks": 1,
+    "window": 32
+  },
+  "runs": [
+    {
+      "action_ingress_to_first_frame_ms": {},
+      "action_to_first_frame_ms": {},
+      "aggregate_fps": 19.92841391143442,
+      "chunk_total_ms": {
+        "count": 2,
+        "max": 878.9193749544211,
+        "mean": 802.8737294953316,
+        "p50": 802.8737294953316,
+        "p95": 878.9193749544211,
+        "p99": 878.9193749544211
+      },
+      "client_observed_action_to_first_frame_ms": {
+        "count": 2,
+        "max": 944.695,
+        "mean": 915.6975,
+        "p50": 915.6975,
+        "p95": 944.695,
+        "p99": 944.695
+      },
+      "concurrency": 1,
+      "direct_vae_frame_batches": 0,
+      "error_rate": 0.0,
+      "errors": [],
+      "measurement_wall_seconds": 1.6057474589906633,
+      "min_session_fps": 19.92841391143442,
+      "per_session_fps": {
+        "count": 1,
+        "max": 19.92841391143442,
+        "mean": 19.92841391143442,
+        "p50": 19.92841391143442,
+        "p95": 19.92841391143442,
+        "p99": 19.92841391143442
+      },
+      "stage_ms": {},
+      "successful_sessions": 1,
+      "timing_sources": [
+        "client_frame_completion_interval"
+      ],
+      "trace_event_names": []
+    }
+  ],
+  "schema_version": "minwm-realtime-load/v1"
+}

@@ -1,0 +1,184 @@
+{
+  "hardware": {},
+  "profile": "async",
+  "request": {
+    "completion_signal": "final-frame",
+    "first_frame": "python/sglang/multimodal_gen/apps/realtime_webui/assets/dragon-ride.jpg",
+    "fps": 24,
+    "generation_mode": "i2v",
+    "measured_chunks": 4,
+    "model": "/work/model",
+    "sink": 8,
+    "size": "832x480",
+    "steps": 4,
+    "warmup_chunks": 1,
+    "window": 32
+  },
+  "runs": [
+    {
+      "action_ingress_to_first_frame_ms": {},
+      "action_to_first_frame_ms": {},
+      "aggregate_fps": 18.447402474075144,
+      "chunk_total_ms": {
+        "count": 4,
+        "max": 1255.2361669950187,
+        "mean": 867.3307812568964,
+        "p50": 893.9358959905803,
+        "p95": 1255.2361669950187,
+        "p99": 1255.2361669950187
+      },
+      "client_observed_action_to_first_frame_ms": {
+        "count": 4,
+        "max": 1574.651,
+        "mean": 1270.6915,
+        "p50": 1324.3265000000001,
+        "p95": 1574.651,
+        "p99": 1574.651
+      },
+      "concurrency": 1,
+      "direct_vae_frame_batches": 0,
+      "error_rate": 0.0,
+      "errors": [],
+      "measurement_wall_seconds": 3.4693231250275858,
+      "min_session_fps": 18.447402474075144,
+      "per_session_fps": {
+        "count": 1,
+        "max": 18.447402474075144,
+        "mean": 18.447402474075144,
+        "p50": 18.447402474075144,
+        "p95": 18.447402474075144,
+        "p99": 18.447402474075144
+      },
+      "stage_ms": {},
+      "successful_sessions": 1,
+      "timing_sources": [
+        "client_frame_completion_interval"
+      ],
+      "trace_event_names": []
+    },
+    {
+      "action_ingress_to_first_frame_ms": {},
+      "action_to_first_frame_ms": {},
+      "aggregate_fps": 58.927987123931395,
+      "chunk_total_ms": {
+        "count": 8,
+        "max": 615.1718330220319,
+        "mean": 533.4435519907856,
+        "p50": 520.6113959720824,
+        "p95": 615.1718330220319,
+        "p99": 615.1718330220319
+      },
+      "client_observed_action_to_first_frame_ms": {
+        "count": 8,
+        "max": 2246.778,
+        "mean": 1812.6535,
+        "p50": 1746.345,
+        "p95": 2246.778,
+        "p99": 2246.778
+      },
+      "concurrency": 2,
+      "direct_vae_frame_batches": 0,
+      "error_rate": 0.0,
+      "errors": [],
+      "measurement_wall_seconds": 2.172142749943305,
+      "min_session_fps": 29.661757487906517,
+      "per_session_fps": {
+        "count": 2,
+        "max": 30.33336366744295,
+        "mean": 29.997560577674733,
+        "p50": 29.997560577674733,
+        "p95": 30.33336366744295,
+        "p99": 30.33336366744295
+      },
+      "stage_ms": {},
+      "successful_sessions": 2,
+      "timing_sources": [
+        "client_frame_completion_interval"
+      ],
+      "trace_event_names": []
+    },
+    {
+      "action_ingress_to_first_frame_ms": {},
+      "action_to_first_frame_ms": {},
+      "aggregate_fps": 102.14941726625977,
+      "chunk_total_ms": {
+        "count": 16,
+        "max": 1194.8992080288008,
+        "mean": 491.389989558229,
+        "p50": 536.6270829981659,
+        "p95": 1194.8992080288008,
+        "p99": 1194.8992080288008
+      },
+      "client_observed_action_to_first_frame_ms": {
+        "count": 16,
+        "max": 3710.154,
+        "mean": 2390.752625,
+        "p50": 2145.874,
+        "p95": 3710.154,
+        "p99": 3710.154
+      },
+      "concurrency": 4,
+      "direct_vae_frame_batches": 0,
+      "error_rate": 0.0,
+      "errors": [],
+      "measurement_wall_seconds": 2.5061327499570325,
+      "min_session_fps": 26.946298613317218,
+      "per_session_fps": {
+        "count": 4,
+        "max": 48.09905850870512,
+        "mean": 34.32232991103673,
+        "p50": 31.121981261062288,
+        "p95": 48.09905850870512,
+        "p99": 48.09905850870512
+      },
+      "stage_ms": {},
+      "successful_sessions": 4,
+      "timing_sources": [
+        "client_frame_completion_interval"
+      ],
+      "trace_event_names": []
+    },
+    {
+      "action_ingress_to_first_frame_ms": {},
+      "action_to_first_frame_ms": {},
+      "aggregate_fps": 115.1047023307537,
+      "chunk_total_ms": {
+        "count": 28,
+        "max": 1006.8731250357814,
+        "mean": 882.9064331054853,
+        "p50": 891.5362705010921,
+        "p95": 978.1087919836864,
+        "p99": 1006.8731250357814
+      },
+      "client_observed_action_to_first_frame_ms": {
+        "count": 28,
+        "max": 1125.554,
+        "mean": 982.4238214285714,
+        "p50": 978.486,
+        "p95": 1095.634,
+        "p99": 1125.554
+      },
+      "concurrency": 7,
+      "direct_vae_frame_batches": 0,
+      "error_rate": 0.0,
+      "errors": [],
+      "measurement_wall_seconds": 3.8921085839974694,
+      "min_session_fps": 17.795251310701047,
+      "per_session_fps": {
+        "count": 7,
+        "max": 18.29412979979761,
+        "mean": 18.123262329915462,
+        "p50": 18.168545765037667,
+        "p95": 18.29412979979761,
+        "p99": 18.29412979979761
+      },
+      "stage_ms": {},
+      "successful_sessions": 7,
+      "timing_sources": [
+        "client_frame_completion_interval"
+      ],
+      "trace_event_names": []
+    }
+  ],
+  "schema_version": "minwm-realtime-load/v1"
+}

@@ -528,6 +528,18 @@ def shallow_asdict(obj) -> dict[str, Any]:
 
 
 def kill_itself_when_parent_died() -> None:
+    # Some container runtimes briefly re-parent Python ``spawn`` workers while
+    # reconstructing the child process.  In that environment the post-prctl
+    # PPID check can mistake a healthy launcher for a dead parent and make the
+    # worker SIGKILL itself.  Operators that already supervise the container
+    # may opt out of PDEATHSIG and rely on the container restart policy.
+    if os.environ.get("SGLANG_DISABLE_PDEATHSIG", "").lower() in {
+        "1",
+        "true",
+        "yes",
+    }:
+        return
+
     if sys.platform != "linux":
         return
 
