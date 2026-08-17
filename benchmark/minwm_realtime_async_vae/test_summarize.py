@@ -1,5 +1,4 @@
 import pytest
-
 from summarize import (
     build_report,
     latency_summary,
