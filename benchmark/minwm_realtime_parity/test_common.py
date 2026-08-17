@@ -5,6 +5,7 @@ import io
 import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -12,6 +13,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from benchmark_realtime_throughput import (  # noqa: E402
     record_frame_batch,
+    record_server_chunk_timing,
+    validate_contract,
     validate_frame_batch,
 )
 from common import (  # noqa: E402
@@ -132,7 +135,13 @@ def test_streamed_frame_batch_completes_unknown_count_from_frame_contract() -> N
             num_frame_batches=0,
             is_final_frame_batch=False,
         )
-        index, count, frames = validate_frame_batch(header, payload, chunk_index=0)
+        index, count, frames = validate_frame_batch(
+            header,
+            payload,
+            chunk_index=0,
+            expected_width=2,
+            expected_height=2,
+        )
         complete = record_frame_batch(
             state,
             chunk_index=0,
@@ -153,12 +162,94 @@ def test_streamed_frame_batch_completes_unknown_count_from_frame_contract() -> N
 
 def test_streamed_frame_batch_rejects_final_unknown_count() -> None:
     with pytest.raises(AssertionError, match="is_final_frame_batch"):
-        validate_frame_batch(_raw_header(num_frame_batches=0), bytes(12), chunk_index=0)
+        validate_frame_batch(
+            _raw_header(num_frame_batches=0),
+            bytes(12),
+            chunk_index=0,
+            expected_width=2,
+            expected_height=2,
+        )
+
+
+def test_frame_batch_rejects_self_consistent_wrong_geometry() -> None:
+    header = _raw_header(
+        width=1,
+        height=1,
+        channels=3,
+        bytes_per_frame=3,
+        raw_size=3,
+        total_size=3,
+    )
+    with pytest.raises(AssertionError, match="width.*height"):
+        validate_frame_batch(
+            header,
+            bytes(3),
+            chunk_index=0,
+            expected_width=1248,
+            expected_height=704,
+        )
+
+
+def test_throughput_contract_rejects_sink_outside_bounded_window() -> None:
+    manifest = load_cases(Path(__file__).with_name("cases_720p_compile_smoke.json"))
+    args = SimpleNamespace(
+        warmup_chunks=20,
+        measured_chunks=200,
+        kv_cache_num_frames=32,
+        sink_size=32,
+        case="00_forward_080_pottery_720p",
+    )
+
+    with pytest.raises(ValueError, match="sink-size must be smaller"):
+        validate_contract(manifest, args)
 
 
 def test_realtime_trace_events_are_out_of_band() -> None:
     assert is_realtime_trace_event({"type": "trace_event", "trace": {}})
     assert not is_realtime_trace_event({"type": "chunk_stats"})
+
+
+def test_chunk_telemetry_is_recorded_with_legacy_timing_aliases() -> None:
+    stats = {}
+    normalized = record_server_chunk_timing(
+        stats,
+        {
+            "type": "chunk_telemetry",
+            "chunk_index": 3,
+            "chunk_total_ms": 42.0,
+            "model_denoise_ms": 30.0,
+            "output_pace_ms": 1.0,
+            "transport_encode_ms": 2.0,
+            "transport_write_ms": 3.0,
+        },
+    )
+
+    assert stats == {3: normalized}
+    assert normalized["pace_wait_ms"] == 1.0
+    assert normalized["raw_payload_build_ms"] == 2.0
+    assert normalized["ws_write_ms"] == 3.0
+    assert normalized["model_denoise_ms"] == 30.0
+
+
+def test_legacy_chunk_stats_are_still_recorded() -> None:
+    stats = {}
+    message = {"type": "chunk_stats", "chunk_index": 0, "chunk_total_ms": 10.0}
+
+    assert record_server_chunk_timing(stats, message) == message
+    assert stats == {0: message}
+
+
+def test_duplicate_chunk_timing_is_rejected() -> None:
+    stats = {}
+    record_server_chunk_timing(
+        stats, {"type": "chunk_stats", "chunk_index": 0, "chunk_total_ms": 10.0}
+    )
+
+    with pytest.raises(AssertionError, match="duplicate server timing"):
+        record_server_chunk_timing(
+            stats,
+            {"type": "chunk_telemetry", "chunk_index": 0, "chunk_total_ms": 9.0},
+        )
 
 
 def test_dragon_ride_contract_is_exactly_sixty_generated_seconds() -> None:
@@ -246,3 +337,26 @@ def test_materialize_first_frame_rejects_checksum_mismatch(
             },
             tmp_path,
         )
+
+
+def test_materialize_s3_first_frame_uses_configured_mount(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    payload = b"mounted-reference-image"
+    mount_root = tmp_path / "s3-input"
+    source = mount_root / "world-model/eval/reference.png"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(payload)
+    monkeypatch.setenv("MINWM_S3_MOUNT", str(mount_root))
+
+    path = materialize_first_frame(
+        {
+            "id": "s3-fixture",
+            "first_frame": "s3://leap-world-us-east-2/world-model/eval/reference.png",
+            "first_frame_sha256": hashlib.sha256(payload).hexdigest(),
+        },
+        tmp_path / "inputs",
+    )
+
+    assert path.read_bytes() == payload

@@ -24,7 +24,7 @@ deployment manifests. Do not use old dated YAML as a template.
 5. Record the detected hardware, selected profile, SGLang/model commits, image
    digest, and result URI with the run artifacts.
 
-## RTX 6000 labels and `vae_cpu_offload`
+## Hardware gates and `vae_cpu_offload`
 
 Do not derive memory policy from the string `6000`. NVIDIA's full-card published
 capacities differ by generation: RTX 6000 Ada has 48 GB, while the RTX PRO 6000
@@ -38,6 +38,8 @@ Use this decision table when Codex renders a job:
 | --- | --- | --- |
 | SM120 and <=36,864 MiB | `true` | Required by the current 32 GiB candidate |
 | SM120 and >=65,536 MiB | omitted / `false` | High-memory speed default |
+| SM100 and >=180,000 MiB | `false` | `experimental-sm100-high-memory`; B200 validation only |
+| SM103 and >=250,000 MiB | `false` | `experimental-sm103-high-memory`; B300 validation only |
 | Any other capacity or compute capability, including a 48 GB Ada card | `true` initially | Experimental; do not disable until the same device passes the acceptance gates |
 
 Always record the queried GPU name, total MiB, compute capability, and the final
@@ -121,11 +123,59 @@ Do not add CPU/layerwise offload unless a separate memory goal requires it. The
 96 GiB characterization measured 30.045 FPS at 832x480 and 11.356 FPS at
 1248x704 for local TAEHV, but those numbers do not prove a 32 GiB deployment.
 
+### `experimental-sm100-high-memory`
+
+Select this experimental profile only when `nvidia-smi` reports compute
+capability `10.0` and at least 180,000 MiB of visible physical memory. Record the
+reported GPU name as well; `B200` in the name confirms the intended device but
+does not override either gate.
+
+Add these explicit server settings:
+
+```text
+--performance-mode speed
+--vae-config.taehv-checkpoint-path <taehv-checkpoint>
+--vae-cpu-offload false
+```
+
+Validation status:
+
+- The current B200 `a3` observation is only no-OOM and run-progress evidence for
+  running without VAE CPU offload. It is not a formal successful benchmark and
+  does not validate local TAEHV at 24 FPS.
+- This profile remains experimental and must not be described as
+  production-ready.
+
+### `experimental-sm103-high-memory`
+
+Select this experimental profile only when `nvidia-smi` reports compute
+capability `10.3` and at least 250,000 MiB of visible physical memory. Record the
+reported GPU name as well; `B300` in the name confirms the intended device but
+does not override either gate.
+
+Add these explicit server settings:
+
+```text
+--performance-mode speed
+--vae-config.taehv-checkpoint-path <taehv-checkpoint>
+--vae-cpu-offload false
+```
+
+Validation status:
+
+- The exact-720 SP1 result recorded in `README.md` completed at 1248x704 with a
+  51,588 MiB per-GPU peak. This is same-device physical-fit evidence for the
+  high-memory B300 profile.
+- That historical result does not validate the current local TAEHV path at
+  24 FPS. This profile remains experimental and must not be described as
+  production-ready.
+
 ### Unclassified hardware
 
-Do not silently choose a nearby profile for non-SM120 GPUs or memory between the
-two ranges. Generate a manifest only after marking the profile experimental and
-defining an explicit memory/performance validation.
+Do not silently choose a nearby profile when the reported compute capability and
+visible memory do not match one of the exact gates above. Generate a manifest
+only after marking the profile experimental and defining an explicit
+memory/performance validation.
 
 ## Acceptance gates
 
