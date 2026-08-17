@@ -223,13 +223,13 @@ assert.match(
 );
 assert.match(
   appJs,
-  /const NATIVE_MEDIA_PROFILE\s*=\s*"native_v1";[\s\S]*const RIFE2X_MEDIA_PROFILE\s*=\s*"rife2x_v1";/,
+  /const NATIVE_MEDIA_PROFILE\s*=\s*"native_v1";[\s\S]*const RIFE2X_MEDIA_PROFILE\s*=\s*"rife2x_v1";[\s\S]*const RIFE3X_MEDIA_PROFILE\s*=\s*"rife3x_v1";/,
   "Zing interpolation should use versioned media profiles",
 );
 assert.match(
   appJs,
-  /function readFrameInterpolationParams\(key = "minwm"\)[\s\S]*key !== "minwm"[\s\S]*return \{\};[\s\S]*realtime_media_profile: RIFE2X_MEDIA_PROFILE/,
-  "only Zing should be able to request the RIFE media profile",
+  /function readFrameInterpolationParams\(key = "minwm"\)[\s\S]*key !== "minwm"[\s\S]*return \{\};[\s\S]*realtime_media_profile: RIFE3X_MEDIA_PROFILE/,
+  "only Zing should explicitly request the exact RIFE 3x media profile",
 );
 assert.match(
   appJs,
@@ -243,7 +243,7 @@ assert.doesNotMatch(
 );
 assert.match(
   appJs,
-  /return mediaProfileNegotiated && effectiveMediaProfile === RIFE2X_MEDIA_PROFILE[\s\S]*\? 2/,
+  /function frameInterpolationMultiplier\(key = "minwm"\)[\s\S]*mediaProfileNegotiated[\s\S]*interpolationMultiplier\(effectiveMediaProfile\)/,
   "playback FPS should increase only after an effective server acceptance",
 );
 assert.match(
@@ -263,8 +263,8 @@ assert.match(
 );
 assert.match(
   appJs,
-  /插入帧只改善平滑度，不提高实时速度/,
-  "the UI must not claim interpolation raises the model's realtime factor",
+  /timeline 不是实际 wall\/presented FPS/,
+  "the UI must not present the negotiated timeline as measured or displayed FPS",
 );
 assert.match(
   appJs,
@@ -273,18 +273,28 @@ assert.match(
 );
 assert.match(
   appJs,
+  /message\.type === "chunk_telemetry"[\s\S]*playbackController\.observeServerStats\(message, receivedAt\)/,
+  "smooth WebP cadence must consume measured chunk output per wall second",
+);
+assert.match(
+  appJs,
+  /playbackController\.setTargetFps\(previewPlaybackTargetFps\("minwm"\), \{[\s\S]*preserveCadence:[\s\S]*mediaProfileNegotiated && isInterpolatedMediaProfile\(effectiveMediaProfile\)/,
+  "timeline profile acceptance must preserve the conservative startup cadence",
+);
+assert.match(
+  appJs,
   /source\/wall[\s\S]*interpolated\/wall[\s\S]*presented[\s\S]*timeline/,
   "the UI should label source, interpolated, presented, and timeline rates",
 );
 assert.match(
   appJs,
-  /RIFE 2x requires WebP\/raw until H\.264 timebase support is deployed/,
+  /negotiated RIFE requires WebP until H\.264 timebase support is deployed/,
   "H.264 plus RIFE must fail closed until its timebase is profile aware",
 );
 assert.match(
   appJs,
-  /await minwmH264Session\.connect\(h264CompressionInit\(init, "minwm"\)\);[\s\S]*catch \(error\)[\s\S]*return openPrimarySession\(init, url\);/,
-  "a RIFE request rejected by H.264 must fall back to the WebP/raw primary session",
+  /const requiresWebP = isInterpolatedMediaProfile\(init\.realtime_media_profile\);[\s\S]*realtime_output_format: "webp"[\s\S]*minwmH264Session && !requiresWebP[\s\S]*else if \(minwmH264Session && requiresWebP\)[\s\S]*return openPrimarySession\(fallbackInit, url\);/,
+  "an interpolated request must bypass H.264 and force the WebP primary session",
 );
 assert.match(
   appJs,

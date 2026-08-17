@@ -39,7 +39,6 @@ from sglang.multimodal_gen.runtime.realtime.async_vae_worker import (
     TAEHVEngine,
 )
 from sglang.multimodal_gen.runtime.realtime.media_profile import (
-    RealtimeMediaProfile,
     parse_media_profile,
     validate_source_timeline_fps,
 )
@@ -106,7 +105,9 @@ def create_app(
             "encoded_frames_per_batch": worker.encoded_frames_per_batch,
             "decode_parallel_size": getattr(worker.engine, "decode_parallel_size", 1),
         }
-        if RealtimeMediaProfile.RIFE2X_V1 in worker.supported_media_profiles:
+        if any(
+            profile.interpolation_enabled for profile in worker.supported_media_profiles
+        ):
             health_fields.update(
                 supported_media_profiles=[
                     profile.value for profile in worker.supported_media_profiles
@@ -421,7 +422,7 @@ def create_app(
                             duration_ms=round(result.encode_ms, 3),
                             **common_trace,
                         )
-                        if result.media_profile is RealtimeMediaProfile.RIFE2X_V1:
+                        if result.media_profile.interpolation_enabled:
                             log_realtime_trace(
                                 logger,
                                 trace_session,
@@ -449,7 +450,7 @@ def create_app(
                                 "num_frames": result.num_frames,
                                 "is_final_chunk": header.is_final_chunk,
                             }
-                            if result.media_profile is RealtimeMediaProfile.RIFE2X_V1:
+                            if result.media_profile.interpolation_enabled:
                                 media_completion_fields.update(
                                     source_num_frames=result.source_num_frames,
                                     output_num_frames=result.output_num_frames,
@@ -487,7 +488,7 @@ def create_app(
                             "post_decode_ms": result.post_decode_ms,
                             "encode_ms": result.encode_ms,
                         }
-                        if result.media_profile is RealtimeMediaProfile.RIFE2X_V1:
+                        if result.media_profile.interpolation_enabled:
                             chunk_complete_fields.update(
                                 source_num_frames=result.source_num_frames,
                                 output_num_frames=result.output_num_frames,

@@ -235,16 +235,34 @@ class AsyncVAEWorker:
         if self.rife_processor is not None and bool(
             getattr(self.rife_processor, "ready", False)
         ):
-            profiles.append(RealtimeMediaProfile.RIFE2X_V1)
+            # A legacy injected processor implements only the historical
+            # midpoint API. Do not advertise 3x unless the warmed processor
+            # explicitly declares that capability.
+            declared = getattr(
+                self.rife_processor,
+                "profiles",
+                (RealtimeMediaProfile.RIFE2X_V1.value,),
+            )
+            for value in declared:
+                profile = parse_media_profile(value)
+                if profile.interpolation_enabled and profile not in profiles:
+                    profiles.append(profile)
         return tuple(profiles)
 
     @property
     def media_capability_fingerprint(self) -> str | None:
         """Fingerprint used to verify a homogeneous RIFE worker pool."""
 
-        if RealtimeMediaProfile.RIFE2X_V1 not in self.supported_media_profiles:
+        if not any(
+            profile.interpolation_enabled for profile in self.supported_media_profiles
+        ):
             return None
-        return f"rife2x_v1:{self.rife_processor.weights_sha256}"
+        profiles = "+".join(
+            profile.value
+            for profile in self.supported_media_profiles
+            if profile.interpolation_enabled
+        )
+        return f"{profiles}:{self.rife_processor.weights_sha256}"
 
     def _accept_media_profile(self, request: SessionOpen) -> MediaProfileAcceptance:
         requested = parse_media_profile(request.media_profile)
@@ -254,7 +272,7 @@ class AsyncVAEWorker:
                 f"realtime media profile is unavailable: {requested.value}"
             )
         weights_sha256 = None
-        if requested is RealtimeMediaProfile.RIFE2X_V1:
+        if requested.interpolation_enabled:
             weights_sha256 = str(
                 getattr(self.rife_processor, "weights_sha256", "") or ""
             ).lower()
@@ -501,9 +519,10 @@ class AsyncVAEWorker:
             or state.last_media_action_version != header.action_version
             or state.last_media_prompt_version != header.prompt_version
         )
-        # The first session chunk naturally has 2N-1 output frames.  A later
-        # control cutover must retain the global 2x cadence without blending
-        # old/new states, so its missing seam slot holds the *new* first frame.
+        # The first session chunk naturally omits the seam intermediates.  A
+        # later control cutover must retain the negotiated cadence without
+        # blending old/new states, so all missing seam slots hold the *new*
+        # first frame.
         if (
             reset_media_boundary
             and media_boundary_was_initialized
@@ -515,8 +534,7 @@ class AsyncVAEWorker:
         state.last_media_event_id = header.event_id
         state.last_media_action_version = header.action_version
         state.last_media_prompt_version = header.prompt_version
-        if reset_media_boundary:
-            state.previous_source_frame = None
+        reset_media_boundary_pending = reset_media_boundary
 
         def schedule_encode(frames: torch.Tensor) -> None:
             nonlocal callback_tail, frame_batch_index
@@ -579,11 +597,22 @@ class AsyncVAEWorker:
                     if state.media_acceptance.interpolation_enabled:
                         interpolation_started = time.perf_counter()
                         try:
-                            frames = await self._interpolate_rife2x(
+                            frames = await self._interpolate_rife(
                                 state,
                                 frames,
+                                multiplier=(
+                                    state.media_acceptance.effective.output_timeline_fps_multiplier
+                                ),
                                 hold_new_boundary_frame=(
                                     state.pending_media_boundary_hold
+                                ),
+                                # A cutover can yield an empty decoder batch.
+                                # Keep both the cadence hold and the old-seam
+                                # reset pending until the first non-empty
+                                # batch succeeds.
+                                reset_previous=(
+                                    reset_media_boundary_pending
+                                    or state.pending_media_boundary_hold
                                 ),
                             )
                         finally:
@@ -591,6 +620,7 @@ class AsyncVAEWorker:
                                 time.perf_counter() - interpolation_started
                             ) * 1000.0
                         state.pending_media_boundary_hold = False
+                        reset_media_boundary_pending = False
 
                     pending_frames.append(frames)
                     pending_frame_count += int(frames.shape[2])
@@ -682,28 +712,35 @@ class AsyncVAEWorker:
             rife_interpolation_ms=rife_interpolation_ms,
         )
 
-    async def _interpolate_rife2x(
+    async def _interpolate_rife(
         self,
         state: _WorkerSession,
         frames: torch.Tensor,
         *,
+        multiplier: int,
         hold_new_boundary_frame: bool = False,
+        reset_previous: bool = False,
     ) -> torch.Tensor:
-        """Interleave RIFE midpoints while preserving seam cadence.
+        """Interleave exact RIFE samples while preserving seam cadence.
 
         A control cutover never blends the previous state into the new one.
-        Instead its otherwise-missing midpoint slot repeats the new first
-        frame, so every non-initial source chunk still emits exactly 2N frames.
+        Instead its otherwise-missing seam slots repeat the new first frame,
+        so every non-initial source chunk still emits exactly ``multiplier*N``
+        frames.  The previous-frame state is committed only after every RIFE
+        inference and shape check succeeds.
         """
 
         processor = self.rife_processor
         if processor is None:
             raise RuntimeError("RIFE media processor is unavailable")
+        if multiplier not in (2, 3):
+            raise RuntimeError(f"unsupported realtime RIFE multiplier: {multiplier}")
+        intermediate_count = multiplier - 1
         # Preserve the decoder tensor on its current device until RIFE has read
         # it.  A taehv CUDA frame would otherwise make a needless D2H -> H2D
         # round trip before interpolation.
         current = frames[:, :3].contiguous()
-        previous = state.previous_source_frame
+        previous = None if reset_previous else state.previous_source_frame
         if previous is not None and (
             previous.shape[0] != current.shape[0]
             or previous.shape[1] != current.shape[1]
@@ -712,76 +749,108 @@ class AsyncVAEWorker:
             previous = None
             hold_new_boundary_frame = True
         source = current if previous is None else torch.cat((previous, current), dim=2)
+        next_previous = current[:, :, -1:].clone()
         if source.shape[2] < 2:
-            state.previous_source_frame = current[:, :, -1:].clone()
             if hold_new_boundary_frame:
-                current = torch.cat((current, current), dim=2)
-            return current.to(device="cpu", dtype=torch.float32)
+                current = current.repeat(1, 1, multiplier, 1, 1)
+            output = current.to(device="cpu", dtype=torch.float32)
+            state.previous_source_frame = next_previous
+            return output
 
-        midpoints = await _run_non_preemptible_thread_call(
-            processor.interpolate_midpoints,
-            source,
-        )
-        expected_midpoints = int(source.shape[2]) - 1
+        if multiplier == 2:
+            midpoints = await _run_non_preemptible_thread_call(
+                processor.interpolate_midpoints,
+                source,
+            )
+            intermediates = midpoints.unsqueeze(3)
+        else:
+            interpolate = getattr(processor, "interpolate_intermediates", None)
+            if not callable(interpolate):
+                raise RuntimeError("RIFE processor does not support 3x interpolation")
+            intermediates = await _run_non_preemptible_thread_call(
+                interpolate,
+                source,
+                multiplier=multiplier,
+            )
+        expected_pairs = int(source.shape[2]) - 1
         expected_shape = (
             int(current.shape[0]),
             3,
-            expected_midpoints,
+            expected_pairs,
+            intermediate_count,
             int(current.shape[-2]),
             int(current.shape[-1]),
         )
-        if tuple(midpoints.shape) != expected_shape:
+        if tuple(intermediates.shape) != expected_shape:
             raise RuntimeError(
-                "RIFE midpoint shape mismatch: "
-                f"expected {expected_shape}, got {tuple(midpoints.shape)}"
+                "RIFE intermediate shape mismatch: "
+                f"expected {expected_shape}, got {tuple(intermediates.shape)}"
             )
-        # Commit the seam only after interpolation succeeds.  A failed job
-        # must not poison state if its error is inspected or retried.
-        state.previous_source_frame = current[:, :, -1:].clone()
         current = current.to(device="cpu", dtype=torch.float32)
-        midpoints = midpoints.to(device="cpu", dtype=torch.float32).contiguous()
+        intermediates = intermediates.to(device="cpu", dtype=torch.float32).contiguous()
+        batch, _channels, current_count, height, width = current.shape
         if previous is None:
             if hold_new_boundary_frame:
                 output = torch.empty(
                     (
-                        current.shape[0],
+                        batch,
                         3,
-                        current.shape[2] * 2,
-                        current.shape[-2],
-                        current.shape[-1],
+                        current_count * multiplier,
+                        height,
+                        width,
                     ),
                     dtype=torch.float32,
                 )
-                output[:, :, 0] = current[:, :, 0]
-                output[:, :, 1::2] = current
-                output[:, :, 2::2] = midpoints
+                grouped = output.view(
+                    batch, 3, current_count, multiplier, height, width
+                )
+                grouped[:, :, 0] = current[:, :, 0:1].expand(-1, -1, multiplier, -1, -1)
+                if current_count > 1:
+                    grouped[:, :, 1:, :intermediate_count] = intermediates
+                    grouped[:, :, 1:, intermediate_count] = current[:, :, 1:]
+                state.previous_source_frame = next_previous
                 return output
             output = torch.empty(
                 (
-                    current.shape[0],
+                    batch,
                     3,
-                    current.shape[2] * 2 - 1,
-                    current.shape[-2],
-                    current.shape[-1],
+                    current_count * multiplier - intermediate_count,
+                    height,
+                    width,
                 ),
                 dtype=torch.float32,
             )
-            output[:, :, 0::2] = current
-            output[:, :, 1::2] = midpoints
+            output[:, :, 0] = current[:, :, 0]
+            if current_count > 1:
+                grouped = output[:, :, 1:].view(
+                    batch,
+                    3,
+                    current_count - 1,
+                    multiplier,
+                    height,
+                    width,
+                )
+                grouped[:, :, :, :intermediate_count] = intermediates
+                grouped[:, :, :, intermediate_count] = current[:, :, 1:]
+            state.previous_source_frame = next_previous
             return output
 
         output = torch.empty(
             (
-                current.shape[0],
+                batch,
                 3,
-                current.shape[2] * 2,
-                current.shape[-2],
-                current.shape[-1],
+                current_count * multiplier,
+                height,
+                width,
             ),
             dtype=torch.float32,
         )
-        output[:, :, 0::2] = midpoints
-        output[:, :, 1::2] = current
+        grouped = output.view(batch, 3, current_count, multiplier, height, width)
+        grouped[:, :, :, :intermediate_count] = intermediates
+        grouped[:, :, :, intermediate_count] = current
+        # Commit the seam only after inference, validation, transfer, and
+        # output assembly all succeed. A failed job must be safely retryable.
+        state.previous_source_frame = next_previous
         return output
 
     async def _iter_decoded_frames(self, decoder, source, *, first_chunk):

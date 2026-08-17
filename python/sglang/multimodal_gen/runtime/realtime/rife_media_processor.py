@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-"""Strictly local RIFE 2x runtime for the remote realtime VAE worker."""
+"""Strictly local RIFE runtime for the remote realtime VAE worker."""
 
 from __future__ import annotations
 
@@ -127,13 +127,19 @@ def _load_strict_rife_state(
 
 
 class RIFE2xMediaProcessor:
-    """Preloaded RIFE 4.22.lite midpoint generator.
+    """Preloaded RIFE 4.22.lite realtime interpolation engine.
 
     The caller supplies a local checkpoint and an exact digest at process
-    startup.  No code path in this class downloads weights at runtime.
+    startup.  No code path in this class downloads weights at runtime.  The
+    historical class name remains wire/source compatible, while the engine
+    now serves both the exact 2x midpoint profile and the exact 3x profile.
     """
 
+    # Keep the singular attribute for callers that introspect the historical
+    # 2x-only processor while advertising the complete negotiated set through
+    # ``profiles``.
     profile = "rife2x_v1"
+    profiles = (profile, "rife3x_v1")
 
     def __init__(
         self,
@@ -178,6 +184,16 @@ class RIFE2xMediaProcessor:
         first = torch.zeros((1, 3, height, width), device=self.device)
         second = torch.ones_like(first)
         self.model.inference(first, second, scale=1.0)
+        self.model.inference(
+            first.repeat(2, 1, 1, 1),
+            second.repeat(2, 1, 1, 1),
+            scale=1.0,
+            timestep=torch.tensor(
+                (1.0 / 3.0, 2.0 / 3.0),
+                device=self.device,
+                dtype=first.dtype,
+            )[:, None, None, None],
+        )
         if self.device.type == "cuda":
             torch.cuda.synchronize(self.device)
         self.ready = True
@@ -186,14 +202,39 @@ class RIFE2xMediaProcessor:
     def interpolate_midpoints(self, source_frames: torch.Tensor) -> torch.Tensor:
         """Return one midpoint for every adjacent BCTHW source-frame pair."""
 
+        intermediates = self.interpolate_intermediates(source_frames, multiplier=2)
+        return intermediates[:, :, :, 0].contiguous()
+
+    @torch.inference_mode()
+    def interpolate_intermediates(
+        self,
+        source_frames: torch.Tensor,
+        *,
+        multiplier: int,
+    ) -> torch.Tensor:
+        """Return ordered intermediate frames for every adjacent source pair.
+
+        The result is ``BCPKHW`` where ``P`` is the adjacent-pair count and
+        ``K = multiplier - 1``.  For 3x, each pair is evaluated directly at
+        timesteps 1/3 and 2/3.  Direct arbitrary-time inference avoids the
+        recursive-quarter semantics of RIFE 4x and gives the wire profile an
+        exact, uniform 3x cadence.
+        """
+
         if not isinstance(source_frames, torch.Tensor) or source_frames.ndim != 5:
             raise ValueError("RIFE source frames must be a BCTHW tensor")
         if source_frames.shape[0] != 1 or source_frames.shape[1] < 3:
             raise ValueError("RIFE source frames require one RGB sample")
+        if multiplier not in (2, 3):
+            raise ValueError("realtime RIFE multiplier must be 2 or 3")
+        intermediate_count = multiplier - 1
         pair_count = int(source_frames.shape[2]) - 1
         if pair_count < 1:
             height, width = source_frames.shape[-2:]
-            return torch.empty((1, 3, 0, height, width), dtype=torch.float32)
+            return torch.empty(
+                (1, 3, 0, intermediate_count, height, width),
+                dtype=torch.float32,
+            )
 
         source = (
             source_frames[0, :3]
@@ -201,19 +242,43 @@ class RIFE2xMediaProcessor:
             .contiguous()
             .to(device=self.device, dtype=torch.float32, non_blocking=True)
         )
-        midpoint_groups: list[torch.Tensor] = []
-        for start in range(0, pair_count, self.max_batch_pairs):
-            end = min(start + self.max_batch_pairs, pair_count)
-            midpoint_groups.append(
-                self.model.inference(
-                    source[start:end],
-                    source[start + 1 : end + 1],
+        # Keep the number of inference samples bounded by the existing batch
+        # gate.  A 3x pair contributes two arbitrary-time samples.
+        pairs_per_batch = max(1, self.max_batch_pairs // intermediate_count)
+        intermediate_groups: list[torch.Tensor] = []
+        for start in range(0, pair_count, pairs_per_batch):
+            end = min(start + pairs_per_batch, pair_count)
+            left = source[start:end]
+            right = source[start + 1 : end + 1]
+            group_pairs = end - start
+            if multiplier == 2:
+                inferred = self.model.inference(left, right, scale=1.0)
+            else:
+                left = left.repeat_interleave(intermediate_count, dim=0)
+                right = right.repeat_interleave(intermediate_count, dim=0)
+                timestep = torch.tensor(
+                    (1.0 / 3.0, 2.0 / 3.0),
+                    device=self.device,
+                    dtype=left.dtype,
+                ).repeat(group_pairs)
+                inferred = self.model.inference(
+                    left,
+                    right,
                     scale=1.0,
-                ).detach()
+                    timestep=timestep[:, None, None, None],
+                )
+            intermediate_groups.append(
+                inferred.detach().reshape(
+                    group_pairs,
+                    intermediate_count,
+                    3,
+                    int(source.shape[-2]),
+                    int(source.shape[-1]),
+                )
             )
-        midpoints = torch.cat(midpoint_groups, dim=0)
+        intermediates = torch.cat(intermediate_groups, dim=0)
         return (
-            midpoints.permute(1, 0, 2, 3)
+            intermediates.permute(2, 0, 1, 3, 4)
             .unsqueeze(0)
             .contiguous()
             .to(device="cpu", dtype=torch.float32)

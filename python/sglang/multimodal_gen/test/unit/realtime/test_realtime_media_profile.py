@@ -69,10 +69,12 @@ class _FrameEngine:
 class _AveragingRIFE:
     weights_sha256 = "a" * 64
     ready = True
+    profiles = ("rife2x_v1", "rife3x_v1")
 
     def __init__(self) -> None:
         self.calls: list[tuple[int, ...]] = []
         self.ranges: list[tuple[float, float]] = []
+        self.intermediate_multipliers: list[int] = []
 
     def interpolate_midpoints(self, source_frames: torch.Tensor) -> torch.Tensor:
         self.calls.append(tuple(source_frames.shape))
@@ -80,6 +82,25 @@ class _AveragingRIFE:
         return (
             source_frames[:, :3, :-1].float() + source_frames[:, :3, 1:].float()
         ) / 2
+
+    def interpolate_intermediates(
+        self,
+        source_frames: torch.Tensor,
+        *,
+        multiplier: int,
+    ) -> torch.Tensor:
+        self.calls.append(tuple(source_frames.shape))
+        self.ranges.append((float(source_frames.min()), float(source_frames.max())))
+        self.intermediate_multipliers.append(multiplier)
+        left = source_frames[:, :3, :-1].float()
+        right = source_frames[:, :3, 1:].float()
+        return torch.stack(
+            [
+                left + (right - left) * (offset / multiplier)
+                for offset in range(1, multiplier)
+            ],
+            dim=3,
+        )
 
 
 class _NegotiationSocket:
@@ -155,6 +176,8 @@ def test_media_profile_parser_is_strict_and_typed():
         parse_media_profile(RealtimeMediaProfile.RIFE2X_V1)
         is RealtimeMediaProfile.RIFE2X_V1
     )
+    assert parse_media_profile("rife3x_v1") is RealtimeMediaProfile.RIFE3X_V1
+    assert RealtimeMediaProfile.RIFE3X_V1.output_timeline_fps_multiplier == 3
     with pytest.raises(ProtocolViolation, match="unsupported realtime media profile"):
         parse_media_profile("rife-latest")
 
@@ -265,7 +288,7 @@ def test_remote_legacy_init_is_rejected_before_session_or_media_messages(
         messages = [msgspec.msgpack.decode(payload) for payload in socket.sent]
         assert len(messages) == 1
         assert messages[0]["type"] == "error"
-        assert "realtime_media_profile=rife2x_v1" in messages[0]["content"]
+        assert "explicit realtime_media_profile" in messages[0]["content"]
         assert not any(
             message.get("type") in {"session_ready", "frame_batch"}
             for message in messages
@@ -340,13 +363,17 @@ def test_strict_local_rife_processor_batches_midpoints(tmp_path):
     class _Model:
         def __init__(self):
             self.flownet = _Flownet()
+            self.timesteps = []
 
         def eval(self):
             return self
 
-        def inference(self, first, second, scale=1.0):
+        def inference(self, first, second, scale=1.0, timestep=0.5):
             assert scale == 1.0
-            return (first + second) / 2
+            self.timesteps.append(timestep)
+            if torch.is_tensor(timestep):
+                return first + (second - first) * timestep
+            return first + (second - first) * float(timestep)
 
     torch.save({"module.weight": torch.ones(1)}, weight_file)
     digest = hashlib.sha256(weight_file.read_bytes()).hexdigest()
@@ -365,6 +392,31 @@ def test_strict_local_rife_processor_batches_midpoints(tmp_path):
     torch.testing.assert_close(
         result[0, 0, :, 0, 0],
         torch.tensor([0.1, 0.3, 0.6]),
+    )
+    exact_3x = processor.interpolate_intermediates(
+        _frames(0.0, 0.3, 0.6, 0.9),
+        multiplier=3,
+    )
+    assert exact_3x.shape == (1, 3, 3, 2, 2, 2)
+    torch.testing.assert_close(
+        exact_3x[0, 0, :, :, 0, 0],
+        torch.tensor(
+            [
+                [0.1, 0.2],
+                [0.4, 0.5],
+                [0.7, 0.8],
+            ]
+        ),
+    )
+    arbitrary_timesteps = [
+        value.flatten().tolist()
+        for value in processor.model.timesteps
+        if torch.is_tensor(value)
+    ]
+    assert arbitrary_timesteps
+    assert all(
+        values == pytest.approx([1.0 / 3.0, 2.0 / 3.0])
+        for values in arbitrary_timesteps
     )
 
 
@@ -504,6 +556,32 @@ def test_worker_does_not_advertise_rife_before_processor_warmup():
     asyncio.run(worker.close_all())
 
 
+def test_worker_keeps_legacy_midpoint_only_processor_at_rife2x_capability():
+    class _LegacyMidpointRIFE:
+        ready = True
+        weights_sha256 = "d" * 64
+
+        def interpolate_midpoints(self, source_frames):
+            return (
+                source_frames[:, :3, :-1].float() + source_frames[:, :3, 1:].float()
+            ) / 2
+
+    processor = _LegacyMidpointRIFE()
+    worker = AsyncVAEWorker(
+        _FrameEngine([]),
+        max_sessions=1,
+        rife_processor=processor,
+    )
+    assert worker.supported_media_profiles == (
+        RealtimeMediaProfile.NATIVE_V1,
+        RealtimeMediaProfile.RIFE2X_V1,
+    )
+    assert worker.media_capability_fingerprint == (
+        f"rife2x_v1:{processor.weights_sha256}"
+    )
+    asyncio.run(worker.close_all())
+
+
 def test_worker_native_profile_is_byte_and_count_compatible():
     async def scenario():
         processor = _AveragingRIFE()
@@ -609,6 +687,182 @@ def test_worker_rife2x_preserves_seam_and_resets_on_event_or_prompt_cutover():
         assert b'stage="rife_interpolation"' in metrics
         assert b'stage="vae_actor_wait"' in metrics
         assert b'stage="frame_interpolation"' in metrics
+        await worker.close_all()
+
+    asyncio.run(scenario())
+
+
+def test_worker_rife3x_preserves_exact_cadence_and_holds_cutover_slots():
+    async def scenario():
+        processor = _AveragingRIFE()
+        worker = AsyncVAEWorker(
+            _FrameEngine(
+                [
+                    _frames(0.0, 0.6),
+                    _frames(0.0, 0.6),
+                    _frames(0.4, 1.0),
+                ]
+            ),
+            max_sessions=1,
+            encoded_frames_per_batch=16,
+            rife_processor=processor,
+        )
+        acceptance = await worker.open(
+            SessionOpen(
+                "session",
+                "generation",
+                media_profile=RealtimeMediaProfile.RIFE3X_V1,
+                source_timeline_fps=24,
+            )
+        )
+        assert acceptance.output_timeline_fps == 72
+        latent = torch.zeros((1, 4, 1, 1, 1), dtype=torch.bfloat16)
+
+        first = await worker.decode(_header(0, event_id=7, prompt_version=0), latent)
+        second = await worker.decode(_header(1, event_id=7, prompt_version=0), latent)
+        cutover = await worker.decode(_header(2, event_id=8, prompt_version=0), latent)
+
+        # The session begins with 3N-2 because no preceding source endpoint
+        # exists. Every later chunk emits exactly 3N frames.
+        assert (first.source_num_frames, first.output_num_frames) == (2, 4)
+        assert _red_values(first) == [0, 51, 102, 153]
+        assert (second.source_num_frames, second.output_num_frames) == (2, 6)
+        assert _red_values(second) == [102, 51, 0, 51, 102, 153]
+        # A control cutover holds both missing 1/3 and 2/3 seam slots at the
+        # new first endpoint. It never interpolates the old state into it.
+        assert (cutover.source_num_frames, cutover.output_num_frames) == (2, 6)
+        assert _red_values(cutover) == [102, 102, 102, 153, 204, 255]
+        assert (
+            sum(result.output_num_frames for result in (first, second, cutover))
+            == 3 * sum(result.source_num_frames for result in (first, second, cutover))
+            - 2
+        )
+        assert [shape[2] for shape in processor.calls] == [2, 3, 2]
+        assert processor.intermediate_multipliers == [3, 3, 3]
+        await worker.close_all()
+
+    asyncio.run(scenario())
+
+
+def test_worker_rife3x_empty_single_and_shape_change_keep_global_cadence():
+    async def scenario():
+        shape_changed = torch.full(
+            (1, 3, 1, 3, 2),
+            0.2,
+            dtype=torch.float32,
+        )
+        worker = AsyncVAEWorker(
+            _FrameEngine(
+                [
+                    _frames(0.0),
+                    torch.empty((1, 3, 0, 2, 2), dtype=torch.float32),
+                    _frames(0.6),
+                    shape_changed,
+                ]
+            ),
+            max_sessions=1,
+            encoded_frames_per_batch=16,
+            rife_processor=_AveragingRIFE(),
+        )
+        await worker.open(
+            SessionOpen(
+                "session",
+                "generation",
+                media_profile=RealtimeMediaProfile.RIFE3X_V1,
+            )
+        )
+        latent = torch.zeros((1, 4, 1, 1, 1), dtype=torch.bfloat16)
+        first = await worker.decode(
+            _header(0, event_id=None, action_version=0, prompt_version=0),
+            latent,
+        )
+        empty_cutover = await worker.decode(
+            _header(1, event_id=None, action_version=1, prompt_version=0),
+            latent,
+        )
+        held_single = await worker.decode(
+            _header(2, event_id=None, action_version=1, prompt_version=0),
+            latent,
+        )
+        changed_shape = await worker.decode(
+            _header(3, event_id=None, action_version=1, prompt_version=0),
+            latent,
+        )
+
+        assert (first.source_num_frames, first.output_num_frames) == (1, 1)
+        assert (empty_cutover.source_num_frames, empty_cutover.output_num_frames) == (
+            0,
+            0,
+        )
+        assert (held_single.source_num_frames, held_single.output_num_frames) == (
+            1,
+            3,
+        )
+        assert _red_values(held_single) == [153, 153, 153]
+        assert (changed_shape.source_num_frames, changed_shape.output_num_frames) == (
+            1,
+            3,
+        )
+        assert _red_values(changed_shape) == [51, 51, 51]
+        results = (first, empty_cutover, held_single, changed_shape)
+        assert (
+            sum(result.output_num_frames for result in results)
+            == 3 * sum(result.source_num_frames for result in results) - 2
+        )
+        await worker.close_all()
+
+    asyncio.run(scenario())
+
+
+def test_worker_rife3x_shape_failure_does_not_commit_previous_frame():
+    class _ShapeFailingRIFE(_AveragingRIFE):
+        fail = True
+
+        def interpolate_intermediates(
+            self,
+            source_frames: torch.Tensor,
+            *,
+            multiplier: int,
+        ) -> torch.Tensor:
+            result = super().interpolate_intermediates(
+                source_frames,
+                multiplier=multiplier,
+            )
+            return result[:, :, :, :1] if self.fail else result
+
+    async def scenario():
+        processor = _ShapeFailingRIFE()
+        worker = AsyncVAEWorker(
+            _FrameEngine([]),
+            max_sessions=1,
+            rife_processor=processor,
+        )
+        previous = _frames(0.9)
+        state = SimpleNamespace(previous_source_frame=previous.clone())
+        current = _frames(0.0, 0.6)
+        with pytest.raises(RuntimeError, match="intermediate shape mismatch"):
+            await worker._interpolate_rife(
+                state,
+                current,
+                multiplier=3,
+                hold_new_boundary_frame=True,
+                reset_previous=True,
+            )
+        torch.testing.assert_close(state.previous_source_frame, previous)
+
+        processor.fail = False
+        output = await worker._interpolate_rife(
+            state,
+            current,
+            multiplier=3,
+            hold_new_boundary_frame=True,
+            reset_previous=True,
+        )
+        torch.testing.assert_close(
+            output[0, 0, :, 0, 0],
+            torch.tensor([0.0, 0.0, 0.0, 0.2, 0.4, 0.6]),
+        )
+        torch.testing.assert_close(state.previous_source_frame, _frames(0.6))
         await worker.close_all()
 
     asyncio.run(scenario())
@@ -1175,6 +1429,54 @@ def test_client_uses_only_server_accepted_rife_profile_and_timing():
     asyncio.run(scenario())
 
 
+def test_client_accepts_explicit_rife3x_timeline_72_profile():
+    async def scenario():
+        digest = "c" * 64
+        socket = _NegotiationSocket(
+            encode_message(
+                "session_accepted",
+                session_id="session",
+                generation_id="generation",
+                decoder_backend="taehv",
+                decoder_fidelity="approximate",
+                requested_media_profile="rife3x_v1",
+                effective_media_profile="rife3x_v1",
+                source_timeline_fps=24,
+                output_timeline_fps=72,
+                media_weights_sha256=digest,
+            )
+        )
+
+        async def connect_factory(*args, **kwargs):
+            del args, kwargs
+            return socket
+
+        client = RealtimeVAEClient(
+            "ws://vae",
+            session_id="session",
+            generation_id="generation",
+            transport="websocket",
+            connect_factory=connect_factory,
+        )
+        acceptance = await client.open(
+            decoder_backend="taehv",
+            output_format="webp",
+            quality=80,
+            preview_max_width=832,
+            media_profile=RealtimeMediaProfile.RIFE3X_V1,
+            source_timeline_fps=24,
+        )
+        session_open = decode_message(await socket.sent.get())
+        assert session_open["media_profile"] == "rife3x_v1"
+        assert session_open["source_timeline_fps"] == 24
+        assert acceptance.effective is RealtimeMediaProfile.RIFE3X_V1
+        assert acceptance.output_timeline_fps == 72
+        assert acceptance.weights_sha256 == digest
+        await client.close()
+
+    asyncio.run(scenario())
+
+
 def test_client_native_handshake_adds_no_wire_fields_or_messages():
     async def scenario():
         socket = _NegotiationSocket(
@@ -1253,13 +1555,51 @@ def test_client_rejects_silently_downgraded_rife_frame_counts():
         transport="websocket",
     )
     with pytest.raises(ProtocolViolation, match="expected 3, got 2"):
-        client._validate_rife_frame_counts(2, 2)
+        client._validate_rife_frame_counts(
+            2,
+            2,
+            RealtimeMediaProfile.RIFE2X_V1,
+        )
     # An empty source chunk neither starts nor advances the media cadence.
-    client._validate_rife_frame_counts(0, 0)
-    client._validate_rife_frame_counts(2, 3)
+    client._validate_rife_frame_counts(0, 0, RealtimeMediaProfile.RIFE2X_V1)
+    client._validate_rife_frame_counts(2, 3, RealtimeMediaProfile.RIFE2X_V1)
     with pytest.raises(ProtocolViolation, match="expected 4, got 3"):
-        client._validate_rife_frame_counts(2, 3)
-    client._validate_rife_frame_counts(2, 4)
+        client._validate_rife_frame_counts(2, 3, RealtimeMediaProfile.RIFE2X_V1)
+    client._validate_rife_frame_counts(2, 4, RealtimeMediaProfile.RIFE2X_V1)
+
+    rife3_client = RealtimeVAEClient(
+        "ws://vae",
+        session_id="session",
+        generation_id="generation",
+        transport="websocket",
+    )
+    rife3_client._validate_rife_frame_counts(
+        0,
+        0,
+        RealtimeMediaProfile.RIFE3X_V1,
+    )
+    with pytest.raises(ProtocolViolation, match="expected 4, got 3"):
+        rife3_client._validate_rife_frame_counts(
+            2,
+            3,
+            RealtimeMediaProfile.RIFE3X_V1,
+        )
+    rife3_client._validate_rife_frame_counts(
+        2,
+        4,
+        RealtimeMediaProfile.RIFE3X_V1,
+    )
+    with pytest.raises(ProtocolViolation, match="expected 6, got 5"):
+        rife3_client._validate_rife_frame_counts(
+            2,
+            5,
+            RealtimeMediaProfile.RIFE3X_V1,
+        )
+    rife3_client._validate_rife_frame_counts(
+        2,
+        6,
+        RealtimeMediaProfile.RIFE3X_V1,
+    )
 
 
 @pytest.mark.parametrize(
@@ -1327,7 +1667,7 @@ def test_client_fails_closed_without_exact_rife_acceptance(
     asyncio.run(scenario())
 
 
-def test_vae_server_reports_authoritative_profile_capability_and_acceptance():
+def test_vae_server_reports_rife3x_timeline_72_capability_and_acceptance():
     processor = _AveragingRIFE()
     worker = AsyncVAEWorker(
         _FrameEngine([_frames(0.0, 1.0)]),
@@ -1338,10 +1678,14 @@ def test_vae_server_reports_authoritative_profile_capability_and_acceptance():
 
     with TestClient(app) as client:
         health = client.get("/health").json()
-        assert health["supported_media_profiles"] == ["native_v1", "rife2x_v1"]
+        assert health["supported_media_profiles"] == [
+            "native_v1",
+            "rife2x_v1",
+            "rife3x_v1",
+        ]
         assert health["rife_weights_sha256"] == processor.weights_sha256
         assert health["media_capability_fingerprint"] == (
-            f"rife2x_v1:{processor.weights_sha256}"
+            f"rife2x_v1+rife3x_v1:{processor.weights_sha256}"
         )
         assert health["media_pool_rollout"] == "homogeneous_only"
         with client.websocket_connect("/v1/realtime_vae/decode") as websocket:
@@ -1353,16 +1697,16 @@ def test_vae_server_reports_authoritative_profile_capability_and_acceptance():
                     decoder_backend="taehv",
                     output_format="webp",
                     quality=80,
-                    media_profile="rife2x_v1",
-                    source_timeline_fps=12,
+                    media_profile="rife3x_v1",
+                    source_timeline_fps=24,
                 )
             )
             accepted = decode_message(websocket.receive_bytes())
             assert accepted["type"] == "session_accepted"
-            assert accepted["requested_media_profile"] == "rife2x_v1"
-            assert accepted["effective_media_profile"] == "rife2x_v1"
-            assert accepted["source_timeline_fps"] == 12
-            assert accepted["output_timeline_fps"] == 24
+            assert accepted["requested_media_profile"] == "rife3x_v1"
+            assert accepted["effective_media_profile"] == "rife3x_v1"
+            assert accepted["source_timeline_fps"] == 24
+            assert accepted["output_timeline_fps"] == 72
             assert accepted["media_weights_sha256"] == processor.weights_sha256
             latents = torch.zeros((1, 4, 1, 1, 1), dtype=torch.bfloat16)
             payload = latents.view(torch.uint8).numpy().tobytes()
@@ -1392,11 +1736,11 @@ def test_vae_server_reports_authoritative_profile_capability_and_acceptance():
             frame_messages = [
                 message for message in messages if message["type"] == "frame_batch"
             ]
-            assert len(frame_messages) == 3
+            assert len(frame_messages) == 4
             assert all(
-                message["media_profile"] == "rife2x_v1"
-                and message["source_timeline_fps"] == 12
-                and message["output_timeline_fps"] == 24
+                message["media_profile"] == "rife3x_v1"
+                and message["source_timeline_fps"] == 24
+                and message["output_timeline_fps"] == 72
                 for message in frame_messages
             )
             complete = next(
@@ -1404,7 +1748,7 @@ def test_vae_server_reports_authoritative_profile_capability_and_acceptance():
             )
             assert (complete["source_num_frames"], complete["output_num_frames"]) == (
                 2,
-                3,
+                4,
             )
             assert complete["rife_interpolation_ms"] >= 0
             assert complete["actor_wait_ms"] >= 0

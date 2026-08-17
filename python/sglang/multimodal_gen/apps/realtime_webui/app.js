@@ -54,9 +54,9 @@ function setStreamChipTransport(key, useH264, fallbackInit = {}) {
 }
 
 function h264CompressionInit(init, key) {
-  if (key === "minwm" && init.realtime_media_profile === "rife2x_v1") {
+  if (key === "minwm" && interpolationMultiplier(init.realtime_media_profile) > 1) {
     throw new Error(
-      "RIFE 2x requires WebP/raw until H.264 timebase support is deployed",
+      "negotiated RIFE requires WebP until H.264 timebase support is deployed",
     );
   }
   const bitrateKbps = Math.max(
@@ -154,6 +154,20 @@ const DEFAULT_PREVIEW_MAX_WIDTH = configuredNumber("previewMaxWidth", 832);
 const MAX_AUTO_PREVIEW_WIDTH = configuredNumber("maxAutoPreviewWidth", 1280);
 const NATIVE_MEDIA_PROFILE = "native_v1";
 const RIFE2X_MEDIA_PROFILE = "rife2x_v1";
+const RIFE3X_MEDIA_PROFILE = "rife3x_v1";
+const RIFE_MEDIA_MULTIPLIERS = Object.freeze({
+  [RIFE2X_MEDIA_PROFILE]: 2,
+  [RIFE3X_MEDIA_PROFILE]: 3,
+});
+
+function interpolationMultiplier(profile) {
+  return Number(RIFE_MEDIA_MULTIPLIERS[String(profile || "")] || 1);
+}
+
+function isInterpolatedMediaProfile(profile) {
+  return interpolationMultiplier(profile) > 1;
+}
+
 let requestedMediaProfile = NATIVE_MEDIA_PROFILE;
 let effectiveMediaProfile = NATIVE_MEDIA_PROFILE;
 let mediaProfileNegotiated = false;
@@ -1039,7 +1053,11 @@ function buildHappyOysterInit(init) {
 let primaryUsesH264 = false;
 const primarySessionAdapter = {
   async connect(init, url) {
-    if (minwmH264Session) {
+    const requiresWebP = isInterpolatedMediaProfile(init.realtime_media_profile);
+    const fallbackInit = requiresWebP
+      ? { ...init, realtime_output_format: "webp" }
+      : init;
+    if (minwmH264Session && !requiresWebP) {
       try {
         await minwmH264Session.connect(h264CompressionInit(init, "minwm"));
         primaryUsesH264 = true;
@@ -1052,9 +1070,17 @@ const primarySessionAdapter = {
         canvas.hidden = false;
         setStreamChipTransport("minwm", false, init);
       }
+    } else if (minwmH264Session && requiresWebP) {
+      // This is a deliberate fail-closed transport decision, not an H.264
+      // startup failure.  H.264 cannot preserve the negotiated RIFE timebase.
+      await minwmH264Session.close("RIFE requires WebP", { emitState: false });
+      minwmH264Video.hidden = true;
+      canvas.hidden = false;
+      setStreamChipTransport("minwm", false, fallbackInit);
+      addHistory("Zing RIFE 使用 WebP · H.264 timebase 尚未支持");
     }
     primaryUsesH264 = false;
-    return openPrimarySession(init, url);
+    return openPrimarySession(fallbackInit, url);
   },
   sendEvent(envelope) {
     return primaryUsesH264
@@ -2298,8 +2324,8 @@ function requestedInputFps(key = "minwm") {
 
 function frameInterpolationMultiplier(key = "minwm") {
   if (key !== "minwm") return 1;
-  return mediaProfileNegotiated && effectiveMediaProfile === RIFE2X_MEDIA_PROFILE
-    ? 2
+  return mediaProfileNegotiated
+    ? interpolationMultiplier(effectiveMediaProfile)
     : 1;
 }
 
@@ -2308,7 +2334,13 @@ function previewPlaybackTargetFps(key = "minwm") {
 }
 
 function syncPlaybackTargetFps() {
-  playbackController.setTargetFps(previewPlaybackTargetFps("minwm"));
+  playbackController.setTargetFps(previewPlaybackTargetFps("minwm"), {
+    // A negotiated 3x timeline raises the ceiling from 24 to 72, but it is
+    // not wall-clock production evidence. Keep the conservative pre-profile
+    // cadence until chunk telemetry supplies measured output/wall FPS.
+    preserveCadence:
+      mediaProfileNegotiated && isInterpolatedMediaProfile(effectiveMediaProfile),
+  });
   primarySessionAdapter.configure({ targetFps: previewPlaybackTargetFps("minwm") });
   lingbot2Session.configure({ targetFps: previewPlaybackTargetFps("lingbot2") });
   updateStats();
@@ -2342,7 +2374,7 @@ function acceptMediaProfile(message) {
       `media profile mismatch: requested ${requestedMediaProfile}, server accepted ${requested}/${effective || "missing"}`,
     );
   }
-  const expectedMultiplier = effective === RIFE2X_MEDIA_PROFILE ? 2 : 1;
+  const expectedMultiplier = interpolationMultiplier(effective);
   if (
     !Number.isFinite(sourceTimelineFps)
     || !Number.isFinite(outputTimelineFps)
@@ -2352,7 +2384,7 @@ function acceptMediaProfile(message) {
     throw new Error("server returned invalid media profile timing");
   }
   if (
-    effective === RIFE2X_MEDIA_PROFILE
+    isInterpolatedMediaProfile(effective)
     && !/^[0-9a-f]{64}$/i.test(String(message.media_weights_sha256 || ""))
   ) {
     throw new Error("server accepted RIFE without a verified weights digest");
@@ -2362,9 +2394,9 @@ function acceptMediaProfile(message) {
   negotiatedSourceTimelineFps = sourceTimelineFps;
   negotiatedOutputTimelineFps = outputTimelineFps;
   syncPlaybackTargetFps();
-  if (effective === RIFE2X_MEDIA_PROFILE) {
+  if (isInterpolatedMediaProfile(effective)) {
     addHistory(
-      `Zing RIFE 2x accepted · timeline ${sourceTimelineFps.toFixed(1)}→${outputTimelineFps.toFixed(1)} FPS · 插入帧只改善平滑度，不提高实时速度`,
+      `Zing RIFE ${expectedMultiplier}x accepted · timeline ${sourceTimelineFps.toFixed(1)}→${outputTimelineFps.toFixed(1)} FPS · timeline 不是实际 wall/presented FPS`,
     );
   }
   recordTrajectoryEvent("media_profile_accepted", {
@@ -6102,26 +6134,29 @@ function receive(data, epoch) {
       acceptMediaProfile(message);
       return;
     }
-    if (
-      message.type === "chunk_telemetry"
-      && message.media_profile === RIFE2X_MEDIA_PROFILE
-    ) {
-      rifeChunkTelemetry = { ...message };
-      recordTrajectoryEvent("rife_chunk_telemetry", {
-        chunk_index: Number(message.chunk_index || 0),
-        source_num_frames: Number(message.source_num_frames || 0),
-        output_num_frames: Number(message.output_num_frames || 0),
-        actor_wait_ms: Number(message.actor_wait_ms || 0),
-        rife_interpolation_ms: Number(message.rife_interpolation_ms || 0),
-        source_frames_per_chunk_wall_second: Number(
-          message.source_frames_per_chunk_wall_second || 0,
-        ),
-        output_frames_per_chunk_wall_second: Number(
-          message.output_frames_per_chunk_wall_second || 0,
-        ),
-        source_realtime_factor: Number(message.source_realtime_factor || 0),
-        output_realtime_factor: Number(message.output_realtime_factor || 0),
-      });
+    if (message.type === "chunk_telemetry") {
+      // Smooth WebP playback follows measured output frames per chunk wall
+      // second. The negotiated output timeline (for example 72 FPS) remains
+      // metadata and must never become a fabricated presentation cadence.
+      playbackController.observeServerStats(message, receivedAt);
+      if (isInterpolatedMediaProfile(message.media_profile)) {
+        rifeChunkTelemetry = { ...message };
+        recordTrajectoryEvent("rife_chunk_telemetry", {
+          chunk_index: Number(message.chunk_index || 0),
+          source_num_frames: Number(message.source_num_frames || 0),
+          output_num_frames: Number(message.output_num_frames || 0),
+          actor_wait_ms: Number(message.actor_wait_ms || 0),
+          rife_interpolation_ms: Number(message.rife_interpolation_ms || 0),
+          source_frames_per_chunk_wall_second: Number(
+            message.source_frames_per_chunk_wall_second || 0,
+          ),
+          output_frames_per_chunk_wall_second: Number(
+            message.output_frames_per_chunk_wall_second || 0,
+          ),
+          source_realtime_factor: Number(message.source_realtime_factor || 0),
+          output_realtime_factor: Number(message.output_realtime_factor || 0),
+        });
+      }
       updateStats();
       return;
     }
@@ -6601,7 +6636,7 @@ function readFrameInterpolationParams(key = "minwm") {
   if (key !== "minwm" || !modelControl(key, "frameInterpolation").checked) {
     return {};
   }
-  return { realtime_media_profile: RIFE2X_MEDIA_PROFILE };
+  return { realtime_media_profile: RIFE3X_MEDIA_PROFILE };
 }
 
 function readUpscalingScale(key = "minwm") {

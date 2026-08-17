@@ -72,6 +72,9 @@ def test_init_request_only_adds_an_explicit_non_native_media_profile():
     rife_values = vars(native).copy()
     rife_values["realtime_media_profile"] = "rife2x_v1"
     rife = Namespace(**rife_values)
+    rife3_values = vars(native).copy()
+    rife3_values["realtime_media_profile"] = "rife3x_v1"
+    rife3 = Namespace(**rife3_values)
 
     assert "realtime_media_profile" not in init_request(
         native, total_chunks=2, trace_id="native"
@@ -79,6 +82,10 @@ def test_init_request_only_adds_an_explicit_non_native_media_profile():
     assert (
         init_request(rife, total_chunks=2, trace_id="rife")["realtime_media_profile"]
         == "rife2x_v1"
+    )
+    assert (
+        init_request(rife3, total_chunks=2, trace_id="rife3")["realtime_media_profile"]
+        == "rife3x_v1"
     )
 
 
@@ -135,6 +142,69 @@ def test_rife_contract_requires_exact_wire_counts_and_timeline():
     assert result["source_frames"] == 8
     assert result["output_frames"] == 15
     assert result["acceptance"]["output_timeline_fps"] == 48
+
+
+def test_rife3x_contract_keeps_timeline_72_separate_from_exact_wire_counts():
+    result = validate_media_profile_contract(
+        media_profile="rife3x_v1",
+        requested_fps=24,
+        expected_media_weights_sha256=RIFE_SHA256,
+        session_ready={
+            "requested_media_profile": "rife3x_v1",
+            "effective_media_profile": "rife3x_v1",
+            "source_timeline_fps": 24,
+            "output_timeline_fps": 72,
+            "media_weights_sha256": RIFE_SHA256,
+        },
+        completions={
+            0: {
+                "media_profile": "rife3x_v1",
+                "source_num_frames": 0,
+                "output_num_frames": 0,
+                "num_frames": 0,
+                "source_timeline_fps": 24,
+                "output_timeline_fps": 72,
+            },
+            1: {
+                "media_profile": "rife3x_v1",
+                "source_num_frames": 4,
+                "output_num_frames": 10,
+                "num_frames": 10,
+                "source_timeline_fps": 24,
+                "output_timeline_fps": 72,
+            },
+            2: {
+                "media_profile": "rife3x_v1",
+                "source_num_frames": 4,
+                "output_num_frames": 12,
+                "num_frames": 12,
+                "source_timeline_fps": 24,
+                "output_timeline_fps": 72,
+            },
+        },
+        frame_counts={1: 10, 2: 12},
+        frame_messages={
+            1: [
+                {
+                    "media_profile": "rife3x_v1",
+                    "source_timeline_fps": 24,
+                    "output_timeline_fps": 72,
+                }
+            ],
+            2: [
+                {
+                    "media_profile": "rife3x_v1",
+                    "source_timeline_fps": 24,
+                    "output_timeline_fps": 72,
+                }
+            ],
+        },
+        expected_chunks={0, 1, 2},
+    )
+
+    assert result["source_frames"] == 8
+    assert result["output_frames"] == 22
+    assert result["acceptance"]["output_timeline_fps"] == 72
 
 
 def test_rife_contract_rejects_silent_frame_loss():

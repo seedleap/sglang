@@ -114,10 +114,10 @@
       return this.snapshot();
     }
 
-    setTargetFps(targetFps) {
+    setTargetFps(targetFps, { preserveCadence = false } = {}) {
       const nextTargetFps = Math.max(1, Number(targetFps || this.config.targetFps));
       this.targetFps = nextTargetFps;
-      if (!this.hasServerSample && !this.hasDeliverySample) {
+      if (!this.hasServerSample && !this.hasDeliverySample && !preserveCadence) {
         this.serverFps = nextTargetFps;
         this.deliveryFps = nextTargetFps;
         this.sourceFps = nextTargetFps;
