@@ -126,6 +126,7 @@ class Backend(str, Enum):
 
 
 WARMUP_MODES = ("off", "request", "server")
+REALTIME_SCHEDULING_POLICIES = ("fifo", "session_round_robin")
 
 
 @dataclasses.dataclass
@@ -290,6 +291,7 @@ class ServerArgs(DisaggServerArgsMixin):
     # Realtime admission and worker-local state limits
     realtime_max_sessions: int = 8
     realtime_max_sessions_per_worker: int = 8
+    realtime_scheduling_policy: str = "fifo"
     realtime_session_lease_ttl_s: float = 60.0
     realtime_session_idle_timeout_s: float = 60.0
     realtime_session_max_lifetime_s: float = 600.0
@@ -1617,6 +1619,16 @@ class ServerArgs(DisaggServerArgsMixin):
             help="Maximum persistent realtime session states on each GPU worker.",
         )
         parser.add_argument(
+            "--realtime-scheduling-policy",
+            choices=REALTIME_SCHEDULING_POLICIES,
+            default=ServerArgs.realtime_scheduling_policy,
+            help=(
+                "Denoiser scheduling for realtime chunks. fifo preserves global "
+                "arrival order; session_round_robin dispatches one whole chunk per "
+                "runnable Session in strict, work-conserving rotation."
+            ),
+        )
+        parser.add_argument(
             "--realtime-session-lease-ttl-s",
             type=float,
             default=ServerArgs.realtime_session_lease_ttl_s,
@@ -2297,6 +2309,11 @@ class ServerArgs(DisaggServerArgsMixin):
             raise ValueError("realtime_max_sessions must be >= 1")
         if self.realtime_max_sessions_per_worker < 1:
             raise ValueError("realtime_max_sessions_per_worker must be >= 1")
+        if self.realtime_scheduling_policy not in REALTIME_SCHEDULING_POLICIES:
+            raise ValueError(
+                "realtime_scheduling_policy must be one of: "
+                + ", ".join(REALTIME_SCHEDULING_POLICIES)
+            )
         if self.realtime_session_lease_ttl_s <= 0:
             raise ValueError("realtime_session_lease_ttl_s must be > 0")
         if self.realtime_session_idle_timeout_s < 0:

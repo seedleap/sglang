@@ -661,7 +661,7 @@ def test_coordinator_release_frees_store_when_worker_cleanup_is_best_effort():
     asyncio.run(run())
 
 
-def test_dynamodb_coordinator_admission_is_one_four_item_transaction():
+def test_dynamodb_coordinator_admission_fences_slots_with_worker_heartbeats():
     class TransactionCanceledException(Exception):
         pass
 
@@ -725,12 +725,16 @@ def test_dynamodb_coordinator_admission_is_one_four_item_transaction():
         assert assignment.vae.worker_id == "vae-a"
         assert len(client.transactions) == 1
         transaction = client.transactions[0]
-        assert len(transaction) == 4
+        assert len(transaction) == 6
         keys = {
             (
                 item["Put"]["Item"]["pk"]["S"]
                 if "Put" in item
-                else item["Update"]["Key"]["pk"]["S"]
+                else (
+                    item["Update"]["Key"]["pk"]["S"]
+                    if "Update" in item
+                    else item["ConditionCheck"]["Key"]["pk"]["S"]
+                )
             )
             for item in transaction
         }
@@ -739,7 +743,19 @@ def test_dynamodb_coordinator_admission_is_one_four_item_transaction():
             "SESSION#session-a",
             "SLOT#denoiser#denoiser-a#0000",
             "SLOT#vae#vae-a#0000",
+            "WORKER#denoiser-a",
+            "WORKER#vae-a",
         }
+        checks = [
+            item["ConditionCheck"] for item in transaction if "ConditionCheck" in item
+        ]
+        assert all(
+            "#capacity > :slot_index" in check["ConditionExpression"]
+            and "worker_epoch = :worker_epoch" in check["ConditionExpression"]
+            and "heartbeat_expires_at > :now" in check["ConditionExpression"]
+            and "#lifecycle = :ready" in check["ConditionExpression"]
+            for check in checks
+        )
 
     asyncio.run(run())
 
@@ -1166,6 +1182,445 @@ def test_dynamodb_heartbeat_persists_epoch_lifecycle_and_worker_load():
     assert values[":worker_epoch"] == {"S": "epoch-a"}
     assert values[":queue_depth"] == {"N": "3"}
     assert values[":service_time_ms"] == {"N": "12.5"}
+
+
+def test_dynamodb_capacity_shrink_retires_stale_slots_before_publish_and_grows():
+    class TransactionCanceledException(Exception):
+        pass
+
+    class TransactionConflictException(Exception):
+        pass
+
+    class ConditionalCheckFailedException(Exception):
+        pass
+
+    class FakeExceptions:
+        pass
+
+    FakeExceptions.TransactionCanceledException = TransactionCanceledException
+    FakeExceptions.TransactionConflictException = TransactionConflictException
+    FakeExceptions.ConditionalCheckFailedException = ConditionalCheckFailedException
+
+    def slot_item(role, worker_id, slot_index, capacity):
+        model_revision = "minwm-r1" if role == "denoiser" else "all"
+        return {
+            "pk": {"S": f"SLOT#{role}#{worker_id}#{slot_index:04d}"},
+            "sk": {"S": "LEASE"},
+            "item_type": {"S": "worker_slot"},
+            "role": {"S": role},
+            "worker_id": {"S": worker_id},
+            "endpoint": {"S": f"ws://{worker_id}/generate"},
+            "az": {"S": "us-east-2a"},
+            "slot_index": {"N": str(slot_index)},
+            "model_revision": {"S": model_revision},
+            "vae_fingerprint": {"S": "taew2_2"},
+            "worker_epoch": {"S": "epoch-a"},
+            "lifecycle": {"S": "ready"},
+            "capacity": {"N": str(capacity)},
+            "active_sessions": {"N": "0"},
+            "runnable_sessions": {"N": "0"},
+            "blocked_sessions": {"N": "0"},
+            "queue_depth": {"N": "0"},
+            "service_time_ms": {"N": "0"},
+            "reservation_endpoint": {"S": f"http://{worker_id}/worker"},
+            "heartbeat_expires_at": {"N": "200"},
+            "allocation_key": {
+                "S": ("DENOISER#minwm-r1" if role == "denoiser" else "VAE#taew2_2")
+            },
+            "allocation_sort": {"S": f"us-east-2a#{worker_id}#{slot_index:04d}"},
+            "ttl": {"N": "86600"},
+        }
+
+    class FakeClient:
+        exceptions = FakeExceptions()
+
+        def __init__(self, *, retire_failures=1):
+            self.retire_failures = retire_failures
+            self.retire_attempts = 0
+            self.put_calls = 0
+            self.order = []
+            self.acquire_transaction = None
+            self.workers = {
+                "denoiser-a": {
+                    "pk": {"S": "WORKER#denoiser-a"},
+                    "sk": {"S": "HEARTBEAT"},
+                    "role": {"S": "denoiser"},
+                    "capacity": {"N": "2"},
+                    "worker_epoch": {"S": "epoch-a"},
+                    "lifecycle": {"S": "ready"},
+                    "heartbeat_expires_at": {"N": "200"},
+                },
+                "vae-a": {
+                    "pk": {"S": "WORKER#vae-a"},
+                    "sk": {"S": "HEARTBEAT"},
+                    "role": {"S": "vae"},
+                    "capacity": {"N": "1"},
+                    "worker_epoch": {"S": "epoch-a"},
+                    "lifecycle": {"S": "ready"},
+                    "heartbeat_expires_at": {"N": "200"},
+                },
+            }
+            self.slots = {
+                "SLOT#denoiser#denoiser-a#0000": slot_item(
+                    "denoiser", "denoiser-a", 0, 2
+                ),
+                "SLOT#denoiser#denoiser-a#0001": slot_item(
+                    "denoiser", "denoiser-a", 1, 2
+                ),
+                "SLOT#vae#vae-a#0000": slot_item("vae", "vae-a", 0, 1),
+            }
+            for pk in (
+                "SLOT#denoiser#denoiser-a#0001",
+                "SLOT#vae#vae-a#0000",
+            ):
+                self.slots[pk].update(
+                    {
+                        "lease_token": {"S": "active-token"},
+                        "user_id": {"S": "user-a"},
+                        "session_id": {"S": "session-a"},
+                        "generation_id": {"S": "generation-a"},
+                        "lease_expires_at": {"N": "180"},
+                    }
+                )
+
+        def get_item(self, *, Key, **_kwargs):
+            pk = Key["pk"]["S"]
+            if pk.startswith("WORKER#"):
+                return {"Item": self.workers.get(pk.removeprefix("WORKER#"))}
+            if pk.startswith("SLOT#"):
+                return {"Item": self.slots.get(pk)}
+            return {}
+
+        def put_item(
+            self,
+            *,
+            Item,
+            ConditionExpression=None,
+            ExpressionAttributeValues=None,
+            **_kwargs,
+        ):
+            self.put_calls += 1
+            worker_id = Item["pk"]["S"].removeprefix("WORKER#")
+            current = self.workers.get(worker_id)
+            if ConditionExpression == "attribute_not_exists(pk)" and current:
+                raise ConditionalCheckFailedException("worker already exists")
+            if (
+                ConditionExpression
+                and ConditionExpression != "attribute_not_exists(pk)"
+            ):
+                values = ExpressionAttributeValues
+                if (
+                    current is None
+                    or current["role"] != values[":previous_role"]
+                    or current["capacity"] != values[":previous_capacity"]
+                    or (
+                        ":previous_worker_epoch" in values
+                        and current.get("worker_epoch")
+                        != values[":previous_worker_epoch"]
+                    )
+                ):
+                    raise ConditionalCheckFailedException("stale worker snapshot")
+            self.workers[worker_id] = dict(Item)
+            self.order.append(f"put:{Item['capacity']['N']}")
+
+        def update_item(
+            self,
+            *,
+            Key,
+            ExpressionAttributeValues,
+            ConditionExpression=None,
+            **_kwargs,
+        ):
+            pk = Key["pk"]["S"]
+            item = self.slots.setdefault(pk, {"pk": Key["pk"], "sk": Key["sk"]})
+            values = ExpressionAttributeValues
+            if ConditionExpression and "previous_worker_epoch" in ConditionExpression:
+                current_epoch = item.get("worker_epoch")
+                current_capacity = item.get("capacity")
+                target = (values[":worker_epoch"], values[":capacity"])
+                if (
+                    current_epoch is not None
+                    and current_epoch != values[":previous_worker_epoch"]
+                    and (current_epoch, current_capacity) != target
+                ):
+                    raise ConditionalCheckFailedException("stale slot snapshot")
+            field_values = {
+                "item_type": ":item_type",
+                "role": ":role",
+                "worker_id": ":worker_id",
+                "endpoint": ":endpoint",
+                "az": ":az",
+                "slot_index": ":slot_index",
+                "model_revision": ":model_revision",
+                "vae_fingerprint": ":vae_fingerprint",
+                "worker_epoch": ":worker_epoch",
+                "lifecycle": ":lifecycle",
+                "capacity": ":capacity",
+                "active_sessions": ":active_sessions",
+                "runnable_sessions": ":runnable_sessions",
+                "blocked_sessions": ":blocked_sessions",
+                "queue_depth": ":queue_depth",
+                "service_time_ms": ":service_time_ms",
+                "reservation_endpoint": ":reservation_endpoint",
+                "heartbeat_expires_at": ":heartbeat_expires",
+                "allocation_key": ":allocation_key",
+                "allocation_sort": ":allocation_sort",
+                "ttl": ":ttl",
+            }
+            for field, placeholder in field_values.items():
+                item[field] = values[placeholder]
+            self.order.append(f"slot:{item['slot_index']['N']}")
+
+        def transact_write_items(self, *, TransactItems):
+            retirement_updates = [
+                entry["Update"]
+                for entry in TransactItems
+                if "Update" in entry
+                and "REMOVE allocation_key" in entry["Update"]["UpdateExpression"]
+            ]
+            is_retirement = (
+                bool(retirement_updates)
+                and len(retirement_updates) == len(TransactItems) - 1
+            )
+            if is_retirement:
+                snapshot_check = next(
+                    entry["ConditionCheck"]
+                    for entry in TransactItems
+                    if "ConditionCheck" in entry
+                )
+                snapshot_values = snapshot_check["ExpressionAttributeValues"]
+                worker_id = snapshot_check["Key"]["pk"]["S"].removeprefix("WORKER#")
+                current_worker = self.workers[worker_id]
+                if (
+                    (
+                        ":previous_worker_epoch" in snapshot_values
+                        and current_worker.get("worker_epoch")
+                        != snapshot_values[":previous_worker_epoch"]
+                    )
+                    or (
+                        ":previous_worker_epoch" not in snapshot_values
+                        and "worker_epoch" in current_worker
+                    )
+                    or current_worker["capacity"]
+                    != snapshot_values[":previous_capacity"]
+                ):
+                    raise TransactionCanceledException("stale worker snapshot")
+                self.retire_attempts += 1
+                self.order.append("retire-attempt")
+                if self.retire_attempts <= self.retire_failures:
+                    raise TransactionCanceledException("transient conflict")
+                for update in retirement_updates:
+                    item = self.slots[update["Key"]["pk"]["S"]]
+                    values = update["ExpressionAttributeValues"]
+                    item["lifecycle"] = values[":failed"]
+                    item["heartbeat_expires_at"] = values[":now"]
+                    item["capacity"] = values[":capacity"]
+                    item["ttl"] = values[":ttl"]
+                    item.pop("allocation_key", None)
+                    item.pop("allocation_sort", None)
+                self.order.append("retire-commit")
+                return
+
+            checks = [
+                entry["ConditionCheck"]
+                for entry in TransactItems
+                if "ConditionCheck" in entry
+            ]
+            if checks:
+                self.acquire_transaction = TransactItems
+                for check in checks:
+                    worker_id = check["Key"]["pk"]["S"].removeprefix("WORKER#")
+                    worker = self.workers[worker_id]
+                    values = check["ExpressionAttributeValues"]
+                    if (
+                        int(worker["capacity"]["N"]) <= int(values[":slot_index"]["N"])
+                        or worker["worker_epoch"] != values[":worker_epoch"]
+                        or worker["lifecycle"] != values[":ready"]
+                        or int(worker["heartbeat_expires_at"]["N"])
+                        <= int(values[":now"]["N"])
+                    ):
+                        raise TransactionCanceledException("worker fence rejected slot")
+                return
+
+            # Release keeps the retired slot record but removes lease ownership.
+            for entry in TransactItems:
+                if "Update" not in entry:
+                    continue
+                item = self.slots[entry["Update"]["Key"]["pk"]["S"]]
+                for field in (
+                    "lease_token",
+                    "user_id",
+                    "session_id",
+                    "generation_id",
+                    "lease_expires_at",
+                ):
+                    item.pop(field, None)
+
+    client = FakeClient()
+    store = DynamoDBCoordinatorStore(
+        "minwm-realtime-coordinator",
+        ttl_s=60,
+        worker_ttl_s=30,
+        wall_clock=lambda: 100,
+        client=client,
+    )
+
+    store._heartbeat_sync(_heartbeat("denoiser-a", "denoiser", capacity=1))
+
+    retired = client.slots["SLOT#denoiser#denoiser-a#0001"]
+    assert client.retire_attempts == 2
+    assert client.order[:4] == [
+        "retire-attempt",
+        "retire-attempt",
+        "retire-commit",
+        "put:1",
+    ]
+    assert retired["lifecycle"] == {"S": "failed"}
+    assert retired["heartbeat_expires_at"] == {"N": "100"}
+    assert retired["capacity"] == {"N": "1"}
+    assert "allocation_key" not in retired
+    assert retired["lease_token"] == {"S": "active-token"}
+
+    stale_slot = store._slot_from_item(retired)
+    vae_slot = store._slot_from_item(client.slots["SLOT#vae#vae-a#0000"])
+    assert (
+        store._try_acquire_pair_sync(
+            client,
+            user_id="user-b",
+            session_id="session-b",
+            generation_id="generation-b",
+            denoiser=stale_slot,
+            vae=vae_slot,
+            now_epoch=100,
+            expires_epoch=160,
+        )
+        is None
+    )
+    denoiser_check = next(
+        entry["ConditionCheck"]
+        for entry in client.acquire_transaction
+        if entry.get("ConditionCheck", {}).get("Key", {}).get("pk", {}).get("S")
+        == "WORKER#denoiser-a"
+    )
+    assert "#capacity > :slot_index" in denoiser_check["ConditionExpression"]
+
+    assignment = SessionAssignment(
+        user_id="user-a",
+        session_id="session-a",
+        generation_id="generation-a",
+        token="active-token",
+        expires_at=time.monotonic() + 30,
+        denoiser=stale_slot,
+        vae=vae_slot,
+    )
+    store._release_sync(assignment)
+    assert "lease_token" not in retired
+    assert retired["lifecycle"] == {"S": "failed"}
+
+    store._heartbeat_sync(_heartbeat("denoiser-a", "denoiser", capacity=2))
+    restored = client.slots["SLOT#denoiser#denoiser-a#0001"]
+    assert restored["lifecycle"] == {"S": "ready"}
+    assert restored["capacity"] == {"N": "2"}
+    assert restored["allocation_key"] == {"S": "DENOISER#minwm-r1"}
+
+    permanently_conflicted = FakeClient(retire_failures=3)
+    failed_store = DynamoDBCoordinatorStore(
+        "minwm-realtime-coordinator",
+        ttl_s=60,
+        worker_ttl_s=30,
+        wall_clock=lambda: 100,
+        client=permanently_conflicted,
+    )
+    with pytest.raises(TransactionCanceledException, match="transient conflict"):
+        failed_store._heartbeat_sync(_heartbeat("denoiser-a", "denoiser", capacity=1))
+    assert permanently_conflicted.put_calls == 0
+    assert permanently_conflicted.workers["denoiser-a"]["capacity"] == {"N": "2"}
+    assert all(
+        slot["lifecycle"] == {"S": "ready"}
+        for pk, slot in permanently_conflicted.slots.items()
+        if pk.startswith("SLOT#denoiser#")
+    )
+
+    # Legacy records written before worker_epoch was introduced migrate on the
+    # first shrinking heartbeat instead of becoming permanently unshrinkable.
+    legacy = FakeClient(retire_failures=0)
+    legacy.workers["denoiser-a"].pop("worker_epoch")
+    for pk, slot in legacy.slots.items():
+        if pk.startswith("SLOT#denoiser#"):
+            slot.pop("worker_epoch")
+    legacy_store = DynamoDBCoordinatorStore(
+        "minwm-realtime-coordinator",
+        ttl_s=60,
+        worker_ttl_s=30,
+        wall_clock=lambda: 100,
+        client=legacy,
+    )
+    legacy_store._heartbeat_sync(
+        _heartbeat(
+            "denoiser-a",
+            "denoiser",
+            capacity=1,
+            worker_epoch="epoch-migrated",
+        )
+    )
+    assert legacy.workers["denoiser-a"]["worker_epoch"] == {"S": "epoch-migrated"}
+    assert legacy.slots["SLOT#denoiser#denoiser-a#0001"]["lifecycle"] == {"S": "failed"}
+
+    class RacingClient(FakeClient):
+        def __init__(self):
+            super().__init__(retire_failures=0)
+            self.store = None
+            self.injected_new_epoch = False
+
+        def put_item(self, *, Item, **kwargs):
+            if (
+                Item.get("worker_epoch") == {"S": "epoch-a"}
+                and Item.get("capacity") == {"N": "1"}
+                and not self.injected_new_epoch
+            ):
+                self.injected_new_epoch = True
+                self.store._heartbeat_sync(
+                    _heartbeat(
+                        "denoiser-a",
+                        "denoiser",
+                        capacity=3,
+                        worker_epoch="epoch-b",
+                    )
+                )
+            return super().put_item(Item=Item, **kwargs)
+
+    racing = RacingClient()
+    racing_store = DynamoDBCoordinatorStore(
+        "minwm-realtime-coordinator",
+        ttl_s=60,
+        worker_ttl_s=30,
+        wall_clock=lambda: 100,
+        client=racing,
+    )
+    racing.store = racing_store
+
+    with pytest.raises(ConditionalCheckFailedException, match="stale worker"):
+        racing_store._heartbeat_sync(
+            _heartbeat(
+                "denoiser-a",
+                "denoiser",
+                capacity=1,
+                worker_epoch="epoch-a",
+            )
+        )
+
+    # The stale epoch-a shrink cannot overwrite either the epoch-b worker
+    # heartbeat or the slots restored/created by its grow.
+    assert racing.workers["denoiser-a"]["worker_epoch"] == {"S": "epoch-b"}
+    assert racing.workers["denoiser-a"]["capacity"] == {"N": "3"}
+    assert {
+        (
+            racing.slots[f"SLOT#denoiser#denoiser-a#{index:04d}"]["worker_epoch"]["S"],
+            racing.slots[f"SLOT#denoiser#denoiser-a#{index:04d}"]["capacity"]["N"],
+            racing.slots[f"SLOT#denoiser#denoiser-a#{index:04d}"]["lifecycle"]["S"],
+        )
+        for index in range(3)
+    } == {("epoch-b", "3", "ready")}
 
 
 def test_dynamodb_renew_condition_checks_current_worker_epochs_and_expiry():

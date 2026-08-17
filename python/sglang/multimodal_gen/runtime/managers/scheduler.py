@@ -155,6 +155,9 @@ class Scheduler(SchedulerWarmupMixin, SchedulerPostTrainingMixin, SchedulerDisag
 
         # FIFO queue entries: (identity, request, enqueue_ts_s)
         self.waiting_queue: deque[tuple[bytes | None, Any, float]] = deque()
+        self._realtime_scheduling_policy = server_args.realtime_scheduling_policy
+        self._realtime_rr_sessions: list[str] = []
+        self._realtime_rr_last_session: str | None = None
         self._pending_realtime_replacements: dict[
             tuple[str, str, int, str], tuple[ReplaceQueuedRealtimeReq, float]
         ] = {}
@@ -229,7 +232,92 @@ class Scheduler(SchedulerWarmupMixin, SchedulerPostTrainingMixin, SchedulerDisag
 
     def _handle_release_realtime_session(self, reqs: List[Any]) -> OutputBatch:
         req = reqs[0]
-        return self.worker.release_realtime_session(req.session_id)
+        try:
+            return self.worker.release_realtime_session(req.session_id)
+        finally:
+            self._forget_realtime_rr_session(req.session_id)
+
+    def _session_round_robin_enabled(self) -> bool:
+        return (
+            getattr(self, "_realtime_scheduling_policy", "fifo")
+            == "session_round_robin"
+        )
+
+    def _realtime_rr_state(self) -> tuple[list[str], str | None]:
+        sessions = getattr(self, "_realtime_rr_sessions", None)
+        if sessions is None:
+            sessions = self._realtime_rr_sessions = []
+        return sessions, getattr(self, "_realtime_rr_last_session", None)
+
+    def _register_realtime_rr_session(self, session_id: str | None) -> None:
+        if not session_id or not self._session_round_robin_enabled():
+            return
+        sessions, _last = self._realtime_rr_state()
+        if session_id not in sessions:
+            sessions.append(session_id)
+
+    def _forget_realtime_rr_session(self, session_id: str | None) -> None:
+        if not session_id:
+            return
+        sessions, last = self._realtime_rr_state()
+        if session_id not in sessions:
+            return
+        removed_index = sessions.index(session_id)
+        if last == session_id:
+            # Preserve the cursor: after removal, the next scan starts at the
+            # Session that followed the released one in the old ring.
+            if len(sessions) > 1:
+                self._realtime_rr_last_session = sessions[removed_index - 1]
+            else:
+                self._realtime_rr_last_session = None
+        sessions.remove(session_id)
+
+    @staticmethod
+    def _is_realtime_chunk(request: Any) -> bool:
+        return isinstance(request, Req) and bool(request.realtime_session_id)
+
+    def _get_next_session_round_robin_chunk(
+        self,
+    ) -> tuple[bytes | None, Any, float] | None:
+        """Pop one whole realtime chunk without crossing a queue barrier.
+
+        Only a consecutive realtime prefix is eligible. A control request,
+        grouped request, or non-realtime generation request therefore keeps its
+        existing FIFO ordering relative to everything after it.
+        """
+        if not self._session_round_robin_enabled() or not self.waiting_queue:
+            return None
+        if not self._is_realtime_chunk(self.waiting_queue[0][1]):
+            return None
+
+        first_index_by_session: dict[str, int] = {}
+        for index, (_identity, request, _enqueue_time) in enumerate(self.waiting_queue):
+            if not self._is_realtime_chunk(request):
+                break
+            session_id = request.realtime_session_id
+            self._register_realtime_rr_session(session_id)
+            first_index_by_session.setdefault(session_id, index)
+
+        sessions, last = self._realtime_rr_state()
+        if not sessions:
+            return None
+        start = (sessions.index(last) + 1) % len(sessions) if last in sessions else 0
+        selected_session = next(
+            (
+                sessions[(start + offset) % len(sessions)]
+                for offset in range(len(sessions))
+                if sessions[(start + offset) % len(sessions)] in first_index_by_session
+            ),
+            None,
+        )
+        if selected_session is None:
+            return None
+
+        selected_index = first_index_by_session[selected_session]
+        selected = self.waiting_queue[selected_index]
+        del self.waiting_queue[selected_index]
+        self._realtime_rr_last_session = selected_session
+        return selected
 
     def _replace_waiting_realtime_request(
         self, update: ReplaceQueuedRealtimeReq
@@ -401,6 +489,7 @@ class Scheduler(SchedulerWarmupMixin, SchedulerPostTrainingMixin, SchedulerDisag
                 continue
             if isinstance(req, Req):
                 req = self._take_pending_realtime_replacement(req, now=now)
+                self._register_realtime_rr_session(req.realtime_session_id)
             self.waiting_queue.append((identity, req, now))
 
     def _observe_realtime_scheduler_queue(
@@ -1004,6 +1093,35 @@ class Scheduler(SchedulerWarmupMixin, SchedulerPostTrainingMixin, SchedulerDisag
         """
         if not self.waiting_queue:
             return None
+
+        rr_item = self._get_next_session_round_robin_chunk()
+        if rr_item is not None:
+            identity, req, enqueue_time = rr_item
+            now = time.monotonic()
+            self._observe_realtime_scheduler_queue(req, enqueue_time, now=now)
+            self._record_batch_dispatch_metrics(
+                batch_size=1,
+                queue_wait_ms=(now - enqueue_time) * 1000.0,
+                effective_max_batch_size=1,
+                stop_reason="realtime_session_round_robin",
+            )
+            return [(identity, req)]
+
+        if self._session_round_robin_enabled():
+            # In strict mode, a control or non-realtime head is a hard FIFO
+            # barrier. Dispatch it alone instead of letting ordinary dynamic
+            # batching search past realtime chunks later in the deque.
+            identity, req, enqueue_time = self.waiting_queue.popleft()
+            now = time.monotonic()
+            self._observe_realtime_scheduler_queue(req, enqueue_time, now=now)
+            if isinstance(req, Req):
+                self._record_batch_dispatch_metrics(
+                    batch_size=1,
+                    queue_wait_ms=(now - enqueue_time) * 1000.0,
+                    effective_max_batch_size=1,
+                    stop_reason="realtime_round_robin_barrier",
+                )
+            return [(identity, req)]
 
         if not self._dynamic_batching_enabled():
             identity, req, enqueue_time = self.waiting_queue.popleft()
