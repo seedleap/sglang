@@ -1,0 +1,404 @@
+{
+  "affinity": {},
+  "annotations": {
+    "cloudwatch.aws.amazon.com/auto-annotate-python": "false",
+    "instrumentation.opentelemetry.io/inject-python": "false",
+    "logs.loopit.me/bucket": "world-model",
+    "logs.loopit.me/enabled": "true"
+  },
+  "appGroup": "world-studio",
+  "appName": "minWM Denoiser",
+  "args": [
+    "set -euo pipefail; test -f ${MODEL_PATH}/_READY; test -f ${MODEL_PATH}/model_index.json; test -d ${MODEL_PATH}/transformer; python3 -m sglang.multimodal_gen.runtime.launch_server --model-path ${MODEL_PATH} --pipeline-class-name MinWMCausalDMDPipeline --attention-backend fa --performance-mode speed --num-gpus 2 --tp-size 1 --sp-degree 2 --ulysses-degree 2 --ring-degree 1 --enable-cuda-graph --enable-cfg-parallel false --enable-torch-compile false --warmup-mode off --batching-max-size 1 --batching-delay-ms 2 --realtime-max-sessions 1 --realtime-max-sessions-per-worker 1 --realtime-remote-vae-enabled --realtime-session-idle-timeout-s 60 --realtime-session-max-lifetime-s 90 --realtime-admission-wait-s 10 --realtime-causal-sink-size 8 --realtime-causal-kv-cache-num-frames 32 --enable-trace --otlp-traces-endpoint ${OTEL_EXPORTER_OTLP_ENDPOINT} --host 0.0.0.0 --port 30000 & child=$!; terminate() { kill -TERM ${child} 2>/dev/null || true; wait ${child} || true; exit 143; }; trap terminate TERM INT; wait ${child}"
+  ],
+  "businessLineId": "world-model",
+  "clusterId": "${WORLD_MODEL_CLUSTER_ID}",
+  "command": [
+    "/bin/bash",
+    "-lc"
+  ],
+  "deployType": "statefulset",
+  "env": [
+    {
+      "name": "PYTHONUNBUFFERED",
+      "value": "1"
+    },
+    {
+      "name": "MODEL_PATH",
+      "value": "/model-cache/model"
+    },
+    {
+      "name": "MODEL_REVISION",
+      "value": "gs3200-ema-student-v1"
+    },
+    {
+      "name": "WORKER_EPOCH_FILE",
+      "value": "/var/run/minwm-worker/epoch"
+    },
+    {
+      "name": "OTEL_SERVICE_NAME",
+      "value": "minwm-denoiser"
+    },
+    {
+      "name": "OTEL_EXPORTER_OTLP_ENDPOINT",
+      "value": "http://adot-collector.monitoring:4317"
+    }
+  ],
+  "gitRepo": "git@github.com:seedleap/sglang.git",
+  "image": "${MINWM_DENOISER_IMAGE_DIGEST}",
+  "initContainers": [
+    {
+      "args": [
+        "exec python3 benchmark/minwm_realtime_async_vae/download_model_artifact.py --bucket \"${MODEL_BUCKET}\" --model-s3-uri \"${MODEL_S3_URI:-}\" --model-name \"${MODEL_NAME}\" --model-version \"${MODEL_VERSION}\" --model-release-id \"${MODEL_RELEASE_ID}\" --destination /model-cache/model --lock-path /model-cache/.download.lock --region \"${AWS_REGION}\" --expected-revision \"${MODEL_SOURCE_REVISION}\" --concurrency 128 --part-size-mib 16"
+      ],
+      "command": [
+        "/bin/bash",
+        "-lc"
+      ],
+      "env": [
+        {
+          "name": "AWS_REGION",
+          "value": "us-east-2"
+        },
+        {
+          "name": "AWS_DEFAULT_REGION",
+          "value": "us-east-2"
+        },
+        {
+          "name": "AWS_EC2_METADATA_DISABLED",
+          "value": "true"
+        },
+        {
+          "name": "MODEL_BUCKET",
+          "value": "leap-world-model-serving-829115578968-us-east-2"
+        },
+        {
+          "name": "MODEL_NAME",
+          "value": "minwm-async-denoiser-0"
+        },
+        {
+          "name": "MODEL_VERSION",
+          "value": "wan22-5b-stage3-dmd-47-0808-2fb2cfec2a2-gs3200-ema-student-v1"
+        },
+        {
+          "name": "MODEL_RELEASE_ID",
+          "value": "20260810T042157Z-c302d572"
+        },
+        {
+          "name": "MODEL_SOURCE_REVISION",
+          "value": "gs3200-ema-student-v1"
+        },
+        {
+          "name": "MODEL_S3_URI",
+          "value": ""
+        }
+      ],
+      "image": "${MINWM_DENOISER_IMAGE_DIGEST}",
+      "imagePullPolicy": "IfNotPresent",
+      "name": "model-stager",
+      "resources": {
+        "limits": {
+          "cpu": "16",
+          "ephemeral-storage": "64Gi",
+          "memory": "64Gi"
+        },
+        "requests": {
+          "cpu": "8",
+          "ephemeral-storage": "32Gi",
+          "memory": "32Gi"
+        }
+      },
+      "securityContext": {
+        "allowPrivilegeEscalation": false,
+        "readOnlyRootFilesystem": false
+      },
+      "volumeMounts": [
+        {
+          "mountPath": "/model-cache",
+          "name": "model-cache"
+        }
+      ],
+      "workingDir": "/opt/sglang"
+    },
+    {
+      "args": [
+        "exec python3 -m sglang.multimodal_gen.runtime.entrypoints.realtime_worker_heartbeat --coordinator-url=http://world-realtime-coordinator:18081 --health-url=http://127.0.0.1:30000/health --state-url=http://127.0.0.1:30000/v1/realtime_worker/state --worker-id=${POD_UID} --worker-epoch-file=/var/run/minwm-worker/epoch --role=denoiser --endpoint=ws://${POD_IP}:30000/v1/realtime_video/generate --reservation-endpoint=http://${POD_IP}:30000/v1/realtime_worker --node-name=${NODE_NAME} --capacity=1 --model-revision=wan22-5b-stage3-dmd-47-0808-2fb2cfec2a2 --vae-fingerprint=taew2_2-d053e216 --interval-s=5"
+      ],
+      "command": [
+        "/bin/sh",
+        "-ec"
+      ],
+      "env": [
+        {
+          "name": "SGLANG_LIGHTWEIGHT_RUNTIME",
+          "value": "1"
+        },
+        {
+          "name": "MODEL_NAME",
+          "value": "minwm"
+        },
+        {
+          "name": "POD_UID",
+          "valueFrom": {
+            "fieldRef": {
+              "fieldPath": "metadata.uid"
+            }
+          }
+        },
+        {
+          "name": "POD_IP",
+          "valueFrom": {
+            "fieldRef": {
+              "fieldPath": "status.podIP"
+            }
+          }
+        },
+        {
+          "name": "NODE_NAME",
+          "valueFrom": {
+            "fieldRef": {
+              "fieldPath": "spec.nodeName"
+            }
+          }
+        }
+      ],
+      "image": "${MINWM_DENOISER_IMAGE_DIGEST}",
+      "imagePullPolicy": "IfNotPresent",
+      "name": "denoiser-heartbeat",
+      "resources": {
+        "limits": {
+          "cpu": "200m",
+          "memory": "256Mi"
+        },
+        "requests": {
+          "cpu": "25m",
+          "memory": "64Mi"
+        }
+      },
+      "restartPolicy": "Always",
+      "volumeMounts": [
+        {
+          "mountPath": "/var/run/minwm-worker",
+          "name": "worker-epoch"
+        }
+      ]
+    }
+  ],
+  "jenkinsJob": "loopit/world-model/minwm-denoiser",
+  "labels": {
+    "app.kubernetes.io/name": "minwm-denoiser",
+    "loopit.me/gpu-role": "denoiser",
+    "world-model.loopit.me/application-group": "world-studio",
+    "world-model.loopit.me/service": "minwm-denoiser"
+  },
+  "livenessProbe": {
+    "enabled": true,
+    "failureThreshold": 6,
+    "initialDelaySeconds": 60,
+    "path": "/health",
+    "periodSeconds": 30,
+    "port": 30000,
+    "timeoutSeconds": 5,
+    "type": "httpGet"
+  },
+  "name": "minwm-denoiser",
+  "namespace": "world-model",
+  "networkPolicy": {
+    "defaultDeny": true,
+    "egress": [
+      {
+        "ports": [
+          {
+            "port": 53,
+            "protocol": "UDP"
+          }
+        ],
+        "to": [
+          {
+            "namespaceSelector": {
+              "matchLabels": {
+                "kubernetes.io/metadata.name": "kube-system"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "ports": [
+          {
+            "port": 53,
+            "protocol": "TCP"
+          }
+        ],
+        "to": [
+          {
+            "namespaceSelector": {
+              "matchLabels": {
+                "kubernetes.io/metadata.name": "kube-system"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "ports": [
+          {
+            "port": 18081,
+            "protocol": "TCP"
+          }
+        ],
+        "to": [
+          {
+            "podSelector": {
+              "matchLabels": {
+                "app.kubernetes.io/name": "world-realtime-coordinator"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "ports": [
+          {
+            "port": 18081,
+            "protocol": "TCP"
+          }
+        ],
+        "to": [
+          {
+            "podSelector": {
+              "matchLabels": {
+                "app.kubernetes.io/name": "minwm-vae"
+              }
+            }
+          }
+        ]
+      }
+    ],
+    "enabled": true,
+    "ingress": [
+      {
+        "from": [
+          {
+            "podSelector": {
+              "matchLabels": {
+                "app.kubernetes.io/name": "world-realtime-gateway"
+              }
+            }
+          }
+        ],
+        "ports": [
+          {
+            "port": 30000,
+            "protocol": "TCP"
+          }
+        ]
+      }
+    ]
+  },
+  "nodeSelector": {
+    "loopit.me/gpu-pool": "h100"
+  },
+  "podDisruptionBudget": {
+    "maxUnavailable": 1
+  },
+  "readinessProbe": {
+    "enabled": true,
+    "failureThreshold": 6,
+    "path": "/health",
+    "periodSeconds": 10,
+    "port": 30000,
+    "timeoutSeconds": 5,
+    "type": "httpGet"
+  },
+  "replicas": 1,
+  "resources": {
+    "limits": {
+      "cpu": "40",
+      "ephemeral-storage": "64Gi",
+      "memory": "400Gi",
+      "nvidia.com/gpu": "2"
+    },
+    "requests": {
+      "cpu": "24",
+      "ephemeral-storage": "32Gi",
+      "memory": "300Gi",
+      "nvidia.com/gpu": "2"
+    }
+  },
+  "serviceAccountName": "wm-model-fetcher",
+  "serviceSpec": {
+    "headless": true,
+    "ports": [
+      {
+        "name": "api",
+        "port": 30000,
+        "targetPort": 30000
+      }
+    ],
+    "publishNotReadyAddresses": true
+  },
+  "startupProbe": {
+    "enabled": true,
+    "failureThreshold": 270,
+    "path": "/health",
+    "periodSeconds": 20,
+    "port": 30000,
+    "timeoutSeconds": 5,
+    "type": "httpGet"
+  },
+  "statefulSet": {
+    "podManagementPolicy": "Parallel",
+    "serviceName": "minwm-denoiser-headless",
+    "updateStrategy": {
+      "type": "OnDelete"
+    }
+  },
+  "terminationGracePeriodSeconds": 90,
+  "tolerations": [
+    {
+      "effect": "NoSchedule",
+      "key": "nvidia.com/gpu",
+      "operator": "Equal",
+      "value": "true"
+    }
+  ],
+  "topologySpreadConstraints": [],
+  "volumeMounts": [
+    {
+      "mountPath": "/model-cache",
+      "name": "model-cache",
+      "readOnly": true
+    },
+    {
+      "mountPath": "/dev/shm",
+      "name": "shm"
+    },
+    {
+      "mountPath": "/var/run/minwm-worker",
+      "name": "worker-epoch"
+    }
+  ],
+  "volumes": [
+    {
+      "emptyDir": {
+        "sizeLimit": "80Gi"
+      },
+      "name": "model-cache",
+      "type": "emptyDir"
+    },
+    {
+      "emptyDir": {
+        "medium": "Memory",
+        "sizeLimit": "64Gi"
+      },
+      "name": "shm",
+      "type": "emptyDir"
+    },
+    {
+      "emptyDir": {},
+      "name": "worker-epoch",
+      "type": "emptyDir"
+    }
+  ]
+}

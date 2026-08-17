@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Publish an immutable, fully materialized MinWM serving artifact to S3."""
+"""Legacy MinWM checkpoint-conversion publisher; not the generic release copier."""
 
 from __future__ import annotations
 

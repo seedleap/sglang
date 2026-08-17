@@ -13,7 +13,7 @@ spec:
   ports:
     - name: http
       port: 80
-      targetPort: http
+      targetPort: metrics
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -93,19 +93,21 @@ spec:
             - {name: OTEL_SERVICE_NAME, value: minwm-webui-opt-gateway-20260813}
             - {name: OTEL_EXPORTER_OTLP_ENDPOINT, value: http://minwm-realtime-adot:4317}
             - {name: OTEL_RESOURCE_ATTRIBUTES, value: service.namespace=minwm,deployment.environment=production,webui.profile=opt-20260813}
+            - {name: WORLD_MODEL_METRIC_SERVICE, value: gateway}
+            - {name: WORLD_MODEL_METRIC_LANE, value: production}
           ports:
-            - {name: http, containerPort: 18080}
+            - {name: metrics, containerPort: 18080}
           startupProbe:
-            httpGet: {path: /healthz, port: http}
+            httpGet: {path: /healthz, port: metrics}
             periodSeconds: 2
             failureThreshold: 30
           readinessProbe:
-            httpGet: {path: /readyz, port: http}
+            httpGet: {path: /readyz, port: metrics}
             periodSeconds: 5
             timeoutSeconds: 2
             failureThreshold: 6
           livenessProbe:
-            httpGet: {path: /healthz, port: http}
+            httpGet: {path: /healthz, port: metrics}
             periodSeconds: 15
           resources:
             requests: {cpu: 500m, memory: 512Mi}
