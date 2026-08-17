@@ -60,32 +60,38 @@ def resolve_remote_media_profile(
     legacy_scale: object = 1.0,
     legacy_model_path: object = None,
 ) -> RealtimeMediaProfile:
-    """Map the one safe legacy RIFE request; reject ambiguous remote semantics."""
+    """Resolve an explicit remote profile without upgrading legacy clients."""
 
     requested = parse_media_profile(media_profile)
-    if legacy_enabled or requested is RealtimeMediaProfile.RIFE2X_V1:
+    if legacy_enabled:
+        # Legacy browsers do not understand the session_ready receipt and
+        # legacy H.264 bridges keep the source timebase.  Silently mapping the
+        # old flag would therefore desynchronize either framing or playback.
+        raise ProtocolViolation(
+            "remote enable_frame_interpolation is no longer supported; "
+            "upgrade the client and request realtime_media_profile=rife2x_v1"
+        )
+    if requested is RealtimeMediaProfile.RIFE2X_V1:
         if legacy_model_path not in (None, ""):
             raise ProtocolViolation(
                 "remote RIFE weights are configured only by the VAE worker"
             )
-        try:
-            exp = float(legacy_exp)
-            scale = float(legacy_scale)
-        except (TypeError, ValueError, OverflowError) as exc:
-            raise ProtocolViolation(
-                "remote RIFE exp and scale must be numeric"
-            ) from exc
-        if not math.isfinite(exp) or exp != 1.0:
-            raise ProtocolViolation(
-                "remote RIFE supports only 2x interpolation (exp=1)"
-            )
-        if not math.isfinite(scale) or abs(scale - 1.0) > 1e-9:
-            raise ProtocolViolation("remote RIFE supports only scale=1.0")
-    if legacy_enabled:
-        # A remote VAE never executes the legacy post-process.  Mapping the
-        # supported legacy form into the negotiated profile makes an
-        # unavailable worker reject it instead of silently returning native.
-        return RealtimeMediaProfile.RIFE2X_V1
+        if legacy_exp is not None:
+            try:
+                exp = float(legacy_exp)
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise ProtocolViolation("remote RIFE exp must be numeric") from exc
+            if not math.isfinite(exp) or exp != 1.0:
+                raise ProtocolViolation(
+                    "remote RIFE supports only 2x interpolation (exp=1)"
+                )
+        if legacy_scale is not None:
+            try:
+                scale = float(legacy_scale)
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise ProtocolViolation("remote RIFE scale must be numeric") from exc
+            if not math.isfinite(scale) or abs(scale - 1.0) > 1e-9:
+                raise ProtocolViolation("remote RIFE supports only scale=1.0")
     return requested
 
 

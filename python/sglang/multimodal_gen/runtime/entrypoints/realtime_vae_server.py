@@ -425,6 +425,13 @@ def create_app(
                             log_realtime_trace(
                                 logger,
                                 trace_session,
+                                "server.vae_actor_wait_complete",
+                                duration_ms=round(result.actor_wait_ms, 3),
+                                **common_trace,
+                            )
+                            log_realtime_trace(
+                                logger,
+                                trace_session,
                                 "server.vae_rife_interpolation_complete",
                                 duration_ms=round(result.rife_interpolation_ms, 3),
                                 source_num_frames=result.source_num_frames,
@@ -449,6 +456,7 @@ def create_app(
                                     media_profile=result.media_profile.value,
                                     source_timeline_fps=result.source_timeline_fps,
                                     output_timeline_fps=result.output_timeline_fps,
+                                    actor_wait_ms=result.actor_wait_ms,
                                     rife_interpolation_ms=result.rife_interpolation_ms,
                                 )
                             await output_client.send(
@@ -486,6 +494,7 @@ def create_app(
                                 media_profile=result.media_profile.value,
                                 source_timeline_fps=result.source_timeline_fps,
                                 output_timeline_fps=result.output_timeline_fps,
+                                actor_wait_ms=result.actor_wait_ms,
                                 rife_interpolation_ms=result.rife_interpolation_ms,
                             )
                         await send(

@@ -288,6 +288,16 @@ assert.match(
 );
 assert.match(
   appJs,
+  /function fallbackStreamTransportLabel\(key, init = \{\}\)[\s\S]*realtime_output_format[\s\S]*JPEG[\s\S]*Raw RGB[\s\S]*Lossless delta[\s\S]*WebP/,
+  "an H.264 startup fallback should report its effective requested transport",
+);
+assert.match(
+  appJs,
+  /setStreamChipTransport\(key, false, init\)[\s\S]*setStreamChipTransport\("minwm", false, init\)/,
+  "the primary Zing adapter should not leave a false H.264 transport chip after fallback",
+);
+assert.match(
+  appJs,
   /lowLatencyMaxLeadFrames:\s*12/,
   "live playback should retain a small 24 fps frame cushion before dropping stale frames",
 );
