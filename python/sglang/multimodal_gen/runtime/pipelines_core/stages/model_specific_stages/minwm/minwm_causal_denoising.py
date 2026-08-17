@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from collections.abc import Callable
 from pathlib import Path
@@ -64,6 +65,7 @@ from sglang.multimodal_gen.runtime.realtime.states import (
 )
 from sglang.multimodal_gen.runtime.server_args import ServerArgs
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
+from sglang.multimodal_gen.runtime.utils.nvtx_pytorch_hooks import maybe_nvtx_range
 from sglang.multimodal_gen.runtime.utils.realtime_trace import (
     realtime_trace_span,
     tensor_trace_metadata,
@@ -73,6 +75,9 @@ MINWM_ACTION_HISTORY_CACHE = "minwm_action_history"
 MINWM_INITIAL_NOISE_CACHE = "minwm_initial_noise"
 MINWM_INITIAL_NOISE_CURSOR_CACHE = "minwm_initial_noise_cursor"
 MINWM_T2V_FIRST_LATENT_CACHE = "minwm_t2v_first_latent"
+MINWM_ACTION_RESIDUAL_PREPARE_NVTX_RANGE = (
+    "minwm_action_residual_prepare_once_per_chunk"
+)
 
 logger = init_logger(__name__)
 
@@ -826,30 +831,168 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
     ) -> None:
         if getattr(self, "_runtime_alignment_logged", False):
             return
-        self._runtime_alignment_logged = True
+
         arch_config = self.transformer.config.arch_config
-        cache = cache_ctx.kv_cache[0]
-        logger.info(
-            "MINWM_RUNTIME_ALIGNMENT local_attn_size=%d sink_size=%d "
-            "window_size=%d rope_position_mode=%s rope_gap=%d "
-            "prompt_first_frame_pin_enabled=%s request_sink_size=%s "
-            "request_window_size=%s allow_growth=%s cache_tokens=%d "
-            "sink_tokens=%d scene_cut_rope_offset=%d "
-            "scene_cut_sink_enabled=%s",
-            int(arch_config.local_attn_size),
-            int(self.sink_size),
-            int(self.sliding_window_num_frames),
-            cache.rope_position_mode,
-            int(cache.rope_max_frame_gap),
-            bool(cache.prompt_first_frame_pin_enabled),
-            getattr(batch, "realtime_causal_sink_size", None),
-            getattr(batch, "realtime_causal_kv_cache_num_frames", None),
-            bool(cache.allow_growth),
-            int(cache.cache_size),
-            int(cache.sink_tokens),
-            int(cache.scene_cut_rope_offset),
-            bool(cache.scene_cut_sink_enabled),
+        caches = cache_ctx.kv_cache
+        sequence_shard_enabled = self._causal_sequence_shard_enabled(batch)
+        expected_cache_tokens = self._get_causal_kv_cache_size(
+            sequence_shard_enabled=sequence_shard_enabled
         )
+        expected_sink_tokens = self._get_causal_sink_tokens()
+        expected_attention_window_tokens = self._get_causal_attention_window_size(
+            expected_cache_tokens
+        )
+        expected_attention_heads = self._num_causal_cache_attention_heads(
+            sequence_shard_enabled=sequence_shard_enabled
+        )
+        expected = {
+            "layer_count": int(self.num_transformer_blocks),
+            "cache_tokens": int(expected_cache_tokens),
+            "sink_tokens": int(expected_sink_tokens),
+            "attention_window_tokens": int(expected_attention_window_tokens),
+            "attention_heads": int(expected_attention_heads),
+            "allow_growth": bool(self._minwm_unbounded_cache),
+            "rope_position_mode": str(
+                getattr(arch_config, "rope_position_mode", "absolute")
+            ),
+            "rope_max_frame_gap": int(getattr(arch_config, "rope_max_frame_gap", 1)),
+            "prompt_first_frame_pin_enabled": bool(
+                getattr(arch_config, "prompt_first_frame_pin_enabled", False)
+            ),
+            "scene_cut_rope_offset": int(
+                getattr(arch_config, "scene_cut_rope_offset", 0)
+            ),
+            "scene_cut_sink_enabled": bool(
+                getattr(arch_config, "scene_cut_sink_enabled", False)
+            ),
+        }
+        violations: list[dict[str, Any]] = []
+
+        def check(layer: int | None, field: str, actual: Any) -> None:
+            expected_value = expected[field]
+            if actual != expected_value:
+                violations.append(
+                    {
+                        "layer": layer,
+                        "field": field,
+                        "expected": expected_value,
+                        "actual": actual,
+                    }
+                )
+
+        check(None, "layer_count", len(caches))
+        for layer, cache in enumerate(caches):
+            check(layer, "cache_tokens", int(cache.cache_size))
+            check(layer, "sink_tokens", int(cache.sink_tokens))
+            check(
+                layer,
+                "attention_window_tokens",
+                int(cache.attention_window_size),
+            )
+            check(layer, "attention_heads", int(cache.k.shape[2]))
+            check(layer, "attention_heads", int(cache.v.shape[2]))
+            check(layer, "allow_growth", bool(cache.allow_growth))
+            check(layer, "rope_position_mode", str(cache.rope_position_mode))
+            check(layer, "rope_max_frame_gap", int(cache.rope_max_frame_gap))
+            check(
+                layer,
+                "prompt_first_frame_pin_enabled",
+                bool(cache.prompt_first_frame_pin_enabled),
+            )
+            check(
+                layer,
+                "scene_cut_rope_offset",
+                int(cache.scene_cut_rope_offset),
+            )
+            check(
+                layer,
+                "scene_cut_sink_enabled",
+                bool(cache.scene_cut_sink_enabled),
+            )
+            for tensor_name in ("k", "v"):
+                tensor = getattr(cache, tensor_name)
+                actual_capacity = int(tensor.shape[1])
+                if actual_capacity != expected_cache_tokens:
+                    violations.append(
+                        {
+                            "layer": layer,
+                            "field": f"{tensor_name}_capacity_tokens",
+                            "expected": int(expected_cache_tokens),
+                            "actual": actual_capacity,
+                        }
+                    )
+
+        observed = {
+            "cache_token_counts": sorted({int(cache.cache_size) for cache in caches}),
+            "sink_token_counts": sorted({int(cache.sink_tokens) for cache in caches}),
+            "attention_window_token_counts": sorted(
+                {int(cache.attention_window_size) for cache in caches}
+            ),
+            "k_capacity_token_counts": sorted(
+                {int(cache.k.shape[1]) for cache in caches}
+            ),
+            "v_capacity_token_counts": sorted(
+                {int(cache.v.shape[1]) for cache in caches}
+            ),
+        }
+        alignment = {
+            "all_match": not violations,
+            "layer_count": len(caches),
+            "expected": expected,
+            "observed": observed,
+            "resolved": {
+                "local_attn_size": int(arch_config.local_attn_size),
+                "sink_size": int(self.sink_size),
+                "window_size": int(self.sliding_window_num_frames),
+                "tokens_per_frame": int(self.num_token_per_frame),
+                "request_sink_size": getattr(batch, "realtime_causal_sink_size", None),
+                "request_window_size": getattr(
+                    batch, "realtime_causal_kv_cache_num_frames", None
+                ),
+            },
+            "violations": violations,
+        }
+
+        if caches:
+            cache = caches[0]
+            logger.info(
+                "MINWM_RUNTIME_ALIGNMENT local_attn_size=%d sink_size=%d "
+                "window_size=%d rope_position_mode=%s rope_gap=%d "
+                "prompt_first_frame_pin_enabled=%s request_sink_size=%s "
+                "request_window_size=%s allow_growth=%s cache_tokens=%d "
+                "sink_tokens=%d scene_cut_rope_offset=%d "
+                "scene_cut_sink_enabled=%s",
+                int(arch_config.local_attn_size),
+                int(self.sink_size),
+                int(self.sliding_window_num_frames),
+                cache.rope_position_mode,
+                int(cache.rope_max_frame_gap),
+                bool(cache.prompt_first_frame_pin_enabled),
+                getattr(batch, "realtime_causal_sink_size", None),
+                getattr(batch, "realtime_causal_kv_cache_num_frames", None),
+                bool(cache.allow_growth),
+                int(cache.cache_size),
+                int(cache.sink_tokens),
+                int(cache.scene_cut_rope_offset),
+                bool(cache.scene_cut_sink_enabled),
+            )
+        logger.info(
+            "MINWM_RUNTIME_ALIGNMENT_JSON %s",
+            json.dumps(alignment, sort_keys=True, separators=(",", ":")),
+        )
+        if violations:
+            first = violations[0]
+            location = (
+                "cache collection"
+                if first["layer"] is None
+                else f"layer {first['layer']}"
+            )
+            raise RuntimeError(
+                "MinWM runtime alignment mismatch at "
+                f"{location}: {first['field']} expected={first['expected']!r} "
+                f"actual={first['actual']!r}"
+            )
+        self._runtime_alignment_logged = True
 
     def _prepare_realtime_causal_caches(
         self,
@@ -932,18 +1075,22 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
     ) -> torch.Tensor:
         """Materialize the action condition once for this forward context."""
         p_t, p_h, p_w = self.transformer.patch_size
-        with torch.autocast(
-            device_type=current_platform.device_type,
-            dtype=ctx.target_dtype,
-            enabled=ctx.autocast_enabled,
+        with maybe_nvtx_range(
+            MINWM_ACTION_RESIDUAL_PREPARE_NVTX_RANGE,
+            bool(getattr(self, "_current_use_nvtx", False)),
         ):
-            return self.transformer.prepare_action_token_residual(
-                ctx.pos_cond_kwargs["action"],
-                num_frames=ctx.num_frames // p_t,
-                height=ctx.height // p_h,
-                width=ctx.width // p_w,
+            with torch.autocast(
+                device_type=current_platform.device_type,
                 dtype=ctx.target_dtype,
-            )
+                enabled=ctx.autocast_enabled,
+            ):
+                return self.transformer.prepare_action_token_residual(
+                    ctx.pos_cond_kwargs["action"],
+                    num_frames=ctx.num_frames // p_t,
+                    height=ctx.height // p_h,
+                    width=ctx.width // p_w,
+                    dtype=ctx.target_dtype,
+                )
 
     def _forward_causal_transformer(self, batch: Req, **kwargs) -> torch.Tensor:
         output = self._forward_causal_transformer_impl(batch, **kwargs)

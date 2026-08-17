@@ -29,6 +29,27 @@ from sglang.multimodal_gen.runtime.utils.realtime_video import (
 )
 
 
+def test_async_materializer_logs_initialization_once(monkeypatch, tmp_path):
+    from sglang.multimodal_gen.runtime.utils import realtime_video
+
+    log_calls = []
+    monkeypatch.setattr(
+        realtime_video,
+        "logger",
+        type("Logger", (), {"info": lambda _self, *args: log_calls.append(args)})(),
+    )
+
+    materializer = AsyncRawRGBFrameMaterializer(
+        max_in_flight=2,
+        shared_memory_dir=str(tmp_path),
+    )
+    materializer.close()
+
+    assert len(log_calls) == 1
+    assert log_calls[0][0].startswith("Async raw RGB frame materializer initialized")
+    assert log_calls[0][1:] == (2, str(tmp_path))
+
+
 def test_materialize_output_sample_converts_tensor_to_uint8_frames():
     sample = torch.zeros(3, 1, 2, 2)
     sample[0] = 1.0

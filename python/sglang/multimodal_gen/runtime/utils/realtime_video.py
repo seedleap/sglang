@@ -67,6 +67,12 @@ class AsyncRawRGBFrameMaterializer:
             max_workers=max_in_flight,
             thread_name_prefix="sglang-raw-rgb",
         )
+        logger.info(
+            "Async raw RGB frame materializer initialized: "
+            "max_in_flight=%d shared_memory_dir=%s",
+            max_in_flight,
+            shared_memory_dir,
+        )
 
     def enqueue(
         self,

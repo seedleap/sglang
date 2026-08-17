@@ -403,13 +403,14 @@ def _batch_elapsed_ms(batch, now: float) -> float:
 
 
 def _should_measure_cuda(measure_cuda: bool | None) -> bool:
+    """Enable synchronizing CUDA timing only as an explicit diagnostic opt-in."""
     if measure_cuda is not None:
         return measure_cuda
-    return os.environ.get("SGLANG_REALTIME_TRACE_SYNC_CUDA", "1").lower() not in {
-        "0",
-        "false",
-        "no",
-        "off",
+    return os.environ.get("SGLANG_REALTIME_TRACE_SYNC_CUDA", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
     }
 
 

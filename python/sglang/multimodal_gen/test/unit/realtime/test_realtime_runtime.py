@@ -816,10 +816,8 @@ def test_scheduler_applies_realtime_replacement_that_arrives_before_request():
     scheduler = Scheduler.__new__(Scheduler)
     scheduler.waiting_queue = deque()
     replies = []
-    scheduler.return_result = (
-        lambda output, identity, should_not_return: replies.append(
-            (output.output, identity, should_not_return)
-        )
+    scheduler.return_result = lambda output, identity, should_not_return: (
+        replies.append((output.output, identity, should_not_return))
     )
     original = Req.__new__(Req)
     original.request_id = "request-1"
@@ -868,10 +866,8 @@ def test_scheduler_reports_realtime_replacement_after_dispatch_as_too_late():
     scheduler = Scheduler.__new__(Scheduler)
     scheduler.waiting_queue = deque()
     replies = []
-    scheduler.return_result = (
-        lambda output, identity, should_not_return: replies.append(
-            (output.output, identity, should_not_return)
-        )
+    scheduler.return_result = lambda output, identity, should_not_return: (
+        replies.append((output.output, identity, should_not_return))
     )
     dispatched = Req.__new__(Req)
     dispatched.request_id = "request-1"
@@ -919,8 +915,8 @@ def test_scheduler_rejects_replacement_with_mismatched_envelope_identity():
     scheduler = Scheduler.__new__(Scheduler)
     scheduler.waiting_queue = deque()
     replies = []
-    scheduler.return_result = (
-        lambda output, identity, should_not_return: replies.append(output.output)
+    scheduler.return_result = lambda output, identity, should_not_return: (
+        replies.append(output.output)
     )
     replacement = Req.__new__(Req)
     replacement.request_id = "other-request"
@@ -1317,6 +1313,42 @@ def test_scheduler_stage_metrics_emit_dedicated_realtime_trace_events(monkeypatc
     assert denoise["event_id"] == 9
     assert denoise["duration_ms"] == 620
     assert denoise["source"] == "scheduler_result_metrics"
+
+
+def test_async_raw_frame_enqueue_metric_reaches_chunk_telemetry():
+    metrics = RequestMetrics("metrics-req")
+    metrics.record_stage("GPUWorker.raw_frame_async_enqueue", 0.00125)
+    stage_metrics = realtime_video_api._collect_realtime_result_stage_metrics(
+        OutputBatch(metrics=metrics)
+    )
+
+    assert stage_metrics == {"raw_frame_async_enqueue_ms": 1.25}
+
+    sent_messages = []
+
+    class _Ws:
+        async def send_bytes(self, payload):
+            sent_messages.append(msgspec.msgpack.decode(payload))
+
+    session = GenerateSession()
+    chunk = session.new_chunk()
+    batch = SimpleNamespace(block_idx=0, realtime_event_id=1)
+    asyncio.run(
+        realtime_video_api._send_chunk_telemetry(
+            _Ws(),
+            session,
+            chunk,
+            batch,
+            request_prepare_ms=1.0,
+            scheduler_forward_ms=2.0,
+            chunk_total_ms=3.0,
+            send_stats=empty_frame_send_stats(),
+            stage_metrics=stage_metrics,
+        )
+    )
+
+    assert len(sent_messages) == 1
+    assert sent_messages[0]["raw_frame_async_enqueue_ms"] == 1.25
 
 
 def test_scheduler_stage_metrics_emit_dedicated_realtime_trace_events(monkeypatch):

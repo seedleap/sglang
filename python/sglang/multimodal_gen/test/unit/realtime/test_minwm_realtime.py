@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import inspect
+import json
 from contextlib import contextmanager
 from types import SimpleNamespace
 
@@ -68,6 +70,7 @@ from sglang.multimodal_gen.runtime.pipelines.minwm_causal_dmd_pipeline import (
 )
 from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import OutputBatch
 from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.minwm.minwm_causal_denoising import (
+    MINWM_ACTION_RESIDUAL_PREPARE_NVTX_RANGE,
     MinWMCausalDMDDenoisingStage,
     MinWMCausalUniPCDenoisingStage,
     MinWMCausalVaeDecodingStage,
@@ -114,7 +117,67 @@ def test_minwm_denoising_declares_transformer_residency_use(monkeypatch):
     assert calls == [("transformer", "transformer", transformer)]
 
 
-def test_minwm_runtime_alignment_logs_once_after_cache_init(monkeypatch):
+def _make_minwm_runtime_alignment_fixture():
+    layer_count = 30
+    cache_tokens = 22
+    sink_tokens = 6
+    attention_heads = 4
+    arch_config = SimpleNamespace(
+        local_attn_size=11,
+        sink_size=3,
+        sliding_window_num_frames=13,
+        rope_position_mode="block_relative",
+        rope_max_frame_gap=5,
+        prompt_first_frame_pin_enabled=True,
+        scene_cut_rope_offset=0,
+        scene_cut_sink_enabled=False,
+    )
+    stage = MinWMCausalDMDDenoisingStage.__new__(MinWMCausalDMDDenoisingStage)
+    stage.transformer = SimpleNamespace(
+        num_attention_heads=attention_heads,
+        config=SimpleNamespace(arch_config=arch_config),
+    )
+    stage.num_transformer_blocks = layer_count
+    stage.local_attn_size = arch_config.local_attn_size
+    stage.sink_size = arch_config.sink_size
+    stage.sliding_window_num_frames = arch_config.sliding_window_num_frames
+    stage.num_token_per_frame = 2
+    stage._minwm_unbounded_cache = False
+    batch = SimpleNamespace(
+        enable_sequence_shard=False,
+        realtime_causal_sink_size=3,
+        realtime_causal_kv_cache_num_frames=13,
+    )
+    caches = [
+        SimpleNamespace(
+            k=torch.empty(1, cache_tokens, attention_heads, 1),
+            v=torch.empty(1, cache_tokens, attention_heads, 1),
+            rope_position_mode=arch_config.rope_position_mode,
+            rope_max_frame_gap=arch_config.rope_max_frame_gap,
+            prompt_first_frame_pin_enabled=(arch_config.prompt_first_frame_pin_enabled),
+            allow_growth=False,
+            cache_size=cache_tokens,
+            sink_tokens=sink_tokens,
+            attention_window_size=cache_tokens,
+            scene_cut_rope_offset=arch_config.scene_cut_rope_offset,
+            scene_cut_sink_enabled=arch_config.scene_cut_sink_enabled,
+        )
+        for _ in range(layer_count)
+    ]
+    return stage, batch, SimpleNamespace(kv_cache=caches)
+
+
+def _runtime_alignment_json(log_calls):
+    payloads = [
+        call[1] for call in log_calls if call[0] == "MINWM_RUNTIME_ALIGNMENT_JSON %s"
+    ]
+    assert len(payloads) == 1
+    return json.loads(payloads[0])
+
+
+def test_minwm_runtime_alignment_validates_all_30_layers_without_hardcoding_config(
+    monkeypatch,
+):
     from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.minwm import (
         minwm_causal_denoising,
     )
@@ -125,38 +188,53 @@ def test_minwm_runtime_alignment_logs_once_after_cache_init(monkeypatch):
         "logger",
         SimpleNamespace(info=lambda *args: log_calls.append(args)),
     )
-    stage = MinWMCausalDMDDenoisingStage.__new__(MinWMCausalDMDDenoisingStage)
-    stage.transformer = SimpleNamespace(
-        config=SimpleNamespace(
-            arch_config=SimpleNamespace(local_attn_size=32),
-        )
-    )
-    stage.sink_size = 8
-    stage.sliding_window_num_frames = 32
-    batch = SimpleNamespace(
-        realtime_causal_sink_size=8,
-        realtime_causal_kv_cache_num_frames=32,
-    )
-    cache_ctx = SimpleNamespace(
-        kv_cache=[
-            SimpleNamespace(
-                rope_position_mode="block_relative",
-                rope_max_frame_gap=12,
-                prompt_first_frame_pin_enabled=True,
-                allow_growth=False,
-                cache_size=32,
-                sink_tokens=8,
-                scene_cut_rope_offset=0,
-                scene_cut_sink_enabled=False,
-            )
-        ]
-    )
+    stage, batch, cache_ctx = _make_minwm_runtime_alignment_fixture()
 
     stage._log_runtime_alignment_once(batch, cache_ctx)
     stage._log_runtime_alignment_once(batch, cache_ctx)
 
-    assert len(log_calls) == 1
+    assert len(log_calls) == 2
     assert log_calls[0][0].startswith("MINWM_RUNTIME_ALIGNMENT")
+    alignment = _runtime_alignment_json(log_calls)
+    assert alignment["all_match"] is True
+    assert alignment["layer_count"] == 30
+    assert alignment["expected"]["layer_count"] == 30
+    assert alignment["expected"]["cache_tokens"] == 22
+    assert alignment["expected"]["sink_tokens"] == 6
+    assert alignment["resolved"]["local_attn_size"] == 11
+    assert alignment["resolved"]["sink_size"] == 3
+    assert alignment["resolved"]["window_size"] == 13
+    assert alignment["observed"]["cache_token_counts"] == [22]
+    assert alignment["observed"]["sink_token_counts"] == [6]
+
+
+def test_minwm_runtime_alignment_reports_layer_17_mismatch(monkeypatch):
+    from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.minwm import (
+        minwm_causal_denoising,
+    )
+
+    log_calls = []
+    monkeypatch.setattr(
+        minwm_causal_denoising,
+        "logger",
+        SimpleNamespace(info=lambda *args: log_calls.append(args)),
+    )
+    stage, batch, cache_ctx = _make_minwm_runtime_alignment_fixture()
+    cache_ctx.kv_cache[17].rope_max_frame_gap = 6
+
+    with pytest.raises(RuntimeError, match="layer 17"):
+        stage._log_runtime_alignment_once(batch, cache_ctx)
+
+    alignment = _runtime_alignment_json(log_calls)
+    assert alignment["all_match"] is False
+    assert alignment["violations"] == [
+        {
+            "actual": 6,
+            "expected": 5,
+            "field": "rope_max_frame_gap",
+            "layer": 17,
+        }
+    ]
 
 
 @pytest.mark.parametrize(
@@ -821,6 +899,51 @@ def test_minwm_action_residual_is_recomputed_for_each_chunk():
     assert first.data_ptr() != second.data_ptr()
     assert torch.all(first == 1)
     assert torch.all(second == 2)
+
+
+def test_minwm_action_residual_prepare_nvtx_range_is_gated_and_unique(monkeypatch):
+    from sglang.multimodal_gen.runtime.utils import nvtx_pytorch_hooks
+
+    pushes = []
+    pops = []
+    monkeypatch.setattr(nvtx_pytorch_hooks.nvtx, "range_push", pushes.append)
+    monkeypatch.setattr(nvtx_pytorch_hooks.nvtx, "range_pop", lambda: pops.append(None))
+
+    class Transformer:
+        patch_size = (1, 2, 2)
+
+        @staticmethod
+        def prepare_action_token_residual(_action, **_kwargs):
+            return torch.zeros(1)
+
+    stage = MinWMCausalDMDDenoisingStage.__new__(MinWMCausalDMDDenoisingStage)
+    stage.transformer = Transformer()
+    context = SimpleNamespace(
+        target_dtype=torch.bfloat16,
+        autocast_enabled=False,
+        num_frames=4,
+        height=6,
+        width=8,
+        pos_cond_kwargs={"action": torch.zeros(1, 4, dtype=torch.long)},
+    )
+
+    stage._current_use_nvtx = True
+    stage._prepare_chunk_action_token_residual(context)
+    stage._prepare_chunk_action_token_residual(context)
+    stage._current_use_nvtx = False
+    stage._prepare_chunk_action_token_residual(context)
+
+    assert pushes == [MINWM_ACTION_RESIDUAL_PREPARE_NVTX_RANGE] * 2
+    assert pops == [None] * 2
+
+
+def test_minwm_forward_impl_prepares_action_residual_once_per_chunk():
+    source = inspect.getsource(MinWMCausalDMDDenoisingStage._forward_impl)
+
+    assert source.count("self._prepare_chunk_action_token_residual(ctx)") == 1
+    assert source.index(
+        "self._prepare_chunk_action_token_residual(ctx)"
+    ) < source.index("self._denoise_realtime_causal_chunk(")
 
 
 def test_minwm_bounded_session_presamples_reference_and_full_horizon(monkeypatch):

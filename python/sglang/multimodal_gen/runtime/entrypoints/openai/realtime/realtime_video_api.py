@@ -79,6 +79,7 @@ logger = init_logger(__name__)
 _REALTIME_CONTROL_REFRESH_TIMEOUT_S = 1.0
 router = APIRouter(prefix="/v1/realtime_video", tags=["realtime"])
 _REALTIME_RESULT_STAGE_MARKERS = ("vae", "denois")
+_RAW_FRAME_ASYNC_ENQUEUE_STAGE = "GPUWorker.raw_frame_async_enqueue"
 _ADMISSION_CONTROLLER: RealtimeAdmissionController | None = None
 _ADMISSION_CONFIG: tuple | None = None
 
@@ -389,7 +390,9 @@ def _coerce_metric_ms(value: Any) -> float | None:
 
 def _is_realtime_result_stage_metric(stage_name: str) -> bool:
     normalized = stage_name.lower()
-    return any(marker in normalized for marker in _REALTIME_RESULT_STAGE_MARKERS)
+    return normalized == _RAW_FRAME_ASYNC_ENQUEUE_STAGE.lower() or any(
+        marker in normalized for marker in _REALTIME_RESULT_STAGE_MARKERS
+    )
 
 
 def _realtime_stage_event_name(stage_name: str) -> str | None:
@@ -484,6 +487,9 @@ def _emit_realtime_result_stage_traces(
 def _collect_realtime_result_stage_metrics(result: Any) -> dict[str, float]:
     collected: dict[str, float] = {}
     for stage_name, duration_ms, _ in _iter_realtime_result_stage_metrics(result):
+        if stage_name.lower() == _RAW_FRAME_ASYNC_ENQUEUE_STAGE.lower():
+            collected["raw_frame_async_enqueue_ms"] = round(duration_ms, 3)
+            continue
         event_name = _realtime_stage_event_name(stage_name)
         if event_name == "server.model_denoise_complete":
             collected["model_denoise_ms"] = round(duration_ms, 3)
