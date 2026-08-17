@@ -18,12 +18,24 @@ python benchmark/minwm_realtime_async_vae/load_test.py \
   --concurrency 1,2,4,8 \
   --output artifacts/async.json
 
+# 远程 VAE RIFE 2x 验证：会严格校验协商回执、权重摘要、时间轴、
+# 每个 chunk 的 source/output 计数，以及实际接收帧数是否完整。
+python benchmark/minwm_realtime_async_vae/load_test.py \
+  --ws-url ws://HOST/v1/realtime_video/generate \
+  --profile async \
+  --realtime-media-profile rife2x_v1 \
+  --concurrency 1,2 \
+  --output artifacts/rife2x.json
+
 python benchmark/minwm_realtime_async_vae/summarize.py \
   --baseline artifacts/sync.json \
   --async-profile artifacts/async.json \
   --output-json artifacts/report.json \
   --output-md artifacts/report.zh-CN.md
 ```
+
+RIFE 报告会同时输出 source FPS 与 output FPS。`output FPS` 是插帧后的展示帧率；
+是否跟得上实时播放仍应看 source/output realtime factor，不能仅凭 output FPS 宣称模型吞吐提升。
 
 最高稳定并发的默认门槛为：P95 action 到首批帧 `< 1000 ms`、每会话生成速度 `>= 16 FPS`、错误率 `0`。最终人工浏览器验证另行记录 action 到 canvas 首帧的真实耗时。
 

@@ -14,7 +14,9 @@ from load_test import (
     record_frame_batch,
     server_action_latencies,
     stage_values,
+    stage_values_from_chunk_messages,
     trace_contract_summary,
+    validate_media_profile_contract,
 )
 
 
@@ -52,6 +54,87 @@ def test_init_request_supports_i2v_reference_bytes():
     assert request["realtime_causal_sink_size"] == 9
     assert request["realtime_causal_kv_cache_num_frames"] == 18
     assert "num_frames" not in request
+
+
+def test_init_request_only_adds_an_explicit_non_native_media_profile():
+    native = Namespace(
+        model="/work/model",
+        prompt="test prompt",
+        size="1280x704",
+        fps=24,
+        realtime_media_profile="native_v1",
+    )
+    rife_values = vars(native).copy()
+    rife_values["realtime_media_profile"] = "rife2x_v1"
+    rife = Namespace(**rife_values)
+
+    assert "realtime_media_profile" not in init_request(
+        native, total_chunks=2, trace_id="native"
+    )
+    assert (
+        init_request(rife, total_chunks=2, trace_id="rife")["realtime_media_profile"]
+        == "rife2x_v1"
+    )
+
+
+def test_rife_contract_requires_exact_wire_counts_and_timeline():
+    result = validate_media_profile_contract(
+        media_profile="rife2x_v1",
+        requested_fps=24,
+        session_ready={
+            "requested_media_profile": "rife2x_v1",
+            "effective_media_profile": "rife2x_v1",
+            "source_timeline_fps": 24,
+            "output_timeline_fps": 48,
+            "media_weights_sha256": "8f6f",
+        },
+        completions={
+            0: {
+                "media_profile": "rife2x_v1",
+                "source_num_frames": 4,
+                "output_num_frames": 7,
+            },
+            1: {
+                "media_profile": "rife2x_v1",
+                "source_num_frames": 4,
+                "output_num_frames": 8,
+            },
+        },
+        frame_counts={0: 7, 1: 8},
+        expected_chunks={0, 1},
+    )
+
+    assert result["source_frames"] == 8
+    assert result["output_frames"] == 15
+    assert result["acceptance"]["output_timeline_fps"] == 48
+
+
+def test_rife_contract_rejects_silent_frame_loss():
+    try:
+        validate_media_profile_contract(
+            media_profile="rife2x_v1",
+            requested_fps=24,
+            session_ready={
+                "requested_media_profile": "rife2x_v1",
+                "effective_media_profile": "rife2x_v1",
+                "source_timeline_fps": 24,
+                "output_timeline_fps": 48,
+                "media_weights_sha256": "8f6f",
+            },
+            completions={
+                0: {
+                    "media_profile": "rife2x_v1",
+                    "source_num_frames": 4,
+                    "output_num_frames": 7,
+                }
+            },
+            frame_counts={0: 6},
+            expected_chunks={0},
+        )
+    except RuntimeError as exc:
+        assert "delivered 6 frames" in str(exc)
+    else:
+        raise AssertionError("RIFE frame loss must fail the load-test contract")
 
 
 def test_record_frame_batch_counts_all_batches_in_the_same_chunk():
@@ -191,6 +274,52 @@ def test_stage_values_excludes_warmup_and_records_local_vae():
     assert stage_values(events, min_chunk_index=2) == {
         "denoise_ms": [310.0],
         "vae_decode_ms": [16.0],
+    }
+
+
+def test_stage_values_records_remote_rife_costs_separately():
+    result = stage_values(
+        [
+            {
+                "event": "server.remote_vae_complete",
+                "chunk_index": 3,
+                "vae_decode_ms": 12.0,
+                "vae_post_decode_ms": 3.0,
+                "actor_wait_ms": 4.0,
+                "rife_interpolation_ms": 21.0,
+            }
+        ]
+    )
+
+    assert result == {
+        "vae_decode_ms": [12.0],
+        "vae_post_decode_ms": [3.0],
+        "actor_wait_ms": [4.0],
+        "rife_interpolation_ms": [21.0],
+    }
+
+
+def test_chunk_telemetry_provides_rife_stages_without_trace_api():
+    result = stage_values_from_chunk_messages(
+        {
+            0: {"chunk_total_ms": 900, "rife_interpolation_ms": 18},
+            1: {
+                "chunk_total_ms": 1100,
+                "actor_wait_ms": 3,
+                "rife_interpolation_ms": 20,
+                "source_realtime_factor": 0.62,
+                "output_realtime_factor": 0.62,
+            },
+        },
+        min_chunk_index=1,
+    )
+
+    assert result == {
+        "chunk_total_ms": [1100.0],
+        "actor_wait_ms": [3.0],
+        "rife_interpolation_ms": [20.0],
+        "source_realtime_factor": [0.62],
+        "output_realtime_factor": [0.62],
     }
 
 
