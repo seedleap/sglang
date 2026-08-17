@@ -20,24 +20,24 @@
     const skills = (Array.isArray(draft.skills) ? draft.skills : [])
       .map((skill, index) => ({
         id: normalizedText(skill?.id) || `skill-${index + 1}`,
-        name: normalizedText(skill?.name) || `技能 ${index + 1}`,
-        instruction: normalizedText(skill?.instruction),
+        input: normalizedText(skill?.input)
+          || normalizedText(skill?.instruction)
+          || normalizedText(skill?.name),
       }))
-      .filter((skill) => skill.instruction);
+      .filter((skill) => skill.input);
     if (skills.length > MAX_WORLD_SKILLS) {
       throw new Error(`最多可以配置 ${MAX_WORLD_SKILLS} 个技能`);
     }
 
     const rawGoal = draft.goal || {};
-    const goalInstruction = normalizedText(rawGoal.instruction);
-    const hasPartialGoal = Boolean(goalInstruction || normalizedText(rawGoal.name));
+    const goalInput = normalizedText(rawGoal.input)
+      || normalizedText(rawGoal.instruction)
+      || normalizedText(rawGoal.name);
     let goal = null;
-    if (hasPartialGoal) {
-      if (!goalInstruction) throw new Error("请填写目标触发 Prompt");
+    if (goalInput) {
       goal = {
-        name: normalizedText(rawGoal.name) || "隐藏目标",
         probability: normalizeProbability(rawGoal.probability),
-        instruction: goalInstruction,
+        input: goalInput,
       };
     }
     return { skills, goal };
@@ -53,9 +53,18 @@
     return { prompt, change_type: changeType };
   }
 
+  function normalizeCompletedRule(result) {
+    const name = normalizedText(result?.name);
+    if (!name) throw new Error("规则补全结果缺少按键名称或奖励名称");
+    return {
+      name: name.slice(0, 28),
+      prepared: normalizePreparedResult(result),
+    };
+  }
+
   class WorldRulesController {
     constructor({
-      rewrite,
+      completeRule,
       dispatchPrepared,
       random = Math.random,
       setTimer = global.setTimeout.bind(global),
@@ -64,7 +73,7 @@
       onAchievement = () => {},
       onStateChange = () => {},
     }) {
-      this.rewrite = rewrite;
+      this.completeRule = completeRule;
       this.dispatchPrepared = dispatchPrepared;
       this.random = random;
       this.setTimer = setTimer;
@@ -87,18 +96,22 @@
       }
       const skillPromise = Promise.all(normalized.skills.map(async (skill) => ({
         ...skill,
-        prepared: normalizePreparedResult(await this.rewrite({
-          instruction: skill.instruction,
+        ...normalizeCompletedRule(await this.completeRule({
+          kind: "skill",
+          input: skill.input,
           previous_prompt: basePrompt,
         })),
+        instruction: skill.input,
       })));
       const goalPromise = normalized.goal
-        ? this.rewrite({
-          instruction: normalized.goal.instruction,
+        ? this.completeRule({
+          kind: "goal",
+          input: normalized.goal.input,
           previous_prompt: basePrompt,
         }).then((result) => ({
           ...normalized.goal,
-          prepared: normalizePreparedResult(result),
+          ...normalizeCompletedRule(result),
+          instruction: normalized.goal.input,
         }))
         : Promise.resolve(null);
       const [skills, goal] = await Promise.all([skillPromise, goalPromise]);

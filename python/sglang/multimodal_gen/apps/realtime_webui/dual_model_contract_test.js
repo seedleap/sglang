@@ -132,6 +132,8 @@ assert.match(html, /<details id="worldRulesPanel" class="world-rules-panel">/, "
 assert.doesNotMatch(html, /<details id="worldRulesPanel"[^>]*\sopen/, "world rules must not occupy sidebar space until expanded");
 assert.match(html, /id="addSkillRuleBtn"/, "world rules should support multiple skills");
 assert.match(html, /id="goalProbability"[^>]*min="0"[^>]*max="1"/, "goal probability should be constrained to 0-1");
+assert.match(html, /id="goalRuleInput"/, "a goal should use one reward-or-prompt input");
+assert.doesNotMatch(html, /id="goalName"|id="goalPrompt"/, "a goal must not require separate name and prompt fields");
 assert.match(html, /id="runtimeSkillBar"[^>]*hidden/, "prepared skills should render above movement controls only when active");
 assert.match(html, /id="goalAchievementToast"[^>]*hidden/, "goal completion should have an accessible popup");
 assert.match(app, /function clearWorldDraft\(\)/);
@@ -139,6 +141,7 @@ assert.match(app, /async function completeWorldDraft\(\)/);
 assert.match(app, /function setWorldCompletionBusy\(pending, completingFromImage = false\)/);
 assert.match(app, /function setupFirstFrameDropZone\(\)/);
 assert.match(app, /async function prepareWorldRulesForEntry\(description\)/);
+assert.match(app, /fetch\("\.\/api\/world-rule\/complete"/);
 assert.match(app, /worldRulesController\.activate\(preparedWorldRules\)/);
 assert.match(app, /achievementDelayMs:\s*5000/);
 assert.match(app, /function keyboardSkill\(event\)/);

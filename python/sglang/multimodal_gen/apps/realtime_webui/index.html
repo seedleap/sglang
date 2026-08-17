@@ -92,7 +92,7 @@
             <span id="worldRulesSummary">未配置</span>
           </summary>
           <div class="world-rules-content">
-            <p class="world-rules-intro">进入世界前统一润色，游玩时按键立即发送。</p>
+            <p class="world-rules-intro">只需填写技能或奖励的一种表达，AI 会自动补全按键名称与完整 Prompt。</p>
             <section class="rule-editor rule-editor-skills" aria-labelledby="skillRulesTitle">
               <header>
                 <span><b id="skillRulesTitle">技能</b><small>最多 9 个</small></span>
@@ -110,15 +110,11 @@
                   <span>触发概率</span>
                   <input id="goalProbability" type="number" min="0" max="1" step="0.01" placeholder="0.2" inputmode="decimal" />
                 </label>
-                <label class="goal-name-field">
-                  <span>达成奖励</span>
-                  <input id="goalName" type="text" maxlength="28" placeholder="例如：星光徽章" />
+                <label class="goal-rule-input-field">
+                  <span>达成奖励或触发效果</span>
+                  <textarea id="goalRuleInput" rows="3" maxlength="2000" placeholder="例如：星光徽章；或：天空落下一枚发光徽章，被主角稳稳接住……"></textarea>
                 </label>
               </div>
-              <label class="goal-prompt-field">
-                <span>触发 Prompt</span>
-                <textarea id="goalPrompt" rows="3" maxlength="2000" placeholder="例如：天空中落下一枚发光徽章，被主角稳稳接住……"></textarea>
-              </label>
             </section>
             <p id="worldRulesStatus" class="world-rules-status" role="status" aria-live="polite">规则非必填</p>
           </div>

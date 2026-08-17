@@ -52,6 +52,28 @@ class PromptRewriteOutput(BaseModel):
     )
 
 
+class WorldRuleCompletionOutput(BaseModel):
+    """A display label and prepared prompt completed from one rule input."""
+
+    name: str = Field(
+        min_length=1,
+        max_length=28,
+        description="Concise UI label for the skill button or achieved reward.",
+    )
+    prompt: str = Field(
+        min_length=1,
+        description="Detailed standalone rewritten video-generation prompt in English.",
+    )
+    change_type: ChangeType
+
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={
+            "propertyOrdering": ["name", "prompt", "change_type"]
+        },
+    )
+
+
 SYSTEM_PROMPT = """Rewrite PREVIOUS PROMPT using EDIT INSTRUCTION and return the schema only.
 
 Write one detailed, standalone English video prompt in this exact semantic order: viewpoint/camera first; main subject second; scene/environment third. Target 180-320 English words for a normal edit, using several substantial paragraphs when useful. Do not compress the result into a short summary. Favor explicit visual detail and continuity constraints over brevity, but avoid redundant restatement.
@@ -65,6 +87,19 @@ Never leave a changed category implicit. For an environment edit, audit terrain/
 Resolve all contradictions. Do not preserve a trait that the requested change removes. Do not invent unrelated changes. The generated prompt must not use the words "reference," "source," "previous," "original," "input," or "instruction" anywhere. It must not describe the generation or comparison process. Describe visual transitions directly in present tense. Do not use headings, bullets, markdown, commentary, or alternatives inside the generated prompt.
 
 Set change_type=persistent for a continuing state edit: environment, weather, time, lighting, viewpoint, composition, subject identity/type/appearance, clothing, equipment, style, layout, or another stable visual state. Set change_type=one_time for a transient shot action/event: summoning, casting or releasing a skill, attacking, jumping, exploding, or transforming as an action beat. Summons and skill releases are always one_time even when visible throughout this shot. Choose exactly one type."""
+
+
+WORLD_RULE_SYSTEM_PROMPT = """Complete one interactive world rule and return the schema only.
+
+RULE INPUT may be either a short interface label or a longer visual instruction. Infer whichever side is missing. Return both a concise name and one detailed standalone English video-generation prompt. Do not ask questions and do not return alternatives.
+
+For kind=skill, name is the short action label shown on a gameplay button. For kind=goal, name is the concise reward or achievement shown in the success popup. Prefer 2-8 Chinese characters when RULE INPUT is Chinese; otherwise use 2-4 short words. Never use generic labels such as “技能”, “动作”, “目标”, or “成功”.
+
+Write prompt in this semantic order: viewpoint/camera first; main subject second; scene/environment third. Preserve every unspecified visual fact in WORLD PROMPT. If RULE INPUT is only a name, invent the most direct visible action or reward manifestation that matches it. If it is already a detailed instruction, preserve its intent and infer only the concise name. For goal rules, make the named reward or achievement visibly appear in the scene so the trigger has a concrete visual result.
+
+The prompt must be a complete current visual state rather than an edit command. State what changes and explicitly retain important unchanged subjects, composition, environment, lighting, and camera continuity. Resolve contradictions and do not invent unrelated changes. Do not use headings, bullets, markdown, commentary, or alternatives inside prompt.
+
+Set change_type=persistent for continuing world, weather, lighting, viewpoint, composition, identity, appearance, equipment, or layout changes. Set change_type=one_time for a transient action, skill release, summon, attack, jump, explosion, transformation beat, reward appearance, or achievement event. Choose exactly one type."""
 
 
 def build_user_message(previous_prompt: str, instruction: str) -> str:
@@ -81,6 +116,29 @@ def build_user_message(previous_prompt: str, instruction: str) -> str:
         f"<previous_prompt>\n{normalized_prompt}\n</previous_prompt>\n\n"
         "EDIT INSTRUCTION:\n"
         f"<edit_instruction>\n{normalized_instruction}\n</edit_instruction>"
+    )
+
+
+def build_world_rule_message(
+    previous_prompt: str, rule_input: str, kind: str
+) -> str:
+    """Build a delimited input for a skill or goal completion."""
+
+    normalized_prompt = previous_prompt.strip()
+    normalized_input = rule_input.strip()
+    normalized_kind = kind.strip().lower()
+    if not normalized_prompt:
+        raise ValueError("previous_prompt must not be empty")
+    if not normalized_input:
+        raise ValueError("rule_input must not be empty")
+    if normalized_kind not in {"skill", "goal"}:
+        raise ValueError("kind must be skill or goal")
+    return (
+        f"RULE KIND: {normalized_kind}\n\n"
+        "WORLD PROMPT:\n"
+        f"<world_prompt>\n{normalized_prompt}\n</world_prompt>\n\n"
+        "RULE INPUT:\n"
+        f"<rule_input>\n{normalized_input}\n</rule_input>"
     )
 
 
@@ -104,6 +162,20 @@ def _validate_output(payload: Any) -> PromptRewriteOutput:
     elif isinstance(payload, str):
         return PromptRewriteOutput.model_validate_json(payload)
     return PromptRewriteOutput.model_validate(payload)
+
+
+def _validate_world_rule_output(payload: Any) -> WorldRuleCompletionOutput:
+    if isinstance(payload, WorldRuleCompletionOutput):
+        return payload
+    if isinstance(payload, BaseModel):
+        return WorldRuleCompletionOutput.model_validate(payload.model_dump())
+    if isinstance(payload, (bytes, bytearray)):
+        return WorldRuleCompletionOutput.model_validate_json(
+            payload.decode("utf-8")
+        )
+    if isinstance(payload, str):
+        return WorldRuleCompletionOutput.model_validate_json(payload)
+    return WorldRuleCompletionOutput.model_validate(payload)
 
 
 class PromptRewriter:
@@ -233,5 +305,55 @@ class PromptRewriter:
                     + str(exc)
                     + "\nReturn valid JSON with exactly prompt and change_type. "
                     + "change_type must be persistent or one_time."
+                )
+        raise AssertionError("unreachable")
+
+    async def complete_world_rule(
+        self, rule_input: str, previous_prompt: str, kind: str
+    ) -> WorldRuleCompletionOutput:
+        """Infer a rule label and prepared prompt in one latency-sensitive call."""
+
+        from google.genai import types
+
+        client = await self._get_client()
+        user_message = build_world_rule_message(
+            previous_prompt, rule_input, kind
+        )
+        attempt_message = user_message
+        for attempt in range(1, self.max_attempts + 1):
+            response = await asyncio.wait_for(
+                client.aio.models.generate_content(
+                    model=self.model,
+                    contents=[attempt_message],
+                    config=types.GenerateContentConfig(
+                        system_instruction=WORLD_RULE_SYSTEM_PROMPT,
+                        temperature=0.1,
+                        max_output_tokens=1024,
+                        response_mime_type="application/json",
+                        response_json_schema=(
+                            WorldRuleCompletionOutput.model_json_schema()
+                        ),
+                        thinking_config=types.ThinkingConfig(
+                            thinking_budget=0,
+                            include_thoughts=False,
+                        ),
+                    ),
+                ),
+                timeout=self.request_timeout_seconds,
+            )
+            try:
+                return _validate_world_rule_output(_extract_payload(response))
+            except (TypeError, ValueError) as exc:
+                if attempt == self.max_attempts:
+                    raise RuntimeError(
+                        "Gemini returned invalid world rule output after "
+                        f"{self.max_attempts} attempt(s)"
+                    ) from exc
+                attempt_message = (
+                    user_message
+                    + "\n\nSTRUCTURE CORRECTION FOR THE NEXT ATTEMPT:\n"
+                    + str(exc)
+                    + "\nReturn valid JSON with exactly name, prompt, and "
+                    + "change_type. change_type must be persistent or one_time."
                 )
         raise AssertionError("unreachable")

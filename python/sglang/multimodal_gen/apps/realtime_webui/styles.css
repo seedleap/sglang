@@ -1679,7 +1679,7 @@ body.world-studio {
 .world-studio #addSkillRuleBtn:hover:not(:disabled) { border-color: var(--ws-accent); background: rgba(121, 223, 189, 0.12); transform: none; }
 .world-studio .skill-rule-list { display: grid; gap: 8px; }
 .world-studio .skill-rule-item { display: grid; gap: 7px; border: 1px solid var(--ws-line); border-radius: 10px; padding: 9px; background: rgba(5, 9, 9, 0.22); }
-.world-studio .skill-rule-item-head { display: grid; grid-template-columns: 24px minmax(0, 1fr) auto; align-items: center; gap: 7px; }
+.world-studio .skill-rule-item-head { display: grid; grid-template-columns: 24px minmax(0, 1fr) auto; align-items: start; gap: 7px; }
 .world-studio .skill-rule-key {
   display: grid;
   width: 24px;
@@ -1692,22 +1692,21 @@ body.world-studio {
   font-size: 9px;
   font-weight: 760;
 }
-.world-studio .skill-rule-item input { min-width: 0; height: 30px; padding: 0 9px; font-size: 10px; }
-.world-studio .skill-rule-remove { width: 26px; height: 26px; min-height: 26px; border: 0; border-radius: 7px; padding: 0; background: transparent; color: var(--ws-muted); font-size: 14px; }
+.world-studio .skill-rule-remove { width: 26px; height: 26px; min-height: 26px; margin-top: 2px; border: 0; border-radius: 7px; padding: 0; background: transparent; color: var(--ws-muted); font-size: 14px; }
 .world-studio .skill-rule-remove:hover { background: rgba(228, 134, 116, 0.1); color: #f0b0a3; transform: none; }
 .world-studio .skill-rule-item textarea,
-.world-studio .goal-prompt-field textarea { width: 100%; resize: vertical; padding: 9px; color: #d8dedb; font-size: 10px; line-height: 1.45; }
-.world-studio .skill-rule-item textarea { min-height: 62px; }
+.world-studio .goal-rule-input-field textarea { width: 100%; resize: vertical; padding: 9px; color: #d8dedb; font-size: 10px; line-height: 1.45; }
+.world-studio .skill-rule-item textarea { min-width: 0; min-height: 58px; }
 .world-studio .skill-rule-state { min-height: 12px; color: var(--ws-muted); font-size: 8px; }
 .world-studio .skill-rule-state[data-state="ready"] { color: var(--ws-accent); }
 .world-studio .skill-rule-state[data-state="error"] { color: #f1aa9c; }
 .world-studio .rule-empty { margin: 0; color: #74807c; font-size: 8px; }
 .world-studio .rule-empty[hidden] { display: none; }
-.world-studio .goal-rule-fields { display: grid; grid-template-columns: 92px minmax(0, 1fr); gap: 8px; }
+.world-studio .goal-rule-fields { display: grid; grid-template-columns: 82px minmax(0, 1fr); align-items: start; gap: 8px; }
 .world-studio .goal-rule-fields label,
-.world-studio .goal-prompt-field { display: grid; gap: 5px; color: var(--ws-muted); font-size: 8px; }
+.world-studio .goal-rule-input-field { display: grid; gap: 5px; color: var(--ws-muted); font-size: 8px; }
 .world-studio .goal-rule-fields input { width: 100%; height: 31px; padding: 0 9px; font-size: 10px; }
-.world-studio .goal-prompt-field textarea { min-height: 68px; }
+.world-studio .goal-rule-input-field textarea { min-height: 68px; }
 .world-studio .world-rules-status { min-height: 13px; margin: 0; color: var(--ws-muted); font-size: 8px; line-height: 1.45; }
 .world-studio .world-rules-status[data-state="working"] { color: #e7c58f; }
 .world-studio .world-rules-status[data-state="ready"] { color: var(--ws-accent); }

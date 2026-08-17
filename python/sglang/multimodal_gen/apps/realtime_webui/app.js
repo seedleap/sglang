@@ -958,7 +958,7 @@ const promptRewriteController = new PromptRewriteController({
   restoreDelayMs: 10000,
 });
 worldRulesController = new WorldRulesController({
-  rewrite: rewriteRuntimePrompt,
+  completeRule: completeWorldRule,
   dispatchPrepared: (prepared, metadata) => {
     markRecordingPromptSubmitted(metadata.instruction || metadata.skillName || metadata.goalName || "");
     return promptRewriteController.submitPrepared(
@@ -4599,13 +4599,11 @@ function readWorldRulesDraft() {
   return {
     skills: skillRuleElements().map((item) => ({
       id: item.dataset.skillRuleId,
-      name: item.querySelector("[data-rule-field='name']").value,
-      instruction: item.querySelector("[data-rule-field='instruction']").value,
+      input: item.querySelector("[data-rule-field='input']").value,
     })),
     goal: {
-      name: $("goalName").value,
       probability: $("goalProbability").value,
-      instruction: $("goalPrompt").value,
+      input: $("goalRuleInput").value,
     },
   };
 }
@@ -4643,9 +4641,9 @@ function invalidatePreparedWorldRules() {
   worldRulesDraftGeneration += 1;
   skillRuleElements().forEach((item) => {
     const state = item.querySelector(".skill-rule-state");
-    state.textContent = item.querySelector("[data-rule-field='instruction']").value.trim()
-      ? "待进入世界时润色"
-      : "填写 Prompt 后启用";
+    state.textContent = item.querySelector("[data-rule-field='input']").value.trim()
+      ? "待进入世界时由 AI 补全"
+      : "填写技能标签或动作描述后启用";
     delete state.dataset.state;
   });
 }
@@ -4658,9 +4656,9 @@ function updateWorldRulesDraftUi() {
   $("skillRuleEmpty").hidden = items.length > 0;
   $("addSkillRuleBtn").disabled = items.length >= 9;
   const skillCount = items.filter((item) => (
-    item.querySelector("[data-rule-field='instruction']").value.trim()
+    item.querySelector("[data-rule-field='input']").value.trim()
   )).length;
-  const hasGoal = Boolean($("goalPrompt").value.trim() || $("goalName").value.trim());
+  const hasGoal = Boolean($("goalRuleInput").value.trim());
   const parts = [];
   if (skillCount) parts.push(`${skillCount} 个技能`);
   if (hasGoal) parts.push("1 个目标");
@@ -4672,7 +4670,7 @@ function updateWorldRulesDraftUi() {
   }
   try {
     normalizedWorldRulesForStorage();
-    setWorldRulesStatus("进入世界前会自动完成 Prompt 润色", "ready");
+    setWorldRulesStatus("进入世界前 AI 会自动补全名称与完整 Prompt", "ready");
   } catch (error) {
     setWorldRulesStatus(error.message || "规则配置不完整", "error");
   }
@@ -4708,42 +4706,35 @@ function addSkillRule(skill = {}, { focus = true } = {}) {
   const key = document.createElement("span");
   key.className = "skill-rule-key";
   key.setAttribute("aria-hidden", "true");
-  const name = document.createElement("input");
-  name.type = "text";
-  name.maxLength = 28;
-  name.placeholder = "技能名称（例如：召唤飞船）";
-  name.value = String(skill.name || "");
-  name.dataset.ruleField = "name";
-  name.setAttribute("aria-label", "技能名称");
+  const input = document.createElement("textarea");
+  input.rows = 2;
+  input.maxLength = 2000;
+  input.placeholder = "输入技能标签或动作描述，例如：召唤飞船；或：从云层中召唤一艘发光飞船……";
+  input.value = String(skill.input || skill.instruction || skill.name || "");
+  input.dataset.ruleField = "input";
+  input.setAttribute("aria-label", "技能标签或动作描述");
   const remove = document.createElement("button");
   remove.className = "skill-rule-remove";
   remove.type = "button";
   remove.setAttribute("aria-label", "删除技能");
   remove.title = "删除技能";
   remove.textContent = "×";
-  head.append(key, name, remove);
-
-  const instruction = document.createElement("textarea");
-  instruction.rows = 3;
-  instruction.maxLength = 2000;
-  instruction.placeholder = "输入技能 Prompt，例如：从云层中召唤一艘发光飞船……";
-  instruction.value = String(skill.instruction || "");
-  instruction.dataset.ruleField = "instruction";
-  instruction.setAttribute("aria-label", "技能 Prompt");
+  head.append(key, input, remove);
   const state = document.createElement("span");
   state.className = "skill-rule-state";
-  state.textContent = instruction.value.trim() ? "待进入世界时润色" : "填写 Prompt 后启用";
-  item.append(head, instruction, state);
+  state.textContent = input.value.trim()
+    ? "待进入世界时由 AI 补全"
+    : "填写技能标签或动作描述后启用";
+  item.append(head, state);
   list.appendChild(item);
 
-  name.addEventListener("input", handleWorldRulesDraftInput);
-  instruction.addEventListener("input", handleWorldRulesDraftInput);
+  input.addEventListener("input", handleWorldRulesDraftInput);
   remove.onclick = () => {
     item.remove();
     handleWorldRulesDraftInput();
   };
   updateWorldRulesDraftUi();
-  if (focus) name.focus({ preventScroll: true });
+  if (focus) input.focus({ preventScroll: true });
   return item;
 }
 
@@ -4751,11 +4742,12 @@ function applyWorldRulesDraft(draft = null) {
   $("skillRuleList").innerHTML = "";
   const skills = Array.isArray(draft?.skills) ? draft.skills : [];
   skills.slice(0, 9).forEach((skill) => addSkillRule(skill, { focus: false }));
-  $("goalName").value = String(draft?.goal?.name || "");
   $("goalProbability").value = draft?.goal?.probability == null
     ? ""
     : String(draft.goal.probability);
-  $("goalPrompt").value = String(draft?.goal?.instruction || "");
+  $("goalRuleInput").value = String(
+    draft?.goal?.input || draft?.goal?.instruction || draft?.goal?.name || "",
+  );
   invalidatePreparedWorldRules();
   updateWorldRulesDraftUi();
 }
@@ -4783,11 +4775,11 @@ async function prepareWorldRulesForEntry(description) {
 
   const generation = worldRulesDraftGeneration;
   setWorldRulesPreparing(true);
-  setWorldRulesStatus(`正在并行润色 ${ruleCount} 条规则 Prompt…`, "working");
+  setWorldRulesStatus(`正在并行补全 ${ruleCount} 条规则…`, "working");
   skillRuleElements().forEach((item) => {
     const state = item.querySelector(".skill-rule-state");
-    if (item.querySelector("[data-rule-field='instruction']").value.trim()) {
-      state.textContent = "正在润色…";
+    if (item.querySelector("[data-rule-field='input']").value.trim()) {
+      state.textContent = "AI 正在补全名称与 Prompt…";
       delete state.dataset.state;
     }
   });
@@ -4803,23 +4795,23 @@ async function prepareWorldRulesForEntry(description) {
       const state = item?.querySelector(".skill-rule-state");
       if (!state) return;
       state.textContent = skill.prepared.change_type === "one_time"
-        ? "✓ 已润色 · 一次性"
-        : "✓ 已润色 · 持久";
+        ? `✓ ${skill.name} · 一次性`
+        : `✓ ${skill.name} · 持久`;
       state.dataset.state = "ready";
     });
     preparedWorldRulesCache = { signature, prepared };
-    setWorldRulesStatus(`${ruleCount} 条规则已润色，进入后可立即触发`, "ready");
+    setWorldRulesStatus(`${ruleCount} 条规则已补全，进入后可立即触发`, "ready");
     return prepared;
   } catch (error) {
     $("worldRulesPanel").open = true;
     skillRuleElements().forEach((item) => {
       const state = item.querySelector(".skill-rule-state");
       if (!state.dataset.state) {
-        state.textContent = "润色失败，请重试";
+        state.textContent = "补全失败，请重试";
         state.dataset.state = "error";
       }
     });
-    setWorldRulesStatus(error.message || "规则 Prompt 润色失败", "error");
+    setWorldRulesStatus(error.message || "规则补全失败", "error");
     throw error;
   } finally {
     setWorldRulesPreparing(false);
@@ -6441,7 +6433,7 @@ $("addSkillRuleBtn").onclick = () => {
   addSkillRule();
   handleWorldRulesDraftInput();
 };
-for (const id of ["goalName", "goalProbability", "goalPrompt"]) {
+for (const id of ["goalProbability", "goalRuleInput"]) {
   $(id).addEventListener("input", handleWorldRulesDraftInput);
 }
 $("stopBtn").onclick = () => {
@@ -6472,6 +6464,24 @@ async function rewriteRuntimePrompt(payload) {
   }
   if (!response.ok) {
     throw new Error(result?.error || `prompt rewrite failed (${response.status})`);
+  }
+  return result;
+}
+
+async function completeWorldRule(payload) {
+  const response = await fetch("./api/world-rule/complete", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  let result = null;
+  try {
+    result = await response.json();
+  } catch {
+    result = null;
+  }
+  if (!response.ok) {
+    throw new Error(result?.error || `world rule completion failed (${response.status})`);
   }
   return result;
 }

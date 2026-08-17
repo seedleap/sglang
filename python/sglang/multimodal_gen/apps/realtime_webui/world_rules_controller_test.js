@@ -17,17 +17,25 @@ async function main() {
     () => normalizeWorldRulesDraft({ goal: { name: "徽章", instruction: "出现徽章", probability: 1.2 } }),
     /0–1/,
   );
+  assert.deepEqual(
+    normalizeWorldRulesDraft({ skills: [{ id: "fly", name: "召唤飞船" }] }),
+    { skills: [{ id: "fly", input: "召唤飞船" }], goal: null },
+    "a legacy label-only skill should migrate into the single rule input",
+  );
 
-  const rewriteCalls = [];
+  const completionCalls = [];
   const dispatches = [];
   const timers = [];
   const achievements = [];
   const controller = new WorldRulesController({
-    rewrite: async (request) => {
-      rewriteCalls.push(request);
+    completeRule: async (request) => {
+      completionCalls.push(request);
       return {
-        prompt: `prepared:${request.instruction}`,
-        change_type: request.instruction.includes("天气") ? "persistent" : "one_time",
+        name: request.kind === "goal"
+          ? "星光徽章"
+          : request.input.includes("天气") ? "暴雪" : "召唤飞船",
+        prompt: `prepared:${request.input}`,
+        change_type: request.input.includes("天气") ? "persistent" : "one_time",
       };
     },
     dispatchPrepared: async (prepared, metadata) => {
@@ -46,13 +54,16 @@ async function main() {
 
   const prepared = await controller.prepare({
     skills: [
-      { id: "fly", name: "召唤飞船", instruction: "召唤一艘飞船" },
-      { id: "snow", name: "暴雪", instruction: "让天气变成暴雪" },
+      { id: "fly", input: "召唤一艘飞船" },
+      { id: "snow", input: "让天气变成暴雪" },
     ],
-    goal: { name: "星光徽章", probability: 0.5, instruction: "出现一枚星光徽章" },
+    goal: { probability: 0.5, input: "出现一枚星光徽章" },
   }, "A rider explores a valley.");
-  assert.equal(rewriteCalls.length, 3);
-  assert.ok(rewriteCalls.every((request) => request.previous_prompt === "A rider explores a valley."));
+  assert.equal(completionCalls.length, 3);
+  assert.ok(completionCalls.every((request) => request.previous_prompt === "A rider explores a valley."));
+  assert.deepEqual(completionCalls.map((request) => request.kind), ["skill", "skill", "goal"]);
+  assert.equal(prepared.skills[0].name, "召唤飞船");
+  assert.equal(prepared.goal.name, "星光徽章");
   assert.equal(prepared.skills[0].prepared.change_type, "one_time");
   assert.equal(prepared.skills[1].prepared.change_type, "persistent");
 
