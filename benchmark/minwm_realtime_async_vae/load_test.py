@@ -38,6 +38,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--size", default="832x480")
     parser.add_argument("--fps", type=int, default=24)
+    parser.add_argument(
+        "--realtime-media-profile",
+        choices=("native_v1", "rife2x_v1"),
+        default="native_v1",
+        help="Request native frames or the negotiated remote-VAE RIFE 2x profile.",
+    )
     parser.add_argument("--sink", type=int, default=9)
     parser.add_argument("--window", type=int, default=18)
     parser.add_argument(
@@ -203,6 +209,9 @@ def init_request(args: argparse.Namespace, *, total_chunks: int, trace_id: str) 
         "realtime_causal_kv_cache_num_frames": getattr(args, "window", 18),
         "trace_id": trace_id,
     }
+    media_profile = getattr(args, "realtime_media_profile", "native_v1")
+    if media_profile != "native_v1":
+        request["realtime_media_profile"] = media_profile
     if generation_mode == "i2v":
         first_frame = getattr(args, "first_frame_bytes", None)
         if not first_frame:
@@ -241,11 +250,14 @@ def stage_values(
             for field in (
                 "vae_queue_wait_ms",
                 "vae_decode_ms",
+                "vae_post_decode_ms",
                 "frame_encode_ms",
                 "latent_serialize_ms",
                 "latent_send_ms",
                 "vae_credit_wait_ms",
                 "first_frame_ms",
+                "actor_wait_ms",
+                "rife_interpolation_ms",
                 "overlap_with_next_denoise_ms",
                 "overlap_ratio",
             ):
@@ -262,6 +274,44 @@ def stage_values(
         name: [by_chunk[index] for index in sorted(by_chunk)]
         for name, by_chunk in values.items()
     }
+
+
+def stage_values_from_chunk_messages(
+    stats: dict[int, dict], *, min_chunk_index: int = 0
+) -> dict[str, list[float]]:
+    """Read stage values from in-band chunk telemetry when Trace is disabled."""
+
+    fields = (
+        "request_prepare_ms",
+        "scheduler_forward_ms",
+        "chunk_total_ms",
+        "output_pace_ms",
+        "transport_encode_ms",
+        "transport_write_ms",
+        "vae_queue_wait_ms",
+        "vae_decode_ms",
+        "vae_post_decode_ms",
+        "vae_encode_ms",
+        "vae_transfer_ms",
+        "latent_serialize_ms",
+        "latent_send_ms",
+        "vae_credit_wait_ms",
+        "actor_wait_ms",
+        "rife_interpolation_ms",
+        "source_frames_per_chunk_wall_second",
+        "output_frames_per_chunk_wall_second",
+        "source_realtime_factor",
+        "output_realtime_factor",
+    )
+    values: dict[str, list[float]] = defaultdict(list)
+    for chunk_index in sorted(stats):
+        if chunk_index < min_chunk_index:
+            continue
+        message = stats[chunk_index]
+        for field in fields:
+            if message.get(field) is not None:
+                values[field].append(float(message[field]))
+    return dict(values)
 
 
 def trace_contract_summary(trace_events: list[dict]) -> dict:
@@ -314,6 +364,97 @@ def record_frame_batch(message: dict, *, frame_counts: dict[int, int]) -> None:
     if chunk_index < 0 or num_frames <= 0:
         return
     frame_counts[chunk_index] = frame_counts.get(chunk_index, 0) + num_frames
+
+
+def validate_media_profile_contract(
+    *,
+    media_profile: str,
+    requested_fps: float,
+    session_ready: dict | None,
+    completions: dict[int, dict],
+    frame_counts: dict[int, int],
+    expected_chunks: set[int],
+) -> dict:
+    """Validate negotiated RIFE timing and exact source/output frame counts."""
+
+    if media_profile == "native_v1":
+        total = sum(frame_counts.get(chunk, 0) for chunk in expected_chunks)
+        return {
+            "source_frames": total,
+            "output_frames": total,
+            "acceptance": None,
+        }
+    if media_profile != "rife2x_v1":
+        raise RuntimeError(f"unsupported realtime media profile {media_profile!r}")
+    if session_ready is None:
+        raise RuntimeError("RIFE session omitted the required session_ready receipt")
+    if (
+        session_ready.get("requested_media_profile") != media_profile
+        or session_ready.get("effective_media_profile") != media_profile
+    ):
+        raise RuntimeError(f"RIFE profile was not accepted: {session_ready!r}")
+    source_timeline_fps = float(session_ready.get("source_timeline_fps") or 0)
+    output_timeline_fps = float(session_ready.get("output_timeline_fps") or 0)
+    if abs(source_timeline_fps - requested_fps) > 1e-6:
+        raise RuntimeError(
+            "RIFE source timeline does not match the request: "
+            f"{source_timeline_fps} != {requested_fps}"
+        )
+    if abs(output_timeline_fps - requested_fps * 2.0) > 1e-6:
+        raise RuntimeError(
+            "RIFE output timeline is not 2x the source: "
+            f"{output_timeline_fps} != {requested_fps * 2.0}"
+        )
+    if not session_ready.get("media_weights_sha256"):
+        raise RuntimeError("RIFE session_ready omitted the weights digest")
+
+    missing = sorted(expected_chunks - set(completions))
+    if missing:
+        raise RuntimeError(f"RIFE media completion metadata omitted chunks {missing}")
+
+    source_total = 0
+    output_total = 0
+    has_source_history = False
+    for chunk in sorted(expected_chunks):
+        completion = completions[chunk]
+        if completion.get("media_profile") != media_profile:
+            raise RuntimeError(f"chunk {chunk} omitted the effective RIFE profile")
+        source_frames = int(completion.get("source_num_frames", -1))
+        output_frames = int(completion.get("output_num_frames", -1))
+        actual_frames = frame_counts.get(chunk, 0)
+        if source_frames < 0 or output_frames < 0:
+            raise RuntimeError(f"chunk {chunk} omitted RIFE frame counts")
+        expected_output = 0
+        if source_frames > 0:
+            expected_output = (
+                source_frames * 2 if has_source_history else source_frames * 2 - 1
+            )
+            has_source_history = True
+        if output_frames != expected_output:
+            raise RuntimeError(
+                f"chunk {chunk} violated RIFE 2x cadence: "
+                f"source={source_frames} output={output_frames} "
+                f"expected={expected_output}"
+            )
+        if actual_frames != output_frames:
+            raise RuntimeError(
+                f"chunk {chunk} delivered {actual_frames} frames but completion "
+                f"reported {output_frames}"
+            )
+        source_total += source_frames
+        output_total += output_frames
+
+    return {
+        "source_frames": source_total,
+        "output_frames": output_total,
+        "acceptance": {
+            "requested_media_profile": session_ready["requested_media_profile"],
+            "effective_media_profile": session_ready["effective_media_profile"],
+            "source_timeline_fps": source_timeline_fps,
+            "output_timeline_fps": output_timeline_fps,
+            "media_weights_sha256": session_ready["media_weights_sha256"],
+        },
+    }
 
 
 def final_frame_batch_chunk(message: dict) -> int | None:
@@ -481,6 +622,7 @@ async def run_session(args: argparse.Namespace, concurrency: int, index: int) ->
     import websockets
 
     total_chunks = args.warmup_chunks + args.measured_chunks
+    media_profile = getattr(args, "realtime_media_profile", "native_v1")
     trace_id = uuid4().hex
     url = with_identity(
         args.ws_url,
@@ -495,6 +637,8 @@ async def run_session(args: argparse.Namespace, concurrency: int, index: int) ->
     action_latencies: list[float] = []
     pending_raw_header = None
     completed_chunk_at: dict[int, float] = {}
+    completion_metadata: dict[int, dict] = {}
+    media_acceptance: dict | None = None
     measured_started_at: float | None = None
     measured_completed_at: float | None = None
     session_started_at = time.perf_counter()
@@ -565,7 +709,17 @@ async def run_session(args: argparse.Namespace, concurrency: int, index: int) ->
                         "production video WebSocket carried forbidden Trace data"
                     )
                 if message_type == "media_chunk_complete":
+                    chunk_value = int(message.get("chunk_index", -1))
+                    if chunk_value >= 0:
+                        completion_metadata[chunk_value] = dict(message)
                     mark_chunk_complete(message, time.perf_counter())
+                    continue
+                if message_type == "session_ready":
+                    if media_acceptance is not None:
+                        raise RuntimeError(
+                            "session emitted duplicate session_ready receipts"
+                        )
+                    media_acceptance = dict(message)
                     continue
                 if message_type == "frame_batch_header":
                     pending_raw_header = message
@@ -584,7 +738,7 @@ async def run_session(args: argparse.Namespace, concurrency: int, index: int) ->
                     if message_type == "frame_batch":
                         mark_chunk_complete(message, observed_at)
                     continue
-                if message_type != "chunk_stats":
+                if message_type not in {"chunk_stats", "chunk_telemetry"}:
                     continue
 
                 chunk = int(message["chunk_index"])
@@ -619,12 +773,29 @@ async def run_session(args: argparse.Namespace, concurrency: int, index: int) ->
             f"chunks {missing}"
         )
 
+    media_contract = validate_media_profile_contract(
+        media_profile=media_profile,
+        requested_fps=float(args.fps),
+        session_ready=media_acceptance,
+        completions=completion_metadata,
+        frame_counts=frame_counts,
+        expected_chunks=expected_chunks,
+    )
+
+    websocket_stats = dict(stats)
     trace_stats = chunk_stats_from_trace(trace_events)
     stats.update(trace_stats)
     if trace_stats and len(trace_stats) == total_chunks:
         timing_source = "trace_http"
     elif len(stats) == total_chunks:
-        timing_source = "video_ws_chunk_stats"
+        timing_source = (
+            "video_ws_chunk_telemetry"
+            if any(
+                message.get("type") == "chunk_telemetry"
+                for message in websocket_stats.values()
+            )
+            else "video_ws_chunk_stats"
+        )
     elif args.skip_trace_query:
         timing_source = "client_frame_completion_interval"
         previous = session_started_at
@@ -646,9 +817,15 @@ async def run_session(args: argparse.Namespace, concurrency: int, index: int) ->
 
     measured = [stats[index] for index in range(args.warmup_chunks, total_chunks)]
     chunk_total = [float(item["chunk_total_ms"]) for item in measured]
-    frame_count = sum(
-        frame_counts.get(index, 0) for index in range(args.warmup_chunks, total_chunks)
-    )
+    measured_chunk_indexes = set(range(args.warmup_chunks, total_chunks))
+    frame_count = sum(frame_counts.get(index, 0) for index in measured_chunk_indexes)
+    if media_profile == "rife2x_v1":
+        source_frame_count = sum(
+            int(completion_metadata[index]["source_num_frames"])
+            for index in measured_chunk_indexes
+        )
+    else:
+        source_frame_count = frame_count
     measured_seconds = (
         max(0.0, measured_completed_at - measured_started_at)
         if measured_started_at is not None and measured_completed_at is not None
@@ -669,10 +846,18 @@ async def run_session(args: argparse.Namespace, concurrency: int, index: int) ->
         ],
         "client_observed_action_to_first_frame_ms": action_latencies,
         "frames": frame_count,
+        "source_frames": source_frame_count,
+        "output_frames": frame_count,
+        "media_profile_acceptance": media_contract["acceptance"],
         "measured_seconds": measured_seconds,
         "measured_started_at": measured_started_at,
         "measured_completed_at": measured_completed_at,
-        "stage_values": stage_values(trace_events, min_chunk_index=args.warmup_chunks),
+        "stage_values": (
+            stage_values(trace_events, min_chunk_index=args.warmup_chunks)
+            or stage_values_from_chunk_messages(
+                websocket_stats, min_chunk_index=args.warmup_chunks
+            )
+        ),
         "trace_event_names": trace_contract["event_names"],
         "direct_vae_frame_batches": trace_contract["direct_vae_frame_batches"],
     }
@@ -707,9 +892,15 @@ async def run_level(args: argparse.Namespace, concurrency: int) -> dict:
         {name for session in sessions for name in session["trace_event_names"]}
     )
     total_frames = sum(session["frames"] for session in sessions)
+    total_source_frames = sum(session["source_frames"] for session in sessions)
     wall_seconds = aggregate_measurement_seconds(sessions)
     session_fps = [
         session["frames"] / session["measured_seconds"]
+        for session in sessions
+        if session["measured_seconds"]
+    ]
+    source_session_fps = [
+        session["source_frames"] / session["measured_seconds"]
         for session in sessions
         if session["measured_seconds"]
     ]
@@ -726,9 +917,17 @@ async def run_level(args: argparse.Namespace, concurrency: int) -> dict:
             client_observed_action
         ),
         "aggregate_fps": total_frames / wall_seconds if wall_seconds else 0.0,
+        "aggregate_source_fps": (
+            total_source_frames / wall_seconds if wall_seconds else 0.0
+        ),
         "measurement_wall_seconds": wall_seconds,
         "per_session_fps": latency_summary(session_fps),
+        "per_session_source_fps": latency_summary(source_session_fps),
         "min_session_fps": min(session_fps, default=0.0),
+        "min_session_source_fps": min(source_session_fps, default=0.0),
+        "media_profile_acceptance": [
+            session["media_profile_acceptance"] for session in sessions
+        ],
         "stage_ms": {name: latency_summary(values) for name, values in stages.items()},
         "trace_event_names": trace_event_names,
         "direct_vae_frame_batches": sum(
@@ -761,6 +960,7 @@ async def async_main(args: argparse.Namespace) -> None:
             "first_frame": str(args.first_frame) if args.first_frame else None,
             "size": args.size,
             "fps": args.fps,
+            "realtime_media_profile": args.realtime_media_profile,
             "sink": args.sink,
             "window": args.window,
             "completion_signal": args.completion_signal,
