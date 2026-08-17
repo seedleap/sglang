@@ -18,6 +18,7 @@ from render_single_gpu_taehv_24fps import (  # noqa: E402
     MINWM_GIT_REF,
     parse_args,
     render,
+    storage_spec,
 )
 
 SGLANG_GIT_REF = "54bdfea9cd52ac1cd79896e1a7275e18a0257b79"
@@ -48,8 +49,7 @@ def _write_nsys_sqlite_fixture(
 ) -> None:
     con = sqlite3.connect(path)
     cur = con.cursor()
-    cur.executescript(
-        """
+    cur.executescript("""
         CREATE TABLE NVTX_EVENTS (
           start INTEGER NOT NULL,
           end INTEGER,
@@ -74,8 +74,7 @@ def _write_nsys_sqlite_fixture(
           metricId INTEGER NOT NULL,
           metricName TEXT NOT NULL
         );
-        """
-    )
+        """)
     cur.execute(
         "INSERT INTO StringIds VALUES (?,?)",
         (1, "stage_MinWMCausalDMDDenoisingStage"),
@@ -151,19 +150,35 @@ def test_render_preserves_single_gpu_hardware_and_profile_contract(
     assert job["metadata"]["annotations"]["seedleap.ai/result-uri"].endswith(
         f"/{sku}/{mode}/{run_id}"
     )
+    assert (
+        job["metadata"]["annotations"]["seedleap.ai/cluster-context"]
+        == hardware["context"]
+    )
+    assert job["metadata"]["annotations"]["seedleap.ai/storage-layout"] == "shared"
+    assert job["metadata"]["annotations"]["seedleap.ai/input-pvc"] == "s3-claim"
+    assert job["metadata"]["annotations"]["seedleap.ai/results-pvc"] == "s3-claim"
+    assert job["metadata"]["annotations"]["seedleap.ai/results-pvc-access"] == "RWX"
     assert container["resources"]["requests"]["nvidia.com/gpu"] == "1"
     assert container["resources"]["limits"]["nvidia.com/gpu"] == "1"
+    s3_volumes = [
+        volume for volume in pod_spec["volumes"] if "persistentVolumeClaim" in volume
+    ]
+    assert s3_volumes == [
+        {
+            "name": "s3-shared",
+            "persistentVolumeClaim": {"claimName": "s3-claim"},
+        }
+    ]
+    s3_mounts = [
+        mount for mount in container["volumeMounts"] if mount["name"] == "s3-shared"
+    ]
+    assert s3_mounts == [
+        {"name": "s3-shared", "mountPath": "/s3-input", "readOnly": True},
+        {"name": "s3-shared", "mountPath": "/s3-results"},
+    ]
 
     node_selector = pod_spec["nodeSelector"]
-    assert node_selector["karpenter.sh/capacity-type"] == "spot"
-    assert node_selector["karpenter.sh/nodepool"] == hardware["nodepool"]
-    assert (
-        node_selector["node.kubernetes.io/instance-type"] == hardware["instance_type"]
-    )
-    if hardware["zone"] is None:
-        assert "topology.kubernetes.io/zone" not in node_selector
-    else:
-        assert node_selector["topology.kubernetes.io/zone"] == hardware["zone"]
+    assert node_selector == hardware["node_selector"]
 
     expected_toleration = {
         "key": hardware["taint_key"],
@@ -172,10 +187,11 @@ def test_render_preserves_single_gpu_hardware_and_profile_contract(
         "effect": "NoSchedule",
     }
     assert expected_toleration in pod_spec["tolerations"]
-    if sku == "b300":
-        assert "seedleap.ai/capacity-pool" not in node_selector
+    if sku == "b200":
+        assert node_selector["seedleap.ai/capacity-pool"] == "minwm-test-b200-karpenter"
     else:
-        assert node_selector["seedleap.ai/capacity-pool"] == hardware["capacity_label"]
+        assert node_selector["eks.amazonaws.com/capacityType"] == "SPOT"
+        assert node_selector["eks.amazonaws.com/nodegroup"] == hardware["nodepool"]
 
     if mode == "nsys":
         assert container["securityContext"] == {"capabilities": {"add": ["SYS_ADMIN"]}}
@@ -215,6 +231,10 @@ def test_render_preserves_single_gpu_hardware_and_profile_contract(
     assert len(environment["TAEHV_CHECKPOINT_SHA256"]) == 64
     assert environment["MINWM_PROFILE_MODE"] == mode
     assert environment["MINWM_RUN_ID"] == run_id
+    assert environment["MINWM_STORAGE_LAYOUT"] == "shared"
+    assert environment["MINWM_INPUT_PVC"] == "s3-claim"
+    assert environment["MINWM_RESULTS_PVC"] == "s3-claim"
+    assert environment["MINWM_RESULTS_PVC_ACCESS"] == "RWX"
     runner = configmap["data"]["run_single_gpu_taehv_24fps.sh"]
     assert set(configmap["data"]) == {
         "benchmark_realtime_throughput.py",
@@ -226,6 +246,13 @@ def test_render_preserves_single_gpu_hardware_and_profile_contract(
     assert 'export PYTHONPATH="${PROFILE_DIR}:${REPO_ROOT}/python"' in runner
     assert 'export MINWM_S3_MOUNT="${MINWM_INPUT_ROOT}"' in runner
     assert "first-frame-source.json" in runner
+    assert '"${REMOTE_RESULTS}/STORAGE_WRITE_PROBE"' in runner
+    assert '"${LOCAL_ROOT}/STORAGE_WRITE_PROBE"' in runner
+    assert '"${LOCAL_RESULTS}/STORAGE_WRITE_PROBE"' not in runner
+    assert 'cmp --silent "${LOCAL_ROOT}/STORAGE_WRITE_PROBE"' in runner
+    assert runner.index('cp "${LOCAL_ROOT}/STORAGE_WRITE_PROBE"') < runner.index(
+        "git clone"
+    )
     assert 'uri = os.environ["MINWM_FIRST_FRAME_SOURCE_URI"]' in runner
     assert 'Path(os.environ["MINWM_S3_MOUNT"]) / key' in runner
     assert "assert mounted_source.is_file()" in runner
@@ -292,6 +319,62 @@ def test_render_preserves_single_gpu_hardware_and_profile_contract(
             '--profile-name "${MINWM_GPU_SKU,,}-local-taehv-main-segment-nsys"'
         )
         assert "run_sglang_api.py" not in runner
+
+
+def test_storage_spec_supports_explicit_split_rw_s3_claims() -> None:
+    volumes, mounts = storage_spec(
+        {
+            "layout": "split",
+            "input_pvc": "input-s3",
+            "results_pvc": "results-s3",
+            "verified_results_access": "RWX",
+        }
+    )
+    assert [volume["persistentVolumeClaim"]["claimName"] for volume in volumes] == [
+        "input-s3",
+        "results-s3",
+    ]
+    assert mounts == [
+        {"name": "s3-input", "mountPath": "/s3-input", "readOnly": True},
+        {"name": "s3-results", "mountPath": "/s3-results"},
+    ]
+
+
+@pytest.mark.parametrize(
+    "storage,match",
+    (
+        (
+            {
+                "layout": "shared",
+                "input_pvc": "input-s3",
+                "results_pvc": "results-s3",
+                "verified_results_access": "RWX",
+            },
+            "identical",
+        ),
+        (
+            {
+                "layout": "split",
+                "input_pvc": "input-s3",
+                "results_pvc": None,
+                "verified_results_access": "RWX",
+            },
+            "explicit results_pvc",
+        ),
+        (
+            {
+                "layout": "split",
+                "input_pvc": "input-s3",
+                "results_pvc": "results-ebs",
+                "verified_results_access": "RWO",
+            },
+            "verified RWX",
+        ),
+    ),
+)
+def test_storage_spec_fails_closed(storage: dict, match: str) -> None:
+    with pytest.raises(ValueError, match=match):
+        storage_spec(storage)
 
 
 def test_render_makes_candidate_names_and_result_prefixes_unique() -> None:

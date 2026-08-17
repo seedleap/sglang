@@ -48,12 +48,10 @@ kubectl --context <context> apply --dry-run=server -f <generated-yaml>
 
 ## Load-bearing contract
 
-- One requested and limited GPU; Spot-only selectors. B200 uses
-  `p6-b200.48xlarge`; B300 uses `p6-b300.48xlarge` in `us-west-2d`.
-- The B300 NodePool is uniquely selected by `karpenter.sh/nodepool`; its
-  `seedleap.ai/capacity-pool` value remains a taint toleration, not a Pod
-  selector, because EKS Auto Mode does not expose that template label as a
-  compatible selector value during provisioning.
+- One requested and limited GPU; Spot-only selectors. B200 uses the
+  `minwm-spot/ray` Auto Mode pool on `p6-b200.48xlarge`. B300 uses the
+  `aws03-usw2/default` managed Spot node group
+  `minwm-spot-p6-b300-0703` on `p6-b300.48xlarge` in `us-west-2a`.
 - Immutable image digest, full SGLang commit, checkpoint version/size/SHA-256,
   first-frame URI/version/size/SHA-256, MinWM provenance commit, TAEHV revision,
   and `taew2_2.pth` SHA-256 are embedded and asserted at runtime. The
@@ -103,7 +101,13 @@ kubectl --context <context> apply --dry-run=server -f <generated-yaml>
   kernel each and no partial/invalid target ranges. Candidate NSYS also
   requires exactly one nested
   `minwm_action_residual_prepare_once_per_chunk` range per chunk.
-- Input S3 CSI is read-only; results use a unique writable prefix. Runtime
+- Storage is an explicit deployment-profile contract. The supported B200 and
+  aws03 B300 profiles both use the verified RWX `s3-claim` once, mounted as
+  read-only `/s3-input` and writable `/s3-results`. The phx2 B300 cluster's
+  `s3-claim` is ROX and is intentionally not a renderer target. A split layout
+  fails closed unless it names a distinct, verified RWX S3 results PVC.
+  Before any expensive setup, runtime writes and reads back a non-empty
+  `STORAGE_WRITE_PROBE` in the unique result prefix. Runtime
   exports `MINWM_S3_MOUNT=/s3-input`, derives the mount key from the immutable
   case URI, and refuses to launch the server unless that object is readable and
   matches the recorded byte count and SHA-256. The complete provenance is

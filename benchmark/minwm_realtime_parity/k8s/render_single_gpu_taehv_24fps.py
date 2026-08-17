@@ -4,12 +4,11 @@ from __future__ import annotations
 import argparse
 import copy
 import hashlib
-from pathlib import Path
 import re
 import subprocess
+from pathlib import Path
 
 import yaml
-
 
 HERE = Path(__file__).resolve().parent
 BENCHMARK_ROOT = HERE.parent
@@ -98,25 +97,46 @@ HARDWARE = {
         "instance_type": "p6-b200.48xlarge",
         "nodepool": "minwm-test-b200-spot",
         "zone": None,
-        "capacity_label": "minwm-test-b200-karpenter",
-        "capacity_selector": True,
+        "node_selector": {
+            "karpenter.sh/capacity-type": "spot",
+            "karpenter.sh/nodepool": "minwm-test-b200-spot",
+            "node.kubernetes.io/instance-type": "p6-b200.48xlarge",
+            "seedleap.ai/capacity-pool": "minwm-test-b200-karpenter",
+        },
         "taint_key": "seedleap.ai/workload",
         "taint_value": "wan22-ti2v",
+        "storage": {
+            "layout": "shared",
+            "input_pvc": "s3-claim",
+            "results_pvc": "s3-claim",
+            "verified_results_access": "RWX",
+        },
         "profile": "experimental-sm100-high-memory",
         "compute_cap": "10.0",
         "min_memory_mib": "180000",
         "gpu_sku": "B200",
     },
     "b300": {
-        "context": "codex-minwm-test-phx2",
+        "context": "aws03-usw2",
         "namespace": "default",
         "instance_type": "p6-b300.48xlarge",
-        "nodepool": "minwm-sp12-usw2d-p6-spot",
-        "zone": "us-west-2d",
-        "capacity_label": "minwm-sp12-usw2d-karpenter",
-        "capacity_selector": False,
-        "taint_key": "seedleap.ai/capacity-pool",
-        "taint_value": "minwm-sp12-usw2d-karpenter",
+        "nodepool": "minwm-spot-p6-b300-0703",
+        "zone": "us-west-2a",
+        "node_selector": {
+            "eks.amazonaws.com/capacityType": "SPOT",
+            "eks.amazonaws.com/nodegroup": "minwm-spot-p6-b300-0703",
+            "node.kubernetes.io/instance-type": "p6-b300.48xlarge",
+            "seedleap.ai/workload": "wan22-ti2v",
+            "topology.kubernetes.io/zone": "us-west-2a",
+        },
+        "taint_key": "seedleap.ai/workload",
+        "taint_value": "wan22-ti2v",
+        "storage": {
+            "layout": "shared",
+            "input_pvc": "s3-claim",
+            "results_pvc": "s3-claim",
+            "verified_results_access": "RWX",
+        },
         "profile": "experimental-sm103-high-memory",
         "compute_cap": "10.3",
         "min_memory_mib": "250000",
@@ -143,6 +163,60 @@ def env_entry(name: str, value: str) -> dict:
 
 def sha256_file(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def storage_spec(storage: dict) -> tuple[list[dict], list[dict]]:
+    layout = storage.get("layout")
+    input_pvc = storage.get("input_pvc")
+    results_pvc = storage.get("results_pvc")
+    verified_results_access = storage.get("verified_results_access")
+    if not input_pvc:
+        raise ValueError("storage input_pvc must be explicit")
+    if layout == "shared":
+        if results_pvc != input_pvc:
+            raise ValueError("shared storage requires identical input/results PVCs")
+        if verified_results_access != "RWX":
+            raise ValueError("shared storage requires a verified RWX results PVC")
+        return (
+            [
+                {
+                    "name": "s3-shared",
+                    "persistentVolumeClaim": {"claimName": input_pvc},
+                }
+            ],
+            [
+                {
+                    "name": "s3-shared",
+                    "mountPath": "/s3-input",
+                    "readOnly": True,
+                },
+                {"name": "s3-shared", "mountPath": "/s3-results"},
+            ],
+        )
+    if layout == "split":
+        if not results_pvc:
+            raise ValueError("split storage requires an explicit results_pvc")
+        if results_pvc == input_pvc:
+            raise ValueError("split storage requires distinct input/results PVCs")
+        if verified_results_access != "RWX":
+            raise ValueError("split storage requires a verified RWX results PVC")
+        return (
+            [
+                {
+                    "name": "s3-input",
+                    "persistentVolumeClaim": {"claimName": input_pvc},
+                },
+                {
+                    "name": "s3-results",
+                    "persistentVolumeClaim": {"claimName": results_pvc},
+                },
+            ],
+            [
+                {"name": "s3-input", "mountPath": "/s3-input", "readOnly": True},
+                {"name": "s3-results", "mountPath": "/s3-results"},
+            ],
+        )
+    raise ValueError(f"unsupported storage layout: {layout!r}")
 
 
 def harness_ref_matches_checkout(harness_git_ref: str) -> bool:
@@ -173,6 +247,7 @@ def render(
     run_tag: str,
 ) -> tuple[dict, dict]:
     hardware = HARDWARE[sku]
+    storage_volumes, storage_mounts = storage_spec(hardware["storage"])
     candidate_evidence = candidate_evidence or require_24fps
     run_id = f"minwm-taehv24-{sku}-{mode}-{run_tag}"
     configmap_name = f"{run_id}-files"
@@ -200,8 +275,15 @@ def render(
             ),
             "seedleap.ai/instance-type": hardware["instance_type"],
             "seedleap.ai/capacity-type": "spot",
+            "seedleap.ai/cluster-context": hardware["context"],
             "seedleap.ai/vae-cpu-offload": "false",
             "seedleap.ai/execution-policy": "serial-quiet-headline",
+            "seedleap.ai/storage-layout": hardware["storage"]["layout"],
+            "seedleap.ai/input-pvc": hardware["storage"]["input_pvc"],
+            "seedleap.ai/results-pvc": hardware["storage"]["results_pvc"],
+            "seedleap.ai/results-pvc-access": hardware["storage"][
+                "verified_results_access"
+            ],
             "seedleap.ai/require-24fps": str(require_24fps).lower(),
             "seedleap.ai/candidate-evidence": str(candidate_evidence).lower(),
             "seedleap.ai/result-uri": (f"{RESULT_URI_ROOT}/{sku}/{mode}/{run_id}"),
@@ -222,11 +304,7 @@ def render(
                 "restartPolicy": "Never",
                 "terminationGracePeriodSeconds": 120,
                 "securityContext": {"seLinuxOptions": {"type": "spc_t"}},
-                "nodeSelector": {
-                    "karpenter.sh/capacity-type": "spot",
-                    "karpenter.sh/nodepool": hardware["nodepool"],
-                    "node.kubernetes.io/instance-type": hardware["instance_type"],
-                },
+                "nodeSelector": copy.deepcopy(hardware["node_selector"]),
                 "tolerations": [
                     {
                         "key": hardware["taint_key"],
@@ -241,14 +319,7 @@ def render(
                         "name": "profile-files",
                         "configMap": {"name": configmap_name, "defaultMode": 0o555},
                     },
-                    {
-                        "name": "s3-input",
-                        "persistentVolumeClaim": {"claimName": "s3-claim"},
-                    },
-                    {
-                        "name": "s3-results",
-                        "persistentVolumeClaim": {"claimName": "s3-claim"},
-                    },
+                    *storage_volumes,
                     {"name": "work", "emptyDir": {"sizeLimit": "300Gi"}},
                     {
                         "name": "shm",
@@ -258,15 +329,6 @@ def render(
             },
         },
     }
-    if hardware["zone"]:
-        job["spec"]["template"]["spec"]["nodeSelector"][
-            "topology.kubernetes.io/zone"
-        ] = hardware["zone"]
-    if hardware["capacity_selector"]:
-        job["spec"]["template"]["spec"]["nodeSelector"]["seedleap.ai/capacity-pool"] = (
-            hardware["capacity_label"]
-        )
-
     env = {
         **COMMON_ENV,
         "SGLANG_GIT_REF": sglang_git_ref,
@@ -284,6 +346,10 @@ def render(
         "MINWM_HARDWARE_PROFILE": hardware["profile"],
         "MINWM_EXPECTED_COMPUTE_CAP": hardware["compute_cap"],
         "MINWM_EXPECTED_MIN_MEMORY_MIB": hardware["min_memory_mib"],
+        "MINWM_STORAGE_LAYOUT": hardware["storage"]["layout"],
+        "MINWM_INPUT_PVC": hardware["storage"]["input_pvc"],
+        "MINWM_RESULTS_PVC": hardware["storage"]["results_pvc"],
+        "MINWM_RESULTS_PVC_ACCESS": hardware["storage"]["verified_results_access"],
         "MINWM_RESULTS_ROOT": f"{RESULT_MOUNT_ROOT}/{sku}/{mode}",
     }
     container = {
@@ -326,8 +392,7 @@ def render(
                 "mountPath": "/opt/minwm-profile",
                 "readOnly": True,
             },
-            {"name": "s3-input", "mountPath": "/s3-input", "readOnly": True},
-            {"name": "s3-results", "mountPath": "/s3-results"},
+            *storage_mounts,
             {"name": "work", "mountPath": "/work"},
             {"name": "shm", "mountPath": "/dev/shm"},
         ],

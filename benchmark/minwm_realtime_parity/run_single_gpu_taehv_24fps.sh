@@ -20,6 +20,10 @@ set -euo pipefail
 : "${MINWM_CASES_SHA256:?set the fixed cases manifest SHA-256}"
 : "${MINWM_INPUT_ROOT:?set the read-only S3 CSI input mount root}"
 : "${MINWM_RESULTS_ROOT:?set the unique writable S3 CSI result prefix}"
+: "${MINWM_STORAGE_LAYOUT:?set the verified storage layout}"
+: "${MINWM_INPUT_PVC:?set the input PVC name}"
+: "${MINWM_RESULTS_PVC:?set the results PVC name}"
+: "${MINWM_RESULTS_PVC_ACCESS:?set the verified results PVC access mode}"
 : "${MINWM_CHECKPOINT_RELATIVE_PATH:?set checkpoint path below MINWM_INPUT_ROOT}"
 : "${MINWM_PRETRAINED_RELATIVE_PATH:?set donor path below MINWM_INPUT_ROOT}"
 : "${MINWM_CHECKPOINT_SOURCE_URI:?set immutable source URI}"
@@ -43,6 +47,9 @@ set -euo pipefail
 [[ "${MINWM_GPU_SKU}" == "B200" || "${MINWM_GPU_SKU}" == "B300" ]]
 [[ "${MINWM_RUN_ID}" =~ ^[a-z0-9][a-z0-9.-]+$ ]]
 [[ "${MINWM_RESULTS_ROOT}" == /s3-results/world-model/evals/minwm/performance/* ]]
+[[ "${MINWM_STORAGE_LAYOUT}" == "shared" || "${MINWM_STORAGE_LAYOUT}" == "split" ]]
+[[ -n "${MINWM_INPUT_PVC}" && -n "${MINWM_RESULTS_PVC}" ]]
+[[ "${MINWM_RESULTS_PVC_ACCESS}" == "RWX" ]]
 [[ "${SGLANG_GIT_REF}" =~ ^[0-9a-f]{40}$ ]]
 [[ "${MINWM_GIT_REF}" =~ ^[0-9a-f]{40}$ ]]
 [[ "${MINWM_HARNESS_GIT_REF}" =~ ^[0-9a-f]{40}$ ]]
@@ -122,6 +129,14 @@ finish() {
 trap 'finish $?' EXIT
 trap 'finish 130' INT
 trap 'finish 143' TERM
+
+printf 'run_id=%s\nstorage_layout=%s\ninput_pvc=%s\nresults_pvc=%s\n' \
+  "${MINWM_RUN_ID}" "${MINWM_STORAGE_LAYOUT}" "${MINWM_INPUT_PVC}" \
+  "${MINWM_RESULTS_PVC}" > "${LOCAL_ROOT}/STORAGE_WRITE_PROBE"
+cp "${LOCAL_ROOT}/STORAGE_WRITE_PROBE" \
+  "${REMOTE_RESULTS}/STORAGE_WRITE_PROBE"
+cmp --silent "${LOCAL_ROOT}/STORAGE_WRITE_PROBE" \
+  "${REMOTE_RESULTS}/STORAGE_WRITE_PROBE"
 
 wait_for_server() {
   local log_path="$1"
