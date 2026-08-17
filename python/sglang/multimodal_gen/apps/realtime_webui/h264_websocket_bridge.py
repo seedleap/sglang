@@ -136,8 +136,6 @@ class H264WebSocketSession:
     height: int = 0
     frames: int = 0
     media_bytes: int = 0
-    media_fps: int = 24
-    next_frame_deadline: float | None = None
     minimum_event_id: int = 0
     pending_cutover_event_id: int = 0
     dropped_frames: int = 0
@@ -438,22 +436,12 @@ class H264WebSocketSession:
             self.frame_queue.put_nowait(queued)
 
     async def _encode_frames(self) -> None:
-        last_frame: _QueuedFrame | None = None
+        # Drain decoded frames as soon as FFmpeg can accept them.  The FPS in
+        # the init message defines media timestamps/GOP size only; playback
+        # pacing and smoothing belong to the browser.
         while True:
-            await self._pace_frame()
-            from_queue = False
+            frame = await self.frame_queue.get()
             while True:
-                try:
-                    frame = self.frame_queue.get_nowait()
-                    from_queue = True
-                except asyncio.QueueEmpty:
-                    if last_frame is None:
-                        frame = await self.frame_queue.get()
-                        from_queue = True
-                    else:
-                        frame = last_frame
-                        self.repeated_frames += 1
-                    break
                 queue_age_ms = max(
                     0.0, time.time() * 1000 - frame.bridge_received_epoch_ms
                 )
@@ -464,7 +452,7 @@ class H264WebSocketSession:
                     self.dropped_frames += 1
                     self.latency_dropped_frames += 1
                     self.frame_queue.task_done()
-                    from_queue = False
+                    frame = await self.frame_queue.get()
                     continue
                 break
             try:
@@ -483,7 +471,6 @@ class H264WebSocketSession:
                 if self.ffmpeg is None or self.ffmpeg.stdin is None:
                     raise RuntimeError("H.264 encoder is unavailable")
                 encode_started_epoch_ms = time.time() * 1000
-                repeated_frame = not from_queue
                 # Publish the frame mapping before feeding ffmpeg.  The stdout
                 # pump can then drain a large keyframe immediately without
                 # contending with stdin.drain() for the WebSocket send lock.
@@ -500,55 +487,31 @@ class H264WebSocketSession:
                             "frame_batch_index": frame.frame_batch_index,
                             "num_frame_batches": frame.num_frame_batches,
                             "is_final_frame_batch": frame.is_final_frame_batch,
-                            "server_sent_epoch_ms": (
-                                encode_started_epoch_ms
-                                if repeated_frame
-                                else frame.server_sent_epoch_ms
-                            ),
-                            "bridge_received_epoch_ms": (
-                                encode_started_epoch_ms
-                                if repeated_frame
-                                else frame.bridge_received_epoch_ms
-                            ),
+                            "server_sent_epoch_ms": frame.server_sent_epoch_ms,
+                            "bridge_received_epoch_ms": frame.bridge_received_epoch_ms,
                             "bridge_encode_started_epoch_ms": encode_started_epoch_ms,
                             "bridge_encoded_epoch_ms": encode_started_epoch_ms,
                             "bridge_queue_ms": max(
                                 0.0,
-                                0.0
-                                if repeated_frame
-                                else encode_started_epoch_ms
+                                encode_started_epoch_ms
                                 - frame.bridge_received_epoch_ms,
                             ),
                             "bridge_encoder_feed_ms": 0.0,
                             "dropped_frames": self.dropped_frames,
                             "latency_dropped_frames": self.latency_dropped_frames,
                             "startup_dropped_frames": self.startup_dropped_frames,
-                            "repeated_frame": repeated_frame,
+                            "repeated_frame": False,
                             "repeated_frames": self.repeated_frames,
                         }
                     )
                 self.ffmpeg.stdin.write(frame.rgb)
                 await self.ffmpeg.stdin.drain()
                 self.frames += 1
-                last_frame = frame
             finally:
-                if from_queue:
-                    self.frame_queue.task_done()
-
-    async def _pace_frame(self) -> None:
-        interval = 1 / max(1, self.media_fps)
-        now = asyncio.get_running_loop().time()
-        if self.next_frame_deadline is None or now - self.next_frame_deadline > interval * 4:
-            self.next_frame_deadline = now
-        delay_s = self.next_frame_deadline - now
-        if delay_s > 0:
-            await asyncio.sleep(delay_s)
-        self.next_frame_deadline += interval
+                self.frame_queue.task_done()
 
     async def _start_ffmpeg(self, width: int, height: int) -> None:
         fps = _bounded_int(self.init.get("fps"), default=24, minimum=1, maximum=60)
-        self.media_fps = fps
-        self.next_frame_deadline = None
         gop = max(4, fps * self.encoder_gop_seconds)
         command = [
             self.manager.ffmpeg_bin,

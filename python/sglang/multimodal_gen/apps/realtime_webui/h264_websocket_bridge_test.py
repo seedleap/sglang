@@ -153,3 +153,78 @@ def test_lingbot_does_not_drop_stable_chunk_if_chunk_zero_was_shed(monkeypatch):
     assert session.frame_queue.get_nowait().rgb == frame
     assert session.startup_drop_remaining == 0
     assert session.startup_dropped_frames == 0
+
+
+def test_encoder_drains_frames_immediately_without_server_side_pacing():
+    class FakeWebSocket:
+        def __init__(self):
+            self.messages = []
+
+        async def send_json(self, payload):
+            self.messages.append(payload)
+
+    class FakeStdin:
+        def __init__(self):
+            self.writes = []
+            self.two_frames_written = asyncio.Event()
+
+        def write(self, payload):
+            self.writes.append(payload)
+            if len(self.writes) == 2:
+                self.two_frames_written.set()
+
+        async def drain(self):
+            await asyncio.sleep(0)
+
+    class FakeFFmpeg:
+        def __init__(self):
+            self.stdin = FakeStdin()
+
+    async def exercise():
+        app = web.Application()
+        manager = H264WebSocketBridgeManager(
+            app,
+            web.AppKey("session", object),
+            lambda backend: f"ws://gateway/{backend}",
+        )
+        websocket = FakeWebSocket()
+        session = H264WebSocketSession(
+            manager=manager,
+            websocket=websocket,
+            backend="minwm",
+            # One FPS used to make the old server-side pacing fail this test.
+            # It must now affect only H.264 timestamps, never frame delivery.
+            init={"fps": 1},
+        )
+        session.width = 2
+        session.height = 1
+        session.ffmpeg = FakeFFmpeg()
+        frames = [b"abcdef", b"ABCDEF"]
+        await session._handle_frame_payload(
+            {
+                "content_type": "application/x-raw-rgb",
+                "width": 2,
+                "height": 1,
+                "channels": 3,
+                "chunk_index": 0,
+                "num_frames": 2,
+            },
+            b"".join(frames),
+        )
+
+        encoder_task = asyncio.create_task(session._encode_frames())
+        try:
+            await asyncio.wait_for(
+                session.ffmpeg.stdin.two_frames_written.wait(), timeout=0.1
+            )
+            await asyncio.sleep(0.02)
+            assert session.ffmpeg.stdin.writes == frames
+            assert len(websocket.messages) == 2
+            assert all(
+                message["repeated_frame"] is False for message in websocket.messages
+            )
+        finally:
+            encoder_task.cancel()
+            await asyncio.gather(encoder_task, return_exceptions=True)
+
+    asyncio.run(exercise())
