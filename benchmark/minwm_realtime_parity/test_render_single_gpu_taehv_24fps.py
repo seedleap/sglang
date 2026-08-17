@@ -253,6 +253,7 @@ def test_render_preserves_single_gpu_hardware_and_profile_contract(
     assert "trap 'finish 143' TERM" in runner
     assert "trap - EXIT INT TERM" in runner
     assert 'kill -KILL "${server_pid}"' in runner
+    assert "timeout --kill-after=5s 20s" in runner
     assert 'result["server"]["raw_frame_async_enqueue_ms"]' in runner
     assert 'structured_marker = "MINWM_RUNTIME_ALIGNMENT_JSON "' in runner
     assert '"cache_tokens": "27456"' in runner
@@ -394,6 +395,28 @@ def test_nsys_candidate_can_require_candidate_evidence_without_headline_gate() -
     assert environment["MINWM_REQUIRE_24FPS"] == "false"
     assert environment["MINWM_REQUIRE_CANDIDATE_EVIDENCE"] == "true"
     assert job["metadata"]["annotations"]["seedleap.ai/candidate-evidence"] == "true"
+
+
+def test_parse_args_allows_candidate_evidence_for_nsys() -> None:
+    args = parse_args(
+        [
+            "--sku",
+            "b200",
+            "--mode",
+            "nsys",
+            "--run-tag",
+            "20260817-candidate-nsys",
+            "--sglang-git-ref",
+            "b" * 40,
+            "--harness-git-ref",
+            HARNESS_GIT_REF,
+            "--candidate-evidence",
+            "--allow-uncommitted-harness-for-dry-run",
+        ]
+    )
+
+    assert args.candidate_evidence is True
+    assert args.require_24fps is False
 
 
 def test_nsys_sqlite_analyzer_resolves_registered_nvtx_stage_names(

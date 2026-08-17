@@ -109,7 +109,8 @@ finish() {
   trap - EXIT INT TERM
   set +e
   if (( capture_active == 1 )) && [[ -n "${nsys_session}" ]]; then
-    timeout 20s nsys stop --session="${nsys_session}" >/dev/null 2>&1
+    timeout --kill-after=5s 20s \
+      nsys stop --session="${nsys_session}" >/dev/null 2>&1
   fi
   stop_server
   if (( status != 0 )); then
