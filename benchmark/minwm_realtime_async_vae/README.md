@@ -24,6 +24,7 @@ python benchmark/minwm_realtime_async_vae/load_test.py \
   --ws-url ws://HOST/v1/realtime_video/generate \
   --profile async \
   --realtime-media-profile rife2x_v1 \
+  --expected-media-weights-sha256 8f6fb9105ba9e946762ee7190acbca3ca1cf14193eb81ca0955d492fb8558692 \
   --concurrency 1,2 \
   --output artifacts/rife2x.json
 

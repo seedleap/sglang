@@ -42,7 +42,9 @@ def run_meets_slo(
 ) -> bool:
     e2e = run.get("action_to_first_frame_ms") or run.get("chunk_total_ms") or {}
     p95 = e2e.get("p95")
-    min_session_fps = run.get("min_session_fps")
+    min_session_fps = run.get("min_session_source_fps")
+    if min_session_fps is None:
+        min_session_fps = run.get("min_session_fps")
     if min_session_fps is None:
         min_session_fps = run.get("aggregate_fps") or 0.0
     return bool(
@@ -103,8 +105,16 @@ def compare_profiles(baseline: dict, asynchronous: dict) -> dict:
         async_action = float((async_run.get("action_to_first_frame_ms") or {})["p95"])
         baseline_chunk = float(baseline_run["chunk_total_ms"]["p95"])
         async_chunk = float(async_run["chunk_total_ms"]["p95"])
-        baseline_throughput = float(baseline_run.get("aggregate_fps") or 0.0)
-        async_throughput = float(async_run.get("aggregate_fps") or 0.0)
+        baseline_throughput = float(
+            baseline_run.get("aggregate_source_fps")
+            or baseline_run.get("aggregate_fps")
+            or 0.0
+        )
+        async_throughput = float(
+            async_run.get("aggregate_source_fps")
+            or async_run.get("aggregate_fps")
+            or 0.0
+        )
         by_concurrency.append(
             {
                 "concurrency": concurrency,
@@ -128,8 +138,12 @@ def compare_profiles(baseline: dict, asynchronous: dict) -> dict:
         "baseline_p95_ms": base_p95,
         "async_p95_ms": async_p95,
         "async_improvement_pct": improvement,
-        "baseline_fps": float(base.get("aggregate_fps") or 0.0),
-        "async_fps": float(current.get("aggregate_fps") or 0.0),
+        "baseline_fps": float(
+            base.get("aggregate_source_fps") or base.get("aggregate_fps") or 0.0
+        ),
+        "async_fps": float(
+            current.get("aggregate_source_fps") or current.get("aggregate_fps") or 0.0
+        ),
         "by_concurrency": by_concurrency,
     }
 
@@ -186,7 +200,7 @@ def render_markdown(report: dict) -> str:
         "## 并发压测",
         "",
         "| 模式 | 并发 | P95 action→首帧 (ms) | P95 chunk (ms) | "
-        "最低单会话 FPS | 集群 FPS | 错误率 |",
+        "最低单会话源帧 FPS | 集群源帧 FPS | 错误率 |",
         "|---|---:|---:|---:|---:|---:|---:|",
     ]
     for profile_name in ("baseline", "async"):
@@ -196,8 +210,8 @@ def render_markdown(report: dict) -> str:
                 f"| {profile_name} | {run['concurrency']} | "
                 f"{float(e2e.get('p95') or 0):.1f} | "
                 f"{float((run.get('chunk_total_ms') or {}).get('p95') or 0):.1f} | "
-                f"{float(run.get('min_session_fps') or 0):.2f} | "
-                f"{float(run.get('aggregate_fps') or 0):.2f} | "
+                f"{float(run.get('min_session_source_fps') or run.get('min_session_fps') or 0):.2f} | "
+                f"{float(run.get('aggregate_source_fps') or run.get('aggregate_fps') or 0):.2f} | "
                 f"{float(run.get('error_rate') or 0) * 100:.2f}% |"
             )
     lines.extend(
