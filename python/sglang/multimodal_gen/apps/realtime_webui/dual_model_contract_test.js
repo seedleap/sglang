@@ -43,6 +43,26 @@ assert.match(app, /const DEFAULT_LINGBOT2_SINK_SIZE\s*=\s*configuredModelNumber\
 assert.match(app, /const DEFAULT_LINGBOT2_WINDOW_FRAMES\s*=\s*configuredModelNumber\("lingbot2", "windowFrames", 18\)/);
 assert.match(
   app,
+  /startupTimeoutMs:\s*configuredModelNumber\("lingbot2", "startupTimeoutMs", 60000\)/,
+  "LingBot2 should wait for its measured cold first-frame latency instead of the generic 12s timeout",
+);
+assert.match(
+  app,
+  /if \(message\.type === "chunk_telemetry"\) \{[\s\S]*?chunkTelemetry: \{ \.\.\.message \}[\s\S]*?return;/,
+  "Zing must consume chunk telemetry as control data instead of treating it as a legacy frame header",
+);
+assert.match(
+  app,
+  /message\.type === "frame_batch_header" \|\| \(!message\.type && message\.content_type\)/,
+  "only an explicit or structurally valid legacy frame header may arm the binary payload path",
+);
+assert.doesNotMatch(
+  app,
+  /\n\s*pendingHeader = message;\n\s*if \(pendingHeader && !renderedPreviewFrames\)/,
+  "unknown control messages must not become Zing frame headers",
+);
+assert.match(
+  app,
   /this\.enqueueTransition\(\{ immediate: active \}\)/,
   "key presses should bypass the transition batching delay",
 );
