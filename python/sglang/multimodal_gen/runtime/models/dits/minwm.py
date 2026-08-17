@@ -1087,6 +1087,7 @@ class MinWMCausalTransformer3DModel(CausalWanTransformer3DModel):
         cache_start: int = 0,
         start_frame: int = 0,
         action: torch.Tensor | None = None,
+        action_token_residual: torch.Tensor | None = None,
         precomputed_attention_plan: MinWMCausalAttentionKVPlan | None = None,
     ) -> torch.Tensor:
         if kv_cache is not None:
@@ -1123,6 +1124,7 @@ class MinWMCausalTransformer3DModel(CausalWanTransformer3DModel):
                 cache_start=cache_start,
                 start_frame=start_frame,
                 action=action,
+                action_token_residual=action_token_residual,
             )
 
         ulysses_world_size = get_ulysses_parallel_world_size()
@@ -1198,6 +1200,7 @@ class MinWMCausalTransformer3DModel(CausalWanTransformer3DModel):
         hidden_states = self._apply_patch_token_condition(
             hidden_states,
             action=action,
+            action_token_residual=action_token_residual,
             num_frames=post_patch_num_frames,
             height=post_patch_height,
             width=post_patch_width,
@@ -1422,30 +1425,60 @@ class MinWMCausalTransformer3DModel(CausalWanTransformer3DModel):
         for detail_name, module in detail_modules.items():
             register_detail(detail_name, module)
 
+    def prepare_action_token_residual(
+        self,
+        action: torch.Tensor,
+        *,
+        num_frames: int,
+        height: int,
+        width: int,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        return self.action_in.token_residual(
+            action,
+            num_current_frames=num_frames,
+            tokens_per_frame=height * width,
+            dtype=dtype,
+        )
+
     def _apply_patch_token_condition(
         self,
         hidden_states: torch.Tensor,
         *,
         action: torch.Tensor | None,
+        action_token_residual: torch.Tensor | None = None,
         num_frames: int,
         height: int,
         width: int,
     ) -> torch.Tensor:
-        if action is None:
-            raise ValueError(
-                "MinWM requires an action label for every latent frame; use 0 for noop"
+        if action_token_residual is None:
+            if action is None:
+                raise ValueError(
+                    "MinWM requires an action label for every latent frame; use 0 "
+                    "for noop"
+                )
+            action_token_residual = self.prepare_action_token_residual(
+                action,
+                num_frames=num_frames,
+                height=height,
+                width=width,
+                dtype=hidden_states.dtype,
             )
-        residual = self.action_in.token_residual(
-            action,
-            num_current_frames=num_frames,
-            tokens_per_frame=height * width,
-            dtype=hidden_states.dtype,
-        )
+        if action_token_residual.shape != hidden_states.shape:
+            raise ValueError(
+                "MinWM action token residual shape must match patch tokens: "
+                f"{tuple(action_token_residual.shape)} != {tuple(hidden_states.shape)}"
+            )
+        if action_token_residual.dtype != hidden_states.dtype:
+            raise ValueError(
+                "MinWM action token residual dtype must match patch tokens: "
+                f"{action_token_residual.dtype} != {hidden_states.dtype}"
+            )
         # minWM materializes both patch and action token lists through
         # ``torch.cat`` before this add. Even for B=1 that makes the block input
         # contiguous; a channel-first stride selects a different compiled
         # LayerNorm reduction on B200 despite identical tensor values.
-        return (hidden_states + residual).contiguous()
+        return (hidden_states + action_token_residual).contiguous()
 
     def _apply_output_head(
         self,

@@ -128,7 +128,7 @@ class _MinWMCudaGraphRunner:
         self.static_latent = None
         self.static_prompt = None
         self.static_timestep = None
-        self.static_action = None
+        self.static_action_token_residual = None
         self.capture_stream = None
         self.pool = None
         self.capture_dependencies = None
@@ -140,12 +140,12 @@ class _MinWMCudaGraphRunner:
         latent: torch.Tensor,
         prompt: torch.Tensor,
         timestep: torch.Tensor,
-        action: torch.Tensor,
+        action_token_residual: torch.Tensor,
     ) -> None:
         self.static_latent.copy_(latent)
         self.static_prompt.copy_(prompt)
         self.static_timestep.copy_(timestep)
-        self.static_action.copy_(action)
+        self.static_action_token_residual.copy_(action_token_residual)
 
     def _copy_attention_plan_inputs(
         self, attention_plan: MinWMCausalAttentionKVPlan
@@ -180,7 +180,7 @@ class _MinWMCudaGraphRunner:
         latent: torch.Tensor,
         prompt: torch.Tensor,
         timestep: torch.Tensor,
-        action: torch.Tensor,
+        action_token_residual: torch.Tensor,
         attention_plan: MinWMCausalAttentionKVPlan,
         capture_forward: (
             Callable[
@@ -190,7 +190,7 @@ class _MinWMCudaGraphRunner:
         ),
     ) -> torch.Tensor:
         if self.graph is not None:
-            self._copy_inputs(latent, prompt, timestep, action)
+            self._copy_inputs(latent, prompt, timestep, action_token_residual)
             # block_relative positions can still change when rope_max_frame_gap
             # is greater than one (for example Tianpeng gap12). Refresh the
             # captured plan's static tensors before replaying the fixed graph.
@@ -208,7 +208,9 @@ class _MinWMCudaGraphRunner:
         self.static_latent = _static_cuda_graph_tensor(latent)
         self.static_prompt = _static_cuda_graph_tensor(prompt)
         self.static_timestep = _static_cuda_graph_tensor(timestep)
-        self.static_action = _static_cuda_graph_tensor(action)
+        self.static_action_token_residual = _static_cuda_graph_tensor(
+            action_token_residual
+        )
         assert capture_forward is not None
 
         self.capture_stream = torch.cuda.Stream(device=latent.device)
@@ -220,7 +222,7 @@ class _MinWMCudaGraphRunner:
                     self.static_latent,
                     self.static_prompt,
                     self.static_timestep,
-                    self.static_action,
+                    self.static_action_token_residual,
                 )
         current_stream.wait_stream(self.capture_stream)
         torch.cuda.synchronize(latent.device)
@@ -232,7 +234,7 @@ class _MinWMCudaGraphRunner:
                 self.static_latent,
                 self.static_prompt,
                 self.static_timestep,
-                self.static_action,
+                self.static_action_token_residual,
             )
         current_stream.wait_stream(self.capture_stream)
         # Do not consume the execution performed while stream capture is active.
@@ -924,6 +926,25 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
             [history, current], dim=1
         )[:, -history_frames:]
 
+    def _prepare_chunk_action_token_residual(
+        self,
+        ctx: CausalDMDForwardContext,
+    ) -> torch.Tensor:
+        """Materialize the action condition once for this forward context."""
+        p_t, p_h, p_w = self.transformer.patch_size
+        with torch.autocast(
+            device_type=current_platform.device_type,
+            dtype=ctx.target_dtype,
+            enabled=ctx.autocast_enabled,
+        ):
+            return self.transformer.prepare_action_token_residual(
+                ctx.pos_cond_kwargs["action"],
+                num_frames=ctx.num_frames // p_t,
+                height=ctx.height // p_h,
+                width=ctx.width // p_w,
+                dtype=ctx.target_dtype,
+            )
+
     def _forward_causal_transformer(self, batch: Req, **kwargs) -> torch.Tensor:
         output = self._forward_causal_transformer_impl(batch, **kwargs)
         index = getattr(self, "_parity_forward_index", 0)
@@ -960,7 +981,7 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
             or current_timestep == 0
             or attn_metadata is not None
             or image_kwargs
-            or set(pos_cond_kwargs) != {"action"}
+            or set(pos_cond_kwargs) != {"action", "action_token_residual"}
             or os.environ.get("MINWM_PARITY_DUMP_DIR")
             or not latent_model_input.is_cuda
             or torch.version.hip is not None
@@ -969,7 +990,10 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
         if not isinstance(prompt_embeds, torch.Tensor):
             return None
         action = pos_cond_kwargs["action"]
-        if not isinstance(action, torch.Tensor):
+        action_token_residual = pos_cond_kwargs["action_token_residual"]
+        if not isinstance(action, torch.Tensor) or not isinstance(
+            action_token_residual, torch.Tensor
+        ):
             return None
         if not kv_cache or not crossattn_cache:
             return None
@@ -1020,7 +1044,7 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
             _cuda_graph_tensor_signature(latent_model_input),
             _cuda_graph_tensor_signature(prompt_embeds),
             _cuda_graph_tensor_signature(timestep),
-            _cuda_graph_tensor_signature(action),
+            _cuda_graph_tensor_signature(action_token_residual),
         )
 
     def _forward_causal_transformer_impl(
@@ -1085,16 +1109,12 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
             ):
                 self._minwm_cuda_graph_runner = _MinWMCudaGraphRunner(graph_key)
             runner = self._minwm_cuda_graph_runner
-            action = pos_cond_kwargs["action"]
+            action_token_residual = pos_cond_kwargs["action_token_residual"]
             attention_plan = kv_cache[0].last_attention_plan
             if not isinstance(attention_plan, MinWMCausalAttentionKVPlan):
                 raise RuntimeError("MinWM CUDA graph requires an attention plan")
 
             if runner.graph is None:
-                # Non-checkpoint action buffers start on CPU so meta-device model
-                # loading can materialize successfully. Move them before entering
-                # the capture context; replay then sees a stable GPU pointer.
-                self.transformer.action_in.prepare_label_table(action.device)
                 attention_plan = self.transformer.prepare_causal_attention_plan(
                     latent_model_input,
                     kv_cache=kv_cache,
@@ -1111,7 +1131,7 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
                     static_latent: torch.Tensor,
                     static_prompt: torch.Tensor,
                     static_timestep: torch.Tensor,
-                    static_action: torch.Tensor,
+                    static_action_token_residual: torch.Tensor,
                 ) -> torch.Tensor:
                     return self.transformer(
                         static_latent,
@@ -1121,7 +1141,7 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
                         crossattn_cache=crossattn_cache,
                         current_start=current_start_tokens,
                         start_frame=start_frame,
-                        action=static_action,
+                        action_token_residual=static_action_token_residual,
                         precomputed_attention_plan=attention_plan,
                     )
 
@@ -1129,25 +1149,18 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
                 # Replay does not execute Python, so this callable is unused.
                 capture_forward = None
 
-            validate_runtime_action = self.transformer.action_in.validate_runtime_action
-            self.transformer.action_in.validate_runtime_action = False
-            try:
-                graph_output = runner.run(
-                    latent=latent_model_input,
-                    prompt=prompt_embeds,
-                    timestep=timestep,
-                    action=action,
-                    attention_plan=attention_plan,
-                    capture_forward=capture_forward,
-                )
-                # The captured graph owns a single static output allocation.
-                # Downstream scheduler work can still consume it when the next
-                # denoising replay starts, so hand out an independent snapshot.
-                return graph_output.clone()
-            finally:
-                self.transformer.action_in.validate_runtime_action = (
-                    validate_runtime_action
-                )
+            graph_output = runner.run(
+                latent=latent_model_input,
+                prompt=prompt_embeds,
+                timestep=timestep,
+                action_token_residual=action_token_residual,
+                attention_plan=attention_plan,
+                capture_forward=capture_forward,
+            )
+            # The captured graph owns a single static output allocation.
+            # Downstream scheduler work can still consume it when the next
+            # denoising replay starts, so hand out an independent snapshot.
+            return graph_output.clone()
 
     @torch.no_grad()
     def forward(self, batch: Req, server_args: ServerArgs) -> Req:
@@ -1193,6 +1206,12 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
             self._parity_forward_index = 0
         ctx = self._prepare_causal_dmd_forward_context(batch, server_args)
         cache_ctx = self._prepare_realtime_causal_caches(batch, server_args, ctx)
+        # Keep the reference warmup on its one-frame noop action. The generated
+        # chunk gets a fresh residual after that warmup, and this context carries
+        # it through all DMD forwards plus the clean cache commit.
+        ctx.pos_cond_kwargs["action_token_residual"] = (
+            self._prepare_chunk_action_token_residual(ctx)
+        )
         current_latents = self._denoise_realtime_causal_chunk(
             batch,
             server_args,

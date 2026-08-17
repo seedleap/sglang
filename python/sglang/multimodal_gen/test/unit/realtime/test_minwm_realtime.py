@@ -603,6 +603,34 @@ def test_minwm_cuda_graph_refreshes_block_relative_rope_after_window_roll(
         )
 
 
+def test_minwm_cuda_graph_replay_refreshes_chunk_action_residual():
+    runner = _MinWMCudaGraphRunner(key=())
+    runner.static_latent = torch.zeros(1, 2)
+    runner.static_prompt = torch.zeros(1, 3)
+    runner.static_timestep = torch.zeros(1, dtype=torch.long)
+    runner.static_action_token_residual = torch.zeros(1, 4, 3)
+    replays = []
+    runner.graph = SimpleNamespace(replay=lambda: replays.append(None))
+    runner.output = torch.ones(1)
+    runner.replay_count = 1
+    attention_plan = object()
+    runner._last_attention_plan_source = attention_plan
+
+    for value in (1.0, 2.0):
+        result = runner.run(
+            latent=torch.full((1, 2), value),
+            prompt=torch.full((1, 3), value),
+            timestep=torch.tensor([int(value)]),
+            action_token_residual=torch.full((1, 4, 3), value),
+            attention_plan=attention_plan,
+            capture_forward=None,
+        )
+        assert result is runner.output
+        assert torch.all(runner.static_action_token_residual == value)
+
+    assert len(replays) == 2
+
+
 def test_minwm_prompt_first_frame_promotes_only_when_leaving_tail():
     cache = _make_minwm_test_cache(
         cache_size=6,
@@ -656,6 +684,143 @@ def test_minwm_action_history_chunk_matches_full_sequence():
     )
     assert token_residual.is_contiguous()
     assert token_residual.stride(-1) == 1
+
+
+def test_minwm_legacy_action_condition_recomputes_for_all_five_forwards(monkeypatch):
+    torch.manual_seed(19)
+    model = MinWMCausalTransformer3DModel.__new__(MinWMCausalTransformer3DModel)
+    torch.nn.Module.__init__(model)
+    model.action_in = PrimitiveTokenResidualActionEncoder(
+        dim=24, embed_dim=8, hidden_dim=16, kernel_size=3
+    )
+    labels = torch.tensor([[0, 9, 10, 1]])
+    hidden_states = torch.randn(1, 4 * 6, 24).to(torch.bfloat16)
+
+    original = model.action_in.token_residual
+    calls = []
+
+    def counted_token_residual(*args, **kwargs):
+        calls.append(None)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(model.action_in, "token_residual", counted_token_residual)
+    outputs = [
+        model._apply_patch_token_condition(
+            hidden_states,
+            action=labels,
+            num_frames=4,
+            height=2,
+            width=3,
+        )
+        for _ in range(5)
+    ]
+
+    assert len(calls) == 5
+    for output in outputs:
+        assert output.dtype == torch.bfloat16
+        assert output.is_contiguous()
+        torch.testing.assert_close(output, outputs[0], rtol=0, atol=0)
+
+
+def test_minwm_precomputed_action_residual_is_exactly_reused_for_five_forwards(
+    monkeypatch,
+):
+    torch.manual_seed(23)
+    model = MinWMCausalTransformer3DModel.__new__(MinWMCausalTransformer3DModel)
+    torch.nn.Module.__init__(model)
+    model.action_in = PrimitiveTokenResidualActionEncoder(
+        dim=24, embed_dim=8, hidden_dim=16, kernel_size=3
+    )
+    labels = torch.tensor([[0, 9, 10, 1]])
+    hidden_states = torch.randn(1, 4 * 6, 24).to(torch.bfloat16)
+    legacy = model._apply_patch_token_condition(
+        hidden_states,
+        action=labels,
+        num_frames=4,
+        height=2,
+        width=3,
+    )
+
+    original = model.action_in.token_residual
+    calls = []
+
+    def counted_token_residual(*args, **kwargs):
+        calls.append(None)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(model.action_in, "token_residual", counted_token_residual)
+    residual = model.prepare_action_token_residual(
+        labels,
+        num_frames=4,
+        height=2,
+        width=3,
+        dtype=torch.bfloat16,
+    )
+    outputs = [
+        model._apply_patch_token_condition(
+            hidden_states,
+            action=None,
+            action_token_residual=residual,
+            num_frames=4,
+            height=2,
+            width=3,
+        )
+        for _ in range(5)
+    ]
+
+    assert len(calls) == 1
+    assert residual.dtype == torch.bfloat16
+    assert residual.is_contiguous()
+    for output in outputs:
+        assert output.is_contiguous()
+        torch.testing.assert_close(output, legacy, rtol=0, atol=0)
+
+
+def test_minwm_action_residual_is_recomputed_for_each_chunk():
+    calls = []
+
+    class Transformer:
+        patch_size = (1, 2, 2)
+
+        def prepare_action_token_residual(self, action, **kwargs):
+            calls.append((action.clone(), kwargs))
+            return torch.full(
+                (1, kwargs["num_frames"] * kwargs["height"] * kwargs["width"], 3),
+                len(calls),
+                dtype=kwargs["dtype"],
+            )
+
+    stage = MinWMCausalDMDDenoisingStage.__new__(MinWMCausalDMDDenoisingStage)
+    stage.transformer = Transformer()
+
+    def context(action):
+        return SimpleNamespace(
+            target_dtype=torch.bfloat16,
+            autocast_enabled=False,
+            num_frames=4,
+            height=6,
+            width=8,
+            pos_cond_kwargs={"action": action},
+        )
+
+    first = stage._prepare_chunk_action_token_residual(
+        context(torch.tensor([[0, 9, 10, 1]]))
+    )
+    second = stage._prepare_chunk_action_token_residual(
+        context(torch.tensor([[36, 4, 80, 0]]))
+    )
+
+    assert len(calls) == 2
+    assert calls[0][1] == {
+        "num_frames": 4,
+        "height": 3,
+        "width": 4,
+        "dtype": torch.bfloat16,
+    }
+    assert not torch.equal(calls[0][0], calls[1][0])
+    assert first.data_ptr() != second.data_ptr()
+    assert torch.all(first == 1)
+    assert torch.all(second == 2)
 
 
 def test_minwm_bounded_session_presamples_reference_and_full_horizon(monkeypatch):
