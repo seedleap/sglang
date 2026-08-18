@@ -614,14 +614,15 @@ COPY docker/configs/opt/.gitconfig /opt/sglang/.gitconfig
 COPY docker/configs/.zshrc /root/.zshrc
 
 # Fix Trivy-reported CVEs
-# pip:             urllib3 (CVE-2025-43859), pillow (CVE-2026-25990)
+# pip:             urllib3 (CVE-2025-43859), pillow (CVE-2026-25990,
+#                  CVE-2026-40192)
 # binutils family: CVE-2025-{1147,1148,3198,5244,5245,7545,7546,8225,11082,11083,11412,11413,11414,11494,11839,11840}
 # libgnutls30t64:  CVE-2025-{9820,14831}
 # libpam:          CVE-2024-10963
 # libsqlite3-0:    CVE-2025-{6965,7709}
 # libtasn1-6:      CVE-2025-13151
 # dpkg:            CVE-2025-6297
-RUN python3 -m pip install --upgrade "urllib3>=2.6.3" "pillow>=12.1.1"
+RUN python3 -m pip install --upgrade "urllib3>=2.6.3" "pillow>=12.2.0"
 RUN --mount=type=cache,target=/var/cache/apt,id=framework-apt \
     apt-get update && apt-get install -y --only-upgrade \
     binutils binutils-common binutils-x86-64-linux-gnu libbinutils \
@@ -759,6 +760,8 @@ FROM ${CUDA_BASE_IMAGE} AS runtime
 ARG CUDA_VERSION
 ARG TARGETARCH
 ARG GDRCOPY_VERSION=2.5.1
+ARG SGLANG_EXCLUDE_MOVIEPY=0
+ARG SGLANG_EXCLUDE_NIXL=0
 
 ENV DEBIAN_FRONTEND=noninteractive \
     CUDA_HOME=/usr/local/cuda \
@@ -850,6 +853,31 @@ COPY --from=framework_final /usr/local/lib/python3.12/dist-packages /usr/local/l
 
 # Copy SGLang workspace
 COPY --from=framework_final /sgl-workspace /sgl-workspace
+
+# The framework build can satisfy these packages from Ubuntu's Python path,
+# which is intentionally absent from the minimal runtime stage. Install the
+# runtime copies explicitly so the copied Python environment is self-contained.
+RUN python3 -m pip install --no-cache-dir \
+        "cryptography==50.0.0" \
+        "distro==1.9.0" \
+        "PyJWT==2.13.0" \
+        "pyparsing==3.3.2"
+
+# MoviePy 2.2.1 declares Pillow<12 and its unreleased Pillow 12 compatibility
+# changes are unsuitable for an immutable release image. MinWM does not import
+# MoviePy: video encoding uses PyAV/imageio-ffmpeg. Keep the general SGLang
+# runtime unchanged unless a specialized image explicitly opts out.
+RUN if [ "${SGLANG_EXCLUDE_MOVIEPY}" = "1" ]; then \
+        python3 -m pip uninstall -y moviepy \
+        && sed -i '/^moviepy==/d' /sgl-workspace/constraints.txt; \
+    fi
+
+# The nixl 1.4 meta package deliberately requires both CUDA 12 and CUDA 13
+# backends. MinWM does not use disaggregated transfer or NIXL collectives, so a
+# specialized runtime can omit that otherwise-valid but large dual-CUDA stack.
+RUN if [ "${SGLANG_EXCLUDE_NIXL}" = "1" ]; then \
+        python3 -m pip uninstall -y nixl nixl-cu12 nixl-cu13; \
+    fi
 
 # Copy sgl-model-gateway binary
 COPY --from=framework_final /usr/local/bin/sgl-model-gateway /usr/local/bin/sgl-model-gateway
