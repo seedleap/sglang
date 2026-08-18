@@ -91,6 +91,12 @@ async def _runtime_config(_request):
         raise web.HTTPInternalServerError(
             text="REALTIME_UI_CONFIG_JSON must contain a JSON object"
         )
+    zing_only = config.get("zingOnly", False)
+    if not isinstance(zing_only, bool):
+        raise web.HTTPInternalServerError(
+            text="REALTIME_UI_CONFIG_JSON.zingOnly must be a boolean"
+        )
+    config["zingOnly"] = zing_only
     return web.Response(
         text=f"globalThis.SGLANG_REALTIME_UI_CONFIG = {json.dumps(config)};\n",
         content_type="application/javascript",

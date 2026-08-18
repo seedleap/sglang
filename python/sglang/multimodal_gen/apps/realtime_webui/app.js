@@ -6,6 +6,17 @@ const WEBP_FRAME_CONTENT_TYPE = "image/webp";
 const JPEG_FRAME_CONTENT_TYPE = "image/jpeg";
 const DECODER_WORKER_URL = "./decoder_worker.js?v=rgb-worker-v10";
 const UI_CONFIG = Object.freeze(globalThis.SGLANG_REALTIME_UI_CONFIG || {});
+const EXPERIENCE_MODE = globalThis.SGLangRealtimeExperienceMode || {
+  applyToDocument: () => false,
+  isZingOnly: (config) => config?.zingOnly === true,
+  recordingVariants: (config) => config?.zingOnly === true
+    ? ["zing"]
+    : ["comparison", "zing"],
+  selectedModelKeys: (config, requested) => config?.zingOnly === true
+    ? ["minwm"]
+    : requested,
+};
+const ZING_ONLY = EXPERIENCE_MODE.isZingOnly(UI_CONFIG);
 const DUAL_MODEL_CONFIG = Object.freeze(UI_CONFIG.dualModels || {});
 const H264_MSE_MIME_TYPE = 'video/mp4; codecs="avc1.4D401F"';
 const H264_WEBSOCKET_REQUESTED = UI_CONFIG.h264WebSocketEnabled === true;
@@ -273,7 +284,8 @@ const RECORDING_PROMPT_STATUS_HOLD_MS = 1600;
 const RECORDING_READY_TOAST_MS = 5000;
 
 function applyRuntimeUiConfig() {
-  for (const key of ["minwm", "lingbot2"]) {
+  EXPERIENCE_MODE.applyToDocument(document, UI_CONFIG);
+  for (const key of ZING_ONLY ? ["minwm"] : ["minwm", "lingbot2"]) {
     const isLingBot2 = key === "lingbot2";
     modelControl(key, "fps").value = String(
       isLingBot2 ? DEFAULT_LINGBOT2_TARGET_FPS : DEFAULT_TARGET_FPS,
@@ -303,7 +315,7 @@ function applyRuntimeUiConfig() {
     });
   }
   if (H264_WEBSOCKET_ENABLED) {
-    for (const key of ["minwm", "lingbot2"]) {
+    for (const key of ZING_ONLY ? ["minwm"] : ["minwm", "lingbot2"]) {
       setStreamChipTransport(key, true);
     }
   } else if (H264_WEBSOCKET_REQUESTED) {
@@ -562,7 +574,7 @@ let customWorldPresets = [];
 let customWorldDbPromise = null;
 let customWorldLoadPromise = null;
 const MODEL_SLOT_DEFAULTS = ["minwm", "lingbot2", "happyoyster"];
-let activeModelSlotCount = 2;
+let activeModelSlotCount = ZING_ONLY ? 1 : 2;
 
 function selectedModelKeys() {
   const keys = [];
@@ -570,7 +582,7 @@ function selectedModelKeys() {
     const key = $(`modelSlot${index}`)?.value || MODEL_SLOT_DEFAULTS[index];
     if (!keys.includes(key)) keys.push(key);
   }
-  return keys;
+  return EXPERIENCE_MODE.selectedModelKeys(UI_CONFIG, keys);
 }
 
 function modelSelected(key) {
@@ -782,6 +794,7 @@ function cancelLingbot2Reconnect() {
 
 function canReconnectLingbot2() {
   return (
+    !ZING_ONLY &&
     !sessionLifetimeExpired &&
     selectedGenerationMode() === "i2v" &&
     primarySessionConnected()
@@ -960,6 +973,7 @@ const minwmH264Session = H264_WEBSOCKET_ENABLED
   ? createH264ModelSession("minwm")
   : null;
 const lingbot2H264Session = H264_WEBSOCKET_ENABLED
+  && !ZING_ONLY
   ? createH264ModelSession("lingbot2")
   : null;
 
@@ -1118,8 +1132,10 @@ function primaryTransportBufferedAmount() {
 const dualModelController = new DualModelController({
   sessions: {
     minwm: primarySessionAdapter,
-    lingbot2: lingbot2Session,
-    happyoyster: happyOysterSession,
+    ...(ZING_ONLY ? {} : {
+      lingbot2: lingbot2Session,
+      happyoyster: happyOysterSession,
+    }),
   },
   backends: {
     minwm: {
@@ -1132,45 +1148,47 @@ const dualModelController = new DualModelController({
       ),
       wsUrl: (init) => backendWebSocketUrl("minwm", init.trace_id),
     },
-    lingbot2: {
-      model: String(
-        DUAL_MODEL_CONFIG.lingbot2?.model
-        || UI_CONFIG.lingbot2Model
-        || DEFAULT_LINGBOT2_MODEL
-      ),
-      transformInit: (init) => {
-        // This capability belongs to Zing.  Do not copy an opt-in RIFE
-        // request into a comparison backend.
-        const lingbotInit = { ...init };
-        delete lingbotInit.realtime_media_profile;
-        const modelParams = readModelRequestParams("lingbot2", {
-          generationMode: init.generation_mode,
-          firstFrame: init.first_frame,
-        });
-        const interactiveInit = {
-          ...lingbotInit,
-          ...modelParams,
-          realtime_interactive_event_grace_ms: 1800,
-        };
-        const is720p = interactiveInit.size === "1280x704" || interactiveInit.size === "1280x720";
-        if (!is720p) return interactiveInit;
-        return {
-          ...interactiveInit,
-          size: "1280x720",
-        };
+    ...(ZING_ONLY ? {} : {
+      lingbot2: {
+        model: String(
+          DUAL_MODEL_CONFIG.lingbot2?.model
+          || UI_CONFIG.lingbot2Model
+          || DEFAULT_LINGBOT2_MODEL
+        ),
+        transformInit: (init) => {
+          // This capability belongs to Zing. Do not copy an opt-in RIFE
+          // request into a comparison backend.
+          const lingbotInit = { ...init };
+          delete lingbotInit.realtime_media_profile;
+          const modelParams = readModelRequestParams("lingbot2", {
+            generationMode: init.generation_mode,
+            firstFrame: init.first_frame,
+          });
+          const interactiveInit = {
+            ...lingbotInit,
+            ...modelParams,
+            realtime_interactive_event_grace_ms: 1800,
+          };
+          const is720p = interactiveInit.size === "1280x704" || interactiveInit.size === "1280x720";
+          if (!is720p) return interactiveInit;
+          return {
+            ...interactiveInit,
+            size: "1280x720",
+          };
+        },
+        enabled: (init) => modelSelected("lingbot2") && init.generation_mode !== "t2v",
+        unavailableReason: "T2V unavailable",
+        wsUrl: (init) => backendWebSocketUrl("lingbot2", init.trace_id),
       },
-      enabled: (init) => modelSelected("lingbot2") && init.generation_mode !== "t2v",
-      unavailableReason: "T2V unavailable",
-      wsUrl: (init) => backendWebSocketUrl("lingbot2", init.trace_id),
-    },
-    happyoyster: {
-      model: "happyoyster-adventure",
-      nonBlocking: true,
-      enabled: (init) => modelSelected("happyoyster") && init.generation_mode === "i2v",
-      unavailableReason: "仅支持 I2V Adventure",
-      transformInit: buildHappyOysterInit,
-      wsUrl: "",
-    },
+      happyoyster: {
+        model: "happyoyster-adventure",
+        nonBlocking: true,
+        enabled: (init) => modelSelected("happyoyster") && init.generation_mode === "i2v",
+        unavailableReason: "仅支持 I2V Adventure",
+        transformInit: buildHappyOysterInit,
+        wsUrl: "",
+      },
+    }),
   },
   onBackgroundState: ({ key, state, error }) => {
     if (key !== "happyoyster") return;
@@ -1596,6 +1614,12 @@ function setModelConnectionState(key, state) {
     idle: "待连接",
   }[state] || "待连接";
   renderRuntimeSkillBar();
+}
+
+function setComparisonModelConnectionState(state) {
+  if (ZING_ONLY) return;
+  setModelConnectionState("lingbot2", state);
+  setModelConnectionState("happyoyster", state);
 }
 
 function setHappyOysterStageText(message, state = "") {
@@ -2346,7 +2370,9 @@ function syncPlaybackTargetFps() {
       mediaProfileNegotiated && isInterpolatedMediaProfile(effectiveMediaProfile),
   });
   primarySessionAdapter.configure({ targetFps: previewPlaybackTargetFps("minwm") });
-  lingbot2Session.configure({ targetFps: previewPlaybackTargetFps("lingbot2") });
+  if (!ZING_ONLY) {
+    lingbot2Session.configure({ targetFps: previewPlaybackTargetFps("lingbot2") });
+  }
   updateStats();
 }
 
@@ -2356,7 +2382,7 @@ function syncSmoothCatchupRate() {
   $("smoothCatchupRateText").textContent = `${rate.toFixed(2)}x`;
   playbackController.setSmoothTimelinePlaybackRateMax(rate);
   primarySessionAdapter.configure({ smoothTimelinePlaybackRateMax: rate });
-  lingbot2Session.configure({ smoothTimelinePlaybackRateMax: rate });
+  if (!ZING_ONLY) lingbot2Session.configure({ smoothTimelinePlaybackRateMax: rate });
 }
 
 function syncZingFrameInterpolation({ fromTopbar = true } = {}) {
@@ -2420,10 +2446,10 @@ function selectedPlaybackMode(key = "minwm") {
 
 function syncPlaybackMode({ addToHistory = true } = {}) {
   const mode = selectedPlaybackMode("minwm");
-  const lingbot2Mode = selectedPlaybackMode("lingbot2");
+  const lingbot2Mode = ZING_ONLY ? "" : selectedPlaybackMode("lingbot2");
   playbackController.setMode(mode);
   primarySessionAdapter.configure({ mode });
-  lingbot2Session.configure({ mode: lingbot2Mode });
+  if (!ZING_ONLY) lingbot2Session.configure({ mode: lingbot2Mode });
   if (addToHistory) {
     const historyText =
       mode === "timeline"
@@ -2433,7 +2459,7 @@ function syncPlaybackMode({ addToHistory = true } = {}) {
         : mode === "adaptive"
         ? "playback · adaptive (buffered, fast input)"
         : "playback · low latency (may skip old frames)";
-    addHistory(`${historyText} · LingBot2 ${lingbot2Mode}`);
+    addHistory(ZING_ONLY ? historyText : `${historyText} · LingBot2 ${lingbot2Mode}`);
   }
   trimDecodeQueue();
   updateStats();
@@ -2501,13 +2527,14 @@ function updateRecordButton() {
 function updateRecordingDownloadButton() {
   const button = $("recordDownloadBtn");
   if (!button) return;
-  const ready = recordingDownloads.length === 2;
+  const expectedDownloads = ZING_ONLY ? 1 : 2;
+  const ready = recordingDownloads.length === expectedDownloads;
   button.hidden = !ready;
   button.disabled = !ready || recordingSaving;
   button.setAttribute("aria-disabled", !ready || recordingSaving ? "true" : "false");
   button.title = ready
-    ? `同步下载 ${recordingDownloads.map((item) => item.fileName).join("、")}`
-    : "两份录像生成后可下载";
+    ? `${ZING_ONLY ? "下载" : "同步下载"} ${recordingDownloads.map((item) => item.fileName).join("、")}`
+    : ZING_ONLY ? "Zing 录像生成后可下载" : "两份录像生成后可下载";
 }
 
 function setRecordingDownloads(outputs = []) {
@@ -2524,7 +2551,8 @@ function setRecordingDownloads(outputs = []) {
 }
 
 function downloadGameplayRecordings(event) {
-  if (recordingDownloads.length !== 2 || recordingSaving) {
+  const expectedDownloads = ZING_ONLY ? 1 : 2;
+  if (recordingDownloads.length !== expectedDownloads || recordingSaving) {
     event?.preventDefault?.();
     return;
   }
@@ -2537,7 +2565,9 @@ function downloadGameplayRecordings(event) {
     link.click();
     link.remove();
   }
-  addHistory(`downloaded both gameplay recordings · ${recordingDownloads.map((item) => item.fileName).join(" · ")}`);
+  addHistory(
+    `${ZING_ONLY ? "downloaded Zing gameplay recording" : "downloaded both gameplay recordings"} · ${recordingDownloads.map((item) => item.fileName).join(" · ")}`,
+  );
 }
 
 function resetRecordingPromptOverlay() {
@@ -3138,22 +3168,25 @@ function startRecording({ source = "manual" } = {}) {
   }
   recordingActive = true;
   setRecordingDownloads([]);
-  recordingTracks = [
-    createRecordingTrack({
-      key: "comparison",
-      label: "Zing × LingBot2",
-      variant: "comparison",
-      canvas: recordingCanvas,
-      ctx: recordingCtx,
-    }),
-    createRecordingTrack({
+  const variants = EXPERIENCE_MODE.recordingVariants(UI_CONFIG);
+  recordingTracks = variants.map((variant) => {
+    if (variant === "comparison") {
+      return createRecordingTrack({
+        key: "comparison",
+        label: "Zing × LingBot2",
+        variant: "comparison",
+        canvas: recordingCanvas,
+        ctx: recordingCtx,
+      });
+    }
+    return createRecordingTrack({
       key: "zing",
       label: "Zing",
       variant: "zing",
       canvas: zingRecordingCanvas,
       ctx: zingRecordingCtx,
-    }),
-  ];
+    });
+  });
   recordingFrameIndex = 0;
   recordingFps = Math.max(1, Math.min(GAMEPLAY_RECORDING_FPS, previewPlaybackTargetFps()));
   recordingStartedPerfMs = performance.now();
@@ -3169,7 +3202,7 @@ function startRecording({ source = "manual" } = {}) {
     started_client_ms: artifactClientMs(recordingArtifact),
     mode: recordingMode,
     mime_type: recordingTracks[0].mimeType,
-    capture_scope: "stage",
+    capture_scope: ZING_ONLY ? "zing" : "stage",
     capture_width: RECORDING_STAGE_WIDTH,
     capture_height: RECORDING_STAGE_HEIGHT,
     target_fps: recordingFps,
@@ -3185,7 +3218,7 @@ function startRecording({ source = "manual" } = {}) {
   recordingTimer = window.setInterval(updateRecordButton, 250);
   updateRecordButton();
   updateRecordFolderButton();
-  addHistory("dual recording started · comparison + Zing");
+  addHistory(ZING_ONLY ? "Zing recording started" : "dual recording started · comparison + Zing");
 }
 
 async function stopRecording({ reason = "manual" } = {}) {
@@ -3226,9 +3259,15 @@ async function stopRecording({ reason = "manual" } = {}) {
         : await buildMp4RecordingBlob(track),
     })));
     await saveRecordingArtifactFiles(outputs, { deferDownload: true });
-    addHistory(`both gameplay recordings ready · ${recordingFrameIndex} synchronized frames · ${extension}`);
+    addHistory(
+      `${ZING_ONLY ? "Zing gameplay recording" : "both gameplay recordings"} ready · ${recordingFrameIndex} synchronized frames · ${extension}`,
+    );
     if (["session_timeout", "session_closed", "primary_disconnected"].includes(reason)) {
-      showSessionNotice("两份游玩录像已生成，可点击右上角同步下载");
+      showSessionNotice(
+        ZING_ONLY
+          ? "Zing 游玩录像已生成，可点击右上角下载"
+          : "两份游玩录像已生成，可点击右上角同步下载",
+      );
       showRecordingReadyToast();
     }
   } catch (error) {
@@ -3839,7 +3878,7 @@ function finalizeRecordingArtifact(outputs) {
   const artifact = recordingArtifact || ensureSessionArtifact();
   const primary = outputs.find((output) => output.key === "comparison") || outputs[0];
   if (!primary) throw new Error("No recording outputs were generated");
-  const sidecarBaseName = primary.fileName.replace(/-comparison\.[^.]*$/, "");
+  const sidecarBaseName = primary.fileName.replace(/-(?:comparison|zing)\.[^.]*$/, "");
   const jsonFileName = `${sidecarBaseName}.json`;
   const htmlFileName = `${sidecarBaseName}.html`;
   const tracksByKey = Object.fromEntries(recordingTracks.map((track) => [track.key, track]));
@@ -3863,12 +3902,12 @@ function finalizeRecordingArtifact(outputs) {
     stopped_at: new Date().toISOString(),
     stopped_client_ms: artifactClientMs(artifact),
     mode: recordingMode,
-    mime_type: primary.videoBlob.type || tracksByKey.comparison?.mimeType || "video/mp4",
+    mime_type: primary.videoBlob.type || tracksByKey[primary.key]?.mimeType || "video/mp4",
     fps: recordingFps,
     frames: recordingFrameIndex,
     dropped_frames: recordingDroppedFrames,
     duration_ms: Math.round(recordingElapsedMs),
-    encoded_chunks: videos.comparison?.encoded_chunks || 0,
+    encoded_chunks: videos[primary.key]?.encoded_chunks || 0,
     video_file: primary.fileName,
     video_url: recordingAssetUrl(primary.fileName),
     video_bytes: primary.videoBlob.size,
@@ -5046,11 +5085,13 @@ function drawVisibleReferencePlaceholders() {
   if (!selectedReferencePreviewReady) return;
   const referencePreview = $("referencePreview");
   drawPlaceholderImage(canvas, referencePreview, modelControl("minwm", "size").value);
-  drawPlaceholderImage(
-    lingbot2Canvas,
-    referencePreview,
-    modelControl("lingbot2", "size").value,
-  );
+  if (!ZING_ONLY) {
+    drawPlaceholderImage(
+      lingbot2Canvas,
+      referencePreview,
+      modelControl("lingbot2", "size").value,
+    );
+  }
 }
 
 async function drawInitialReferencePlaceholders(firstFrame) {
@@ -5059,11 +5100,13 @@ async function drawInitialReferencePlaceholders(firstFrame) {
   try {
     image = await createImageBitmap(new Blob([firstFrame]));
     drawPlaceholderImage(canvas, image, modelControl("minwm", "size").value);
-    drawPlaceholderImage(
-      lingbot2Canvas,
-      image,
-      modelControl("lingbot2", "size").value,
-    );
+    if (!ZING_ONLY) {
+      drawPlaceholderImage(
+        lingbot2Canvas,
+        image,
+        modelControl("lingbot2", "size").value,
+      );
+    }
   } catch (error) {
     addHistory(`reference placeholder unavailable · ${error?.message || error}`);
   } finally {
@@ -5848,8 +5891,7 @@ async function connect() {
   resetSessionLifetimeUi();
   $("connectBtn").disabled = true;
   setModelConnectionState("minwm", "connecting");
-  setModelConnectionState("lingbot2", "connecting");
-  setModelConnectionState("happyoyster", "connecting");
+  setComparisonModelConnectionState("connecting");
   setStatus("Preparing");
   setPreviewState("waiting");
   addHistory("preparing session");
@@ -5876,8 +5918,7 @@ async function connect() {
       setStatus("Complete world first", "error");
       setWorldDraftStatus("请先补齐首帧图片和世界描述", "error");
       setModelConnectionState("minwm", "idle");
-      setModelConnectionState("lingbot2", "idle");
-      setModelConnectionState("happyoyster", "idle");
+      setComparisonModelConnectionState("idle");
       setPreviewState("idle");
       addHistory("world draft incomplete");
       $("connectBtn").disabled = false;
@@ -5901,8 +5942,7 @@ async function connect() {
       firstFrame = enteredFirstFrame;
       if (!firstFrame) {
         setModelConnectionState("minwm", "idle");
-        setModelConnectionState("lingbot2", "idle");
-        setModelConnectionState("happyoyster", "idle");
+        setComparisonModelConnectionState("idle");
         setStatus("Pick a reference", "error");
         setPreviewState("idle");
         addHistory("reference image required for I2V");
@@ -6019,7 +6059,9 @@ function openPrimarySession(init, url) {
       const source = generationMode === "t2v"
         ? `${init.num_frames || "continuous"} frames from text`
         : selectedReferenceLabel || "uploaded reference";
-      addHistory(`${generationMode.toUpperCase()} dual session started · ${source}`);
+      addHistory(
+        `${generationMode.toUpperCase()} ${ZING_ONLY ? "Zing" : "dual"} session started · ${source}`,
+      );
       resolve();
     };
     socket.onclose = (event) => {
@@ -6061,7 +6103,7 @@ function openPrimarySession(init, url) {
       } else if (!socketCloseExpected) {
         const hadReadyWorld = worldExperienceReady;
         stopWorldExperienceTiming({ recordingReason: "primary_disconnected" });
-        lingbot2Session.close("Zing primary session closed");
+        if (!ZING_ONLY) lingbot2Session.close("Zing primary session closed");
         if (hadReadyWorld) {
           showSessionNotice("Zing 连接已中断，已结束计时并生成当前录像");
         }
@@ -6869,7 +6911,7 @@ async function applyQueryParams() {
   const srParam = params.get("sr");
   const smoothParam = params.get("smooth");
   const catchupParam = Number(params.get("catchup"));
-  for (const key of ["minwm", "lingbot2"]) {
+  for (const key of ZING_ONLY ? ["minwm"] : ["minwm", "lingbot2"]) {
     modelControl(key, "transportFormat").value = params.get("transport") || DEFAULT_PREVIEW_OUTPUT_FORMAT;
     modelControl(key, "transportQuality").value = params.get("quality") || String(DEFAULT_PREVIEW_OUTPUT_QUALITY);
     if (
@@ -7029,7 +7071,7 @@ void ensureCustomWorldPresetsLoaded();
 drawIdle();
 setPreviewScale(DEFAULT_PREVIEW_SCALE);
 updateSuperResolutionControls("minwm");
-updateSuperResolutionControls("lingbot2");
+if (!ZING_ONLY) updateSuperResolutionControls("lingbot2");
 applyQueryParams()
   .then(async (query) => {
     if (!query.preset) clearWorldDraft();
@@ -7046,39 +7088,42 @@ updateRecordButton();
 updateRecordFolderButton();
 $("connectBtn").onclick = connect;
 function closeForModelSlotChange() {
+  if (ZING_ONLY) return;
   if (!ws && dualModelController.activeKeys.size === 0 && !happyOysterSession.connected) return;
   closeSession("model comparison selection changed");
   setStatus("Selection changed");
 }
-for (let slotIndex = 0; slotIndex < MODEL_SLOT_DEFAULTS.length; slotIndex += 1) {
-  $(`modelSlot${slotIndex}`).addEventListener("change", () => {
+if (!ZING_ONLY) {
+  for (let slotIndex = 0; slotIndex < MODEL_SLOT_DEFAULTS.length; slotIndex += 1) {
+    $(`modelSlot${slotIndex}`).addEventListener("change", () => {
+      closeForModelSlotChange();
+      ensureUniqueModelSlot(slotIndex);
+    });
+  }
+  $("addModelSlotBtn").onclick = () => {
+    const sessionActive = Boolean(
+      ws
+      || dualModelController.activeKeys.size > 0
+      || happyOysterSession.connected
+    );
+    activeModelSlotCount = 3;
+    ensureUniqueModelSlot(2);
+    if (!sessionActive || !modelSelected("happyoyster")) return;
+    setModelConnectionState("happyoyster", "preparing");
+    setHappyOysterStageText("正在创建快乐生蚝 World…", "preparing");
+    addHistory("正在把快乐生蚝加入当前对比会话");
+    void dualModelController.activate("happyoyster").catch((error) => {
+      const message = error?.message || String(error || "连接失败");
+      setModelConnectionState("happyoyster", "error");
+      setHappyOysterStageText(message, "error");
+    });
+  };
+  $("removeModelSlotBtn").onclick = () => {
     closeForModelSlotChange();
-    ensureUniqueModelSlot(slotIndex);
-  });
+    activeModelSlotCount = 2;
+    syncModelSlotUi();
+  };
 }
-$("addModelSlotBtn").onclick = () => {
-  const sessionActive = Boolean(
-    ws
-    || dualModelController.activeKeys.size > 0
-    || happyOysterSession.connected
-  );
-  activeModelSlotCount = 3;
-  ensureUniqueModelSlot(2);
-  if (!sessionActive || !modelSelected("happyoyster")) return;
-  setModelConnectionState("happyoyster", "preparing");
-  setHappyOysterStageText("正在创建快乐生蚝 World…", "preparing");
-  addHistory("正在把快乐生蚝加入当前对比会话");
-  void dualModelController.activate("happyoyster").catch((error) => {
-    const message = error?.message || String(error || "连接失败");
-    setModelConnectionState("happyoyster", "error");
-    setHappyOysterStageText(message, "error");
-  });
-};
-$("removeModelSlotBtn").onclick = () => {
-  closeForModelSlotChange();
-  activeModelSlotCount = 2;
-  syncModelSlotUi();
-};
 $("clearWorldBtn").onclick = clearWorldDraft;
 $("enhanceBtn").onclick = completeWorldDraft;
 $("prompt").addEventListener("input", () => {
@@ -7097,8 +7142,7 @@ for (const id of ["goalMinPlaySeconds", "goalProbability", "goalRuleInput"]) {
 $("stopBtn").onclick = () => {
   closeSession();
   setModelConnectionState("minwm", "closed");
-  setModelConnectionState("lingbot2", "closed");
-  setModelConnectionState("happyoyster", "closed");
+  setComparisonModelConnectionState("closed");
 };
 
 function setPromptRewriteStatus(message, state = "") {
@@ -7336,7 +7380,7 @@ $("firstFrame").onchange = () => {
 $("generationMode").addEventListener("change", updateGenerationModeUi);
 $("continuous").addEventListener("change", updateGenerationModeUi);
 $("numFrames").addEventListener("input", updateT2VFrameHint);
-for (const key of ["minwm", "lingbot2"]) {
+for (const key of ZING_ONLY ? ["minwm"] : ["minwm", "lingbot2"]) {
   modelControl(key, "size").addEventListener("input", () => {
     if (key === "minwm") updateOutputSizeText();
   });
@@ -7364,7 +7408,9 @@ $("zingFrameInterpolation").addEventListener("change", () => {
   syncZingFrameInterpolation({ fromTopbar: true });
 });
 canvas.addEventListener("pointerdown", () => canvas.focus({ preventScroll: true }));
-lingbot2Canvas.addEventListener("pointerdown", () => canvas.focus({ preventScroll: true }));
+if (!ZING_ONLY) {
+  lingbot2Canvas.addEventListener("pointerdown", () => canvas.focus({ preventScroll: true }));
+}
 $("serverUrl").addEventListener("change", () => {
   queryServerModelInfo({ applyPresetForModel: true }).catch(showError);
 });

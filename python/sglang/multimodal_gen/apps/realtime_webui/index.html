@@ -4,7 +4,9 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>World Studio · 实时模型对比</title>
-    <link rel="stylesheet" href="./styles.css?v=world-studio-h264-rules-v6" />
+    <script src="./runtime-config.js"></script>
+    <script src="./realtime_experience_mode.js?v=zing-only-v1"></script>
+    <link rel="stylesheet" href="./styles.css?v=world-studio-zing-only-rife3-finite-v1" />
   </head>
   <body class="world-studio">
     <header class="app-header">
@@ -25,14 +27,14 @@
         </button>
         <button id="recordDownloadBtn" class="gameplay-download-button" type="button" hidden>
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12M7 10l5 5 5-5M5 21h14" /></svg>
-          <span>下载两份录像</span>
+          <span data-zing-only-copy="下载 Zing 录像">下载两份录像</span>
         </button>
       </div>
     </header>
 
     <div id="recordingReadyToast" class="recording-ready-toast" role="status" aria-live="polite" aria-atomic="true" hidden>
       <span class="recording-ready-toast-icon" aria-hidden="true">✓</span>
-      <span><strong>录像已生成</strong><small>可在右上角下载对比版和 Zing 版</small></span>
+      <span><strong>录像已生成</strong><small data-zing-only-copy="可在右上角下载 Zing 录像">可在右上角下载对比版和 Zing 版</small></span>
     </div>
 
     <div id="goalAchievementToast" class="goal-achievement-toast" role="status" aria-live="assertive" aria-atomic="true" hidden>
@@ -141,28 +143,28 @@
         </div>
       </section>
 
-      <section class="workspace" aria-label="实时模型对比">
+      <section class="workspace" aria-label="实时模型对比" data-zing-only-aria-label="Zing 实时世界">
         <div class="workspace-switcher" hidden aria-hidden="true">
           <button id="previewPaneButton" class="workspace-switch is-active" type="button" data-workspace-view="preview">Preview</button>
           <button id="tracePaneButton" class="workspace-switch" type="button" data-workspace-view="trace">Trace</button>
         </div>
 
         <div id="previewPane" class="workspace-pane is-active" role="tabpanel" aria-labelledby="previewPaneButton">
-          <section class="stage" aria-label="实时模型对比">
+          <section class="stage" aria-label="实时模型对比" data-zing-only-aria-label="Zing 实时世界">
             <div class="comparison-heading">
               <div>
-                <span>LIVE COMPARISON</span>
-                <h2>实时模型对比</h2>
-                <p>同一世界 · 同一指令 · 同步生成</p>
+                <span data-zing-only-copy="LIVE WORLD">LIVE COMPARISON</span>
+                <h2 data-zing-only-copy="Zing 实时世界">实时模型对比</h2>
+                <p data-zing-only-copy="实时生成 · 实时交互">同一世界 · 同一指令 · 同步生成</p>
               </div>
-              <button id="fullscreenBtn" class="fullscreen-button" type="button" aria-label="Enter fullscreen comparison" aria-pressed="false" title="全屏对比">
+              <button id="fullscreenBtn" class="fullscreen-button" type="button" aria-label="Enter fullscreen comparison" aria-pressed="false" title="全屏对比" data-zing-only-aria-label="Enter fullscreen Zing world" data-zing-only-title="全屏 Zing 世界">
                 <span class="fullscreen-icon" aria-hidden="true"></span>
               </button>
             </div>
 
             <div id="sessionNotice" class="session-notice" role="alert" hidden>连接已断开，请重新连接</div>
 
-            <div class="model-slot-config" aria-label="选择对比模型">
+            <div class="model-slot-config" aria-label="选择对比模型" data-zing-only-hide>
               <label><span>对比 1</span><select id="modelSlot0" aria-label="对比槽位 1 模型"><option value="minwm" selected>Zing</option><option value="lingbot2">LingBot2</option><option value="happyoyster">快乐生蚝</option></select></label>
               <label><span>对比 2</span><select id="modelSlot1" aria-label="对比槽位 2 模型"><option value="minwm">Zing</option><option value="lingbot2" selected>LingBot2</option><option value="happyoyster">快乐生蚝</option></select></label>
               <label id="modelSlot2Wrap" hidden><span>对比 3</span><select id="modelSlot2" aria-label="对比槽位 3 模型"><option value="minwm">Zing</option><option value="lingbot2">LingBot2</option><option value="happyoyster" selected>快乐生蚝</option></select></label>
@@ -170,7 +172,7 @@
               <button id="removeModelSlotBtn" type="button" hidden>－ 移除第三列</button>
             </div>
 
-            <div class="model-player-grid" aria-label="模型对比画面">
+            <div class="model-player-grid" aria-label="模型对比画面" data-zing-only-aria-label="Zing 实时画面">
               <article class="model-player" data-model-key="minwm" data-session-state="idle">
                 <header class="model-player-title">
                   <strong>Zing</strong>
@@ -210,7 +212,7 @@
                 </div>
               </article>
 
-              <article class="model-player" data-model-key="lingbot2" data-session-state="idle">
+              <article class="model-player" data-model-key="lingbot2" data-session-state="idle" data-zing-only-hide>
                 <header class="model-player-title">
                   <strong>LingBot2</strong>
                   <div class="model-player-telemetry" aria-label="LingBot2 实时状态">
@@ -249,7 +251,7 @@
                 </div>
               </article>
 
-              <article id="happyOysterPlayer" class="model-player" data-model-key="happyoyster" data-session-state="idle" hidden>
+              <article id="happyOysterPlayer" class="model-player" data-model-key="happyoyster" data-session-state="idle" data-zing-only-hide hidden>
                 <header class="model-player-title">
                   <strong>快乐生蚝</strong>
                   <div class="model-player-telemetry" aria-label="快乐生蚝实时状态">
@@ -309,7 +311,7 @@
                   <span>LIVE DIRECTION</span>
                   <h3>世界过程中的新指令</h3>
                 </div>
-                <small>AI 改写后同时发送至 Zing 与 LingBot2</small>
+                <small data-zing-only-copy="AI 改写后发送至 Zing">AI 改写后同时发送至 Zing 与 LingBot2</small>
               </div>
               <div class="prompt-composer">
                 <textarea id="runtimePrompt" rows="2" placeholder="例如：向左转，靠近山谷中的城堡……"></textarea>
@@ -355,7 +357,7 @@
                   <label><input id="continuous" type="checkbox" checked /><span id="continuousLabelText">Continuous session</span></label>
                 </div>
               </div>
-              <div class="model-parameter-panel" aria-label="LingBot2 parameters">
+              <div class="model-parameter-panel" aria-label="LingBot2 parameters" data-zing-only-hide>
                 <div class="model-parameter-title"><strong>LingBot2 parameters</strong></div>
                 <div class="model-parameter-grid">
                   <label>Size<input id="lingbot2Size" value="832x480" /></label>
@@ -400,7 +402,6 @@
         </section>
       </section>
     </main>
-    <script src="./runtime-config.js"></script>
     <script src="./playback_controller.js?v=realtime-playback-v35"></script>
     <script src="./model_session.js?v=dual-h264-telemetry-v1"></script>
     <script src="./dual_model_controller.js?v=dual-model-v6"></script>
@@ -413,6 +414,6 @@
     <script src="./fullscreen_controller.js?v=fullscreen-focus-v1"></script>
     <script src="./trace_topology.js?v=realtime-trace-topology-v6"></script>
     <script src="./trace_transport.js?v=realtime-trace-http-v2"></script>
-    <script src="./app.js?v=world-studio-rife3-h264-smooth-timeline-v3"></script>
+    <script src="./app.js?v=world-studio-zing-only-rife3-finite-v1"></script>
   </body>
 </html>

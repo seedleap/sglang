@@ -16,8 +16,8 @@ assert.match(
 );
 assert.match(
   appJs,
-  /capture_scope:\s*"stage"/,
-  "recording metadata should describe that the stage was captured",
+  /capture_scope:\s*ZING_ONLY \? "zing" : "stage"/,
+  "recording metadata should distinguish the Zing-only and comparison stages",
 );
 assert.match(
   appJs,

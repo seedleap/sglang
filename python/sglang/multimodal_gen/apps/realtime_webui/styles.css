@@ -1804,6 +1804,16 @@ body.world-studio {
   min-width: 0;
   background: transparent;
 }
+html[data-realtime-experience="zing-only"]:not([data-realtime-experience-ready]) body.world-studio {
+  visibility: hidden;
+}
+html[data-realtime-experience="zing-only"] .world-studio [data-zing-only-hide],
+html[data-realtime-experience="zing-only"] .world-studio [data-model-key]:not([data-model-key="minwm"]) {
+  display: none !important;
+}
+html[data-realtime-experience="zing-only"] .world-studio .model-player-grid {
+  grid-template-columns: minmax(0, 1fr);
+}
 .world-studio .model-player-grid.is-three-up { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
 .world-studio .model-player {
   display: grid;
