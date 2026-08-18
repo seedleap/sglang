@@ -3387,6 +3387,7 @@ def test_minwm_cuda_graph_disables_segment_compile(monkeypatch):
         return value
 
     monkeypatch.setattr(minwm_module, "_MINWM_SEGMENT_COMPILE", True)
+    monkeypatch.setattr(minwm_module, "_MINWM_CUDA_GRAPH_CAPTURE_SEGMENTS", False)
     monkeypatch.setattr(minwm_module, "_MINWM_CUDA_GRAPH_ACTIVE", False)
     monkeypatch.setattr(minwm_module._MinWMSegmentCompile, "_compiled", {})
 
@@ -3394,6 +3395,55 @@ def test_minwm_cuda_graph_disables_segment_compile(monkeypatch):
 
     assert minwm_module._MinWMSegmentCompile.get(operation, True) is operation
     assert minwm_module._MinWMSegmentCompile._compiled == {}
+
+
+def test_minwm_cuda_graph_can_capture_warmed_segment_compile(monkeypatch):
+    import sglang.multimodal_gen.runtime.models.dits.minwm as minwm_module
+
+    compile_calls = []
+
+    def fake_compile(function, *, dynamic, mode, options):
+        compile_calls.append(
+            {
+                "function": function,
+                "dynamic": dynamic,
+                "mode": mode,
+                "options": options,
+            }
+        )
+
+        def compiled(*args, **kwargs):
+            return function(*args, **kwargs)
+
+        return compiled
+
+    def operation(value):
+        return value + 1
+
+    monkeypatch.setattr(minwm_module, "_MINWM_SEGMENT_COMPILE", True)
+    monkeypatch.setattr(minwm_module, "_MINWM_CUDA_GRAPH_CAPTURE_SEGMENTS", True)
+    monkeypatch.setattr(minwm_module, "_MINWM_CUDA_GRAPH_ACTIVE", False)
+    monkeypatch.setattr(minwm_module._MinWMSegmentCompile, "_compiled", {})
+    monkeypatch.setattr(minwm_module.torch, "compile", fake_compile)
+    monkeypatch.setattr(
+        minwm_module.torch,
+        "are_deterministic_algorithms_enabled",
+        lambda: False,
+    )
+
+    minwm_module.set_minwm_cuda_graph_active(True)
+    compiled = minwm_module._MinWMSegmentCompile.get(operation, True)
+
+    assert compiled(torch.tensor(2)).item() == 3
+    assert minwm_module._MinWMSegmentCompile.get(operation, True) is compiled
+    assert compile_calls == [
+        {
+            "function": operation,
+            "dynamic": True,
+            "mode": None,
+            "options": {"triton.cudagraphs": False},
+        }
+    ]
 
 
 def test_minwm_rotary_embedding_matches_main_explicit_formula():

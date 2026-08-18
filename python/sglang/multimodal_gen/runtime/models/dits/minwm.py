@@ -79,6 +79,9 @@ _MINWM_PACKED_ATTENTION_DETERMINISTIC = _env_flag(
     "MINWM_PACKED_ATTENTION_DETERMINISTIC", True
 )
 _MINWM_SEGMENT_COMPILE = _env_flag("MINWM_SEGMENT_COMPILE", True)
+_MINWM_CUDA_GRAPH_CAPTURE_SEGMENTS = _env_flag(
+    "MINWM_CUDA_GRAPH_CAPTURE_SEGMENTS", False
+)
 _MINWM_CUDA_GRAPH_ACTIVE = False
 _MINWM_CACHE_ROTATED_K = _env_flag("MINWM_CACHE_ROTATED_K", True)
 _MINWM_PRECOMPUTE_CACHE_ROPE = _env_flag("MINWM_PRECOMPUTE_CACHE_ROPE", True)
@@ -194,14 +197,26 @@ class _MinWMSegmentCompile:
 
     @classmethod
     def get(cls, function, use_compile: bool):
-        if not use_compile or not _MINWM_SEGMENT_COMPILE or _MINWM_CUDA_GRAPH_ACTIVE:
+        if (
+            not use_compile
+            or not _MINWM_SEGMENT_COMPILE
+            or (_MINWM_CUDA_GRAPH_ACTIVE and not _MINWM_CUDA_GRAPH_CAPTURE_SEGMENTS)
+        ):
             return function
         if function not in cls._compiled:
             kwargs = {}
+            options = {}
             if "recompile_limit" in inspect.signature(torch.compile).parameters:
                 kwargs["recompile_limit"] = 64
             if torch.are_deterministic_algorithms_enabled():
-                kwargs["options"] = {"deterministic": True}
+                options["deterministic"] = True
+            if _MINWM_CUDA_GRAPH_CAPTURE_SEGMENTS:
+                # The outer MinWM graph owns capture and static-buffer lifetime.
+                # Keep Inductor focused on fusion/codegen instead of nesting a
+                # second CUDA Graph state machine inside the manual graph.
+                options["triton.cudagraphs"] = False
+            if options:
+                kwargs["options"] = options
             cls._compiled[function] = torch.compile(
                 function, dynamic=True, mode=None, **kwargs
             )
@@ -213,7 +228,9 @@ def set_minwm_cuda_graph_active(enabled: bool) -> None:
 
     Segment compilation can allocate or compile on its first invocation, which
     is unsafe inside CUDA Graph capture. It can also change MinWM's BF16 rounding
-    boundaries, so the graph and eager benchmark lanes both use eager segments.
+    boundaries, so the default graph and eager benchmark lanes use eager
+    segments. The explicit capture-segments experiment instead compiles from the
+    reference forward onward and captures those warmed kernels later.
     """
     global _MINWM_CUDA_GRAPH_ACTIVE
     enabled = bool(enabled)
@@ -221,7 +238,15 @@ def set_minwm_cuda_graph_active(enabled: bool) -> None:
         return
     _MINWM_CUDA_GRAPH_ACTIVE = enabled
     if enabled and _MINWM_SEGMENT_COMPILE:
-        logger.info("MinWM CUDA graph disables nested segment torch.compile for parity")
+        if _MINWM_CUDA_GRAPH_CAPTURE_SEGMENTS:
+            logger.info(
+                "MinWM CUDA graph captures warmed segment torch.compile kernels "
+                "with Inductor CUDA graphs disabled"
+            )
+        else:
+            logger.info(
+                "MinWM CUDA graph disables nested segment torch.compile for parity"
+            )
 
 
 def apply_minwm_rotary_embedding(
@@ -966,11 +991,13 @@ class MinWMCausalTransformer3DModel(CausalWanTransformer3DModel):
             )
         logger.info(
             "MinWM execution profile: attention_impl=%s "
-            "packed_deterministic=%s segment_compile=%s cache_rotated_k=%s "
+            "packed_deterministic=%s segment_compile=%s "
+            "cuda_graph_capture_segments=%s cache_rotated_k=%s "
             "precompute_cache_rope=%s cache_packed_metadata=%s",
             _MINWM_ATTENTION_IMPL,
             _MINWM_PACKED_ATTENTION_DETERMINISTIC,
             _MINWM_SEGMENT_COMPILE,
+            _MINWM_CUDA_GRAPH_CAPTURE_SEGMENTS,
             _MINWM_CACHE_ROTATED_K,
             _MINWM_PRECOMPUTE_CACHE_ROPE,
             _MINWM_CACHE_PACKED_METADATA,
