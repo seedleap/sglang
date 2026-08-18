@@ -65,13 +65,24 @@
       draft.goal ? [draft.goal] : []
     );
     const usedGoalIds = new Set();
+    let nextGeneratedGoalId = 1;
+    const reserveGeneratedGoalIdFloor = (id) => {
+      const match = /^goal-(\d+)$/.exec(id);
+      if (!match) return;
+      nextGeneratedGoalId = Math.max(nextGeneratedGoalId, Number(match[1]) + 1);
+    };
     const goals = rawGoals
       .map((goal, index) => normalizeGoal(goal, index))
       .filter(Boolean)
-      .map((goal, index) => {
+      .map((goal) => {
         let id = goal.id;
-        if (usedGoalIds.has(id)) id = `goal-${index + 1}`;
-        while (usedGoalIds.has(id)) id = `goal-${usedGoalIds.size + 1}`;
+        if (usedGoalIds.has(id)) {
+          do {
+            id = `goal-${nextGeneratedGoalId}`;
+            nextGeneratedGoalId += 1;
+          } while (usedGoalIds.has(id));
+        }
+        reserveGeneratedGoalIdFloor(id);
         usedGoalIds.add(id);
         return { ...goal, id };
       });

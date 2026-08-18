@@ -39,6 +39,17 @@ async function main() {
     { skills: [{ id: "fly", input: "召唤飞船" }], goals: [] },
     "a legacy label-only skill should migrate into the single rule input",
   );
+  assert.deepEqual(
+    normalizeWorldRulesDraft({
+      goals: [
+        { id: "goal-2", input: "出现第一枚徽章" },
+        { id: "goal-2", input: "出现第二枚徽章" },
+        { id: "goal-3", input: "出现第三枚徽章" },
+      ],
+    }).goals.map((goal) => goal.id),
+    ["goal-2", "goal-3", "goal-4"],
+    "duplicate goal ids should advance monotonically instead of retrying the same candidate",
+  );
 
   const completionCalls = [];
   const dispatches = [];
