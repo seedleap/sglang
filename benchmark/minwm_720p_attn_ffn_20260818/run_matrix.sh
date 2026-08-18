@@ -394,12 +394,18 @@ else
   run_lane dense-cross-sage3-bf16 dense false sage_attn_3 "" "" false
 fi
 run_lane dense-fa-online-fp8 dense false fa fp8 "" false
-run_lane dense-fa-bf16-compile dense false fa "" "" true
+if [[ "${MINWM_RUN_COMPILE_LANES:-0}" == "1" ]]; then
+  run_lane dense-fa-bf16-compile dense false fa "" "" true
+fi
 prepare_static_fp8
 run_lane packed-fast-static-ffn-fp8 packed false fa "" "${STATIC_TRANSFORMER}" false
-run_lane packed-fast-static-ffn-fp8-compile packed false fa "" "${STATIC_TRANSFORMER}" true
+if [[ "${MINWM_RUN_COMPILE_LANES:-0}" == "1" ]]; then
+  run_lane packed-fast-static-ffn-fp8-compile packed false fa "" "${STATIC_TRANSFORMER}" true
+fi
 run_lane dense-fa-static-ffn-fp8 dense false fa "" "${STATIC_TRANSFORMER}" false
-run_lane dense-fa-static-ffn-fp8-compile dense false fa "" "${STATIC_TRANSFORMER}" true
+if [[ "${MINWM_RUN_COMPILE_LANES:-0}" == "1" ]]; then
+  run_lane dense-fa-static-ffn-fp8-compile dense false fa "" "${STATIC_TRANSFORMER}" true
+fi
 
 python3 "${SCRIPT_DIR}/summarize_matrix.py" "${RESULT_ROOT}" \
   | tee "${RESULT_ROOT}/summary.log"
@@ -530,7 +536,8 @@ PY
     --cases "${CASES}" --case "${CASE}" \
     --output "${profile_dir}/profile-client.json" \
     --profile-name "${name}-nsys" \
-    --warmup-chunks 16 --measured-chunks 3 \
+    --warmup-chunks 16 \
+    --measured-chunks "${MINWM_PROFILE_MEASURED_CHUNKS:-10}" \
     --kv-cache-num-frames "${KV_FRAMES}" \
     --progress-file "${progress}" \
     > "${profile_dir}/profile-client.log" 2>&1 &
@@ -538,8 +545,9 @@ PY
   local reached=0
   for _ in $(seq 1 1800); do
     if [[ -f "${progress}" ]] && python3 - "${progress}" <<'PY'
-import json, sys
-raise SystemExit(0 if json.load(open(sys.argv[1]))["last_completed_chunk"] >= 12 else 1)
+import json, os, sys
+trigger = int(os.environ.get("MINWM_PROFILE_TRIGGER_CHUNK", "8"))
+raise SystemExit(0 if json.load(open(sys.argv[1]))["last_completed_chunk"] >= trigger else 1)
 PY
     then
       reached=1
@@ -557,7 +565,7 @@ PY
   nsys start \
     --session="${session}" \
     --output="${profile_dir}/trace" \
-    --gpu-metrics-devices=all \
+    --gpu-metrics-devices="${MINWM_PROFILE_GPU_METRICS_DEVICES:-cuda-visible}" \
     --gpu-metrics-frequency=10000 \
     --sample=none
   local client_status=0
