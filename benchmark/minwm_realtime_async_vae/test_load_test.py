@@ -1,4 +1,5 @@
 import asyncio
+import sys
 from argparse import Namespace
 
 import msgspec.msgpack
@@ -14,6 +15,7 @@ from load_test import (
     init_request,
     measurement_window_start,
     merged_stage_values,
+    parse_args,
     record_action_latency,
     record_frame_batch,
     run_session,
@@ -25,6 +27,30 @@ from load_test import (
 )
 
 RIFE_SHA256 = "8f6fb9105ba9e946762ee7190acbca3ca1cf14193eb81ca0955d492fb8558692"
+
+
+def test_cli_defaults_use_the_full_zing_model_profile(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "load_test.py",
+            "--ws-url",
+            "ws://127.0.0.1/realtime",
+            "--profile",
+            "async",
+            "--output",
+            str(tmp_path / "result.json"),
+        ],
+    )
+
+    args = parse_args()
+
+    assert args.size == "1280x704"
+    assert args.preview_max_width == 832
+    assert args.preview_quality == 70
+    assert args.sink == 8
+    assert args.window == 32
 
 
 def _single_chunk_args(ws_url: str) -> Namespace:

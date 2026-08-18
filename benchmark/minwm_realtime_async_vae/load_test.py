@@ -53,9 +53,9 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         help="Reference image used when --generation-mode=i2v",
     )
-    parser.add_argument("--size", default="832x480")
-    parser.add_argument("--preview-max-width", type=int, default=560)
-    parser.add_argument("--preview-quality", type=int, default=55)
+    parser.add_argument("--size", default="1280x704")
+    parser.add_argument("--preview-max-width", type=int, default=832)
+    parser.add_argument("--preview-quality", type=int, default=70)
     parser.add_argument("--fps", type=int, default=24)
     parser.add_argument(
         "--realtime-media-profile",
@@ -67,8 +67,8 @@ def parse_args() -> argparse.Namespace:
         "--expected-media-weights-sha256",
         help="Required exact 64-hex RIFE weights digest for interpolated runs.",
     )
-    parser.add_argument("--sink", type=int, default=9)
-    parser.add_argument("--window", type=int, default=18)
+    parser.add_argument("--sink", type=int, default=8)
+    parser.add_argument("--window", type=int, default=32)
     parser.add_argument(
         "--completion-signal",
         choices=("final-frame", "chunk-stats"),
@@ -238,11 +238,11 @@ def init_request(args: argparse.Namespace, *, total_chunks: int, trace_id: str) 
         "guidance_scale": 0.0,
         "max_chunks": total_chunks,
         "realtime_output_format": "webp",
-        "realtime_preview_max_width": getattr(args, "preview_max_width", 560),
+        "realtime_preview_max_width": getattr(args, "preview_max_width", 832),
         "realtime_output_pacing": False,
-        "output_compression": getattr(args, "preview_quality", 55),
-        "realtime_causal_sink_size": getattr(args, "sink", 9),
-        "realtime_causal_kv_cache_num_frames": getattr(args, "window", 18),
+        "output_compression": getattr(args, "preview_quality", 70),
+        "realtime_causal_sink_size": getattr(args, "sink", 8),
+        "realtime_causal_kv_cache_num_frames": getattr(args, "window", 32),
         "trace_id": trace_id,
     }
     media_profile = getattr(args, "realtime_media_profile", "native_v1")
