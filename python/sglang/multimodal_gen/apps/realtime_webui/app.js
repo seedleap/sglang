@@ -686,6 +686,8 @@ let lastReceivedChunk = null;
 let lastReceivedFrameBatchIndex = null;
 let frameBatchGapCount = 0;
 let encodedDecodeErrors = 0;
+let primaryChunkTelemetry = {};
+let primaryLastInputUplinkMs = 0;
 let socketHadError = false;
 let socketCloseExpected = false;
 let socketServerError = "";
@@ -1956,6 +1958,8 @@ function resetStreamStats() {
   lastReceivedFrameBatchIndex = null;
   frameBatchGapCount = 0;
   encodedDecodeErrors = 0;
+  primaryChunkTelemetry = {};
+  primaryLastInputUplinkMs = 0;
   renderedPreviewFrames = 0;
   lastSentEventId = 0;
   lastRenderedEventId = 0;
@@ -2122,6 +2126,8 @@ function updateStats() {
     renderFps: fpsSamples.length,
     droppedFrames: totalDroppedFrames,
     decodeQueueLength: pendingDecodeBatches,
+    chunkTelemetry: primaryChunkTelemetry,
+    lastInputUplinkMs: primaryLastInputUplinkMs,
   });
 }
 
@@ -5972,6 +5978,24 @@ function handleReceiveError(error, epoch) {
   });
 }
 
+function handlePrimaryControlAck(message) {
+  if (message.stage !== "worker") return;
+  const clientSentEpochMs = Number(message.client_sent_epoch_ms || 0);
+  const serverReceivedEpochMs = Number(message.server_received_epoch_ms || 0);
+  const serverSentEpochMs = Number(message.server_sent_epoch_ms || 0);
+  const clientReceivedEpochMs = Date.now();
+  if (!clientSentEpochMs || !serverReceivedEpochMs || !serverSentEpochMs) return;
+  const serverProcessingMs = Math.max(0, serverSentEpochMs - serverReceivedEpochMs);
+  const roundTripMs = Math.max(0, clientReceivedEpochMs - clientSentEpochMs);
+  primaryLastInputUplinkMs = Math.max(0, (roundTripMs - serverProcessingMs) / 2);
+  markClientTrace("client.control_ack_received", {
+    event_id: Number(message.event_id || 0),
+    kind: message.kind || "",
+    input_uplink_ms: primaryLastInputUplinkMs,
+  });
+  updateStats();
+}
+
 function receive(data, epoch) {
   if (!pendingHeader) {
     const receivedAt = performance.now();
@@ -6006,6 +6030,11 @@ function receive(data, epoch) {
     if (message.type === "frame_batch") {
       const payload = message.payload;
       delete message.payload;
+      if (payload === undefined) {
+        pendingHeader = message;
+        if (!renderedPreviewFrames) setStatus("Receiving", "live");
+        return;
+      }
       markClientTrace("client.frame_batch_received", {
         chunk_index: Number(message.chunk_index || 0),
         event_id: Number(message.event_id || 0),
@@ -6020,6 +6049,20 @@ function receive(data, epoch) {
       if (!renderedPreviewFrames) setStatus("Receiving", "live");
       return;
     }
+    if (message.type === "frame_batch_header") {
+      pendingHeader = message;
+      if (!renderedPreviewFrames) setStatus("Receiving", "live");
+      return;
+    }
+    if (message.type === "control_ack") {
+      handlePrimaryControlAck(message);
+      return;
+    }
+    if (message.type === "chunk_telemetry") {
+      primaryChunkTelemetry = { ...message };
+      updateStats();
+      return;
+    }
     if (message.type === "media_chunk_complete") {
       recordTrajectoryEvent("media_chunk_complete", {
         chunk_index: Number(message.chunk_index || 0),
@@ -6028,8 +6071,8 @@ function receive(data, epoch) {
       });
       return;
     }
-    pendingHeader = message;
-    if (pendingHeader && !renderedPreviewFrames) setStatus("Receiving", "live");
+    if (message.type === "session_ready" || message.type === "heartbeat") return;
+    console.debug("ignored realtime control message", message.type || "unknown");
     return;
   }
   const header = pendingHeader;

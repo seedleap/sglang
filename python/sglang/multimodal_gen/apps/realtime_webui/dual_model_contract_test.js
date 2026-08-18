@@ -51,6 +51,18 @@ assert.match(
   /if \(immediate\) this\.flush\(\);\s*else this\.scheduleFlush\(\);/,
   "key releases should retain the transition batching window",
 );
+assert.match(
+  app,
+  /if \(message\.type === "frame_batch_header"\) \{\s*pendingHeader = message;/,
+  "only an explicit split-media header should arm the next binary payload",
+);
+assert.match(app, /if \(message\.type === "control_ack"\) \{/);
+assert.match(app, /if \(message\.type === "chunk_telemetry"\) \{/);
+assert.doesNotMatch(
+  app,
+  /if \(message\.type === "media_chunk_complete"\)[\s\S]*?pendingHeader = message;/,
+  "control and telemetry messages must not be mistaken for media headers",
+);
 assert.doesNotMatch(
   app,
   /for \(const key of \["minwm", "lingbot2"\]\) \{\s*modelControl\(key, "fps"\)\.value = UI_CONFIG\.targetFps/s,
@@ -157,7 +169,7 @@ assert.match(html, /h264_websocket_session\.js\?v=h264-stage-timing-v1/);
 assert.match(html, /prompt_rewrite_controller\.js\?v=prompt-rewrite-v3/);
 assert.match(html, /world_rules_controller\.js\?v=world-rules-v3/);
 assert.match(html, /styles\.css\?v=world-studio-h264-rules-v5/);
-assert.match(html, /app\.js\?v=world-studio-h264-rules-v5/);
+assert.match(html, /app\.js\?v=world-studio-control-protocol-v6/);
 assert.match(html, /id="minwmH264Viewport"/);
 assert.match(html, /id="lingbot2H264Viewport"/);
 assert.match(html, /id="minwmPerfScheduler"/);
