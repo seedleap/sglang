@@ -110,7 +110,7 @@ sequenceDiagram
 | `generation_mode` | `i2v` / `t2v` | 建议 | 省略时按 `first_frame` 是否存在推断 |
 | `model` | string | 建议 | 模型名；实际 revision 由部署固定，可先通过 `/v1/models` 查询 |
 | `prompt` | string | 是 | 初始 prompt |
-| `size` | string | 建议 | 当前验证规格为 `832x480` |
+| `size` | string | 建议 | 当前 Zing 验证规格固定为 `1280x704` |
 | `fps` | int | 建议 | 客户端目标播放帧率，不会直接令模型计算加速 |
 | `seed` | int | 否 | 默认 42 |
 | `num_inference_steps` | int | 建议 | MinWM DMD 必须为 4 |
@@ -120,11 +120,11 @@ sequenceDiagram
 | `max_chunks` | int >= 1 | 否 | 有限 T2V 建议省略并让服务端从 `num_frames` 推导；连续模式必须省略 |
 | `condition_inputs` | object | 否 | 初始 action、chunk seed 和 prompt schedule |
 | `realtime_output_format` | `raw` / `webp` / `jpeg` | 建议 | 浏览器推荐 `webp` |
-| `realtime_preview_max_width` | int | 否 | 预览缩放最大宽度，例如 560；省略则使用输出尺寸 |
+| `realtime_preview_max_width` | int | 否 | 仅影响浏览器预览编码；当前默认 832，不改变 1280x704 模型计算尺寸 |
 | `realtime_output_pacing` | bool | 兼容 | 旧客户端字段；当前后端不再按 `fps` sleep 节流，播放平滑应由前端/Gateway 处理，新 UI 建议省略 |
-| `output_compression` | int | 否 | WebP/JPEG quality；当前低延迟配置使用 55 |
-| `realtime_causal_sink_size` | int | 否 | 因果 KV sink 帧数，通常沿用服务默认值 |
-| `realtime_causal_kv_cache_num_frames` | int | 否 | 因果 KV 窗口，通常沿用服务默认值 |
+| `output_compression` | int | 否 | WebP/JPEG quality；当前 Zing 验证配置使用 70 |
+| `realtime_causal_sink_size` | int | 否 | 因果 KV sink 帧数；当前 MinWM checkpoint 固定为 8 |
+| `realtime_causal_kv_cache_num_frames` | int | 否 | 因果 KV 窗口；当前 MinWM checkpoint 固定为 32 |
 | `trace_id` | string | 建议 | 与 URL 查询参数一致 |
 
 服务端 Pydantic 模型允许额外字段，但自定义 UI 不应依赖未在本文声明的字段。
@@ -139,14 +139,16 @@ const init = {
   generation_mode: "t2v",
   model: "wan22-5b-stage3-dmd-30-gs1800",
   prompt: "A smooth forward camera move through a mountain valley",
-  size: "832x480",
+  size: "1280x704",
   fps: 24,
   seed: 42,
   num_inference_steps: 4,
   guidance_scale: 0,
   realtime_output_format: "webp",
-  realtime_preview_max_width: 560,
-  output_compression: 55,
+  realtime_preview_max_width: 832,
+  output_compression: 70,
+  realtime_causal_sink_size: 8,
+  realtime_causal_kv_cache_num_frames: 32,
   trace_id: traceId,
 };
 socket.send(encode(init));
