@@ -162,10 +162,11 @@ kubectl --context leap-world-use2 apply \
 Each Job reserves all eight GPUs for isolation but exposes only device 0 to
 Torch. Audit and archive every Pod on the selected Node at gate start/end so a
 CPU-only co-tenant cannot silently contaminate the 3% threshold. The accepted
-H200 floor (`7.8969868` scheduler FPS) came from the legacy packed FA2 image and
-is only the bootstrap floor for the first FA3 release; after that release
-passes, promote its 100-chunk FA3 result to the next image's H200 baseline.
-The B200 floor (`14.3957956`) already used packed FA4.
+H200 locked-FA3 scheduler/client baselines are `9.501709058` / `9.490211946`
+FPS, with 97% minima `9.216657786` / `9.205505587`. The accepted B200 packed-FA4
+scheduler/client baselines remain `14.395795593` / `14.376812178` FPS, with 97%
+minima `13.963921725` / `13.945507813`. Baselines are promoted only when a
+validated release establishes a higher same-contract high-water mark.
 
 An image is releasable only after:
 
