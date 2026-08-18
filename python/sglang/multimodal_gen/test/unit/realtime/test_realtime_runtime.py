@@ -1355,6 +1355,31 @@ def test_scheduler_stage_metrics_emit_dedicated_realtime_trace_events(monkeypatc
     assert denoise["source"] == "scheduler_result_metrics"
 
 
+def test_nsys_chunk_marker_records_identity_index_and_role(monkeypatch):
+    monkeypatch.setenv("SGLANG_REALTIME_NSYS_WARMUP_CHUNKS", "1")
+    monkeypatch.setenv("SGLANG_REALTIME_NSYS_MEASURED_CHUNKS", "10")
+    session = GenerateSession()
+    session.trace_id = "s0-sp2-nsys"
+
+    discard = SimpleNamespace(index=0, request_id="request-zero")
+    measured = SimpleNamespace(index=1, request_id="request-one")
+    assert realtime_video_api._nsys_chunk_marker(session, discard) == (
+        "sglang.realtime.chunk|trace_id=s0-sp2-nsys|request_id=request-zero|"
+        "chunk_index=0|role=discard"
+    )
+    assert realtime_video_api._nsys_chunk_marker(session, measured) == (
+        "sglang.realtime.chunk|trace_id=s0-sp2-nsys|request_id=request-one|"
+        "chunk_index=1|role=measured"
+    )
+
+
+def test_nsys_chunk_marker_rejects_non_integer_configuration(monkeypatch):
+    monkeypatch.setenv("SGLANG_REALTIME_NSYS_WARMUP_CHUNKS", "one")
+    monkeypatch.setenv("SGLANG_REALTIME_NSYS_MEASURED_CHUNKS", "10")
+    with pytest.raises(ValueError, match="chunk counts must be integers"):
+        realtime_video_api._nsys_chunk_role(0)
+
+
 def test_listen_generate_request_propagates_disconnect_without_error_write():
     sent_messages = []
 
