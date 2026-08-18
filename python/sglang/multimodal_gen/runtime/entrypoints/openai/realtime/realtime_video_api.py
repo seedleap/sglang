@@ -83,6 +83,7 @@ router = APIRouter(prefix="/v1/realtime_video", tags=["realtime"])
 _REALTIME_RESULT_STAGE_MARKERS = ("vae", "denois")
 _ADMISSION_CONTROLLER: RealtimeAdmissionController | None = None
 _ADMISSION_CONFIG: tuple | None = None
+_GATEWAY_REMOTE_VAE_FALLBACK_BACKEND = "taehv_remote"
 
 
 class _OrderedDecodeCoordinator:
@@ -653,7 +654,7 @@ def _log_realtime_chunk_timing(
 
 async def _generate_loop(ws: WebSocket, session: GenerateSession):
     server_args = get_global_server_args()
-    deployment_backend = getattr(server_args, "realtime_vae_backend", "local")
+    deployment_backend = _resolve_realtime_vae_backend(session, server_args)
     if uses_remote_vae(deployment_backend):
         return await _generate_loop_async_vae(ws, session, server_args)
     if session.vae_worker_url:
@@ -661,6 +662,21 @@ async def _generate_loop(ws: WebSocket, session: GenerateSession):
             "Gateway supplied a remote VAE worker while realtime_vae_backend=local"
         )
     return await _generate_loop_local(ws, session)
+
+
+def _resolve_realtime_vae_backend(
+    session: GenerateSession,
+    server_args: Any,
+) -> str:
+    deployment_backend = getattr(server_args, "realtime_vae_backend", "local")
+    # Legacy production manifests enable remote VAE with
+    # --realtime-remote-vae-enabled and pass the concrete worker through
+    # Gateway, while newer code paths use --realtime-vae-backend.  Trust the
+    # assigned Gateway worker over the local default so older manifests do not
+    # accidentally force the local path.
+    if session.vae_worker_url and not uses_remote_vae(deployment_backend):
+        return _GATEWAY_REMOTE_VAE_FALLBACK_BACKEND
+    return deployment_backend
 
 
 def _merge_send_stats(
@@ -904,9 +920,8 @@ async def _generate_loop_async_vae(ws, session: GenerateSession, server_args):
         max_message_bytes=server_args.realtime_vae_max_message_mb * 1024 * 1024,
     )
     session.vae_client = client
-    session.vae_decoder_backend = worker_decoder_backend(
-        server_args.realtime_vae_backend
-    )
+    deployment_backend = _resolve_realtime_vae_backend(session, server_args)
+    session.vae_decoder_backend = worker_decoder_backend(deployment_backend)
     output_format = session.request.realtime_output_format or "webp"
     quality = int(session.request.output_compression or 90)
     coordinator = _OrderedDecodeCoordinator()
@@ -919,6 +934,8 @@ async def _generate_loop_async_vae(ws, session: GenerateSession, server_args):
             vae_worker_url=vae_worker_url,
             output_url=getattr(session, "gateway_output_url", None),
             output_format=output_format,
+            deployment_backend=deployment_backend,
+            decoder_backend=session.vae_decoder_backend,
         )
         await client.open(
             decoder_backend=session.vae_decoder_backend,
