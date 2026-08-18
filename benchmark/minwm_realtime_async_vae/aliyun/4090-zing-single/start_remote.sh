@@ -260,12 +260,12 @@ start_vae() {
 
 start_denoiser() {
   local index="$1"
-  local gpu="$2"
+  local gpu_devices="$2"
   local name="zing-denoiser-${index}"
-  log "starting ${name} on GPU ${gpu}"
+  log "starting ${name} with SP2 on GPUs ${gpu_devices}"
   docker run -d --name "${name}" --restart unless-stopped \
     --network "${DOCKER_NETWORK}" \
-    --gpus "device=${gpu}" \
+    --gpus "\"device=${gpu_devices}\"" \
     -e PYTHONUNBUFFERED=1 \
     -e SGLANG_DISABLE_PDEATHSIG=1 \
     -e OMP_NUM_THREADS=4 \
@@ -291,10 +291,10 @@ start_denoiser() {
       --pipeline-class-name=MinWMCausalDMDPipeline \
       --attention-backend=torch_sdpa \
       --performance-mode=speed \
-      --num-gpus=1 \
+      --num-gpus=2 \
       --tp-size=1 \
-      --sp-degree=1 \
-      --ulysses-degree=1 \
+      --sp-degree=2 \
+      --ulysses-degree=2 \
       --ring-degree=1 \
       --enable-cuda-graph \
       --enable-cfg-parallel=false \
@@ -446,11 +446,12 @@ main() {
   start_vae
   wait_container_http zing-vae http://127.0.0.1:18082/health
   # GPU 6 and 7 are reserved for another team workload on this shared host.
-  for gpu in 1 2 3 4 5; do
-    start_denoiser "${gpu}" "${gpu}"
-  done
-  for gpu in 1 2 3 4 5; do
-    wait_container_http "zing-denoiser-${gpu}" http://127.0.0.1:30000/health
+  # SP2 requires disjoint pairs, so GPU 5 remains idle rather than overlapping
+  # a rank with another worker.
+  start_denoiser "1" "1,2"
+  start_denoiser "2" "3,4"
+  for index in 1 2; do
+    wait_container_http "zing-denoiser-${index}" http://127.0.0.1:30000/health
   done
   start_gateway
   wait_container_http zing-gateway http://127.0.0.1:18080/healthz
