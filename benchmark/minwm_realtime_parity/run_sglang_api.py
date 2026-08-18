@@ -194,7 +194,7 @@ async def run_case(args, case, contract, first_frame: Path | None):
                 continue
             if message_type == "error":
                 raise RuntimeError(header.get("content", "unknown realtime error"))
-            if message_type == "chunk_stats":
+            if message_type in {"chunk_stats", "chunk_telemetry"}:
                 stats.append(header)
                 continue
             if message_type == "frame_batch":

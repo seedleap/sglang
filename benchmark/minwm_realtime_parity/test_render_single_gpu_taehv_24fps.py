@@ -662,6 +662,8 @@ def test_render_fa3_quality_is_same_gpu_deterministic_hopper_ab(sku: str) -> Non
         "run_sglang_api.py",
     }
     assert quality_files < set(configmap["data"])
+    quality_client = configmap["data"]["run_sglang_api.py"]
+    assert 'message_type in {"chunk_stats", "chunk_telemetry"}' in quality_client
     for name in (
         "MINWM_QUALITY_CLIENT_SHA256",
         "MINWM_QUALITY_ANALYZER_SHA256",
