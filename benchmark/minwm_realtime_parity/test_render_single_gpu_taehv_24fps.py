@@ -552,7 +552,7 @@ def test_render_preserves_single_gpu_hardware_and_profile_contract(
         '--profile-name "${MINWM_GPU_SKU,,}-local-taehv-main-segment"'
     )
     fit_assertion = 'assert_no_offload_protocol_fit "${no_offload_fit_marker}"'
-    assert runner.count(fit_assertion) == 2
+    assert runner.count(fit_assertion) == 3
     if mode == "baseline":
         assert runner.index(
             fit_assertion, runner.index('if [[ "${MINWM_PROFILE_MODE}"')
@@ -634,7 +634,68 @@ def test_render_preserves_single_gpu_hardware_and_profile_contract(
         assert runner.index("nsys start \\") < runner.index(
             '--profile-name "${MINWM_GPU_SKU,,}-local-taehv-main-segment-nsys"'
         )
-        assert "run_sglang_api.py" not in runner
+        assert "run_sglang_api.py" not in configmap["data"]
+
+
+@pytest.mark.parametrize("sku", ("h100", "h200"))
+def test_render_fa3_quality_is_same_gpu_deterministic_hopper_ab(sku: str) -> None:
+    configmap, job = render(
+        sku,
+        "fa3-quality",
+        sglang_git_ref="f" * 40,
+        harness_git_ref=HARNESS_GIT_REF,
+        run_tag=f"20260818-{sku}-fa3-quality",
+    )
+    container = job["spec"]["template"]["spec"]["containers"][0]
+    environment = _env(container)
+    assert "securityContext" not in container
+    assert environment["MINWM_PROFILE_MODE"] == "fa3-quality"
+    assert environment["MINWM_REQUIRE_CANDIDATE_EVIDENCE"] == "true"
+    assert environment["MINWM_REQUIRE_24FPS"] == "false"
+    assert environment["MINWM_PROTOCOL_SMOKE_WARMUP_CHUNKS"] == "8"
+    assert environment["MINWM_PROTOCOL_SMOKE_MEASURED_CHUNKS"] == "2"
+    quality_files = {
+        "analyze_fa3_quality.py",
+        "cases_fa3_quality_actions_720p.json",
+        "cases_fa3_quality_long_720p.json",
+        "fa2_reference_hopper_validation.patch",
+        "run_sglang_api.py",
+    }
+    assert quality_files < set(configmap["data"])
+    for name in (
+        "MINWM_QUALITY_CLIENT_SHA256",
+        "MINWM_QUALITY_ANALYZER_SHA256",
+        "MINWM_QUALITY_ACTION_CASES_SHA256",
+        "MINWM_QUALITY_LONG_CASES_SHA256",
+        "MINWM_FA2_REFERENCE_PATCH_SHA256",
+    ):
+        assert len(environment[name]) == 64
+    runner = configmap["data"]["run_single_gpu_taehv_24fps.sh"]
+    assert 'git -C "${fa2_repo}" apply --check' in runner
+    assert "MINWM_PACKED_ATTENTION_DETERMINISTIC=true" in runner
+    assert "MINWM_PARITY_DETERMINISTIC=1" in runner
+    assert "SGLANG_ENABLE_DETERMINISTIC_INFERENCE=1" in runner
+    assert "CUBLAS_WORKSPACE_CONFIG=:4096:8" in runner
+    assert "for replay in a b; do" in runner
+    assert "--require-lpips" in runner
+    assert "FA3_QUALITY_PASS=true" in runner
+    long_manifest = json.loads(configmap["data"]["cases_fa3_quality_long_720p.json"])
+    assert long_manifest["contract"]["width"] == 1248
+    assert long_manifest["contract"]["height"] == 704
+    assert long_manifest["contract"]["chunks"] == 90
+    assert long_manifest["contract"]["generated_pixel_frames"] == 1440
+
+
+@pytest.mark.parametrize("sku", ("b200", "b300"))
+def test_render_fa3_quality_rejects_non_hopper(sku: str) -> None:
+    with pytest.raises(ValueError, match="Hopper"):
+        render(
+            sku,
+            "fa3-quality",
+            sglang_git_ref="f" * 40,
+            harness_git_ref=HARNESS_GIT_REF,
+            run_tag=f"20260818-{sku}-fa3-quality",
+        )
 
 
 def test_storage_spec_supports_explicit_split_rw_s3_claims() -> None:

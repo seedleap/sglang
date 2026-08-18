@@ -2,7 +2,7 @@
 set -euo pipefail
 
 : "${MINWM_RUN_ID:?set MINWM_RUN_ID}"
-: "${MINWM_PROFILE_MODE:?set MINWM_PROFILE_MODE to baseline or nsys}"
+: "${MINWM_PROFILE_MODE:?set MINWM_PROFILE_MODE to baseline, nsys, or fa3-quality}"
 : "${MINWM_GPU_SKU:?set MINWM_GPU_SKU to B200, B300, H100, or H200}"
 : "${MINWM_HARDWARE_PROFILE:?set the experimental hardware profile}"
 : "${MINWM_EXPECTED_COMPUTE_CAP:?set expected compute capability}"
@@ -47,7 +47,15 @@ set -euo pipefail
 : "${TAEHV_CHECKPOINT_URL:?set the immutable taew2_2 URL}"
 : "${TAEHV_CHECKPOINT_SHA256:?set the taew2_2 SHA-256}"
 
-[[ "${MINWM_PROFILE_MODE}" == "baseline" || "${MINWM_PROFILE_MODE}" == "nsys" ]]
+[[ ",baseline,nsys,fa3-quality," == *",${MINWM_PROFILE_MODE},"* ]]
+if [[ "${MINWM_PROFILE_MODE}" == "fa3-quality" ]]; then
+  [[ "${MINWM_GPU_SKU}" == "H100" || "${MINWM_GPU_SKU}" == "H200" ]]
+  : "${MINWM_QUALITY_CLIENT_SHA256:?set the fixed quality client SHA-256}"
+  : "${MINWM_QUALITY_ANALYZER_SHA256:?set the fixed quality analyzer SHA-256}"
+  : "${MINWM_QUALITY_ACTION_CASES_SHA256:?set the action cases SHA-256}"
+  : "${MINWM_QUALITY_LONG_CASES_SHA256:?set the long cases SHA-256}"
+  : "${MINWM_FA2_REFERENCE_PATCH_SHA256:?set the FA2 reference patch SHA-256}"
+fi
 [[ ",B200,B300,H100,H200," == *",${MINWM_GPU_SKU},"* ]]
 [[ "${MINWM_RUN_ID}" =~ ^[a-z0-9][a-z0-9.-]+$ ]]
 [[ "${MINWM_RESULTS_ROOT}" == /s3-results/world-model/evals/minwm/performance/* ]]
@@ -72,6 +80,13 @@ fi
 [[ "${MINWM_PROFILE_CLIENT_SHA256}" =~ ^[0-9a-f]{64}$ ]]
 [[ "${MINWM_COMMON_SHA256}" =~ ^[0-9a-f]{64}$ ]]
 [[ "${MINWM_CASES_SHA256}" =~ ^[0-9a-f]{64}$ ]]
+if [[ "${MINWM_PROFILE_MODE}" == "fa3-quality" ]]; then
+  [[ "${MINWM_QUALITY_CLIENT_SHA256}" =~ ^[0-9a-f]{64}$ ]]
+  [[ "${MINWM_QUALITY_ANALYZER_SHA256}" =~ ^[0-9a-f]{64}$ ]]
+  [[ "${MINWM_QUALITY_ACTION_CASES_SHA256}" =~ ^[0-9a-f]{64}$ ]]
+  [[ "${MINWM_QUALITY_LONG_CASES_SHA256}" =~ ^[0-9a-f]{64}$ ]]
+  [[ "${MINWM_FA2_REFERENCE_PATCH_SHA256}" =~ ^[0-9a-f]{64}$ ]]
+fi
 [[ "${MINWM_CHECKPOINT_SHA256}" =~ ^[0-9a-f]{64}$ ]]
 [[ "${MINWM_FIRST_FRAME_SOURCE_SHA256}" =~ ^[0-9a-f]{64}$ ]]
 [[ "${TAEHV_CHECKPOINT_SHA256}" =~ ^[0-9a-f]{64}$ ]]
@@ -94,6 +109,11 @@ readonly CASE="00_forward_080_pottery_720p"
 readonly PROFILE_CLIENT="${PROFILE_DIR}/benchmark_realtime_throughput.py"
 readonly PROFILE_COMMON="${PROFILE_DIR}/common.py"
 readonly PROFILE_RUNNER="${PROFILE_DIR}/run_single_gpu_taehv_24fps.sh"
+readonly QUALITY_CLIENT="${PROFILE_DIR}/run_sglang_api.py"
+readonly QUALITY_ANALYZER="${PROFILE_DIR}/analyze_fa3_quality.py"
+readonly QUALITY_ACTION_CASES="${PROFILE_DIR}/cases_fa3_quality_actions_720p.json"
+readonly QUALITY_LONG_CASES="${PROFILE_DIR}/cases_fa3_quality_long_720p.json"
+readonly FA2_REFERENCE_PATCH="${PROFILE_DIR}/fa2_reference_hopper_validation.patch"
 
 export SGLANG_REALTIME_TRACE_SYNC_CUDA=0
 export SGLANG_DIFFUSION_SYNC_STAGE_PROFILING=0
@@ -661,8 +681,11 @@ contract = {
         "cuda_graph": False,
         "gpu_count": 1,
         "local_streaming_taehv": True,
-        "measured_chunks": 200 if os.environ["MINWM_PROFILE_MODE"] == "baseline" else 8,
-        "nsys_capture_chunks": 0 if os.environ["MINWM_PROFILE_MODE"] == "baseline" else 16,
+        "measured_chunks": (
+            200 if os.environ["MINWM_PROFILE_MODE"] == "baseline" else
+            8 if os.environ["MINWM_PROFILE_MODE"] == "nsys" else 0
+        ),
+        "nsys_capture_chunks": 16 if os.environ["MINWM_PROFILE_MODE"] == "nsys" else 0,
         "nsys_is_headline": False,
         "profile_mode": os.environ["MINWM_PROFILE_MODE"],
         "require_24fps": os.environ["MINWM_REQUIRE_24FPS"] == "true",
@@ -684,7 +707,10 @@ contract = {
         "segment_compile": True,
         "torch_compile": False,
         "vae_cpu_offload": False,
-        "warmup_chunks": 20 if os.environ["MINWM_PROFILE_MODE"] == "baseline" else 8,
+        "warmup_chunks": (
+            20 if os.environ["MINWM_PROFILE_MODE"] == "baseline" else
+            8 if os.environ["MINWM_PROFILE_MODE"] == "nsys" else 0
+        ),
     },
     "environment": {
         "known_unrelated_preinstalled_extras": [
@@ -729,6 +755,24 @@ contract = {
         "profile_client_sha256": os.environ["MINWM_PROFILE_CLIENT_SHA256"],
         "ref_content_verified": os.environ["MINWM_HARNESS_REF_VERIFIED"] == "true",
         "runner_sha256": os.environ["MINWM_RUNNER_SHA256"],
+        "fa3_quality": (
+            {
+                "action_cases_sha256": os.environ[
+                    "MINWM_QUALITY_ACTION_CASES_SHA256"
+                ],
+                "analyzer_sha256": os.environ["MINWM_QUALITY_ANALYZER_SHA256"],
+                "fa2_reference_patch_sha256": os.environ[
+                    "MINWM_FA2_REFERENCE_PATCH_SHA256"
+                ],
+                "long_cases_sha256": os.environ[
+                    "MINWM_QUALITY_LONG_CASES_SHA256"
+                ],
+                "quality_client_sha256": os.environ["MINWM_QUALITY_CLIENT_SHA256"],
+                "reference_scope": "detached validation worktree only",
+            }
+            if os.environ["MINWM_PROFILE_MODE"] == "fa3-quality"
+            else None
+        ),
     },
     "request": {
         "action_source_sha256": hashlib.sha256(canonical_action_source).hexdigest(),
@@ -779,9 +823,20 @@ for harness_entry in \
   printf '%s  %s\n' "${harness_sha}" "${harness_path}" | sha256sum --check -
   cp "${harness_path}" "${LOCAL_RESULTS}/harness/$(basename "${harness_path}")"
 done
-sha256sum \
-  "${PROFILE_RUNNER}" "${PROFILE_CLIENT}" "${PROFILE_COMMON}" "${CASES}" \
-  | tee "${LOCAL_RESULTS}/harness-sha256.txt"
+if [[ "${MINWM_PROFILE_MODE}" == "fa3-quality" ]]; then
+  for harness_entry in \
+    "${MINWM_QUALITY_CLIENT_SHA256}:${QUALITY_CLIENT}" \
+    "${MINWM_QUALITY_ANALYZER_SHA256}:${QUALITY_ANALYZER}" \
+    "${MINWM_QUALITY_ACTION_CASES_SHA256}:${QUALITY_ACTION_CASES}" \
+    "${MINWM_QUALITY_LONG_CASES_SHA256}:${QUALITY_LONG_CASES}" \
+    "${MINWM_FA2_REFERENCE_PATCH_SHA256}:${FA2_REFERENCE_PATCH}"; do
+    harness_sha="${harness_entry%%:*}"
+    harness_path="${harness_entry#*:}"
+    printf '%s  %s\n' "${harness_sha}" "${harness_path}" | sha256sum --check -
+    cp "${harness_path}" "${LOCAL_RESULTS}/harness/$(basename "${harness_path}")"
+  done
+fi
+sha256sum "${PROFILE_DIR}"/* | tee "${LOCAL_RESULTS}/harness-sha256.txt"
 
 if ! command -v cargo >/dev/null; then
   python3 - "${REPO_ROOT}/python/pyproject.toml" <<'PY'
@@ -1002,6 +1057,95 @@ if [[ "${MINWM_PROFILE_MODE}" == "baseline" ]]; then
   assert_profile_result "${baseline_dir}/throughput.json" 20 200
   record_performance_gate "${baseline_dir}/throughput.json"
   stop_server
+elif [[ "${MINWM_PROFILE_MODE}" == "fa3-quality" ]]; then
+  quality_dir="${LOCAL_RESULTS}/fa3-quality"
+  fa2_repo="${LOCAL_ROOT}/sglang-fa2-reference"
+  mkdir -p "${quality_dir}" "${quality_dir}/actions" "${quality_dir}/long"
+  git -C "${REPO_ROOT}" worktree add --detach "${fa2_repo}" "${SGLANG_GIT_REF}"
+  git -C "${fa2_repo}" apply --check "${FA2_REFERENCE_PATCH}"
+  git -C "${fa2_repo}" apply "${FA2_REFERENCE_PATCH}"
+  git -C "${fa2_repo}" diff --check
+  git -C "${fa2_repo}" diff -- \
+    python/sglang/multimodal_gen/runtime/models/dits/minwm.py \
+    > "${quality_dir}/fa2-reference-applied.diff"
+  cp "${FA2_REFERENCE_PATCH}" "${quality_dir}/fa2-reference-source.patch"
+  git -C "${REPO_ROOT}" diff --quiet
+  python3 -m pip install --no-cache-dir --no-deps \
+    lpips==0.1.4 scikit-image==0.24.0 \
+    --root-user-action=ignore
+
+  run_quality_backend() {
+    local backend="$1"
+    local source_root="$2"
+    local backend_dir="${quality_dir}/${backend}"
+    mkdir -p "${backend_dir}"
+    PYTHONPATH="${PROFILE_DIR}:${source_root}/python" \
+    MINWM_PACKED_ATTENTION_DETERMINISTIC=true \
+    MINWM_PARITY_DETERMINISTIC=1 \
+    MINWM_DETERMINISTIC_ATTENTION=true \
+    SGLANG_ENABLE_DETERMINISTIC_INFERENCE=1 \
+    CUBLAS_WORKSPACE_CONFIG=:4096:8 \
+      "${server_command[@]}" > "${backend_dir}/server.log" 2>&1 &
+    server_pid=$!
+    wait_for_server "${backend_dir}/server.log"
+    assert_server_contract "${backend_dir}/server.log"
+    python3 "${PROFILE_CLIENT}" \
+      --cases "${CASES}" \
+      --case "${CASE}" \
+      --profile-name "${MINWM_GPU_SKU,,}-${backend}-quality-protocol-smoke" \
+      --sink-size 8 \
+      --kv-cache-num-frames 32 \
+      --warmup-chunks 8 \
+      --measured-chunks 2 \
+      --timeout 3600 \
+      --output "${backend_dir}/protocol-smoke.json" \
+      > "${backend_dir}/protocol-smoke-client.log" 2>&1
+    assert_profile_result "${backend_dir}/protocol-smoke.json" 8 2
+    assert_runtime_alignment "${backend_dir}/server.log"
+    no_offload_fit_marker="${backend_dir}/NO_OFFLOAD_PROTOCOL_FIT_PASS.json"
+    record_no_offload_protocol_fit \
+      "${backend_dir}/protocol-smoke.json" \
+      "${backend_dir}/server.log" \
+      "${no_offload_fit_marker}"
+    assert_no_offload_protocol_fit "${no_offload_fit_marker}"
+    grep -E "MinWM packed-varlen attention backend=${backend} device=cuda(:0)?" \
+      "${backend_dir}/server.log" > "${backend_dir}/attention-backend.txt"
+    if [[ "${backend}" == "fa3" ]]; then
+      ! grep -E 'MinWM packed-varlen attention backend=fa2 device=cuda(:0)?' \
+        "${backend_dir}/server.log"
+    fi
+    for replay in a b; do
+      python3 "${QUALITY_CLIENT}" \
+        --cases "${QUALITY_ACTION_CASES}" \
+        --results "${quality_dir}/actions" \
+        --output-prefix "${backend}_${replay}" \
+        --engine-name "minwm-${backend}-same-gpu-quality-ab" \
+        --sink-size 8 \
+        --kv-cache-num-frames 32 \
+        --timeout 3600 \
+        > "${backend_dir}/actions-${replay}.log" 2>&1
+      python3 "${QUALITY_CLIENT}" \
+        --cases "${QUALITY_LONG_CASES}" \
+        --results "${quality_dir}/long" \
+        --output-prefix "${backend}_${replay}" \
+        --engine-name "minwm-${backend}-same-gpu-quality-ab" \
+        --sink-size 8 \
+        --kv-cache-num-frames 32 \
+        --timeout 3600 \
+        > "${backend_dir}/long-${replay}.log" 2>&1
+    done
+    stop_server
+  }
+
+  run_quality_backend fa2 "${fa2_repo}"
+  run_quality_backend fa3 "${REPO_ROOT}"
+  python3 "${QUALITY_ANALYZER}" \
+    --actions-results "${quality_dir}/actions" \
+    --long-results "${quality_dir}/long" \
+    --output "${quality_dir}/report.json" \
+    --require-lpips \
+    | tee "${quality_dir}/analysis.log"
+  printf 'FA3_QUALITY_PASS=true\n' > "${LOCAL_RESULTS}/FA3_QUALITY_PASS"
 else
   readonly NSYS_URL="https://developer.nvidia.com/downloads/assets/tools/secure/nsight-systems/2026_4/NsightSystems-linux-cli-public-2026.4.1.191-3860507.deb"
   readonly NSYS_SHA256="b896cb2b9586ddf617c363a43bababad0a015dff4c77d8f0fbb9c26144056a69"

@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "contract": {
+    "case_count": 1,
+    "seed": 42,
+    "width": 1248,
+    "height": 704,
+    "fps": 24,
+    "generated_latent_frames": 360,
+    "chunks": 90,
+    "latent_frames_per_chunk": 4,
+    "generated_pixel_frames": 1440,
+    "reference_pixel_frames": 1,
+    "action_type": "primitive_token_residual",
+    "action_output_format": "label_81",
+    "action_order": ["w", "a", "s", "d", "i", "j", "k", "l"]
+  },
+  "cases": [
+    {
+      "id": "00_street_action_schedule_60s",
+      "source_id": "fa3-quality/p87/long-action-schedule",
+      "prompt": "A wide empty city street stretches straight toward a glowing sun low on the horizon, its rays flooding the avenue with warm golden light. Ornate buildings with shuttered storefronts and street lamps line both sides, leafy trees on the right, the road markings receding into the hazy distance at dawn.",
+      "first_frame": "s3://leap-world-us-east-2/world-model/eval/platform/eval_sets/minWM/testset100_v2/img/p87.png",
+      "action_label": 0,
+      "keys": [],
+      "action_schedule": [
+        {"start_frame": 0, "end_frame": 240, "keys": []},
+        {"start_frame": 240, "end_frame": 480, "keys": ["w"]},
+        {"start_frame": 480, "end_frame": 720, "keys": ["s"]},
+        {"start_frame": 720, "end_frame": 960, "keys": ["j"]},
+        {"start_frame": 960, "end_frame": 1200, "keys": ["l"]},
+        {"start_frame": 1200, "end_frame": 1440, "keys": []}
+      ]
+    }
+  ]
+}

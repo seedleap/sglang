@@ -19,13 +19,26 @@ RUNNER = BENCHMARK_ROOT / "run_single_gpu_taehv_24fps.sh"
 CLIENT = BENCHMARK_ROOT / "benchmark_realtime_throughput.py"
 COMMON = BENCHMARK_ROOT / "common.py"
 CASES = BENCHMARK_ROOT / "cases_720p_compile_smoke.json"
+QUALITY_CLIENT = BENCHMARK_ROOT / "run_sglang_api.py"
+QUALITY_ANALYZER = BENCHMARK_ROOT / "analyze_fa3_quality.py"
+QUALITY_ACTION_CASES = BENCHMARK_ROOT / "cases_fa3_quality_actions_720p.json"
+QUALITY_LONG_CASES = BENCHMARK_ROOT / "cases_fa3_quality_long_720p.json"
+FA2_REFERENCE_PATCH = BENCHMARK_ROOT / "fa2_reference_hopper_validation.patch"
 
-HARNESS_FILES = {
+BASE_HARNESS_FILES = {
     "run_single_gpu_taehv_24fps.sh": RUNNER,
     "benchmark_realtime_throughput.py": CLIENT,
     "common.py": COMMON,
     "cases_720p_compile_smoke.json": CASES,
 }
+QUALITY_HARNESS_FILES = {
+    "run_sglang_api.py": QUALITY_CLIENT,
+    "analyze_fa3_quality.py": QUALITY_ANALYZER,
+    "cases_fa3_quality_actions_720p.json": QUALITY_ACTION_CASES,
+    "cases_fa3_quality_long_720p.json": QUALITY_LONG_CASES,
+    "fa2_reference_hopper_validation.patch": FA2_REFERENCE_PATCH,
+}
+HARNESS_FILES = {**BASE_HARNESS_FILES, **QUALITY_HARNESS_FILES}
 
 DEFAULT_SGLANG_GIT_REF = "54bdfea9cd52ac1cd79896e1a7275e18a0257b79"
 MINWM_GIT_REF = "4220c8a2dc456b2d9c85ef6c0d9db7fb872d864c"
@@ -309,8 +322,10 @@ def render(
     run_tag: str,
 ) -> tuple[dict, dict]:
     hardware = HARDWARE[sku]
+    if mode == "fa3-quality" and sku not in {"h100", "h200"}:
+        raise ValueError("fa3-quality mode requires Hopper H100 or H200")
     storage_volumes, storage_mounts = storage_spec(hardware["storage"])
-    candidate_evidence = candidate_evidence or require_24fps
+    candidate_evidence = candidate_evidence or require_24fps or mode == "fa3-quality"
     run_id = f"minwm-taehv24-{sku}-{mode}-{run_tag}"
     configmap_name = f"{run_id}-files"
     template = yaml.safe_load(TEMPLATE.read_text())
@@ -424,7 +439,9 @@ def render(
         "MINWM_EXPECTED_MIN_MEMORY_MIB": hardware["min_memory_mib"],
         "MINWM_EXPECTED_MAX_MEMORY_MIB": hardware["max_memory_mib"],
         "MINWM_PROTOCOL_SMOKE_WARMUP_CHUNKS": hardware["protocol_smoke_warmup_chunks"],
-        "MINWM_PROTOCOL_SMOKE_MEASURED_CHUNKS": ("2" if mode == "baseline" else "1"),
+        "MINWM_PROTOCOL_SMOKE_MEASURED_CHUNKS": (
+            "2" if mode in ("baseline", "fa3-quality") else "1"
+        ),
         "MINWM_REQUIRE_FULL_WINDOW_NO_OFFLOAD_SMOKE": hardware[
             "require_full_window_no_offload_smoke"
         ],
@@ -434,6 +451,18 @@ def render(
         "MINWM_RESULTS_PVC_ACCESS": hardware["storage"]["verified_results_access"],
         "MINWM_RESULTS_ROOT": f"{RESULT_MOUNT_ROOT}/{sku}/{mode}",
     }
+    harness_files = dict(BASE_HARNESS_FILES)
+    if mode == "fa3-quality":
+        harness_files.update(QUALITY_HARNESS_FILES)
+        env.update(
+            {
+                "MINWM_QUALITY_CLIENT_SHA256": sha256_file(QUALITY_CLIENT),
+                "MINWM_QUALITY_ANALYZER_SHA256": sha256_file(QUALITY_ANALYZER),
+                "MINWM_QUALITY_ACTION_CASES_SHA256": sha256_file(QUALITY_ACTION_CASES),
+                "MINWM_QUALITY_LONG_CASES_SHA256": sha256_file(QUALITY_LONG_CASES),
+                "MINWM_FA2_REFERENCE_PATCH_SHA256": sha256_file(FA2_REFERENCE_PATCH),
+            }
+        )
     container = {
         "name": "benchmark",
         "image": BASE_IMAGE,
@@ -491,7 +520,7 @@ def render(
             "namespace": hardware["namespace"],
             "labels": job["metadata"]["labels"],
         },
-        "data": {name: path.read_text() for name, path in HARNESS_FILES.items()},
+        "data": {name: path.read_text() for name, path in harness_files.items()},
     }
     return configmap, job
 
@@ -504,7 +533,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--sku", action="append", choices=sorted(HARDWARE), required=True
     )
     parser.add_argument(
-        "--mode", action="append", choices=("baseline", "nsys"), required=True
+        "--mode",
+        action="append",
+        choices=("baseline", "nsys", "fa3-quality"),
+        required=True,
     )
     parser.add_argument(
         "--sglang-git-ref", default=DEFAULT_SGLANG_GIT_REF, metavar="COMMIT"
@@ -556,8 +588,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                 parser.error(
                     "--run-tag makes the Kubernetes Job name exceed 63 characters"
                 )
-    if args.require_24fps and "nsys" in args.mode:
+    if args.require_24fps and any(mode != "baseline" for mode in args.mode):
         parser.error("--require-24fps is only valid for baseline Jobs")
+    if "fa3-quality" in args.mode:
+        invalid_skus = sorted(set(args.sku) - {"h100", "h200"})
+        if invalid_skus:
+            parser.error(
+                "--mode fa3-quality is only valid for Hopper H100/H200, got "
+                + ", ".join(invalid_skus)
+            )
     return args
 
 
