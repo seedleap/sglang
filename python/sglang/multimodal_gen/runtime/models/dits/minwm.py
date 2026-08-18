@@ -78,7 +78,6 @@ _MINWM_ATTENTION_IMPL = os.environ.get("MINWM_ATTENTION_IMPL", "packed").strip()
 _MINWM_PACKED_ATTENTION_DETERMINISTIC = _env_flag(
     "MINWM_PACKED_ATTENTION_DETERMINISTIC", True
 )
-_MINWM_ENABLE_HOPPER_FA3 = _env_flag("MINWM_ENABLE_HOPPER_FA3", False)
 _MINWM_SEGMENT_COMPILE = _env_flag("MINWM_SEGMENT_COMPILE", True)
 _MINWM_CUDA_GRAPH_ACTIVE = False
 _MINWM_CACHE_ROTATED_K = _env_flag("MINWM_CACHE_ROTATED_K", True)
@@ -523,15 +522,15 @@ def _minwm_uniform_cu_seqlens(
 
 
 def _minwm_packed_attention_backend(device: torch.device) -> str:
-    """Select the device-compatible backend, keeping Hopper FA3 opt-in."""
+    """Select the device-compatible backend and require FA3 on Hopper."""
     capability = torch.cuda.get_device_capability(device)[0]
     if capability >= 10 and importlib.util.find_spec("flash_attn.cute") is not None:
         return "fa4"
-    if (
-        capability == 9
-        and _MINWM_ENABLE_HOPPER_FA3
-        and importlib.util.find_spec("sglang.jit_kernel.flash_attention_v3") is not None
-    ):
+    if capability == 9:
+        if importlib.util.find_spec("sglang.jit_kernel.flash_attention_v3") is None:
+            raise RuntimeError(
+                "minWM requires the bundled FlashAttention-3 backend on Hopper"
+            )
         return "fa3"
     if importlib.util.find_spec("flash_attn") is not None:
         return "fa2"

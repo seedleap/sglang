@@ -73,9 +73,9 @@ kubectl --context <context> apply --dry-run=server -f <generated-yaml>
   first-frame ETag and CRC64NVME are also recorded.
 - Request: `1248x704`, four denoise steps, four latent frames / 16 pixel frames
   per chunk, 24 FPS target, local StreamingTAEHV, no VAE CPU offload.
-- Hopper defaults to FA2. FA3 requires `MINWM_ENABLE_HOPPER_FA3=1` and is an
-  experimental performance lane until long-rollout, visual-quality, and
-  action-response validation passes.
+- Hopper requires the bundled FA3 backend and fails fast when it is unavailable;
+  there is no FA2 fallback. Long-rollout, visual-quality, and action-response
+  validation remain production rollout gates.
 - Tianpeng: local attention 32, sliding window 32, sink 8,
   `block_relative`, max frame gap 12, first-frame pin enabled.
 - Baseline uses 20 warmup and 200 measured chunks. NSYS is diagnostic, not a

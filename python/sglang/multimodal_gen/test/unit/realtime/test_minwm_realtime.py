@@ -2502,8 +2502,8 @@ def test_minwm_causal_attention_packs_one_ulysses_collective(monkeypatch, seq_sp
     ("capability", "available", "expected"),
     [
         (10, {"flash_attn.cute", "flash_attn"}, "fa4"),
-        (9, {"sglang.jit_kernel.flash_attention_v3", "flash_attn"}, "fa2"),
-        (9, {"flash_attn"}, "fa2"),
+        (9, {"sglang.jit_kernel.flash_attention_v3", "flash_attn"}, "fa3"),
+        (8, {"flash_attn"}, "fa2"),
     ],
 )
 def test_minwm_attention_backend_matches_source_device_fallback(
@@ -2521,11 +2521,10 @@ def test_minwm_attention_backend_matches_source_device_fallback(
         "find_spec",
         lambda name: object() if name in available else None,
     )
-    monkeypatch.setattr(minwm_module, "_MINWM_ENABLE_HOPPER_FA3", False)
     assert _minwm_packed_attention_backend(torch.device("cuda")) == expected
 
 
-def test_minwm_hopper_fa3_requires_explicit_opt_in(monkeypatch):
+def test_minwm_hopper_requires_fa3(monkeypatch):
     import sglang.multimodal_gen.runtime.models.dits.minwm as minwm_module
 
     monkeypatch.setattr(
@@ -2536,18 +2535,11 @@ def test_minwm_hopper_fa3_requires_explicit_opt_in(monkeypatch):
     monkeypatch.setattr(
         minwm_module.importlib.util,
         "find_spec",
-        lambda name: (
-            object()
-            if name in {"sglang.jit_kernel.flash_attention_v3", "flash_attn"}
-            else None
-        ),
+        lambda name: object() if name == "flash_attn" else None,
     )
 
-    monkeypatch.setattr(minwm_module, "_MINWM_ENABLE_HOPPER_FA3", False)
-    assert _minwm_packed_attention_backend(torch.device("cuda")) == "fa2"
-
-    monkeypatch.setattr(minwm_module, "_MINWM_ENABLE_HOPPER_FA3", True)
-    assert _minwm_packed_attention_backend(torch.device("cuda")) == "fa3"
+    with pytest.raises(RuntimeError, match="requires.*FlashAttention-3.*Hopper"):
+        _minwm_packed_attention_backend(torch.device("cuda"))
 
 
 def test_minwm_hopper_attention_uses_sglang_fa3_api(monkeypatch):
