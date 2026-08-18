@@ -1,0 +1,35 @@
+{
+  "checkpoint_bytes": 10007165995,
+  "checkpoint_crc64": "GLaCsoJZbwM=",
+  "checkpoint_uri": "s3://leap-world-us-east-2/world-model/evals/minwm/checkpoint-staging/wan22-5B-stage3-dmd-30-0731-acfd622962df/global_step_001800/ema_student/model.pt",
+  "checkpoint_version_id": "9lr1pX__59kUFlsv6Q.NKFQO3EoRQY9C",
+  "compute_capability": [
+    10,
+    0
+  ],
+  "cuda": "13.0",
+  "gpu": "NVIDIA B200",
+  "gpu_family": "blackwell",
+  "image_digest": "sha256:bedc07ea3ba55059a8c1c569c3b177c4d00d41f37d4fa9105375531534ef5f2a",
+  "minwm_git_sha": "2efc6485f65e8fcab506665efde79bc41406385e",
+  "packages_before_optional_install": {
+    "flash_attn": true,
+    "flash_attn_interface": false,
+    "sageattention": false,
+    "sageattn3": false
+  },
+  "platform": "Linux-6.18.39-79.141.amzn2023.x86_64-x86_64-with-glibc2.39",
+  "request": {
+    "case": "00_forward_080_pottery_720p",
+    "kv_cache_num_frames": 45,
+    "measured_chunks": 100,
+    "size": "1248x704",
+    "sp_degree": 1,
+    "warmup_chunks": 20,
+    "whole_dit_compile": false
+  },
+  "run_id": "minwm-720p-attn-ffn-b200-use2-20260818-01",
+  "schema_version": "minwm-720p-attn-ffn-contract/v1",
+  "sglang_git_sha": "8ae07a622e9fe4c53f85a3b12bdd147bf51e4782",
+  "torch": "2.11.0+cu130"
+}

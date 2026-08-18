@@ -1,0 +1,151 @@
+{
+  "dit_blocks": {
+    "cpu_launch_range_ms_sum": 2049.409687,
+    "gpu_kernel_ms_sum": 1823.153327,
+    "gpu_span_ms_sum": 2215.466275,
+    "kernel_calls": 36960,
+    "range_count": 20,
+    "ranges_without_kernels": 0
+  },
+  "dit_forward": {
+    "cpu_launch_range_ms_sum": 2170.747007,
+    "gpu_kernel_ms_sum": 1833.940762,
+    "gpu_span_ms_sum": 2334.560749,
+    "kernel_calls": 38980,
+    "range_count": 20,
+    "ranges_without_kernels": 0
+  },
+  "method": "CUDA kernels are joined to runtime launches by correlationId; only complete same-thread forward -> block-loop -> phase NVTX trees are used.",
+  "phases": {
+    "cross_attention": {
+      "cpu_launch_range_ms_mean": 0.9248537733333333,
+      "cpu_launch_range_ms_sum": 554.912264,
+      "expected_range_count": 600,
+      "gpu_kernel_ms_mean_per_range": 0.217517135,
+      "gpu_kernel_ms_sum": 130.510281,
+      "gpu_kernel_share_of_dit_blocks_pct": 7.158491777252479,
+      "gpu_kernel_share_of_dit_forward_pct": 7.116384765758317,
+      "gpu_kernel_share_of_three_pct": 7.219265982836062,
+      "gpu_span_ms_mean_per_range": 0.22824557333333334,
+      "gpu_span_ms_sum": 136.947344,
+      "gpu_span_share_of_dit_blocks_pct": 6.181423095686708,
+      "gpu_span_share_of_dit_forward_pct": 5.86608611742748,
+      "gpu_span_share_of_three_pct": 6.387432848040557,
+      "kernel_calls": 4800,
+      "kernel_calls_mean_per_range": 8.0,
+      "kernel_families": {
+        "attention": {
+          "calls": 600,
+          "gpu_kernel_ms": 14.59541
+        },
+        "copy": {
+          "calls": 600,
+          "gpu_kernel_ms": 6.303902
+        },
+        "gemm": {
+          "calls": 1200,
+          "gpu_kernel_ms": 45.156178
+        },
+        "normalization_reduction": {
+          "calls": 1200,
+          "gpu_kernel_ms": 62.348529
+        },
+        "pointwise": {
+          "calls": 1200,
+          "gpu_kernel_ms": 2.106262
+        }
+      },
+      "range_count": 600,
+      "range_coverage_fraction": 1.0,
+      "ranges_without_kernels": 0
+    },
+    "ffn": {
+      "cpu_launch_range_ms_mean": 0.5985781933333334,
+      "cpu_launch_range_ms_sum": 359.146916,
+      "expected_range_count": 600,
+      "gpu_kernel_ms_mean_per_range": 0.299881565,
+      "gpu_kernel_ms_sum": 179.928939,
+      "gpu_kernel_share_of_dit_blocks_pct": 9.86910625317911,
+      "gpu_kernel_share_of_dit_forward_pct": 9.811055118474977,
+      "gpu_kernel_share_of_three_pct": 9.952893049479258,
+      "gpu_span_ms_mean_per_range": 0.3103144716666667,
+      "gpu_span_ms_sum": 186.188683,
+      "gpu_span_share_of_dit_blocks_pct": 8.404040499330101,
+      "gpu_span_share_of_dit_forward_pct": 7.9753196861445215,
+      "gpu_span_share_of_three_pct": 8.68412394860035,
+      "kernel_calls": 3600,
+      "kernel_calls_mean_per_range": 6.0,
+      "kernel_families": {
+        "gemm": {
+          "calls": 1200,
+          "gpu_kernel_ms": 107.533091
+        },
+        "other": {
+          "calls": 1200,
+          "gpu_kernel_ms": 22.049425
+        },
+        "pointwise": {
+          "calls": 1200,
+          "gpu_kernel_ms": 50.346423
+        }
+      },
+      "range_count": 600,
+      "range_coverage_fraction": 1.0,
+      "ranges_without_kernels": 0
+    },
+    "self_attention": {
+      "cpu_launch_range_ms_mean": 1.8083861366666667,
+      "cpu_launch_range_ms_sum": 1085.031682,
+      "expected_range_count": 600,
+      "gpu_kernel_ms_mean_per_range": 2.4956103166666668,
+      "gpu_kernel_ms_sum": 1497.36619,
+      "gpu_kernel_share_of_dit_blocks_pct": 82.1305683852667,
+      "gpu_kernel_share_of_dit_forward_pct": 81.64746762960057,
+      "gpu_kernel_share_of_three_pct": 82.82784096768468,
+      "gpu_span_ms_mean_per_range": 3.034793738333333,
+      "gpu_span_ms_sum": 1820.876243,
+      "gpu_span_share_of_dit_blocks_pct": 82.18930089558687,
+      "gpu_span_share_of_dit_forward_pct": 77.99652434745873,
+      "gpu_span_share_of_three_pct": 84.9284432033591,
+      "kernel_calls": 27960,
+      "kernel_calls_mean_per_range": 46.6,
+      "kernel_families": {
+        "attention": {
+          "calls": 600,
+          "gpu_kernel_ms": 798.910667
+        },
+        "copy": {
+          "calls": 240,
+          "gpu_kernel_ms": 17.104976
+        },
+        "gemm": {
+          "calls": 2400,
+          "gpu_kernel_ms": 93.912229
+        },
+        "normalization_reduction": {
+          "calls": 1800,
+          "gpu_kernel_ms": 54.182523
+        },
+        "other": {
+          "calls": 480,
+          "gpu_kernel_ms": 25.505645
+        },
+        "pointwise": {
+          "calls": 22440,
+          "gpu_kernel_ms": 507.75015
+        }
+      },
+      "range_count": 600,
+      "range_coverage_fraction": 1.0,
+      "ranges_without_kernels": 0
+    }
+  },
+  "schema_version": "minwm-nsys-block-phases/v3",
+  "sqlite": "/results/minwm-720p-attn-ffn-b200-use2-20260818-01/attn-ffn-720p/profiles/dense-fa-static-ffn-fp8/trace.sqlite",
+  "totals": {
+    "mapped_phase_kernel_calls": 36360,
+    "phase_gpu_kernel_ms": 1807.80541,
+    "phase_gpu_span_ms_sum": 2144.01227,
+    "phase_range_count": 1800
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "activation_margin": 1.05,
+  "calibration_sha256": "751bfaa74b76adcab34e0f25ee1b2c203af23976c9855dd8bef49064d444cb82",
+  "format": "sglang-minwm-static-fp8-v1",
+  "ignored_layers": [
+    "to_q",
+    "to_k",
+    "to_v",
+    "to_out",
+    "attn2"
+  ],
+  "module_scope": "ffn",
+  "output_bytes": 7364518752,
+  "quantized_weights": 60
+}
