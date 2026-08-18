@@ -5,6 +5,11 @@ runtime image that supports both Hopper and Blackwell. It deliberately uses the
 repository's full `docker/Dockerfile` build instead of layering a new Torch ABI
 over the historical `bedc07...` image.
 
+The current H200/B200-validated immutable release and its exact gate results are
+recorded in [RELEASES.zh-CN.md](RELEASES.zh-CN.md).  H100 and B300 share the
+family dispatch paths but still require a SKU-specific smoke before production
+use.
+
 ## Runtime contract
 
 The release target is:
