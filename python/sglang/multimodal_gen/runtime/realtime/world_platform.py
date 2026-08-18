@@ -117,6 +117,7 @@ class WorldCallbacks:
     def __init__(self, cfg: WorldPlatformConfig) -> None:
         self._cfg = cfg
         self._client = httpx.AsyncClient(timeout=5.0)
+        self._pending: set[asyncio.Task] = set()  # 任务强引用（见 fire）
 
     def _sign(self, method: str, path: str, body: bytes) -> dict[str, str]:
         # 与 biz-core tracking ingest 同构的 canonical/签名（pkg/hmacsign 的对端）

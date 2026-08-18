@@ -643,6 +643,15 @@ def create_app(
                 try:
                     while True:
                         payload = await _receive_browser(websocket)
+                        if principal is not None and not isinstance(payload, bytes):
+                            # 鉴权会话只接受二进制帧：哈希校验与事件过滤都定义在
+                            # 二进制上，文本帧一律丢弃（纵深防御，引擎侧也只读二进制）
+                            _log_gateway_trace(
+                                trace_id,
+                                "gateway.world_text_frame_dropped",
+                                session_id=session_id,
+                            )
+                            continue
                         control = None
                         if isinstance(payload, bytes):
                             try:
@@ -868,6 +877,8 @@ def create_app(
                 if exception is not None:
                     raise exception
             if route is not None and worker_control_task in done:
+                # 引擎正常收尾（跑满 max_chunks）：终局归类为 completed 而非 user_left
+                world_session["worker_finished"] = True
                 try:
                     if expected_last_chunk is not None:
                         await asyncio.wait_for(
@@ -887,26 +898,53 @@ def create_app(
                     )
         except _WorldInitMismatch:
             world_session["init_rejected"] = True
-            await sender.error("init payload mismatch")
-            await websocket.close(code=1008, reason="init payload mismatch")
+            try:
+                await asyncio.wait_for(
+                    sender.error("init payload mismatch"),
+                    timeout=browser_send_timeout_s,
+                )
+                await websocket.close(code=1008, reason="init payload mismatch")
+            except Exception:
+                pass
         except CoordinatorRejected as exc:
             world_session["admit_rejected"] = exc.reason
-            await sender.error(
-                f"realtime admission rejected: {exc.reason}",
-                reason=exc.reason,
-                retry_after_s=exc.retry_after_s,
-            )
-            close_code = 1013 if exc.reason == "CAPACITY_EXHAUSTED" else 1008
-            await websocket.close(code=close_code, reason=exc.reason)
-        except AdmissionQueueFull as exc:
-            await sender.error(f"realtime admission rejected: {exc.reason}")
-            await websocket.close(code=1013, reason=exc.reason)
-        except (WebSocketDisconnect, OutputRouteClosed):
-            pass
-        except Exception as exc:
             try:
-                await sender.error(
-                    f"realtime gateway error: {str(exc).splitlines()[0]}"
+                await asyncio.wait_for(
+                    sender.error(
+                        f"realtime admission rejected: {exc.reason}",
+                        reason=exc.reason,
+                        retry_after_s=exc.retry_after_s,
+                    ),
+                    timeout=browser_send_timeout_s,
+                )
+                close_code = 1013 if exc.reason == "CAPACITY_EXHAUSTED" else 1008
+                await websocket.close(code=close_code, reason=exc.reason)
+            except Exception:
+                pass
+        except AdmissionQueueFull as exc:
+            try:
+                await asyncio.wait_for(
+                    sender.error(f"realtime admission rejected: {exc.reason}"),
+                    timeout=browser_send_timeout_s,
+                )
+                await websocket.close(code=1013, reason=exc.reason)
+            except Exception:
+                pass
+        except WebSocketDisconnect:
+            pass  # 浏览器断开：真正的 user_left
+        except OutputRouteClosed:
+            # 输出通道被系统侧关闭（VAE/路由异常）——不是用户行为
+            world_session["system_error"] = "output route closed"
+        except Exception as exc:
+            # str() 可能为空（如裸 TimeoutError），splitlines()[0] 会 IndexError
+            detail = (str(exc).splitlines() or [type(exc).__name__])[0]
+            world_session["system_error"] = detail
+            try:
+                # 出错时浏览器可能正是那个不读数据的对端 —— 通知必须限时，
+                # 否则会卡死在 finally 之前，席位永不释放（幽灵会话回魂）
+                await asyncio.wait_for(
+                    sender.error(f"realtime gateway error: {detail}"),
+                    timeout=browser_send_timeout_s,
                 )
                 await websocket.close(code=1011, reason="gateway session failed")
             except Exception:
@@ -947,6 +985,14 @@ def create_app(
                         principal.run_id, trace_id, fault="ours", reason="not admitted"
                     )
                 elif world_session.get("deadline_hit"):
+                    world_callbacks.ended(principal.run_id, trace_id, "completed")
+                elif world_session.get("system_error"):
+                    # 网关/引擎侧故障：fault=ours —— 业务侧免责处理，不消耗玩家局数
+                    world_callbacks.aborted(
+                        principal.run_id, trace_id,
+                        fault="ours", reason=str(world_session["system_error"])[:200],
+                    )
+                elif world_session.get("worker_finished"):
                     world_callbacks.ended(principal.run_id, trace_id, "completed")
                 else:
                     world_callbacks.ended(principal.run_id, trace_id, "user_left")
