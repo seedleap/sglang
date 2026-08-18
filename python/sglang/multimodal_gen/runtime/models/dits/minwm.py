@@ -478,25 +478,30 @@ def _minwm_packed_varlen_attention(
         "max_seqlen_k": key_length,
         "softmax_scale": None,
         "causal": False,
-        "deterministic": _MINWM_PACKED_ATTENTION_DETERMINISTIC,
     }
     if backend == "fa4":
         from flash_attn.cute import flash_attn_varlen_func
 
         output = flash_attn_varlen_func(
             **common_kwargs,
+            deterministic=_MINWM_PACKED_ATTENTION_DETERMINISTIC,
             window_size=(None, None),
             return_lse=False,
         )
     elif backend == "fa3":
-        import flash_attn_interface
+        from sglang.jit_kernel.flash_attention_v3 import flash_attn_varlen_func
 
-        output = flash_attn_interface.flash_attn_varlen_func(**common_kwargs)
+        output = flash_attn_varlen_func(
+            **common_kwargs,
+            window_size=(-1, -1),
+            return_softmax_lse=False,
+        )
     else:
         import flash_attn
 
         output = flash_attn.flash_attn_varlen_func(
             **common_kwargs,
+            deterministic=_MINWM_PACKED_ATTENTION_DETERMINISTIC,
             dropout_p=0.0,
             window_size=(-1, -1),
         )
@@ -522,7 +527,10 @@ def _minwm_packed_attention_backend(device: torch.device) -> str:
     capability = torch.cuda.get_device_capability(device)[0]
     if capability >= 10 and importlib.util.find_spec("flash_attn.cute") is not None:
         return "fa4"
-    if capability == 9 and importlib.util.find_spec("flash_attn_interface") is not None:
+    if (
+        capability == 9
+        and importlib.util.find_spec("sglang.jit_kernel.flash_attention_v3") is not None
+    ):
         return "fa3"
     if importlib.util.find_spec("flash_attn") is not None:
         return "fa2"
