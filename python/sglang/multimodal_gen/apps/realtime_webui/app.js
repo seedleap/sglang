@@ -665,6 +665,7 @@ let encodedDecodeErrors = 0;
 let socketHadError = false;
 let socketCloseExpected = false;
 let socketServerError = "";
+let currentFiniteSession = false;
 let renderedPreviewFrames = 0;
 let previewScaleFrame = 0;
 let recordingActive = false;
@@ -2002,6 +2003,7 @@ function resetStreamStats() {
   lastReceivedFrameBatchIndex = null;
   frameBatchGapCount = 0;
   encodedDecodeErrors = 0;
+  currentFiniteSession = false;
   renderedPreviewFrames = 0;
   lastSentEventId = 0;
   lastRenderedEventId = 0;
@@ -4641,6 +4643,9 @@ function payloadByteLength(data) {
 function trimDecodeQueue() {
   if (recordingActive) return;
   if (!decodeQueue.length) return;
+  // A finite request promises an exact timeline. Let websocket backpressure
+  // slow delivery rather than dropping decoded frames from its tail.
+  if (currentFiniteSession) return;
   const playbackMode = selectedPlaybackMode();
   const preservesTimeline = playbackMode === "timeline";
   const boundedRealtime = playbackMode === "smooth_timeline";
@@ -5921,6 +5926,10 @@ async function connect() {
     requestedMediaProfile = String(
       init.realtime_media_profile || NATIVE_MEDIA_PROFILE,
     );
+    currentFiniteSession = generationMode === "t2v"
+      ? Number.isFinite(Number(init.num_frames)) && Number(init.num_frames) > 0
+      : Number(init.max_chunks || 0) > 0;
+    playbackController.setFiniteTimeline(currentFiniteSession);
     const referenceImage = await createReferenceImageMeta(enteredFirstFrame);
     beginSessionArtifact(init, referenceImage);
     if (currentSessionArtifact && currentTrace) {

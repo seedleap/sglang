@@ -21,6 +21,7 @@ MEDIA_PROFILE_MULTIPLIERS = {
     "rife2x_v1": 2,
     "rife3x_v1": 3,
 }
+NORMAL_FINITE_CLOSE_REASONS = frozenset({"generation complete", "normal"})
 
 
 def media_profile_multiplier(media_profile: str) -> int:
@@ -101,6 +102,19 @@ def derive_trace_http_url(ws_url: str) -> str:
     if scheme is None or not parts.netloc:
         raise ValueError("ws_url must use ws:// or wss://")
     return urlunsplit((scheme, parts.netloc, "", "", ""))
+
+
+def websocket_close_receipt(exc) -> dict[str, int | str]:
+    """Return the peer close code across supported websockets versions."""
+
+    received = getattr(exc, "rcvd", None)
+    code = getattr(received, "code", None)
+    reason = getattr(received, "reason", None)
+    if code is None:
+        code = getattr(exc, "code", None)
+    if reason is None:
+        reason = getattr(exc, "reason", "")
+    return {"code": int(code or 0), "reason": str(reason or "")}
 
 
 async def collect_trace_events(
@@ -733,6 +747,7 @@ async def run_session(args: argparse.Namespace, concurrency: int, index: int) ->
     media_acceptance: dict | None = None
     measured_started_at: float | None = None
     measured_completed_at: float | None = None
+    websocket_close: dict[str, int | str] | None = None
     session_started_at = time.perf_counter()
 
     def mark_chunk_complete(message: dict, observed_at: float) -> None:
@@ -782,7 +797,8 @@ async def run_session(args: argparse.Namespace, concurrency: int, index: int) ->
                     packed = await asyncio.wait_for(
                         websocket.recv(), timeout=args.timeout_s
                     )
-                except websockets.ConnectionClosed:
+                except websockets.ConnectionClosed as exc:
+                    websocket_close = websocket_close_receipt(exc)
                     break
                 if not isinstance(packed, bytes):
                     continue
@@ -851,6 +867,17 @@ async def run_session(args: argparse.Namespace, concurrency: int, index: int) ->
         finally:
             action_stop.set()
             await action_task
+
+    if websocket_close is None:
+        raise RuntimeError("finite session ended without a WebSocket close receipt")
+    if (
+        websocket_close["code"] != 1000
+        or websocket_close["reason"] not in NORMAL_FINITE_CLOSE_REASONS
+    ):
+        raise RuntimeError(
+            "finite session did not close normally: "
+            f"code={websocket_close['code']} reason={websocket_close['reason']!r}"
+        )
 
     if not args.skip_trace_query:
         trace_events = await collect_trace_events(
@@ -959,6 +986,7 @@ async def run_session(args: argparse.Namespace, concurrency: int, index: int) ->
         ),
         "trace_event_names": trace_contract["event_names"],
         "direct_vae_frame_batches": trace_contract["direct_vae_frame_batches"],
+        "websocket_close": websocket_close,
     }
 
 

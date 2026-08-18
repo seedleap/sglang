@@ -155,7 +155,7 @@ for (const selector of ["model-slot-config", "stage-controls", "prompt-update-he
     `fullscreen should hide ${selector}`,
   );
 }
-assert.match(html, /playback_controller\.js\?v=realtime-playback-v34/);
+assert.match(html, /playback_controller\.js\?v=realtime-playback-v35/);
 assert.match(html, /model_session\.js\?v=dual-h264-telemetry-v1/);
 assert.match(html, /dual_model_controller\.js\?v=dual-model-v6/);
 assert.match(html, /h264_websocket_session\.js\?v=h264-smooth-timeline-v1/);
@@ -172,7 +172,7 @@ assert.match(
 assert.match(html, /prompt_rewrite_controller\.js\?v=prompt-rewrite-v3/);
 assert.match(html, /world_rules_controller\.js\?v=world-rules-v3/);
 assert.match(html, /styles\.css\?v=world-studio-h264-rules-v6/);
-assert.match(html, /app\.js\?v=world-studio-rife3-h264-smooth-timeline-v2/);
+assert.match(html, /app\.js\?v=world-studio-rife3-h264-smooth-timeline-v3/);
 assert.match(html, /id="minwmH264Viewport"/);
 assert.match(html, /id="lingbot2H264Viewport"/);
 assert.match(html, /id="minwmPerfScheduler"/);

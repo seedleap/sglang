@@ -702,6 +702,36 @@ function smoothTimelineModeKeepsRealtimeTailBounded() {
   assert.equal(snapshot.lastDropReason, "bounded realtime chunk");
 }
 
+function finiteSmoothTimelinePreservesEveryQueuedFrame() {
+  const controller = new RealtimePlaybackController({
+    mode: "smooth_timeline",
+    targetFps: 72,
+    realtimeMaxBufferMs: 100,
+    realtimeMaxBufferChunks: 1,
+    realtimeMaxFrameAgeMs: 100,
+  });
+  controller.setFiniteTimeline(true);
+  enqueueChunk(controller, {
+    chunk: 0,
+    frameCount: 12,
+    durationMs: 500,
+    now: 1000,
+    receivedAt: 1000,
+  });
+  enqueueChunk(controller, {
+    chunk: 1,
+    frameCount: 12,
+    durationMs: 500,
+    now: 1020,
+    receivedAt: 1020,
+  });
+
+  const snapshot = controller.snapshot();
+  assert.equal(snapshot.finiteTimeline, true);
+  assert.equal(snapshot.queueFrames, 24);
+  assert.equal(snapshot.droppedFrames, 0);
+}
+
 function smoothTimelineModeAllowsSoftRealtimeJitterWindow() {
   const controller = new RealtimePlaybackController({
     mode: "smooth_timeline",
@@ -875,6 +905,7 @@ smoothTimelineDoesNotTurnDeliveryJitterIntoPlaybackSlowdown();
 smoothTimelineUsesMeasuredOutputWallFpsNotTimelineTimebase();
 negotiatedTimelineCeilingDoesNotCreateAnUnmeasuredStartupBurst();
 smoothTimelineModeKeepsRealtimeTailBounded();
+finiteSmoothTimelinePreservesEveryQueuedFrame();
 smoothTimelineModeAllowsSoftRealtimeJitterWindow();
 deliveryCadenceExpandsAdaptiveLeadWindow();
 switchingBackToLiveTrimsTimelineBacklog();

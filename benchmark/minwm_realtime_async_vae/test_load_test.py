@@ -1,6 +1,7 @@
 import asyncio
 from argparse import Namespace
 
+import msgspec.msgpack
 import pytest
 from load_test import (
     aggregate_measurement_seconds,
@@ -15,6 +16,7 @@ from load_test import (
     merged_stage_values,
     record_action_latency,
     record_frame_batch,
+    run_session,
     server_action_latencies,
     stage_values,
     stage_values_from_chunk_messages,
@@ -23,6 +25,77 @@ from load_test import (
 )
 
 RIFE_SHA256 = "8f6fb9105ba9e946762ee7190acbca3ca1cf14193eb81ca0955d492fb8558692"
+
+
+def _single_chunk_args(ws_url: str) -> Namespace:
+    return Namespace(
+        ws_url=ws_url,
+        warmup_chunks=0,
+        measured_chunks=1,
+        realtime_media_profile="native_v1",
+        model="/work/model",
+        prompt="test",
+        generation_mode="t2v",
+        size="832x480",
+        fps=24,
+        sink=9,
+        window=18,
+        timeout_s=2.0,
+        completion_signal="final-frame",
+        skip_trace_query=True,
+        trace_http_url=None,
+        trace_timeout_s=1.0,
+        expected_media_weights_sha256=None,
+    )
+
+
+@pytest.mark.parametrize(
+    ("code", "reason", "should_pass"),
+    [
+        (1000, "generation complete", True),
+        (1000, "normal", True),
+        (1000, "silent truncation", False),
+        (1011, "backend failed after final frame", False),
+    ],
+)
+def test_run_session_requires_a_normal_finite_websocket_close(
+    code, reason, should_pass
+):
+    async def exercise():
+        import websockets
+
+        async def handler(websocket):
+            await websocket.recv()
+            await websocket.send(
+                msgspec.msgpack.encode(
+                    {
+                        "type": "frame_batch",
+                        "chunk_index": 0,
+                        "num_frames": 1,
+                        "is_final_frame_batch": True,
+                        "source_width": 832,
+                        "source_height": 480,
+                        "preview_width": 560,
+                        "preview_height": 323,
+                        "width": 560,
+                        "height": 323,
+                    }
+                )
+            )
+            await websocket.close(code=code, reason=reason)
+
+        async with websockets.serve(handler, "127.0.0.1", 0) as server:
+            port = server.sockets[0].getsockname()[1]
+            return await run_session(
+                _single_chunk_args(f"ws://127.0.0.1:{port}"), 1, 0
+            )
+
+    if should_pass:
+        result = asyncio.run(exercise())
+        assert result["websocket_close"] == {"code": code, "reason": reason}
+    else:
+        with pytest.raises(RuntimeError, match="did not close normally"):
+            asyncio.run(exercise())
 
 
 def test_init_request_keeps_t2v_frame_count_aligned_with_chunk_count():

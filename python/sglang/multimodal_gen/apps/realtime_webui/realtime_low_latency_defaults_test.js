@@ -128,6 +128,16 @@ assert.match(
 );
 assert.match(
   appJs,
+  /function trimDecodeQueue\(\) \{[\s\S]*?if \(currentFiniteSession\) return;/,
+  "finite sessions must preserve their exact decode queue instead of trimming the tail",
+);
+assert.match(
+  appJs,
+  /currentFiniteSession\s*=\s*generationMode === "t2v"[\s\S]*?playbackController\.setFiniteTimeline\(currentFiniteSession\)/,
+  "finite T2V and bounded I2V requests must disable realtime tail dropping",
+);
+assert.match(
+  appJs,
   /const ONLINE_MAX_BUFFER_MS\s*=\s*configuredNumber\("onlineMaxBufferMs", 1100\);/,
   "webui should keep a short soft realtime playback tail by default",
 );

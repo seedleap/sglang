@@ -90,6 +90,7 @@
       this.lastRateUpdateAt = 0;
       this.renderedFrames = 0;
       this.droppedFrames = 0;
+      this.finiteTimeline = false;
       this.buffering = true;
       this.pendingEventId = 0;
       this.pendingEventSentAt = 0;
@@ -140,6 +141,11 @@
         }
         this.#updatePlaybackRate(this.lastRateUpdateAt || 0);
       }
+      return this.snapshot();
+    }
+
+    setFiniteTimeline(enabled) {
+      this.finiteTimeline = Boolean(enabled);
       return this.snapshot();
     }
 
@@ -360,6 +366,7 @@
         smoothTimelineEmergencyCatchup: this.smoothTimelineEmergencyCatchup,
         smoothTimelineCriticalCatchup: this.smoothTimelineCriticalCatchup,
         droppedFrames: this.droppedFrames,
+        finiteTimeline: this.finiteTimeline,
         lastDropAt: this.lastDropAt,
         lastDropCount: this.lastDropCount,
         buffering: this.buffering,
@@ -649,6 +656,7 @@
 
     #isBoundedRealtimeMode() {
       return this.mode === "smooth_timeline" &&
+        !this.finiteTimeline &&
         (this.#realtimeMaxBufferMs() > 0 || this.#realtimeMaxBufferChunks() > 0);
     }
 
