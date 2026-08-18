@@ -19,6 +19,7 @@ BASE_MANIFESTS = (
     "worker-discovery.yaml",
     "autoscaling.yaml",
     "h100-denoiser.yaml",
+    "h200-denoiser-capacity.yaml",
     "lingbot2-h100-denoiser.yaml",
     "l4-vae.yaml",
     "network-policy.yaml",
@@ -61,10 +62,16 @@ def requirement_values(nodepool: dict, key: str) -> list[str]:
 def validate(documents: list[dict]) -> None:
     denoiser = find(documents, "NodePool", "minwm-async-denoiser-h100")
     denoiser_8x = find(documents, "NodePool", "minwm-async-denoiser-h100-8x")
+    denoiser_h200_8x = find(
+        documents, "NodePool", "minwm-async-denoiser-h200-8x"
+    )
     vae = find(documents, "NodePool", "minwm-async-vae-l4")
     vae_spot = find(documents, "NodePool", "minwm-async-vae-l4-spot")
     assert requirement_values(denoiser, "karpenter.sh/capacity-type") == ["spot"]
     assert requirement_values(denoiser_8x, "karpenter.sh/capacity-type") == ["spot"]
+    assert requirement_values(denoiser_h200_8x, "karpenter.sh/capacity-type") == [
+        "spot"
+    ]
     assert requirement_values(vae, "karpenter.sh/capacity-type") == ["on-demand"]
     assert requirement_values(vae_spot, "karpenter.sh/capacity-type") == ["spot"]
     assert vae["spec"]["weight"] > vae_spot["spec"]["weight"]
@@ -74,6 +81,9 @@ def validate(documents: list[dict]) -> None:
     assert requirement_values(denoiser_8x, "node.kubernetes.io/instance-type") == [
         "p5.48xlarge",
     ]
+    assert requirement_values(
+        denoiser_h200_8x, "node.kubernetes.io/instance-type"
+    ) == ["p5e.48xlarge", "p6-b200.48xlarge"]
     denoiser_nodeclass = find(
         documents, "EC2NodeClass", "minwm-async-denoiser-8gpu-nvme-ec2"
     )
@@ -88,7 +98,10 @@ def validate(documents: list[dict]) -> None:
         denoiser_nodeclass["spec"]["blockDeviceMappings"][0]["ebs"]["volumeSize"]
         == "100Gi"
     )
-    for pool in (denoiser, denoiser_8x):
+    assert denoiser_h200_8x["spec"]["template"]["spec"]["nodeClassRef"][
+        "name"
+    ] == "minwm-async-denoiser-8gpu-nvme-ec2"
+    for pool in (denoiser, denoiser_8x, denoiser_h200_8x):
         assert (
             pool["spec"]["template"]["metadata"]["labels"][
                 "seedleap.ai/model-cache-storage"
@@ -110,6 +123,7 @@ def validate(documents: list[dict]) -> None:
     )
     assert 1 <= int(denoiser["spec"]["limits"]["nvidia.com/gpu"]) <= 8
     assert int(denoiser_8x["spec"]["limits"]["nvidia.com/gpu"]) == 8
+    assert int(denoiser_h200_8x["spec"]["limits"]["nvidia.com/gpu"]) == 8
     assert 1 <= int(vae["spec"]["limits"]["nvidia.com/gpu"]) <= 8
 
     workloads = (
@@ -132,12 +146,15 @@ def validate(documents: list[dict]) -> None:
     denoiser = find(documents, "StatefulSet", "minwm-async-denoiser")
     lingbot = find(documents, "StatefulSet", "lingbot2-async-denoiser")
     assert denoiser["spec"]["replicas"] == "REPLACE_WITH_DENOISER_BASE_REPLICAS"
-    assert lingbot["spec"]["replicas"] == 1
+    assert lingbot["spec"]["replicas"] == "REPLACE_WITH_LINGBOT_DENOISER_REPLICAS"
     assert denoiser["spec"]["ordinals"]["start"] == 2
     assert lingbot["spec"]["ordinals"]["start"] == 1
     assert denoiser["spec"]["updateStrategy"]["type"] == "OnDelete"
     assert lingbot["spec"]["updateStrategy"]["type"] == "OnDelete"
     for workload in (denoiser, lingbot):
+        selector = workload["spec"]["template"]["spec"]["nodeSelector"]
+        assert selector["seedleap.ai/denoiser-worker"] == "true"
+        assert "karpenter.sh/nodepool" not in selector
         model_cache = next(
             volume
             for volume in workload["spec"]["template"]["spec"]["volumes"]

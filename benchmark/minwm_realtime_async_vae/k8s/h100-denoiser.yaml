@@ -143,7 +143,7 @@ spec:
       restartPolicy: Always
       terminationGracePeriodSeconds: 90
       nodeSelector:
-        karpenter.sh/nodepool: REPLACE_WITH_DENOISER_NODEPOOL
+        seedleap.ai/denoiser-worker: "true"
         karpenter.sh/capacity-type: spot
         seedleap.ai/model-cache-storage: local-nvme
       tolerations:
