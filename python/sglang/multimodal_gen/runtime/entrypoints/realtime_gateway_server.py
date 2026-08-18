@@ -35,6 +35,14 @@ from sglang.multimodal_gen.runtime.realtime.coordinator import (
     SessionAssignment,
     WorkerSlot,
 )
+from sglang.multimodal_gen.runtime.realtime.critical_path_metrics import (
+    infer_model_label,
+    observe_client_metric_event,
+    observe_stage_seconds,
+    prometheus_content_type,
+    prometheus_latest,
+    result_from_exception,
+)
 from sglang.multimodal_gen.runtime.realtime.gateway import (
     AdmissionQueueFull,
     BoundedAdmissionWaiterGate,
@@ -132,6 +140,55 @@ def _browser_send_trace_fields(wire: bytes) -> dict[str, Any]:
             fields["payload_bytes"] = sum(lengths)
             fields["payload_count"] = len(lengths)
     return fields
+
+
+def _codec_from_message(message: dict[str, Any]) -> str:
+    codec = str(message.get("codec") or message.get("encoding") or "").lower()
+    content_type = str(message.get("content_type") or "").lower()
+    if "h264" in codec or "h264" in content_type or "avc" in content_type:
+        return "h264"
+    if "webp" in codec or "webp" in content_type:
+        return "webp"
+    if "jpeg" in codec or "jpg" in codec or "jpeg" in content_type:
+        return "jpeg"
+    return codec or "none"
+
+
+def _metric_scope_for_message(message: dict[str, Any]) -> str:
+    message_type = message.get("type")
+    if message_type == "frame_batch":
+        return "frame"
+    if message_type in {"chunk_telemetry", "media_chunk_complete"}:
+        return "chunk"
+    return "request"
+
+
+def _metric_labels_from_wire(wire: bytes) -> tuple[str, str]:
+    try:
+        message = decode_message(wire)
+    except ProtocolViolation:
+        return "none", "request"
+    return _codec_from_message(message), _metric_scope_for_message(message)
+
+
+def _observe_gateway_client_metric(
+    message: dict[str, Any],
+    *,
+    model: str,
+) -> int:
+    if message.get("type") == "client_metric":
+        return int(observe_client_metric_event(message, service="gateway", model=model))
+    if message.get("type") != "client_metric_batch":
+        return 0
+    events = message.get("events")
+    if not isinstance(events, list):
+        return 0
+    accepted = 0
+    for event in events[:64]:
+        accepted += int(
+            observe_client_metric_event(event, service="gateway", model=model)
+        )
+    return accepted
 
 
 class CoordinatorClient(Protocol):
@@ -310,6 +367,10 @@ def create_app(
     async def healthz():
         return {"status": "ok"}
 
+    @app.get("/metrics")
+    async def metrics():
+        return Response(prometheus_latest(), media_type=prometheus_content_type())
+
     @app.get("/readyz")
     async def readyz():
         nonlocal last_coordinator_ready_at
@@ -467,6 +528,7 @@ def create_app(
             websocket.query_params.get("trace_id"), fallback=session_id
         )
         output_token = secrets.token_urlsafe(32)
+        metric_model = infer_model_label(selected_model_revision)
         assignment = None
         route = None
         upstream = None
@@ -476,16 +538,35 @@ def create_app(
         try:
             admitted_at = time.perf_counter()
             _log_gateway_trace(trace_id, "gateway.ws_accepted", session_id=session_id)
-            async with admission_gate.waiter():
-                assignment = await coordinator.admit(
-                    user_id=_user_id(websocket),
-                    session_id=session_id,
-                    generation_id=generation_id,
-                    model_revision=selected_model_revision,
-                    vae_fingerprint=selected_vae_fingerprint,
-                    wait_for_capacity=True,
-                    trace_id=trace_id,
+            try:
+                async with admission_gate.waiter():
+                    assignment = await coordinator.admit(
+                        user_id=_user_id(websocket),
+                        session_id=session_id,
+                        generation_id=generation_id,
+                        model_revision=selected_model_revision,
+                        vae_fingerprint=selected_vae_fingerprint,
+                        wait_for_capacity=True,
+                        trace_id=trace_id,
+                    )
+            except BaseException as exc:
+                observe_stage_seconds(
+                    "gateway_route_admit",
+                    time.perf_counter() - admitted_at,
+                    service="gateway",
+                    model=metric_model,
+                    result=result_from_exception(exc),
+                    scope="request",
                 )
+                raise
+            observe_stage_seconds(
+                "gateway_route_admit",
+                time.perf_counter() - admitted_at,
+                service="gateway",
+                model=metric_model,
+                result="success",
+                scope="request",
+            )
             _log_gateway_trace(
                 trace_id,
                 "gateway.coordinator_admit_complete",
@@ -534,11 +615,19 @@ def create_app(
                 try:
                     while True:
                         payload = await _receive_browser(websocket)
-                        if isinstance(payload, bytes) and expected_last_chunk is None:
+                        control = None
+                        if isinstance(payload, bytes):
                             try:
                                 control = decode_message(payload)
                             except ProtocolViolation:
-                                control = None
+                                pass
+                        if isinstance(control, dict) and control.get("type") in {
+                            "client_metric",
+                            "client_metric_batch",
+                        }:
+                            _observe_gateway_client_metric(control, model=metric_model)
+                            continue
+                        if isinstance(control, dict) and expected_last_chunk is None:
                             if (
                                 isinstance(control, dict)
                                 and control.get("type") == "init"
@@ -571,7 +660,18 @@ def create_app(
 
             async def output_to_browser():
                 while True:
-                    wire = await route.get()
+                    output = await route.get_output()
+                    wire = output.wire
+                    codec, scope = _metric_labels_from_wire(wire)
+                    observe_stage_seconds(
+                        "output_pacing_queue",
+                        time.monotonic() - output.enqueued_at,
+                        service="gateway",
+                        model=metric_model,
+                        result="success",
+                        codec=codec,
+                        scope=scope,
+                    )
                     try:
                         await send_browser_with_trace(
                             wire,
@@ -588,9 +688,19 @@ def create_app(
                 queue_fields: dict[str, Any] | None = None,
             ) -> None:
                 send_started = time.perf_counter()
+                codec, scope = _metric_labels_from_wire(wire)
                 send_fields = _browser_send_trace_fields(wire)
                 queue_fields = queue_fields or {}
                 if not await playback_ack_window.allow_output(wire):
+                    observe_stage_seconds(
+                        "websocket_build_write",
+                        time.perf_counter() - send_started,
+                        service="gateway",
+                        model=metric_model,
+                        result="cancelled",
+                        codec=codec,
+                        scope=scope,
+                    )
                     _log_gateway_trace(
                         trace_id,
                         "gateway.browser_send_dropped",
@@ -610,6 +720,15 @@ def create_app(
                     browser_send_ms = round(
                         (time.perf_counter() - send_started) * 1000, 3
                     )
+                    observe_stage_seconds(
+                        "websocket_build_write",
+                        browser_send_ms / 1000.0,
+                        service="gateway",
+                        model=metric_model,
+                        result=result_from_exception(exc),
+                        codec=codec,
+                        scope=scope,
+                    )
                     _log_gateway_trace(
                         trace_id,
                         "gateway.browser_send_complete",
@@ -625,6 +744,15 @@ def create_app(
                     )
                     raise
                 browser_send_ms = round((time.perf_counter() - send_started) * 1000, 3)
+                observe_stage_seconds(
+                    "websocket_build_write",
+                    browser_send_ms / 1000.0,
+                    service="gateway",
+                    model=metric_model,
+                    result="success",
+                    codec=codec,
+                    scope=scope,
+                )
                 _log_gateway_trace(
                     trace_id,
                     "gateway.browser_send_complete",

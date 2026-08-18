@@ -423,7 +423,7 @@ class GatewayOutputRoute:
             "gateway_queue_capacity_frames": self.queue_depth,
         }
 
-    async def get(self) -> bytes:
+    async def get_output(self) -> _QueuedOutput:
         while True:
             if self._queue:
                 output = self._queue.popleft()
@@ -433,13 +433,16 @@ class GatewayOutputRoute:
                     raise OutputRouteClosed("output route is closed")
                 self._queued_media_frames -= output.frame_count
                 self._queued_bytes -= len(output.wire)
-                return output.wire
+                return output
             if self.closed:
                 raise OutputRouteClosed("output route is closed")
             self._queue_ready.clear()
             if self._queue:
                 continue
             await self._queue_ready.wait()
+
+    async def get(self) -> bytes:
+        return (await self.get_output()).wire
 
     def task_done(self) -> None:
         self._finish_task()

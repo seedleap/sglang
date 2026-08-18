@@ -1,0 +1,104 @@
+{
+  "annotations": {
+    "logs.loopit.me/bucket": "world-model",
+    "logs.loopit.me/enabled": "true"
+  },
+  "appGroup": "world-studio",
+  "appName": "World Model Artifact Publisher",
+  "args": [
+    "--release",
+    "/opt/sglang/benchmark/minwm_realtime_async_vae/model_releases/lingbot2/59cccf49f2d2dd27418ae7a04b82b10868d455c2/release-spec.json",
+    "--offline-plan"
+  ],
+  "businessLineId": "world-model",
+  "clusterId": "${WORLD_MODEL_CLUSTER_ID}",
+  "command": [
+    "python3",
+    "/opt/sglang/benchmark/minwm_realtime_async_vae/copy_model_release.py"
+  ],
+  "deployType": "job",
+  "gitRepo": "git@github.com:seedleap/sglang.git",
+  "image": "${WORLD_MODEL_ARTIFACT_PUBLISHER_IMAGE_DIGEST}",
+  "jenkinsJob": "loopit/world-model/model-artifact-publish",
+  "labels": {
+    "app.kubernetes.io/name": "world-model-artifact-publisher",
+    "world-model.loopit.me/application-group": "world-studio",
+    "world-model.loopit.me/service": "world-model-artifact-publisher"
+  },
+  "name": "world-model-artifact-publisher",
+  "namespace": "world-model",
+  "networkPolicy": {
+    "defaultDeny": true,
+    "egress": [
+      {
+        "ports": [
+          {
+            "port": 53,
+            "protocol": "UDP"
+          }
+        ],
+        "to": [
+          {
+            "namespaceSelector": {
+              "matchLabels": {
+                "kubernetes.io/metadata.name": "kube-system"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "ports": [
+          {
+            "port": 53,
+            "protocol": "TCP"
+          }
+        ],
+        "to": [
+          {
+            "namespaceSelector": {
+              "matchLabels": {
+                "kubernetes.io/metadata.name": "kube-system"
+              }
+            }
+          }
+        ]
+      }
+    ],
+    "enabled": true,
+    "ingress": []
+  },
+  "nodeSelector": {},
+  "resources": {
+    "limits": {
+      "cpu": "8",
+      "ephemeral-storage": "32Gi",
+      "memory": "16Gi"
+    },
+    "requests": {
+      "cpu": "4",
+      "ephemeral-storage": "16Gi",
+      "memory": "8Gi"
+    }
+  },
+  "serviceAccountName": "wm-artifact-publisher",
+  "taskExecutionPolicy": {
+    "commandRules": [
+      {
+        "argsExact": [
+          "--release",
+          "/opt/sglang/benchmark/minwm_realtime_async_vae/model_releases/lingbot2/59cccf49f2d2dd27418ae7a04b82b10868d455c2/release-spec.json",
+          "--offline-plan"
+        ],
+        "command": [
+          "python3",
+          "/opt/sglang/benchmark/minwm_realtime_async_vae/copy_model_release.py"
+        ]
+      }
+    ],
+    "requireDigestImage": true
+  },
+  "tolerations": [],
+  "volumeMounts": [],
+  "volumes": []
+}

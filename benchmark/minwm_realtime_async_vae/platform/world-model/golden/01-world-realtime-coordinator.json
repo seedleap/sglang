@@ -1,0 +1,208 @@
+{
+  "affinity": {},
+  "annotations": {
+    "logs.loopit.me/bucket": "world-model",
+    "logs.loopit.me/enabled": "true"
+  },
+  "appGroup": "world-studio",
+  "appName": "World Realtime Coordinator",
+  "args": [
+    "exec python -m sglang.multimodal_gen.runtime.entrypoints.realtime_coordinator_server --host=0.0.0.0 --port=18081 --backend=dynamodb --table-name=${COORDINATOR_TABLE} --region=${AWS_REGION} --ttl-s=30 --worker-ttl-s=15 --wait-timeout-s=10 --candidate-limit=64 --denoiser-capacity-limit=4 --vae-capacity-limit=16"
+  ],
+  "businessLineId": "world-model",
+  "clusterId": "${WORLD_MODEL_CLUSTER_ID}",
+  "command": [
+    "/bin/sh",
+    "-ec"
+  ],
+  "deployType": "deployment",
+  "env": [
+    {
+      "name": "COORDINATOR_TABLE",
+      "value": "world-model-realtime"
+    },
+    {
+      "name": "AWS_REGION",
+      "value": "us-east-2"
+    },
+    {
+      "name": "OTEL_SERVICE_NAME",
+      "value": "world-realtime-coordinator"
+    },
+    {
+      "name": "OTEL_EXPORTER_OTLP_ENDPOINT",
+      "value": "http://adot-collector.monitoring:4317"
+    },
+    {
+      "name": "OTEL_RESOURCE_ATTRIBUTES",
+      "value": "service.namespace=world-model,deployment.environment=production"
+    }
+  ],
+  "gitRepo": "git@github.com:seedleap/sglang.git",
+  "image": "${WORLD_REALTIME_COORDINATOR_IMAGE_DIGEST}",
+  "initContainers": [],
+  "jenkinsJob": "loopit/world-model/world-realtime-coordinator",
+  "labels": {
+    "app.kubernetes.io/name": "world-realtime-coordinator",
+    "world-model.loopit.me/application-group": "world-studio",
+    "world-model.loopit.me/service": "world-realtime-coordinator"
+  },
+  "livenessProbe": {
+    "enabled": true,
+    "failureThreshold": 6,
+    "path": "/healthz",
+    "periodSeconds": 15,
+    "port": 18081,
+    "timeoutSeconds": 5,
+    "type": "httpGet"
+  },
+  "name": "world-realtime-coordinator",
+  "namespace": "world-model",
+  "networkPolicy": {
+    "defaultDeny": true,
+    "egress": [
+      {
+        "ports": [
+          {
+            "port": 53,
+            "protocol": "UDP"
+          }
+        ],
+        "to": [
+          {
+            "namespaceSelector": {
+              "matchLabels": {
+                "kubernetes.io/metadata.name": "kube-system"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "ports": [
+          {
+            "port": 53,
+            "protocol": "TCP"
+          }
+        ],
+        "to": [
+          {
+            "namespaceSelector": {
+              "matchLabels": {
+                "kubernetes.io/metadata.name": "kube-system"
+              }
+            }
+          }
+        ]
+      }
+    ],
+    "enabled": true,
+    "ingress": [
+      {
+        "from": [
+          {
+            "podSelector": {
+              "matchLabels": {
+                "app.kubernetes.io/name": "world-realtime-gateway"
+              }
+            }
+          },
+          {
+            "podSelector": {
+              "matchLabels": {
+                "app.kubernetes.io/name": "minwm-denoiser"
+              }
+            }
+          },
+          {
+            "podSelector": {
+              "matchLabels": {
+                "app.kubernetes.io/name": "lingbot2-denoiser"
+              }
+            }
+          },
+          {
+            "podSelector": {
+              "matchLabels": {
+                "app.kubernetes.io/name": "minwm-vae"
+              }
+            }
+          },
+          {
+            "podSelector": {
+              "matchLabels": {
+                "app.kubernetes.io/name": "lingbot2-vae"
+              }
+            }
+          }
+        ],
+        "ports": [
+          {
+            "port": 18081,
+            "protocol": "TCP"
+          }
+        ]
+      }
+    ]
+  },
+  "nodeSelector": {},
+  "podDisruptionBudget": {
+    "minAvailable": 1
+  },
+  "readinessProbe": {
+    "enabled": true,
+    "failureThreshold": 6,
+    "path": "/healthz",
+    "periodSeconds": 5,
+    "port": 18081,
+    "timeoutSeconds": 5,
+    "type": "httpGet"
+  },
+  "replicas": 2,
+  "resources": {
+    "limits": {
+      "cpu": "1",
+      "memory": "1Gi"
+    },
+    "requests": {
+      "cpu": "250m",
+      "memory": "256Mi"
+    }
+  },
+  "serviceAccountName": "wm-coordinator",
+  "serviceSpec": {
+    "headless": false,
+    "ports": [
+      {
+        "name": "http",
+        "port": 18081,
+        "targetPort": 18081
+      }
+    ]
+  },
+  "startupProbe": {
+    "enabled": true,
+    "failureThreshold": 30,
+    "path": "/healthz",
+    "periodSeconds": 2,
+    "port": 18081,
+    "timeoutSeconds": 5,
+    "type": "httpGet"
+  },
+  "terminationGracePeriodSeconds": 30,
+  "tolerations": [],
+  "topologySpreadConstraints": [
+    {
+      "labelSelector": {
+        "matchLabels": {
+          "app.kubernetes.io/name": "world-realtime-coordinator"
+        }
+      },
+      "maxSkew": 1,
+      "topologyKey": "topology.kubernetes.io/zone",
+      "whenUnsatisfiable": "ScheduleAnyway"
+    }
+  ],
+  "volumeMounts": [],
+  "volumes": []
+}

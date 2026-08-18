@@ -2,6 +2,11 @@
 
 from prometheus_client import Counter, Gauge, Histogram
 
+from sglang.multimodal_gen.runtime.realtime.critical_path_metrics import (
+    codec_label,
+    observe_stage_ms,
+)
+
 STAGE_SECONDS = Histogram(
     "sglang_realtime_vae_stage_seconds",
     "Realtime remote VAE stage latency.",
@@ -28,10 +33,37 @@ BACKPRESSURE_TOTAL = Counter(
     ("worker_role",),
 )
 
+_UNIFIED_STAGE_BY_LEGACY_STAGE = {
+    "queue_wait": "vae_queue",
+    "decode": "vae_decode",
+    "post_decode": "post_decode",
+    "frame_encode": "frame_encode",
+}
 
-def observe_stage(stage: str, duration_ms: float) -> None:
+
+def observe_stage(
+    stage: str,
+    duration_ms: float,
+    *,
+    result: str = "success",
+    codec: str = "none",
+    scope: str = "chunk",
+) -> None:
     STAGE_SECONDS.labels(stage=stage, worker_role="vae").observe(
         max(0.0, duration_ms) / 1000.0
+    )
+    unified_stage = _UNIFIED_STAGE_BY_LEGACY_STAGE.get(stage)
+    if unified_stage is None:
+        return
+    if unified_stage == "frame_encode" and codec_label(codec) == "none":
+        return
+    observe_stage_ms(
+        unified_stage,
+        duration_ms,
+        service="vae",
+        result=result,
+        codec=codec,
+        scope=scope,
     )
 
 

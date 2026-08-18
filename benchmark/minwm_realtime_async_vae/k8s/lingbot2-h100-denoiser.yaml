@@ -12,7 +12,7 @@ spec:
   selector:
     app.kubernetes.io/name: lingbot2-async-denoiser
   ports:
-    - {name: api, port: 30000, targetPort: api}
+    - {name: api, port: 30000, targetPort: metrics}
 ---
 apiVersion: apps/v1
 kind: StatefulSet
@@ -157,6 +157,9 @@ spec:
               value: http://minwm-realtime-adot:4317
             - name: OTEL_RESOURCE_ATTRIBUTES
               value: service.namespace=minwm,deployment.environment=production,worker.role=denoiser,model.name=lingbot2
+            - {name: WORLD_MODEL_METRIC_SERVICE, value: denoiser}
+            - {name: WORLD_MODEL_METRIC_MODEL, value: lingbot2}
+            - {name: WORLD_MODEL_METRIC_LANE, value: production}
           command: [/bin/bash, -lc]
           args:
             - |
@@ -230,7 +233,7 @@ spec:
               flock -u 9
               wait "${child}"
           ports:
-            - {name: api, containerPort: 30000}
+            - {name: metrics, containerPort: 30000}
           lifecycle:
             preStop:
               exec:
@@ -250,17 +253,17 @@ spec:
                       sleep 2
                     done
           startupProbe:
-            httpGet: {path: /health, port: api}
+            httpGet: {path: /health, port: metrics}
             periodSeconds: 20
             timeoutSeconds: 5
             failureThreshold: 270
           readinessProbe:
-            httpGet: {path: /health, port: api}
+            httpGet: {path: /health, port: metrics}
             periodSeconds: 10
             timeoutSeconds: 5
             failureThreshold: 6
           livenessProbe:
-            httpGet: {path: /health, port: api}
+            httpGet: {path: /health, port: metrics}
             initialDelaySeconds: 60
             periodSeconds: 30
             timeoutSeconds: 5

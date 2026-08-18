@@ -1,0 +1,55 @@
+{
+  "schema_version": 1,
+  "publisher_bundle_sha256": "3685a541f6d43c55794eeb2a9e955fe3cd4caba4da3f96f25329b5be6cfee033",
+  "release_id": "20260810T042157Z-c302d572",
+  "release_manifest_created_at": "2026-08-13T12:27:10Z",
+  "model": {
+    "serving_name": "minwm-async-denoiser-0",
+    "version": "wan22-5b-stage3-dmd-47-0808-2fb2cfec2a2-gs3200-ema-student-v1",
+    "family": "minwm",
+    "id": "wan22-5b-stage3-dmd-47-0808-2fb2cfec2a2",
+    "revision": "gs3200-ema-student-v1",
+    "rollback_release": null
+  },
+  "source": {
+    "bucket": "leap-world-us-west-2",
+    "region": "us-west-2",
+    "prefix": "world-model/minwm/serving-artifacts/wan22-5b-stage3-dmd-47-0808-2fb2cfec2a2/gs3200-ema-student-v1/model",
+    "ready": {
+      "version_id": "bgJeMf8tMQMXsTUeiX7FXtGFWBm4CAwS",
+      "size": 124,
+      "sha256": "fe2b0d76f31a21026e9c4b104b94be41739b9c4a026be9f40133cc8532395f52"
+    },
+    "artifact_manifest": {
+      "version_id": "Q3o3w9rAzSmpgkGjF_qzb.eU_iVS0UA5",
+      "size": 3029,
+      "sha256": "2a46c18345428fa6c88e3323d7ce892e128e6e0114cc8da8d6b27cedd0f0cf10"
+    },
+    "object_version_ids": {
+      "minwm_conversion_manifest.json": "DGOE0sUks6M.LaLQeYRcKkupISwoe.r.",
+      "model_index.json": "ZMkuKsAiJ1isCt6BW7vD7S.jyOF_tIhH",
+      "scheduler/scheduler_config.json": "9.kqzpcK08Tg6.AmJO_muZpUUPwVR28Y",
+      "text_encoder/config.json": "fQSS5zAmlT51JI7kDvQhplfBeYUCkjJ3",
+      "text_encoder/model-00001-of-00003.safetensors": "Bw9GzeKEohiEq3rlIPZT.dfb9PcRA.6R",
+      "text_encoder/model-00002-of-00003.safetensors": "etZNL0D6krmM93tP56BEI8jPI18ZJvfp",
+      "text_encoder/model-00003-of-00003.safetensors": "4LVYOgJKELUVbmCHhwvTZgaTtpJSsn2x",
+      "text_encoder/model.safetensors.index.json": "oFUPmJd3D2lHfCRA72xJLnqgU1u.7jnH",
+      "tokenizer/special_tokens_map.json": "1DZntRQekwNnkQzPlv.jB7BdkDNJoHek",
+      "tokenizer/spiece.model": "Y6iqiHtaaeCdZA0FR0o34vzStiv5mwd4",
+      "tokenizer/tokenizer.json": "Sd9mFqSIvuesfPzNyMPFFIjcwWBPeh07",
+      "tokenizer/tokenizer_config.json": "fIT8RmFWdJb6NnoNN87eBQK7H8BttmRR",
+      "transformer/config.json": "a3yw8SEK25DKd1A56CCdimzkpd4Vc_4Q",
+      "transformer/diffusion_pytorch_model-00001-of-00003.safetensors": "zJ2Vlh3UHUNorJs5e2nr6Ee2rOvFUp6j",
+      "transformer/diffusion_pytorch_model-00002-of-00003.safetensors": "YcEr7XwEqbKEwtfig63j6cNfkam_QIeq",
+      "transformer/diffusion_pytorch_model-00003-of-00003.safetensors": "yqnP1IkiZpvLDe0bGxZ4gZJFxiIg2Hda",
+      "transformer/diffusion_pytorch_model.safetensors.index.json": "u2t8044k8TDguSqXnfi3E5rMpupjH8vo",
+      "vae/config.json": "UelmGhNF.mDktmIXEU3EH0GCEmwYn7Ec",
+      "vae/diffusion_pytorch_model.safetensors": "a_KDqr6YS0lladtge2rSyF5FmK67Wmcn"
+    }
+  },
+  "destination": {
+    "bucket": "leap-world-model-serving-829115578968-us-east-2",
+    "region": "us-east-2",
+    "prefix": "models/minwm-async-denoiser-0/wan22-5b-stage3-dmd-47-0808-2fb2cfec2a2-gs3200-ema-student-v1/20260810T042157Z-c302d572"
+  }
+}

@@ -382,6 +382,13 @@ def create_app(
                         log_realtime_trace(
                             logger,
                             trace_session,
+                            "server.post_decode_complete",
+                            duration_ms=round(result.post_decode_ms, 3),
+                            **common_trace,
+                        )
+                        log_realtime_trace(
+                            logger,
+                            trace_session,
                             "server.vae_encode_complete",
                             duration_ms=round(result.encode_ms, 3),
                             **common_trace,
@@ -421,6 +428,7 @@ def create_app(
                                 is_final_chunk=header.is_final_chunk,
                                 queue_wait_ms=result.queue_wait_ms,
                                 decode_ms=result.decode_ms,
+                                post_decode_ms=result.post_decode_ms,
                                 encode_ms=result.encode_ms,
                             )
                         )
