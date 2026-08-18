@@ -16,6 +16,7 @@ resources:
   - gpu-replica-safety.yaml
   - 8gpu-nodeclass.yaml
   - h100-denoiser.yaml
+  - h200-denoiser-capacity.yaml
   - lingbot2-h100-denoiser.yaml
   - l4-vae.yaml
   - gateway-service.yaml

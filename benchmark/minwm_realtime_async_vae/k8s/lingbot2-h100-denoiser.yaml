@@ -25,7 +25,7 @@ metadata:
     seedleap.ai/test-run: minwm-async-vae-benchmark
     seedleap.ai/ttl-after-test: required
 spec:
-  replicas: 1
+  replicas: REPLACE_WITH_LINGBOT_DENOISER_REPLICAS
   ordinals:
     # Preserve the H100-resident worker selected during the two-node scale-in.
     start: 1
@@ -48,7 +48,7 @@ spec:
       restartPolicy: Always
       terminationGracePeriodSeconds: 90
       nodeSelector:
-        karpenter.sh/nodepool: minwm-async-denoiser-h100-8x
+        seedleap.ai/denoiser-worker: "true"
         karpenter.sh/capacity-type: spot
         seedleap.ai/model-cache-storage: local-nvme
       tolerations:

@@ -1667,7 +1667,8 @@ body.world-studio {
 .world-studio .rule-editor > header > span { display: inline-flex; align-items: baseline; gap: 7px; }
 .world-studio .rule-editor > header b { font-size: 11px; font-weight: 650; }
 .world-studio .rule-editor > header small { color: var(--ws-muted); font-size: 8px; }
-.world-studio #addSkillRuleBtn {
+.world-studio #addSkillRuleBtn,
+.world-studio #addGoalRuleBtn {
   min-height: 27px;
   border: 1px solid rgba(121, 223, 189, 0.26);
   border-radius: 8px;
@@ -1676,11 +1677,17 @@ body.world-studio {
   color: var(--ws-accent);
   font-size: 9px;
 }
-.world-studio #addSkillRuleBtn:hover:not(:disabled) { border-color: var(--ws-accent); background: rgba(121, 223, 189, 0.12); transform: none; }
-.world-studio .skill-rule-list { display: grid; gap: 8px; }
-.world-studio .skill-rule-item { display: grid; gap: 7px; border: 1px solid var(--ws-line); border-radius: 10px; padding: 9px; background: rgba(5, 9, 9, 0.22); }
+.world-studio #addSkillRuleBtn:hover:not(:disabled),
+.world-studio #addGoalRuleBtn:hover:not(:disabled) { border-color: var(--ws-accent); background: rgba(121, 223, 189, 0.12); transform: none; }
+.world-studio .skill-rule-list,
+.world-studio .goal-rule-list { display: grid; gap: 8px; }
+.world-studio .skill-rule-item,
+.world-studio .goal-rule-item { display: grid; gap: 7px; border: 1px solid var(--ws-line); border-radius: 10px; padding: 9px; background: rgba(5, 9, 9, 0.22); }
 .world-studio .skill-rule-item-head { display: grid; grid-template-columns: 24px minmax(0, 1fr) auto; align-items: start; gap: 7px; }
-.world-studio .skill-rule-key {
+.world-studio .goal-rule-item-head { display: grid; grid-template-columns: 24px minmax(0, 1fr) auto; align-items: center; gap: 7px; }
+.world-studio .goal-rule-item-head strong { color: #dfe7e3; font-size: 10px; font-weight: 650; }
+.world-studio .skill-rule-key,
+.world-studio .goal-rule-key {
   display: grid;
   width: 24px;
   height: 24px;
@@ -1692,14 +1699,20 @@ body.world-studio {
   font-size: 9px;
   font-weight: 760;
 }
-.world-studio .skill-rule-remove { width: 26px; height: 26px; min-height: 26px; margin-top: 2px; border: 0; border-radius: 7px; padding: 0; background: transparent; color: var(--ws-muted); font-size: 14px; }
-.world-studio .skill-rule-remove:hover { background: rgba(228, 134, 116, 0.1); color: #f0b0a3; transform: none; }
+.world-studio .skill-rule-remove,
+.world-studio .goal-rule-remove { width: 26px; height: 26px; min-height: 26px; border: 0; border-radius: 7px; padding: 0; background: transparent; color: var(--ws-muted); font-size: 14px; }
+.world-studio .skill-rule-remove { margin-top: 2px; }
+.world-studio .skill-rule-remove:hover,
+.world-studio .goal-rule-remove:hover { background: rgba(228, 134, 116, 0.1); color: #f0b0a3; transform: none; }
 .world-studio .skill-rule-item textarea,
 .world-studio .goal-rule-input-field textarea { width: 100%; resize: vertical; padding: 9px; color: #d8dedb; font-size: 10px; line-height: 1.45; }
 .world-studio .skill-rule-item textarea { min-width: 0; min-height: 58px; }
-.world-studio .skill-rule-state { min-height: 12px; color: var(--ws-muted); font-size: 8px; }
-.world-studio .skill-rule-state[data-state="ready"] { color: var(--ws-accent); }
-.world-studio .skill-rule-state[data-state="error"] { color: #f1aa9c; }
+.world-studio .skill-rule-state,
+.world-studio .goal-rule-state { min-height: 12px; color: var(--ws-muted); font-size: 8px; }
+.world-studio .skill-rule-state[data-state="ready"],
+.world-studio .goal-rule-state[data-state="ready"] { color: var(--ws-accent); }
+.world-studio .skill-rule-state[data-state="error"],
+.world-studio .goal-rule-state[data-state="error"] { color: #f1aa9c; }
 .world-studio .rule-empty { margin: 0; color: #74807c; font-size: 8px; }
 .world-studio .rule-empty[hidden] { display: none; }
 .world-studio .goal-rule-fields { display: grid; grid-template-columns: 96px 82px minmax(0, 1fr); align-items: start; gap: 8px; }
