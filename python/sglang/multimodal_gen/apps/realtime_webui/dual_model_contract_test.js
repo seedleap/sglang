@@ -105,6 +105,12 @@ assert.match(app, /\$\(`\$\{key\}PerfPlaybackBuffer`\)\.textContent/);
 assert.match(app, /activeH264Models\.has\("minwm"\)/, "H.264 stats should not be overwritten by WebP playback stats");
 assert.match(
   app,
+  /renderModelTelemetry\("minwm", primaryStats\);\s*renderProtocolPerformance\("minwm", primaryStats\);/,
+  "WebP playback must refresh the detailed protocol metrics as well as summary FPS",
+);
+assert.match(app, /const unavailableForTransport = webpActive \? "WebP 未启用" : "-";/);
+assert.match(
+  app,
   /"h264StartupDropFrames",[\s\S]*?key === "lingbot2" \? 8 : 0/,
   "LingBot2 should hide eight startup transition frames without changing Zing",
 );

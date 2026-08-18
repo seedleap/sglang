@@ -688,6 +688,12 @@ let frameBatchGapCount = 0;
 let encodedDecodeErrors = 0;
 let primaryChunkTelemetry = {};
 let primaryLastInputUplinkMs = 0;
+let primaryReceiveMbps = 0;
+let primaryReceivedBytes = 0;
+let primaryLastNetworkSample = null;
+let primaryLastDownlinkMs = 0;
+let primaryLastControlToVideoMs = 0;
+const primaryControlSentEpochByEvent = new Map();
 let socketHadError = false;
 let socketCloseExpected = false;
 let socketServerError = "";
@@ -1960,6 +1966,12 @@ function resetStreamStats() {
   encodedDecodeErrors = 0;
   primaryChunkTelemetry = {};
   primaryLastInputUplinkMs = 0;
+  primaryReceiveMbps = 0;
+  primaryReceivedBytes = 0;
+  primaryLastNetworkSample = null;
+  primaryLastDownlinkMs = 0;
+  primaryLastControlToVideoMs = 0;
+  primaryControlSentEpochByEvent.clear();
   renderedPreviewFrames = 0;
   lastSentEventId = 0;
   lastRenderedEventId = 0;
@@ -2115,10 +2127,12 @@ function updateStats() {
   }
   const playback = playbackController.snapshot();
   const totalDroppedFrames = playback.droppedFrames + droppedDecodeFrames;
-  renderModelTelemetry("minwm", {
+  const primaryStats = {
     ...playback,
     frames,
     bytes,
+    bytesReceived: primaryReceivedBytes,
+    receiveMbps: primaryReceiveMbps,
     lastChunk: lastRenderedChunk,
     frameBatchGapCount,
     lastDecodeMs,
@@ -2128,7 +2142,11 @@ function updateStats() {
     decodeQueueLength: pendingDecodeBatches,
     chunkTelemetry: primaryChunkTelemetry,
     lastInputUplinkMs: primaryLastInputUplinkMs,
-  });
+    lastDownlinkMs: primaryLastDownlinkMs,
+    lastControlToVideoMs: primaryLastControlToVideoMs,
+  };
+  renderModelTelemetry("minwm", primaryStats);
+  renderProtocolPerformance("minwm", primaryStats);
 }
 
 function resetModelTelemetry(key) {
@@ -2180,6 +2198,8 @@ function renderProtocolPerformance(key, stats = {}) {
   const e2eMs = Number(
     stats.lastPresentedControlToVideoMs || stats.lastControlToVideoMs || 0,
   );
+  const webpActive = bytesReceived > 0 && !activeH264Models.has(key);
+  const unavailableForTransport = webpActive ? "WebP 未启用" : "-";
   $(`${key}PerfData`).textContent = bytesReceived > 0
     ? `${receiveMbps.toFixed(1)} Mb/s`
     : "-";
@@ -2200,20 +2220,20 @@ function renderProtocolPerformance(key, stats = {}) {
     : "-";
   $(`${key}PerfH264Queue`).textContent = bridgeQueueMs > 0
     ? performanceMs(bridgeQueueMs)
-    : "-";
+    : unavailableForTransport;
   $(`${key}PerfH264Feed`).textContent = h264FeedMs > 0
     ? performanceMs(h264FeedMs)
-    : "-";
+    : unavailableForTransport;
   $(`${key}PerfDownlink`).textContent = webSocketDownlinkMs > 0
     ? performanceMs(webSocketDownlinkMs)
     : "-";
   $(`${key}PerfMseQueue`).textContent = mseQueueMs > 0
     ? performanceMs(mseQueueMs)
-    : "-";
+    : unavailableForTransport;
   $(`${key}PerfMseAppend`).textContent = mseAppendMs > 0
     ? performanceMs(mseAppendMs)
-    : "-";
-  $(`${key}PerfPlaybackBuffer`).textContent = playbackBufferMs > 0
+    : unavailableForTransport;
+  $(`${key}PerfPlaybackBuffer`).textContent = bytesReceived > 0
     ? performanceMs(playbackBufferMs)
     : "-";
   $(`${key}PerfE2E`).textContent = e2eMs > 0 ? performanceMs(e2eMs) : "-";
@@ -4850,6 +4870,16 @@ function renderLoop(now) {
     fpsSamples = fpsSamples.filter((t) => now - t < 1000);
     lastRenderedChunk = item.chunk;
     lastRenderedEventId = Number(item.eventId || lastRenderedEventId || 0);
+    const renderedControlEventIds = Array.from(primaryControlSentEpochByEvent.keys())
+      .filter((eventId) => eventId <= lastRenderedEventId)
+      .sort((left, right) => left - right);
+    if (renderedControlEventIds.length) {
+      const sentEpochMs = primaryControlSentEpochByEvent.get(renderedControlEventIds[0]);
+      primaryLastControlToVideoMs = Math.max(0, Date.now() - sentEpochMs);
+      for (const eventId of renderedControlEventIds) {
+        primaryControlSentEpochByEvent.delete(eventId);
+      }
+    }
     lastDisplayLagMs = now - (item.receivedAt || now);
     recordChunkFirstRendered(item.chunk, {
       render_loop: true,
@@ -5996,6 +6026,25 @@ function handlePrimaryControlAck(message) {
   updateStats();
 }
 
+function observePrimaryFrameTransport(header, payloadBytes) {
+  const serverSentEpochMs = Number(header.server_sent_epoch_ms || 0);
+  if (serverSentEpochMs > 0) {
+    primaryLastDownlinkMs = Math.max(0, Date.now() - serverSentEpochMs);
+  }
+  const now = performance.now();
+  primaryReceivedBytes += Math.max(0, Number(payloadBytes || 0));
+  if (primaryLastNetworkSample && now > primaryLastNetworkSample.at) {
+    const elapsedSeconds = (now - primaryLastNetworkSample.at) / 1000;
+    primaryReceiveMbps = Math.max(
+      0,
+      (primaryReceivedBytes - primaryLastNetworkSample.bytes) * 8
+        / elapsedSeconds
+        / 1_000_000,
+    );
+  }
+  primaryLastNetworkSample = { at: now, bytes: primaryReceivedBytes };
+}
+
 function receive(data, epoch) {
   if (!pendingHeader) {
     const receivedAt = performance.now();
@@ -6043,6 +6092,10 @@ function receive(data, epoch) {
         payload_bytes: payload?.byteLength || payload?.size || payload?.length || 0,
         frame_batch_gap_count: observeFrameBatchGap(message),
       });
+      observePrimaryFrameTransport(
+        message,
+        payload?.byteLength || payload?.size || payload?.length || 0,
+      );
       recordFrameBatchReceived(message, payload?.byteLength || payload?.size || payload?.length || 0);
       enqueueDecodeBatch(message, payload, epoch);
       schedulePrimaryPlaybackAck();
@@ -6086,6 +6139,10 @@ function receive(data, epoch) {
     payload_bytes: data.byteLength || data.size || data.length || 0,
     frame_batch_gap_count: observeFrameBatchGap(header),
   });
+  observePrimaryFrameTransport(
+    header,
+    data.byteLength || data.size || data.length || 0,
+  );
   recordFrameBatchReceived(header, data?.byteLength || data?.size || data?.length || 0);
   enqueueDecodeBatch(header, data, epoch);
   schedulePrimaryPlaybackAck();
@@ -6214,7 +6271,17 @@ function sendEvent(kind, payload, historyText = null) {
     return null;
   }
   const eventId = delivery.eventId;
-  const clientSentPerfMs = performance.now();
+  if (
+    delivery.sent.minwm
+    && ["camera_actions", "prompt", "scene_cut"].includes(kind)
+  ) {
+    primaryControlSentEpochByEvent.set(eventId, Date.now());
+    while (primaryControlSentEpochByEvent.size > 64) {
+      primaryControlSentEpochByEvent.delete(
+        primaryControlSentEpochByEvent.keys().next().value,
+      );
+    }
+  }
   markClientTrace("client.event_sent", {
     kind,
     event_id: eventId,

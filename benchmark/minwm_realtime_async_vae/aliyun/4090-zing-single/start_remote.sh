@@ -24,7 +24,7 @@ BASE_DIR="${BASE_DIR:-/data/zing-realtime}"
 DOCKER_NETWORK="${DOCKER_NETWORK:-zing-realtime}"
 PUBLIC_WEB_PORT="${PUBLIC_WEB_PORT:-80}"
 
-UI_CONFIG_JSON="${UI_CONFIG_JSON:-{\"generationModes\":[\"i2v\"],\"defaultGenerationMode\":\"i2v\",\"modelSlots\":[\"minwm\"],\"lockModelSlots\":true,\"size\":\"832x480\",\"targetFps\":24,\"sessionMaxLifetimeSeconds\":45,\"playbackAckEnabled\":false,\"h264WebSocketEnabled\":false,\"singleExperience\":false,\"smoothCatchupRateMax\":1.1,\"dualModels\":{\"minwm\":{\"label\":\"Zing\",\"size\":\"832x480\",\"targetFps\":24,\"sinkSize\":8,\"windowFrames\":32,\"continuous\":true,\"h264StartupDropFrames\":0}}}}"
+UI_CONFIG_JSON="${UI_CONFIG_JSON:-{\"generationModes\":[\"i2v\"],\"defaultGenerationMode\":\"i2v\",\"modelSlots\":[\"minwm\"],\"lockModelSlots\":true,\"size\":\"832x480\",\"targetFps\":24,\"sessionMaxLifetimeSeconds\":70,\"playbackAckEnabled\":false,\"h264WebSocketEnabled\":false,\"singleExperience\":false,\"smoothCatchupRateMax\":1.1,\"dualModels\":{\"minwm\":{\"label\":\"Zing\",\"size\":\"832x480\",\"targetFps\":24,\"sinkSize\":8,\"windowFrames\":32,\"continuous\":true,\"h264StartupDropFrames\":0}}}}"
 
 log() {
   printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"
@@ -296,8 +296,8 @@ start_denoiser() {
       --realtime-max-sessions-per-worker=1 \
       --realtime-vae-backend=taehv_remote \
       --realtime-vae-transport=websocket \
-      --realtime-session-idle-timeout-s=60 \
-      --realtime-session-max-lifetime-s=45 \
+      --realtime-session-idle-timeout-s=90 \
+      --realtime-session-max-lifetime-s=70 \
       --realtime-admission-wait-s=10 \
       --realtime-causal-sink-size=8 \
       --realtime-causal-kv-cache-num-frames=32 \
@@ -348,7 +348,7 @@ start_gateway() {
       --internal-output-url=ws://zing-gateway:18080/v1/internal/realtime_output \
       --output-queue-depth=64 \
       --output-enqueue-timeout-s=0 \
-      --output-drain-timeout-s=45 \
+      --output-drain-timeout-s=70 \
       --lease-renew-interval-s=10 \
       --release-grace-s=0.5 \
       --max-admission-waiters=64 \
