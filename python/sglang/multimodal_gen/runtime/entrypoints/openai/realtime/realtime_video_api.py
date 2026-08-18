@@ -381,6 +381,36 @@ async def _session_watchdog(
             return "session lease lost"
 
 
+def _mark_session_playable_from_server_output(
+    session: GenerateSession,
+    *,
+    source: str,
+    request_id: str | None = None,
+    chunk_index: int | None = None,
+    event_id: int | None = None,
+) -> None:
+    """Start the hard server-side lifetime once the server has emitted media.
+
+    Playback ACKs are useful telemetry, but they are client-controlled.  The
+    server-side max lifetime must not depend solely on ACKs, otherwise a
+    modified frontend can keep the GPU lease alive by sending heartbeats while
+    withholding the first "playable" ACK.
+    """
+
+    was_playable = session.playable_at is not None
+    session.mark_playable()
+    if not was_playable:
+        log_realtime_trace(
+            logger,
+            session,
+            "server.session_playable_marked",
+            source=source,
+            request_id=request_id,
+            chunk_index=chunk_index,
+            event_id=event_id,
+        )
+
+
 def _coerce_metric_ms(value: Any) -> float | None:
     try:
         metric = float(value)
@@ -749,6 +779,7 @@ def _make_remote_frame_batch_handler(
 
     async def on_frame_batch(frame_batch: RemoteFrameBatch) -> None:
         nonlocal first_remote_batch
+        is_first_remote_batch = first_remote_batch
         if first_remote_batch:
             first_remote_batch = False
             log_realtime_trace(
@@ -767,6 +798,14 @@ def _make_remote_frame_batch_handler(
             frame_batch,
             send_stats,
         )
+        if is_first_remote_batch:
+            _mark_session_playable_from_server_output(
+                session,
+                source="remote_frame_batch_sent",
+                request_id=chunk.request_id,
+                chunk_index=chunk.index,
+                event_id=getattr(batch, "realtime_event_id", None),
+            )
 
     return on_frame_batch
 
@@ -1316,11 +1355,13 @@ async def _send_output_and_log(
             result,
             batch,
         )
-        # ACK-aware clients start their lifetime only after a frame is
-        # actually rendered. Legacy clients keep the historical first-send
-        # fallback so this protocol extension is backwards compatible.
-        if not session.playback_ack_enabled:
-            session.mark_playable()
+        _mark_session_playable_from_server_output(
+            session,
+            source="output_batch_sent",
+            request_id=chunk.request_id,
+            chunk_index=batch.block_idx,
+            event_id=getattr(batch, "realtime_event_id", None),
+        )
         send_stats["pace_wait_ms"] = pace_wait_ms
         chunk_total_ms = (time.perf_counter() - chunk_started) * 1000
         _log_realtime_chunk_timing(
