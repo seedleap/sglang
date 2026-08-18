@@ -20,6 +20,13 @@ The core versions are sourced from `python/pyproject.toml`: Torch
 `kernels-community/sgl-flash-attn3` kernel. Do not add the classic
 `flash-attn` distribution or a separate top-level `flash_attn_interface`; they
 are not needed and can create an ambiguous `flash_attn` namespace or Torch ABI.
+The MinWM runtime also excludes MoviePy 2.2.1: it requires Pillow `<12`, while
+the image keeps a security-fixed Pillow `>=12.2`; MinWM video encoding uses
+PyAV/imageio-ffmpeg and has no MoviePy runtime import. This exclusion is a
+specialized build argument and does not change the default SGLang image.
+The same specialized build omits NIXL: MinWM does not use disaggregated
+transfer, while the NIXL 1.4 meta package intentionally pulls both CUDA 12 and
+CUDA 13 backends. The core SGLang runtime keeps its default NIXL behavior.
 The release build also fixes `SGLANG_USE_SGL_FA3_KERNEL=0`, so Hopper selects
 that locked kernels-community artifact instead of the compatible sgl-kernel
 fallback. The runtime contract rejects an image if this selector drifts.
@@ -117,6 +124,43 @@ The Jobs do not mount S3/PVCs or install anything at startup. Archive their raw
 logs, complete Pod JSON, requested top-level image digest, and kubelet `imageID`.
 Do not submit the B200 Job while the warm p6 node is full unless provisioning a
 second Spot node is intentional.
+
+Before the 720p performance gate, verify that the current S3 objects still
+match the pinned checkpoint, first frame, and 12 donor-component versions. The
+preflight compares the control-plane VersionId, size, ETag, and available S3
+checksum and should be archived with the release evidence:
+
+```bash
+python3 benchmark/minwm_unified_image/verify_720p_inputs.py \
+  --profile spot \
+  --output /tmp/minwm-720p-input-preflight.json
+```
+
+The in-Pod runner independently checks the staged checkpoint and first-frame
+SHA256 plus every donor file's path, size, and SHA256 from `inputs_720p.json`. Render
+the matching performance Job only after the preflight passes:
+
+```bash
+bash benchmark/minwm_unified_image/render_gpu_performance_job.sh \
+  hopper <source-sha40> sha256:<image-digest> \
+  > /tmp/minwm-image-perf-h200.yaml
+kubectl --context codex-minwm-test-phx2 apply \
+  --dry-run=server -f /tmp/minwm-image-perf-h200.yaml
+
+bash benchmark/minwm_unified_image/render_gpu_performance_job.sh \
+  blackwell <source-sha40> sha256:<image-digest> \
+  > /tmp/minwm-image-perf-b200.yaml
+kubectl --context leap-world-use2 apply \
+  --dry-run=server -f /tmp/minwm-image-perf-b200.yaml
+```
+
+Each Job reserves all eight GPUs for isolation but exposes only device 0 to
+Torch. Audit and archive every Pod on the selected Node at gate start/end so a
+CPU-only co-tenant cannot silently contaminate the 3% threshold. The accepted
+H200 floor (`7.8969868` scheduler FPS) came from the legacy packed FA2 image and
+is only the bootstrap floor for the first FA3 release; after that release
+passes, promote its 100-chunk FA3 result to the next image's H200 baseline.
+The B200 floor (`14.3957956`) already used packed FA4.
 
 An image is releasable only after:
 

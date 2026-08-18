@@ -1,5 +1,5 @@
-from types import SimpleNamespace
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -56,9 +56,14 @@ class _FakeLockfile:
 
 def _patch_valid_software(monkeypatch):
     versions = {
+        "cryptography": "50.0.0",
+        "distro": "1.9.0",
         "flash-attn-4": "4.0.0b15",
         "kernels": "0.14.1",
         "nvidia-cutlass-dsl": "4.5.2",
+        "pillow": "12.3.0",
+        "pyjwt": "2.13.0",
+        "pyparsing": "3.3.2",
         "sglang-kernel": "0.4.4",
         "torch": "2.11.0+cu130",
         "flash-attn": None,
@@ -127,6 +132,25 @@ def test_software_validation_rejects_wrong_fa3_provider_selection(monkeypatch):
     _, errors = probe._validate_software(torch_module, "a" * 40)
 
     assert any("SGLANG_USE_SGL_FA3_KERNEL" in error for error in errors)
+
+
+@pytest.mark.parametrize("unexpected", ["moviepy", "nixl", "nixl-cu13"])
+def test_software_validation_rejects_excluded_distribution(monkeypatch, unexpected):
+    torch_module = _patch_valid_software(monkeypatch)
+    versions = {
+        name: spec.removeprefix("==").removeprefix(">=")
+        for name, spec in probe.EXPECTED_PACKAGE_SPECS.items()
+    }
+    versions[unexpected] = "1.0.0"
+    monkeypatch.setattr(probe, "package_version", versions.get)
+
+    _, errors = probe._validate_software(torch_module, "a" * 40)
+
+    assert errors
+    assert any(
+        "MoviePy" in error if unexpected == "moviepy" else "NIXL" in error
+        for error in errors
+    )
 
 
 def test_fa3_compat_omits_unsupported_default_keywords():

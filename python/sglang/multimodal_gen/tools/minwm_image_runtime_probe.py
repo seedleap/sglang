@@ -18,12 +18,16 @@ from typing import Any
 
 from packaging.specifiers import SpecifierSet
 
-
 CONTRACT_VERSION = "minwm-image-runtime-contract/v1"
 EXPECTED_PACKAGE_SPECS = {
+    "cryptography": "==50.0.0",
+    "distro": "==1.9.0",
     "flash-attn-4": "==4.0.0b15",
     "kernels": "==0.14.1",
     "nvidia-cutlass-dsl": "==4.5.2",
+    "pillow": ">=12.2.0",
+    "pyjwt": "==2.13.0",
+    "pyparsing": "==3.3.2",
     "sglang-kernel": "==0.4.4",
     "torch": "==2.11.0+cu130",
 }
@@ -139,6 +143,23 @@ def _validate_software(
             "flash-attn-4 namespace"
         )
 
+    moviepy = package_version("moviepy")
+    if moviepy is not None:
+        errors.append(
+            "MoviePy is installed even though its released Pillow<12 dependency "
+            "conflicts with the MinWM image's security-fixed Pillow runtime"
+        )
+
+    nixl_distributions = {
+        name: package_version(name) for name in ("nixl", "nixl-cu12", "nixl-cu13")
+    }
+    if any(version is not None for version in nixl_distributions.values()):
+        errors.append(
+            "NIXL distributions are installed even though MinWM does not use "
+            "disaggregated transfer and the nixl meta package requires both CUDA "
+            "12 and CUDA 13 backends"
+        )
+
     torch_version = str(torch_module.__version__)
     torch_cuda = str(torch_module.version.cuda)
     if torch_version != "2.11.0+cu130":
@@ -244,6 +265,8 @@ def _validate_software(
             "image_tag": os.environ.get("SGLANG_IMAGE_TAG") or None,
             "packages": packages,
             "classic_flash_attn_distribution": classic_flash_attn,
+            "moviepy_distribution": moviepy,
+            "nixl_distributions": nixl_distributions,
             "fa3_kernel_lockfile": str(lockfile),
             "fa3_kernel_lock_contains_repository": lock_contains_fa3,
             "fa3_kernel_revision": lock_revision,
@@ -455,6 +478,7 @@ def _run_ffn_kernel_smoke(family: str) -> list[dict[str, Any]]:
 
 def _fa3_provider_info() -> dict[str, Any]:
     from sgl_kernel.flash_attn import flash_attn_varlen_func as fallback_function
+
     from sglang.jit_kernel.flash_attention_v3 import _load_fa3_kernels
 
     function = _load_fa3_kernels()["flash_attn_varlen_func"]
