@@ -7,8 +7,9 @@
     minSourceFps: 1,
     serverFpsAlphaUp: 0.28,
     serverFpsAlphaDown: 0.2,
-    deliveryFpsAlphaUp: 0.08,
-    deliveryFpsAlphaDown: 0.55,
+    deliveryFpsAlphaUp: 0.18,
+    deliveryFpsAlphaDown: 0.35,
+    deliveryFpsWindowSize: 5,
     targetLeadChunkRatio: 0.45,
     minTargetLeadMs: 180,
     maxTargetLeadMs: 360,
@@ -81,6 +82,7 @@
       this.deliveryFps = this.targetFps;
       this.hasServerSample = false;
       this.hasDeliverySample = false;
+      this.deliveryFpsSamples = [];
       this.latestChunkDurationMs = 1000 / this.targetFps;
       this.latestChunkFrames = 1;
       this.playbackRate = 1;
@@ -302,9 +304,11 @@
     }
 
     get playbackCadenceFps() {
-      if (this.mode === "smooth_timeline" && this.hasServerSample) {
-        return this.serverFps;
-      }
+      // Server FPS is a generation target on several realtime backends. The
+      // delivery cadence is the only rate the browser can sustain without
+      // repeatedly draining its jitter buffer.
+      if (this.mode === "smooth_timeline" && this.hasDeliverySample) return this.sourceFps;
+      if (this.mode === "smooth_timeline" && this.hasServerSample) return this.serverFps;
       return this.sourceFps;
     }
 
@@ -373,14 +377,28 @@
       const isDelivery = kind === "delivery";
       const currentFps = isDelivery ? this.deliveryFps : this.serverFps;
       const hasSample = isDelivery ? this.hasDeliverySample : this.hasServerSample;
+      let observedFps = cappedFps;
+      if (isDelivery) {
+        this.deliveryFpsSamples.push(cappedFps);
+        const windowSize = Math.max(1, Math.round(this.config.deliveryFpsWindowSize));
+        if (this.deliveryFpsSamples.length > windowSize) this.deliveryFpsSamples.shift();
+        const sortedSamples = [...this.deliveryFpsSamples].sort((a, b) => a - b);
+        observedFps = sortedSamples[Math.floor(sortedSamples.length / 2)];
+      }
+      const seedSmoothDeliveryFromServer =
+        isDelivery &&
+        this.mode === "smooth_timeline" &&
+        !hasSample &&
+        this.hasServerSample;
       let nextFps;
-      if (!hasSample) {
-        nextFps = cappedFps;
+      if (!hasSample && !seedSmoothDeliveryFromServer) {
+        nextFps = observedFps;
       } else {
-        const alpha = cappedFps > currentFps
+        const seedFps = seedSmoothDeliveryFromServer ? this.serverFps : currentFps;
+        const alpha = observedFps > seedFps
           ? (isDelivery ? this.config.deliveryFpsAlphaUp : this.config.serverFpsAlphaUp)
           : (isDelivery ? this.config.deliveryFpsAlphaDown : this.config.serverFpsAlphaDown);
-        nextFps = currentFps * (1 - alpha) + cappedFps * alpha;
+        nextFps = seedFps * (1 - alpha) + observedFps * alpha;
       }
       if (isDelivery) {
         this.deliveryFps = nextFps;

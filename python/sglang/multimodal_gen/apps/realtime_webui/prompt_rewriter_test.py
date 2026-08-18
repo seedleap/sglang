@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import unittest
+from unittest.mock import patch
 from types import SimpleNamespace
 
 from prompt_rewriter import (
@@ -35,7 +36,9 @@ class PromptRewriterTest(unittest.IsolatedAsyncioTestCase):
     async def test_rewrite_returns_prompt_and_lifetime(self):
         models = FakeModels()
         client = SimpleNamespace(aio=SimpleNamespace(models=models))
-        rewriter = PromptRewriter(client=client, request_timeout_seconds=1)
+        rewriter = PromptRewriter(
+            client=client, request_timeout_seconds=1, provider="vertex"
+        )
         result = await rewriter.rewrite("让世界下雪", "A dragon flies over a valley.")
         self.assertEqual(result.change_type.value, "persistent")
         self.assertIn("falling snow", result.prompt)
@@ -54,7 +57,7 @@ class PromptRewriterTest(unittest.IsolatedAsyncioTestCase):
             ]
         )
         client = SimpleNamespace(aio=SimpleNamespace(models=models))
-        result = await PromptRewriter(client=client).rewrite(
+        result = await PromptRewriter(client=client, provider="vertex").rewrite(
             "保持位置", "A dragon flies over a valley."
         )
         self.assertIn("original", result.prompt)
@@ -69,7 +72,7 @@ class PromptRewriterTest(unittest.IsolatedAsyncioTestCase):
             ]
         )
         client = SimpleNamespace(aio=SimpleNamespace(models=models))
-        result = await PromptRewriter(client=client).rewrite(
+        result = await PromptRewriter(client=client, provider="vertex").rewrite(
             "跳一下", "A dragon flies over a valley."
         )
         self.assertEqual(result.change_type.value, "one_time")
@@ -80,7 +83,7 @@ class PromptRewriterTest(unittest.IsolatedAsyncioTestCase):
         models = FakeModels([RuntimeError("vertex unavailable")])
         client = SimpleNamespace(aio=SimpleNamespace(models=models))
         with self.assertRaisesRegex(RuntimeError, "vertex unavailable"):
-            await PromptRewriter(client=client).rewrite(
+            await PromptRewriter(client=client, provider="vertex").rewrite(
                 "跳一下", "A dragon flies over a valley."
             )
         self.assertEqual(len(models.calls), 1)
@@ -96,7 +99,9 @@ class PromptRewriterTest(unittest.IsolatedAsyncioTestCase):
             ]
         )
         client = SimpleNamespace(aio=SimpleNamespace(models=models))
-        result = await PromptRewriter(client=client).complete_world_rule(
+        result = await PromptRewriter(
+            client=client, provider="vertex"
+        ).complete_world_rule(
             "召唤飞船", "A rider explores a valley.", "skill"
         )
         self.assertEqual(result.name, "召唤飞船")
@@ -104,6 +109,39 @@ class PromptRewriterTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("RULE KIND: skill", models.calls[0]["contents"][0])
         self.assertIn("召唤飞船", models.calls[0]["contents"][0])
         self.assertEqual(len(models.calls), 1)
+
+    async def test_local_provider_rewrites_without_external_client(self):
+        with patch.dict(
+            "os.environ", {"VIDEO_PROMPT_REWRITE_PROVIDER": "local"}
+        ):
+            rewriter = PromptRewriter(credentials_path="/missing/credential.json")
+            result = await rewriter.rewrite(
+                "让小狗向左走", "A golden dog walks through a meadow."
+            )
+        self.assertTrue(rewriter.configured)
+        self.assertIn("A golden dog walks through a meadow.", result.prompt)
+        self.assertIn("让小狗向左走", result.prompt)
+        self.assertEqual(result.change_type.value, "persistent")
+
+    async def test_local_provider_classifies_transient_action(self):
+        with patch.dict(
+            "os.environ", {"VIDEO_PROMPT_REWRITE_PROVIDER": "local"}
+        ):
+            result = await PromptRewriter().rewrite(
+                "召唤一道闪电", "A rider crosses a quiet valley."
+            )
+        self.assertEqual(result.change_type.value, "one_time")
+
+    async def test_local_provider_completes_world_rule(self):
+        with patch.dict(
+            "os.environ", {"VIDEO_PROMPT_REWRITE_PROVIDER": "local"}
+        ):
+            result = await PromptRewriter().complete_world_rule(
+                "召唤飞船", "A rider explores a valley.", "skill"
+            )
+        self.assertEqual(result.name, "召唤飞船")
+        self.assertEqual(result.change_type.value, "one_time")
+        self.assertIn("召唤飞船", result.prompt)
 
     def test_build_message_rejects_missing_state(self):
         with self.assertRaisesRegex(ValueError, "previous_prompt"):

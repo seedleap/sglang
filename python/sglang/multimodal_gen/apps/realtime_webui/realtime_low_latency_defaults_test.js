@@ -203,6 +203,16 @@ assert.match(
 );
 assert.match(
   appJs,
+  /minStartLeadMs:\s*850/,
+  "smooth playback should wait for an observed delivery cadence before starting",
+);
+assert.match(
+  appJs,
+  /minResumeLeadMs:\s*550/,
+  "smooth playback should rebuild a bounded jitter cushion after an underrun",
+);
+assert.match(
+  appJs,
   /smoothTimelinePlaybackRateMax:\s*DEFAULT_SMOOTH_CATCHUP_RATE/,
   "smooth timeline should use the production-configured bounded catch-up rate",
 );

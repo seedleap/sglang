@@ -791,10 +791,10 @@ const playbackController = new RealtimePlaybackController({
   realtimeMaxBufferChunks: ONLINE_MAX_BUFFER_CHUNKS,
   realtimeMaxFrameAgeMs: ONLINE_MAX_FRAME_AGE_MS,
   startLeadChunkRatio: 0.45,
-  minStartLeadMs: 220,
+  minStartLeadMs: 850,
   resumeLeadChunkRatio: 0.45,
-  minResumeLeadMs: 180,
-  maxResumeLeadMs: 650,
+  minResumeLeadMs: 550,
+  maxResumeLeadMs: 850,
   maxDeliveryLeadBoostMs: 0,
   deliveryStallExpectedMultiplier: 1.8,
 });

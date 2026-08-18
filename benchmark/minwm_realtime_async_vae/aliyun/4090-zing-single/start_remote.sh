@@ -13,7 +13,7 @@ ACR_REGISTRY="${ACR_REGISTRY:-loopit-registry-bj-registry.cn-beijing.cr.aliyuncs
 ACR_REPOSITORY="${ACR_REPOSITORY:-minwm/sglang-minwm-realtime}"
 GPU_IMAGE="${GPU_IMAGE:-${ACR_REGISTRY}/${ACR_REPOSITORY}:gpu-c7ae70a65a2d}"
 GATEWAY_IMAGE="${GATEWAY_IMAGE:-${ACR_REGISTRY}/${ACR_REPOSITORY}:gateway-c7ae70a65a2d}"
-WEBUI_IMAGE="${WEBUI_IMAGE:-${ACR_REGISTRY}/${ACR_REPOSITORY}:webui-c7ae70a65a2d}"
+WEBUI_IMAGE="${WEBUI_IMAGE:-${GPU_IMAGE}}"
 CONTROL_IMAGE="${CONTROL_IMAGE:-${GPU_IMAGE}}"
 
 MODEL_ID="${MODEL_ID:-wan22-5b-stage3-dmd-47-0808-2fb2cfec2a2}"
@@ -159,15 +159,23 @@ login_acr() {
 pull_images() {
   log "pulling runtime images"
   docker pull "${GPU_IMAGE}"
+  docker pull "${WEBUI_IMAGE}"
 }
 
 stop_old_containers() {
   log "stopping old zing-realtime containers"
-  local names
-  names="$(docker ps -a --filter 'name=^/zing-' --format '{{.Names}}' || true)"
-  if [[ -n "${names}" ]]; then
-    xargs -r docker rm -f <<<"${names}" >/dev/null
-  fi
+  local gpu
+  local names=(
+    zing-coordinator
+    zing-vae
+    zing-vae-heartbeat
+    zing-gateway
+    zing-webui
+  )
+  for gpu in 1 2 3 4 5; do
+    names+=("zing-denoiser-${gpu}" "zing-denoiser-${gpu}-heartbeat")
+  done
+  docker rm -f "${names[@]}" >/dev/null 2>&1 || true
   docker network inspect "${DOCKER_NETWORK}" >/dev/null 2>&1 || \
     docker network create "${DOCKER_NETWORK}" >/dev/null
 }
@@ -367,10 +375,11 @@ start_webui() {
     -e REALTIME_UPSTREAM_WS=ws://zing-gateway:18080 \
     -e MINWM_UPSTREAM_HTTP=http://zing-gateway:18080/backends/minwm \
     -e MINWM_UPSTREAM_WS=ws://zing-gateway:18080/backends/minwm \
+    -e VIDEO_PROMPT_REWRITE_PROVIDER=local \
     -e REALTIME_UI_CONFIG_JSON="${UI_CONFIG_JSON}" \
     "${common_mounts[@]}" \
     --entrypoint python \
-    "${CONTROL_IMAGE}" \
+    "${WEBUI_IMAGE}" \
     /opt/sglang/python/sglang/multimodal_gen/apps/realtime_webui/server.py \
     >"${BASE_DIR}/logs/webui.container"
 }
@@ -434,10 +443,11 @@ main() {
   wait_container_http zing-coordinator http://127.0.0.1:18081/healthz
   start_vae
   wait_container_http zing-vae http://127.0.0.1:18082/health
-  for gpu in 1 2 3 4 5 6 7; do
+  # GPU 6 and 7 are reserved for another team workload on this shared host.
+  for gpu in 1 2 3 4 5; do
     start_denoiser "${gpu}" "${gpu}"
   done
-  for gpu in 1 2 3 4 5 6 7; do
+  for gpu in 1 2 3 4 5; do
     wait_container_http "zing-denoiser-${gpu}" http://127.0.0.1:30000/health
   done
   start_gateway

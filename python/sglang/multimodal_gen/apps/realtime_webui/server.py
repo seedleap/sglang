@@ -818,7 +818,10 @@ async def _proxy_backend_websocket(request):
 
 async def _session_context(app):
     app[SESSION] = ClientSession(timeout=ClientTimeout(total=None))
-    if app[PROMPT_REWRITER].configured:
+    if (
+        app[PROMPT_REWRITER].configured
+        and app[PROMPT_REWRITER].provider != "local"
+    ):
         try:
             await app[PROMPT_REWRITER]._get_client()
         except Exception:

@@ -590,7 +590,7 @@ function deliveryFpsCapsOptimisticServerFps() {
   assert.ok(snapshot.sourceFps < 7, `source fps ${snapshot.sourceFps}`);
 }
 
-function smoothTimelineDoesNotTurnDeliveryJitterIntoPlaybackSlowdown() {
+function smoothTimelineUsesSmoothedDeliveryCadence() {
   const controller = new RealtimePlaybackController({
     mode: "smooth_timeline",
     targetFps: 24,
@@ -614,10 +614,10 @@ function smoothTimelineDoesNotTurnDeliveryJitterIntoPlaybackSlowdown() {
   const snapshot = controller.snapshot();
 
   assert.ok(snapshot.serverFps > 22, `server fps ${snapshot.serverFps}`);
-  assert.ok(snapshot.deliveryFps < 7, `delivery fps ${snapshot.deliveryFps}`);
-  assert.ok(snapshot.sourceFps < 7, `effective fps ${snapshot.sourceFps}`);
+  assert.ok(snapshot.deliveryFps > 17 && snapshot.deliveryFps < 20, `delivery fps ${snapshot.deliveryFps}`);
+  assert.ok(snapshot.sourceFps > 17 && snapshot.sourceFps < 20, `effective fps ${snapshot.sourceFps}`);
   assert.ok(snapshot.bufferMs < 1600, `buffer ms ${snapshot.bufferMs}`);
-  assert.ok(snapshot.renderFps > 22, `render fps ${snapshot.renderFps}`);
+  assert.ok(snapshot.renderFps > 17 && snapshot.renderFps < 22, `render fps ${snapshot.renderFps}`);
 }
 
 function smoothTimelineModeKeepsRealtimeTailBounded() {
@@ -825,7 +825,7 @@ adaptiveModeCutsActiveInputWithoutOldFrameGrace();
 adaptiveModeDropsBufferedFramesForActiveInputCutover();
 adaptiveModeRendersCutoverFrameWithoutWaitingForBufferLead();
 deliveryFpsCapsOptimisticServerFps();
-smoothTimelineDoesNotTurnDeliveryJitterIntoPlaybackSlowdown();
+smoothTimelineUsesSmoothedDeliveryCadence();
 smoothTimelineModeKeepsRealtimeTailBounded();
 smoothTimelineModeAllowsSoftRealtimeJitterWindow();
 deliveryCadenceExpandsAdaptiveLeadWindow();

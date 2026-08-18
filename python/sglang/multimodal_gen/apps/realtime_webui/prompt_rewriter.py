@@ -24,6 +24,26 @@ DEFAULT_CREDENTIALS_PATH = (
 DEFAULT_MODEL = "gemini-3.1-flash-lite"
 DEFAULT_LOCATION = "global"
 VERTEX_SCOPE = "https://www.googleapis.com/auth/cloud-platform"
+LOCAL_PROVIDER = "local"
+
+_ONE_TIME_HINTS = (
+    "attack",
+    "cast",
+    "explode",
+    "explosion",
+    "jump",
+    "release",
+    "shoot",
+    "summon",
+    "transform",
+    "攻击",
+    "爆炸",
+    "变身",
+    "发射",
+    "释放",
+    "跳",
+    "召唤",
+)
 
 
 class ChangeType(str, Enum):
@@ -171,6 +191,44 @@ def _validate_world_rule_output(payload: Any) -> WorldRuleCompletionOutput:
     return WorldRuleCompletionOutput.model_validate(payload)
 
 
+def _classify_local_change(instruction: str) -> ChangeType:
+    normalized = instruction.casefold()
+    return (
+        ChangeType.ONE_TIME
+        if any(hint in normalized for hint in _ONE_TIME_HINTS)
+        else ChangeType.PERSISTENT
+    )
+
+
+def _local_rewrite(instruction: str, previous_prompt: str) -> PromptRewriteOutput:
+    """Build a bounded prompt update when the configured LLM is unreachable.
+
+    This mode intentionally preserves the complete prior state and appends the
+    user's latest direction. It is deterministic and has no external network
+    dependency, which makes it suitable for mainland deployments.
+    """
+
+    normalized_prompt = previous_prompt.strip()
+    normalized_instruction = instruction.strip()
+    if not normalized_prompt:
+        raise ValueError("previous_prompt must not be empty")
+    if not normalized_instruction:
+        raise ValueError("instruction must not be empty")
+    return PromptRewriteOutput(
+        prompt=(
+            f"{normalized_prompt}\n\n"
+            "Apply this latest live direction while preserving all unspecified "
+            f"subjects, composition, lighting, and scene continuity: {normalized_instruction}"
+        ),
+        change_type=_classify_local_change(normalized_instruction),
+    )
+
+
+def _local_rule_name(rule_input: str) -> str:
+    compact = " ".join(rule_input.strip().split())
+    return compact[:28] or "Live update"
+
+
 class PromptRewriter:
     """One warm Vertex Gemini client shared by all rewrite HTTP requests."""
 
@@ -184,7 +242,16 @@ class PromptRewriter:
         request_timeout_seconds: float | None = None,
         max_attempts: int = 2,
         client: Any | None = None,
+        provider: str | None = None,
     ) -> None:
+        self.provider = (
+            provider
+            or os.environ.get("VIDEO_PROMPT_REWRITE_PROVIDER", "vertex")
+        ).strip().lower()
+        if self.provider not in {"vertex", LOCAL_PROVIDER}:
+            raise ValueError(
+                "VIDEO_PROMPT_REWRITE_PROVIDER must be vertex or local"
+            )
         self.model = model or os.environ.get(
             "VIDEO_PROMPT_REWRITE_MODEL", DEFAULT_MODEL
         )
@@ -210,9 +277,15 @@ class PromptRewriter:
 
     @property
     def configured(self) -> bool:
-        return self._client is not None or self.credentials_path.is_file()
+        return (
+            self.provider == LOCAL_PROVIDER
+            or self._client is not None
+            or self.credentials_path.is_file()
+        )
 
     async def _get_client(self) -> Any:
+        if self.provider == LOCAL_PROVIDER:
+            raise RuntimeError("Local prompt rewriter does not use a Gemini client")
         if self._client is not None:
             return self._client
         async with self._client_lock:
@@ -257,6 +330,9 @@ class PromptRewriter:
         self, instruction: str, previous_prompt: str
     ) -> PromptRewriteOutput:
         """Rewrite once, retrying only malformed structured model output."""
+
+        if self.provider == LOCAL_PROVIDER:
+            return _local_rewrite(instruction, previous_prompt)
 
         from google.genai import types
 
@@ -305,6 +381,14 @@ class PromptRewriter:
         self, rule_input: str, previous_prompt: str, kind: str
     ) -> WorldRuleCompletionOutput:
         """Infer a rule label and prepared prompt in one latency-sensitive call."""
+
+        if self.provider == LOCAL_PROVIDER:
+            rewritten = _local_rewrite(rule_input, previous_prompt)
+            return WorldRuleCompletionOutput(
+                name=_local_rule_name(rule_input),
+                prompt=rewritten.prompt,
+                change_type=rewritten.change_type,
+            )
 
         from google.genai import types
 
