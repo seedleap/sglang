@@ -816,10 +816,8 @@ def test_scheduler_applies_realtime_replacement_that_arrives_before_request():
     scheduler = Scheduler.__new__(Scheduler)
     scheduler.waiting_queue = deque()
     replies = []
-    scheduler.return_result = (
-        lambda output, identity, should_not_return: replies.append(
-            (output.output, identity, should_not_return)
-        )
+    scheduler.return_result = lambda output, identity, should_not_return: (
+        replies.append((output.output, identity, should_not_return))
     )
     original = Req.__new__(Req)
     original.request_id = "request-1"
@@ -868,10 +866,8 @@ def test_scheduler_reports_realtime_replacement_after_dispatch_as_too_late():
     scheduler = Scheduler.__new__(Scheduler)
     scheduler.waiting_queue = deque()
     replies = []
-    scheduler.return_result = (
-        lambda output, identity, should_not_return: replies.append(
-            (output.output, identity, should_not_return)
-        )
+    scheduler.return_result = lambda output, identity, should_not_return: (
+        replies.append((output.output, identity, should_not_return))
     )
     dispatched = Req.__new__(Req)
     dispatched.request_id = "request-1"
@@ -919,8 +915,8 @@ def test_scheduler_rejects_replacement_with_mismatched_envelope_identity():
     scheduler = Scheduler.__new__(Scheduler)
     scheduler.waiting_queue = deque()
     replies = []
-    scheduler.return_result = (
-        lambda output, identity, should_not_return: replies.append(output.output)
+    scheduler.return_result = lambda output, identity, should_not_return: (
+        replies.append(output.output)
     )
     replacement = Req.__new__(Req)
     replacement.request_id = "other-request"
@@ -1048,6 +1044,9 @@ async def _assert_event_listener_does_not_block_on_scheduler_refresh(monkeypatch
             return copy(batch)
 
     class WebSocket:
+        async def send_bytes(self, _message):
+            return None
+
         async def iter_bytes(self):
             for event_id in (1, 2):
                 yield msgspec.msgpack.encode(
@@ -1233,7 +1232,7 @@ def test_generate_loop_overlaps_send_with_next_generation(monkeypatch):
     assert events[-1] == "send_end_1"
 
 
-def test_send_output_keeps_chunk_timing_off_the_video_websocket():
+def test_send_output_emits_one_chunk_telemetry_message_after_adapter_output():
     sent_messages = []
 
     class _Ws:
@@ -1276,11 +1275,17 @@ def test_send_output_keeps_chunk_timing_off_the_video_websocket():
             request_prepare_ms=1.0,
             scheduler_forward_ms=2.0,
             chunk_started=time.perf_counter(),
+            stage_metrics={},
         )
     )
 
     assert stats["raw_write_ms"] == 42.0
-    assert sent_messages == []
+    assert len(sent_messages) == 1
+    telemetry = msgspec.msgpack.decode(sent_messages[0])
+    assert telemetry["type"] == "chunk_telemetry"
+    assert telemetry["chunk_index"] == chunk.index == 0
+    assert telemetry["event_id"] == 11
+    assert telemetry["transport_write_ms"] == 42.2
 
 
 def test_scheduler_stage_metrics_emit_dedicated_realtime_trace_events(monkeypatch):
@@ -1319,40 +1324,70 @@ def test_scheduler_stage_metrics_emit_dedicated_realtime_trace_events(monkeypatc
     assert denoise["source"] == "scheduler_result_metrics"
 
 
-def test_scheduler_stage_metrics_emit_dedicated_realtime_trace_events(monkeypatch):
-    emitted = []
-
-    def fake_log_realtime_trace(_logger, _session, event, **fields):
-        emitted.append((event, fields))
-
+def test_async_raw_frame_enqueue_metric_reaches_chunk_telemetry_without_prometheus_alias(
+    monkeypatch,
+):
+    metrics = RequestMetrics("metrics-req")
+    metrics.record_stage("MinWMCausalDMDDenoisingStage", 0.2)
+    metrics.record_stage("GPUWorker.raw_frame_async_enqueue", 0.00125)
+    result = OutputBatch(metrics=metrics)
+    stage_metrics = realtime_video_api._collect_realtime_result_stage_metrics(result)
+    observed = []
     monkeypatch.setattr(
-        realtime_video_api, "log_realtime_trace", fake_log_realtime_trace
+        realtime_video_api,
+        "observe_stage_ms",
+        lambda stage, duration_ms, **labels: observed.append(
+            (stage, duration_ms, labels)
+        ),
     )
+    realtime_video_api._observe_realtime_result_stage_metrics(
+        result,
+        server_args=SimpleNamespace(model_path="minwm"),
+    )
+
+    assert stage_metrics == {
+        "model_denoise_ms": 200.0,
+        "raw_frame_async_enqueue_ms": 1.25,
+    }
+    assert [(stage, duration_ms) for stage, duration_ms, _ in observed] == [
+        ("denoiser_compute", 200.0)
+    ]
+
+    sent_messages = []
+
+    class _Ws:
+        async def send_bytes(self, payload):
+            sent_messages.append(msgspec.msgpack.decode(payload))
 
     session = GenerateSession()
-    session.trace_id = "trace-stage"
-    chunk = SimpleNamespace(request_id="chunk-req")
-    batch = SimpleNamespace(block_idx=4, realtime_event_id=9)
-    metrics = RequestMetrics("metrics-req")
-    metrics.record_stage("RealtimeImageVAEEncodingStage", 0.012)
-    metrics.record_stage("MinWMCausalDMDDenoisingStage", 0.620)
-    metrics.record_stage("MinWMCausalVaeDecodingStage", 0.180)
-    result = OutputBatch(metrics=metrics)
-
-    realtime_video_api._emit_realtime_result_stage_traces(session, chunk, batch, result)
-
-    event_names = [event for event, _fields in emitted]
-    assert event_names.count("server.pipeline_stage_complete") == 3
-    assert "server.vae_encode_complete" in event_names
-    assert "server.model_denoise_complete" in event_names
-    assert "server.vae_decode_complete" in event_names
-    denoise = next(
-        fields for event, fields in emitted if event == "server.model_denoise_complete"
+    chunk = session.new_chunk()
+    batch = SimpleNamespace(block_idx=0, realtime_event_id=1)
+    asyncio.run(
+        realtime_video_api._send_chunk_telemetry(
+            _Ws(),
+            session,
+            chunk,
+            batch,
+            request_prepare_ms=1.0,
+            scheduler_forward_ms=2.0,
+            chunk_total_ms=3.0,
+            send_stats=empty_frame_send_stats(),
+            stage_metrics=stage_metrics,
+        )
     )
-    assert denoise["chunk_index"] == 4
-    assert denoise["event_id"] == 9
-    assert denoise["duration_ms"] == 620
-    assert denoise["source"] == "scheduler_result_metrics"
+
+    assert len(sent_messages) == 1
+    assert sent_messages[0]["raw_frame_async_enqueue_ms"] == 1.25
+
+
+def test_local_loop_keeps_async_output_ownership_through_metric_observation():
+    source = inspect.getsource(realtime_video_api._generate_loop_local)
+
+    ownership = source.index("current_result = result")
+    observe = source.index("_observe_realtime_result_stage_metrics(result")
+    register_cleanup = source.index("pending_send_task.add_done_callback(")
+    transfer = source.index("current_result = None")
+    assert ownership < observe < register_cleanup < transfer
 
 
 def test_listen_generate_request_propagates_disconnect_without_error_write():

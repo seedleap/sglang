@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from collections.abc import Callable
 from pathlib import Path
@@ -64,6 +65,7 @@ from sglang.multimodal_gen.runtime.realtime.states import (
 )
 from sglang.multimodal_gen.runtime.server_args import ServerArgs
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
+from sglang.multimodal_gen.runtime.utils.nvtx_pytorch_hooks import maybe_nvtx_range
 from sglang.multimodal_gen.runtime.utils.realtime_trace import (
     realtime_trace_span,
     tensor_trace_metadata,
@@ -73,6 +75,9 @@ MINWM_ACTION_HISTORY_CACHE = "minwm_action_history"
 MINWM_INITIAL_NOISE_CACHE = "minwm_initial_noise"
 MINWM_INITIAL_NOISE_CURSOR_CACHE = "minwm_initial_noise_cursor"
 MINWM_T2V_FIRST_LATENT_CACHE = "minwm_t2v_first_latent"
+MINWM_ACTION_RESIDUAL_PREPARE_NVTX_RANGE = (
+    "minwm_action_residual_prepare_once_per_chunk"
+)
 
 logger = init_logger(__name__)
 
@@ -128,7 +133,7 @@ class _MinWMCudaGraphRunner:
         self.static_latent = None
         self.static_prompt = None
         self.static_timestep = None
-        self.static_action = None
+        self.static_action_token_residual = None
         self.capture_stream = None
         self.pool = None
         self.capture_dependencies = None
@@ -140,12 +145,12 @@ class _MinWMCudaGraphRunner:
         latent: torch.Tensor,
         prompt: torch.Tensor,
         timestep: torch.Tensor,
-        action: torch.Tensor,
+        action_token_residual: torch.Tensor,
     ) -> None:
         self.static_latent.copy_(latent)
         self.static_prompt.copy_(prompt)
         self.static_timestep.copy_(timestep)
-        self.static_action.copy_(action)
+        self.static_action_token_residual.copy_(action_token_residual)
 
     def _copy_attention_plan_inputs(
         self, attention_plan: MinWMCausalAttentionKVPlan
@@ -180,7 +185,7 @@ class _MinWMCudaGraphRunner:
         latent: torch.Tensor,
         prompt: torch.Tensor,
         timestep: torch.Tensor,
-        action: torch.Tensor,
+        action_token_residual: torch.Tensor,
         attention_plan: MinWMCausalAttentionKVPlan,
         capture_forward: (
             Callable[
@@ -190,7 +195,7 @@ class _MinWMCudaGraphRunner:
         ),
     ) -> torch.Tensor:
         if self.graph is not None:
-            self._copy_inputs(latent, prompt, timestep, action)
+            self._copy_inputs(latent, prompt, timestep, action_token_residual)
             # block_relative positions can still change when rope_max_frame_gap
             # is greater than one (for example Tianpeng gap12). Refresh the
             # captured plan's static tensors before replaying the fixed graph.
@@ -208,7 +213,9 @@ class _MinWMCudaGraphRunner:
         self.static_latent = _static_cuda_graph_tensor(latent)
         self.static_prompt = _static_cuda_graph_tensor(prompt)
         self.static_timestep = _static_cuda_graph_tensor(timestep)
-        self.static_action = _static_cuda_graph_tensor(action)
+        self.static_action_token_residual = _static_cuda_graph_tensor(
+            action_token_residual
+        )
         assert capture_forward is not None
 
         self.capture_stream = torch.cuda.Stream(device=latent.device)
@@ -220,7 +227,7 @@ class _MinWMCudaGraphRunner:
                     self.static_latent,
                     self.static_prompt,
                     self.static_timestep,
-                    self.static_action,
+                    self.static_action_token_residual,
                 )
         current_stream.wait_stream(self.capture_stream)
         torch.cuda.synchronize(latent.device)
@@ -232,7 +239,7 @@ class _MinWMCudaGraphRunner:
                 self.static_latent,
                 self.static_prompt,
                 self.static_timestep,
-                self.static_action,
+                self.static_action_token_residual,
             )
         current_stream.wait_stream(self.capture_stream)
         # Do not consume the execution performed while stream capture is active.
@@ -824,30 +831,168 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
     ) -> None:
         if getattr(self, "_runtime_alignment_logged", False):
             return
-        self._runtime_alignment_logged = True
+
         arch_config = self.transformer.config.arch_config
-        cache = cache_ctx.kv_cache[0]
-        logger.info(
-            "MINWM_RUNTIME_ALIGNMENT local_attn_size=%d sink_size=%d "
-            "window_size=%d rope_position_mode=%s rope_gap=%d "
-            "prompt_first_frame_pin_enabled=%s request_sink_size=%s "
-            "request_window_size=%s allow_growth=%s cache_tokens=%d "
-            "sink_tokens=%d scene_cut_rope_offset=%d "
-            "scene_cut_sink_enabled=%s",
-            int(arch_config.local_attn_size),
-            int(self.sink_size),
-            int(self.sliding_window_num_frames),
-            cache.rope_position_mode,
-            int(cache.rope_max_frame_gap),
-            bool(cache.prompt_first_frame_pin_enabled),
-            getattr(batch, "realtime_causal_sink_size", None),
-            getattr(batch, "realtime_causal_kv_cache_num_frames", None),
-            bool(cache.allow_growth),
-            int(cache.cache_size),
-            int(cache.sink_tokens),
-            int(cache.scene_cut_rope_offset),
-            bool(cache.scene_cut_sink_enabled),
+        caches = cache_ctx.kv_cache
+        sequence_shard_enabled = self._causal_sequence_shard_enabled(batch)
+        expected_cache_tokens = self._get_causal_kv_cache_size(
+            sequence_shard_enabled=sequence_shard_enabled
         )
+        expected_sink_tokens = self._get_causal_sink_tokens()
+        expected_attention_window_tokens = self._get_causal_attention_window_size(
+            expected_cache_tokens
+        )
+        expected_attention_heads = self._num_causal_cache_attention_heads(
+            sequence_shard_enabled=sequence_shard_enabled
+        )
+        expected = {
+            "layer_count": int(self.num_transformer_blocks),
+            "cache_tokens": int(expected_cache_tokens),
+            "sink_tokens": int(expected_sink_tokens),
+            "attention_window_tokens": int(expected_attention_window_tokens),
+            "attention_heads": int(expected_attention_heads),
+            "allow_growth": bool(self._minwm_unbounded_cache),
+            "rope_position_mode": str(
+                getattr(arch_config, "rope_position_mode", "absolute")
+            ),
+            "rope_max_frame_gap": int(getattr(arch_config, "rope_max_frame_gap", 1)),
+            "prompt_first_frame_pin_enabled": bool(
+                getattr(arch_config, "prompt_first_frame_pin_enabled", False)
+            ),
+            "scene_cut_rope_offset": int(
+                getattr(arch_config, "scene_cut_rope_offset", 0)
+            ),
+            "scene_cut_sink_enabled": bool(
+                getattr(arch_config, "scene_cut_sink_enabled", False)
+            ),
+        }
+        violations: list[dict[str, Any]] = []
+
+        def check(layer: int | None, field: str, actual: Any) -> None:
+            expected_value = expected[field]
+            if actual != expected_value:
+                violations.append(
+                    {
+                        "layer": layer,
+                        "field": field,
+                        "expected": expected_value,
+                        "actual": actual,
+                    }
+                )
+
+        check(None, "layer_count", len(caches))
+        for layer, cache in enumerate(caches):
+            check(layer, "cache_tokens", int(cache.cache_size))
+            check(layer, "sink_tokens", int(cache.sink_tokens))
+            check(
+                layer,
+                "attention_window_tokens",
+                int(cache.attention_window_size),
+            )
+            check(layer, "attention_heads", int(cache.k.shape[2]))
+            check(layer, "attention_heads", int(cache.v.shape[2]))
+            check(layer, "allow_growth", bool(cache.allow_growth))
+            check(layer, "rope_position_mode", str(cache.rope_position_mode))
+            check(layer, "rope_max_frame_gap", int(cache.rope_max_frame_gap))
+            check(
+                layer,
+                "prompt_first_frame_pin_enabled",
+                bool(cache.prompt_first_frame_pin_enabled),
+            )
+            check(
+                layer,
+                "scene_cut_rope_offset",
+                int(cache.scene_cut_rope_offset),
+            )
+            check(
+                layer,
+                "scene_cut_sink_enabled",
+                bool(cache.scene_cut_sink_enabled),
+            )
+            for tensor_name in ("k", "v"):
+                tensor = getattr(cache, tensor_name)
+                actual_capacity = int(tensor.shape[1])
+                if actual_capacity != expected_cache_tokens:
+                    violations.append(
+                        {
+                            "layer": layer,
+                            "field": f"{tensor_name}_capacity_tokens",
+                            "expected": int(expected_cache_tokens),
+                            "actual": actual_capacity,
+                        }
+                    )
+
+        observed = {
+            "cache_token_counts": sorted({int(cache.cache_size) for cache in caches}),
+            "sink_token_counts": sorted({int(cache.sink_tokens) for cache in caches}),
+            "attention_window_token_counts": sorted(
+                {int(cache.attention_window_size) for cache in caches}
+            ),
+            "k_capacity_token_counts": sorted(
+                {int(cache.k.shape[1]) for cache in caches}
+            ),
+            "v_capacity_token_counts": sorted(
+                {int(cache.v.shape[1]) for cache in caches}
+            ),
+        }
+        alignment = {
+            "all_match": not violations,
+            "layer_count": len(caches),
+            "expected": expected,
+            "observed": observed,
+            "resolved": {
+                "local_attn_size": int(arch_config.local_attn_size),
+                "sink_size": int(self.sink_size),
+                "window_size": int(self.sliding_window_num_frames),
+                "tokens_per_frame": int(self.num_token_per_frame),
+                "request_sink_size": getattr(batch, "realtime_causal_sink_size", None),
+                "request_window_size": getattr(
+                    batch, "realtime_causal_kv_cache_num_frames", None
+                ),
+            },
+            "violations": violations,
+        }
+
+        if caches:
+            cache = caches[0]
+            logger.info(
+                "MINWM_RUNTIME_ALIGNMENT local_attn_size=%d sink_size=%d "
+                "window_size=%d rope_position_mode=%s rope_gap=%d "
+                "prompt_first_frame_pin_enabled=%s request_sink_size=%s "
+                "request_window_size=%s allow_growth=%s cache_tokens=%d "
+                "sink_tokens=%d scene_cut_rope_offset=%d "
+                "scene_cut_sink_enabled=%s",
+                int(arch_config.local_attn_size),
+                int(self.sink_size),
+                int(self.sliding_window_num_frames),
+                cache.rope_position_mode,
+                int(cache.rope_max_frame_gap),
+                bool(cache.prompt_first_frame_pin_enabled),
+                getattr(batch, "realtime_causal_sink_size", None),
+                getattr(batch, "realtime_causal_kv_cache_num_frames", None),
+                bool(cache.allow_growth),
+                int(cache.cache_size),
+                int(cache.sink_tokens),
+                int(cache.scene_cut_rope_offset),
+                bool(cache.scene_cut_sink_enabled),
+            )
+        logger.info(
+            "MINWM_RUNTIME_ALIGNMENT_JSON %s",
+            json.dumps(alignment, sort_keys=True, separators=(",", ":")),
+        )
+        if violations:
+            first = violations[0]
+            location = (
+                "cache collection"
+                if first["layer"] is None
+                else f"layer {first['layer']}"
+            )
+            raise RuntimeError(
+                "MinWM runtime alignment mismatch at "
+                f"{location}: {first['field']} expected={first['expected']!r} "
+                f"actual={first['actual']!r}"
+            )
+        self._runtime_alignment_logged = True
 
     def _prepare_realtime_causal_caches(
         self,
@@ -924,6 +1069,29 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
             [history, current], dim=1
         )[:, -history_frames:]
 
+    def _prepare_chunk_action_token_residual(
+        self,
+        ctx: CausalDMDForwardContext,
+    ) -> torch.Tensor:
+        """Materialize the action condition once for this forward context."""
+        p_t, p_h, p_w = self.transformer.patch_size
+        with maybe_nvtx_range(
+            MINWM_ACTION_RESIDUAL_PREPARE_NVTX_RANGE,
+            bool(getattr(self, "_current_use_nvtx", False)),
+        ):
+            with torch.autocast(
+                device_type=current_platform.device_type,
+                dtype=ctx.target_dtype,
+                enabled=ctx.autocast_enabled,
+            ):
+                return self.transformer.prepare_action_token_residual(
+                    ctx.pos_cond_kwargs["action"],
+                    num_frames=ctx.num_frames // p_t,
+                    height=ctx.height // p_h,
+                    width=ctx.width // p_w,
+                    dtype=ctx.target_dtype,
+                )
+
     def _forward_causal_transformer(self, batch: Req, **kwargs) -> torch.Tensor:
         output = self._forward_causal_transformer_impl(batch, **kwargs)
         index = getattr(self, "_parity_forward_index", 0)
@@ -960,7 +1128,7 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
             or current_timestep == 0
             or attn_metadata is not None
             or image_kwargs
-            or set(pos_cond_kwargs) != {"action"}
+            or set(pos_cond_kwargs) != {"action", "action_token_residual"}
             or os.environ.get("MINWM_PARITY_DUMP_DIR")
             or not latent_model_input.is_cuda
             or torch.version.hip is not None
@@ -969,7 +1137,10 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
         if not isinstance(prompt_embeds, torch.Tensor):
             return None
         action = pos_cond_kwargs["action"]
-        if not isinstance(action, torch.Tensor):
+        action_token_residual = pos_cond_kwargs["action_token_residual"]
+        if not isinstance(action, torch.Tensor) or not isinstance(
+            action_token_residual, torch.Tensor
+        ):
             return None
         if not kv_cache or not crossattn_cache:
             return None
@@ -1020,7 +1191,7 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
             _cuda_graph_tensor_signature(latent_model_input),
             _cuda_graph_tensor_signature(prompt_embeds),
             _cuda_graph_tensor_signature(timestep),
-            _cuda_graph_tensor_signature(action),
+            _cuda_graph_tensor_signature(action_token_residual),
         )
 
     def _forward_causal_transformer_impl(
@@ -1085,16 +1256,12 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
             ):
                 self._minwm_cuda_graph_runner = _MinWMCudaGraphRunner(graph_key)
             runner = self._minwm_cuda_graph_runner
-            action = pos_cond_kwargs["action"]
+            action_token_residual = pos_cond_kwargs["action_token_residual"]
             attention_plan = kv_cache[0].last_attention_plan
             if not isinstance(attention_plan, MinWMCausalAttentionKVPlan):
                 raise RuntimeError("MinWM CUDA graph requires an attention plan")
 
             if runner.graph is None:
-                # Non-checkpoint action buffers start on CPU so meta-device model
-                # loading can materialize successfully. Move them before entering
-                # the capture context; replay then sees a stable GPU pointer.
-                self.transformer.action_in.prepare_label_table(action.device)
                 attention_plan = self.transformer.prepare_causal_attention_plan(
                     latent_model_input,
                     kv_cache=kv_cache,
@@ -1111,7 +1278,7 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
                     static_latent: torch.Tensor,
                     static_prompt: torch.Tensor,
                     static_timestep: torch.Tensor,
-                    static_action: torch.Tensor,
+                    static_action_token_residual: torch.Tensor,
                 ) -> torch.Tensor:
                     return self.transformer(
                         static_latent,
@@ -1121,7 +1288,7 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
                         crossattn_cache=crossattn_cache,
                         current_start=current_start_tokens,
                         start_frame=start_frame,
-                        action=static_action,
+                        action_token_residual=static_action_token_residual,
                         precomputed_attention_plan=attention_plan,
                     )
 
@@ -1129,25 +1296,18 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
                 # Replay does not execute Python, so this callable is unused.
                 capture_forward = None
 
-            validate_runtime_action = self.transformer.action_in.validate_runtime_action
-            self.transformer.action_in.validate_runtime_action = False
-            try:
-                graph_output = runner.run(
-                    latent=latent_model_input,
-                    prompt=prompt_embeds,
-                    timestep=timestep,
-                    action=action,
-                    attention_plan=attention_plan,
-                    capture_forward=capture_forward,
-                )
-                # The captured graph owns a single static output allocation.
-                # Downstream scheduler work can still consume it when the next
-                # denoising replay starts, so hand out an independent snapshot.
-                return graph_output.clone()
-            finally:
-                self.transformer.action_in.validate_runtime_action = (
-                    validate_runtime_action
-                )
+            graph_output = runner.run(
+                latent=latent_model_input,
+                prompt=prompt_embeds,
+                timestep=timestep,
+                action_token_residual=action_token_residual,
+                attention_plan=attention_plan,
+                capture_forward=capture_forward,
+            )
+            # The captured graph owns a single static output allocation.
+            # Downstream scheduler work can still consume it when the next
+            # denoising replay starts, so hand out an independent snapshot.
+            return graph_output.clone()
 
     @torch.no_grad()
     def forward(self, batch: Req, server_args: ServerArgs) -> Req:
@@ -1193,6 +1353,12 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
             self._parity_forward_index = 0
         ctx = self._prepare_causal_dmd_forward_context(batch, server_args)
         cache_ctx = self._prepare_realtime_causal_caches(batch, server_args, ctx)
+        # Keep the reference warmup on its one-frame noop action. The generated
+        # chunk gets a fresh residual after that warmup, and this context carries
+        # it through all DMD forwards plus the clean cache commit.
+        ctx.pos_cond_kwargs["action_token_residual"] = (
+            self._prepare_chunk_action_token_residual(ctx)
+        )
         current_latents = self._denoise_realtime_causal_chunk(
             batch,
             server_args,

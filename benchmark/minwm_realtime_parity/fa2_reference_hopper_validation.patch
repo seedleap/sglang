@@ -1,0 +1,19 @@
+diff --git a/python/sglang/multimodal_gen/runtime/models/dits/minwm.py b/python/sglang/multimodal_gen/runtime/models/dits/minwm.py
+--- a/python/sglang/multimodal_gen/runtime/models/dits/minwm.py
++++ b/python/sglang/multimodal_gen/runtime/models/dits/minwm.py
+@@ -524,13 +524,9 @@ def _minwm_packed_attention_backend(device: torch.device) -> str:
+-    """Select the device-compatible backend and require FA3 on Hopper."""
++    """Validation-only FA2 reference for a same-commit Hopper A/B."""
+     capability = torch.cuda.get_device_capability(device)[0]
+     if capability >= 10 and importlib.util.find_spec("flash_attn.cute") is not None:
+         return "fa4"
+     if capability == 9:
+-        if importlib.util.find_spec("sglang.jit_kernel.flash_attention_v3") is None:
+-            raise RuntimeError(
+-                "minWM requires the bundled FlashAttention-3 backend on Hopper"
+-            )
+-        return "fa3"
++        return "fa2"
+     if importlib.util.find_spec("flash_attn") is not None:
+         return "fa2"
+     raise RuntimeError("No minWM-compatible packed FlashAttention backend is available")

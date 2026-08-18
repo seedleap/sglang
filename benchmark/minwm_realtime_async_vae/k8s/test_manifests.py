@@ -547,8 +547,7 @@ def test_runtime_uses_one_owned_read_only_s3_claim_and_preconverted_model():
     command = " ".join(container["args"])
 
     assert env["MINWM_MODEL"] == (
-        "/model-cache/"
-        "REPLACE_WITH_MODEL_ID/REPLACE_WITH_MODEL_ARTIFACT_REVISION/model"
+        "/model-cache/REPLACE_WITH_MODEL_ID/REPLACE_WITH_MODEL_ARTIFACT_REVISION/model"
     )
     assert "MINWM_CHECKPOINT" not in env
     assert "MINWM_DONOR" not in env
@@ -928,7 +927,9 @@ def test_capacity_scaler_uses_the_shared_coordinator_snapshot():
     assert "GPU_EVENT_SCALER_REPLICAS" in deploy_script
     assert 'DENOISER_BASE_REPLICAS="${DENOISER_BASE_REPLICAS:-4}"' in deploy_script
     assert 'DENOISER_PEAK_REPLICAS="${DENOISER_PEAK_REPLICAS:-4}"' in deploy_script
-    assert 'LINGBOT_DENOISER_REPLICAS="${LINGBOT_DENOISER_REPLICAS:-2}"' in deploy_script
+    assert (
+        'LINGBOT_DENOISER_REPLICAS="${LINGBOT_DENOISER_REPLICAS:-2}"' in deploy_script
+    )
     assert "leap-world-model-serving-829115578968-us-east-2" in deploy_script
 
 

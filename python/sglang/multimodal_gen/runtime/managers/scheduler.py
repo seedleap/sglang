@@ -68,6 +68,9 @@ from sglang.multimodal_gen.runtime.server_warmup import (
 from sglang.multimodal_gen.runtime.utils.common import get_zmq_socket
 from sglang.multimodal_gen.runtime.utils.distributed import broadcast_pyobj
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
+from sglang.multimodal_gen.runtime.utils.realtime_video import (
+    cancel_async_raw_rgb_frame_reference,
+)
 from sglang.multimodal_gen.runtime.utils.trace_wrapper import DiffStage, trace_slice
 
 logger = init_logger(__name__)
@@ -812,25 +815,43 @@ class Scheduler(SchedulerWarmupMixin, SchedulerPostTrainingMixin, SchedulerDisag
         replies to client, only on rank 0
         """
         if not should_not_return and self.receiver is not None and identity is not None:
-            # if the server is local, use temp file to spill the frame array instead of
-            # leaving it in OutputBatch to be pickled later
-            if is_local_endpoint(self.server_args.scheduler_endpoint):
+            try:
+                # if the server is local, use temp file to spill the frame array instead of
+                # leaving it in OutputBatch to be pickled later
+                if is_local_endpoint(self.server_args.scheduler_endpoint):
+                    with self._record_return_stage(
+                        output_batch, "Scheduler.return_result.spill_arrays"
+                    ):
+                        output_batch.output = spill_large_arrays_to_file_refs(
+                            output_batch.output
+                        )
+
                 with self._record_return_stage(
-                    output_batch, "Scheduler.return_result.spill_arrays"
+                    output_batch, "Scheduler.return_result.pickle"
                 ):
-                    output_batch.output = spill_large_arrays_to_file_refs(
-                        output_batch.output
+                    payload = pickle.dumps(output_batch)
+
+                with self._record_return_stage(
+                    output_batch, "Scheduler.return_result.send"
+                ):
+                    self.receiver.send_multipart([identity, b"", payload])
+            except Exception:
+                try:
+                    cancel_async_raw_rgb_frame_reference(
+                        output_batch.raw_frame_shared_memory_ref
                     )
-
-            with self._record_return_stage(
-                output_batch, "Scheduler.return_result.pickle"
-            ):
-                payload = pickle.dumps(output_batch)
-
-            with self._record_return_stage(
-                output_batch, "Scheduler.return_result.send"
-            ):
-                self.receiver.send_multipart([identity, b"", payload])
+                except Exception:
+                    logger.exception("failed to cancel unsent raw-frame reference")
+                output_batch.raw_frame_shared_memory_ref = None
+                raise
+        elif output_batch.raw_frame_shared_memory_ref is not None:
+            try:
+                cancel_async_raw_rgb_frame_reference(
+                    output_batch.raw_frame_shared_memory_ref
+                )
+            except Exception:
+                logger.exception("failed to cancel dropped raw-frame reference")
+            output_batch.raw_frame_shared_memory_ref = None
 
     @contextmanager
     def _record_return_stage(

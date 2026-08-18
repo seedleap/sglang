@@ -72,6 +72,9 @@ from sglang.multimodal_gen.runtime.utils.realtime_trace import (
     log_realtime_trace,
     normalize_trace_id,
 )
+from sglang.multimodal_gen.runtime.utils.realtime_video import (
+    cancel_async_raw_rgb_frame_reference,
+)
 
 if TYPE_CHECKING:
     from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import Req
@@ -81,6 +84,7 @@ logger = init_logger(__name__)
 _REALTIME_CONTROL_REFRESH_TIMEOUT_S = 1.0
 router = APIRouter(prefix="/v1/realtime_video", tags=["realtime"])
 _REALTIME_RESULT_STAGE_MARKERS = ("vae", "denois")
+_RAW_FRAME_ASYNC_ENQUEUE_STAGE = "GPUWorker.raw_frame_async_enqueue"
 _ADMISSION_CONTROLLER: RealtimeAdmissionController | None = None
 _ADMISSION_CONFIG: tuple | None = None
 
@@ -391,7 +395,9 @@ def _coerce_metric_ms(value: Any) -> float | None:
 
 def _is_realtime_result_stage_metric(stage_name: str) -> bool:
     normalized = stage_name.lower()
-    return any(marker in normalized for marker in _REALTIME_RESULT_STAGE_MARKERS)
+    return normalized == _RAW_FRAME_ASYNC_ENQUEUE_STAGE.lower() or any(
+        marker in normalized for marker in _REALTIME_RESULT_STAGE_MARKERS
+    )
 
 
 def _realtime_stage_event_name(stage_name: str) -> str | None:
@@ -486,6 +492,9 @@ def _emit_realtime_result_stage_traces(
 def _collect_realtime_result_stage_metrics(result: Any) -> dict[str, float]:
     collected: dict[str, float] = {}
     for stage_name, duration_ms, _ in _iter_realtime_result_stage_metrics(result):
+        if stage_name.lower() == _RAW_FRAME_ASYNC_ENQUEUE_STAGE.lower():
+            collected["raw_frame_async_enqueue_ms"] = round(duration_ms, 3)
+            continue
         event_name = _realtime_stage_event_name(stage_name)
         if event_name == "server.model_denoise_complete":
             collected["model_denoise_ms"] = round(duration_ms, 3)
@@ -1083,6 +1092,7 @@ async def _generate_loop_local(ws: WebSocket, session: GenerateSession):
     pending_send_task = None
     pending_event_version = None
     while not session.reached_max_chunks():
+        current_result: OutputBatch | None = None
         try:
             pending_send_task = await _wait_for_realtime_interactive_event_window(
                 session,
@@ -1169,6 +1179,7 @@ async def _generate_loop_local(ws: WebSocket, session: GenerateSession):
             )
 
             _, result = await process_generation_batch(async_scheduler_client, batch)
+            current_result = result
             _sync_batch_realtime_metadata(batch, result)
             scheduler_forward_ms = timer.mark_ms()
             log_realtime_trace(
@@ -1200,15 +1211,21 @@ async def _generate_loop_local(ws: WebSocket, session: GenerateSession):
                     stage_metrics,
                 )
             )
+            pending_send_task.add_done_callback(
+                partial(_cancel_unconsumed_output_ref, result=result)
+            )
+            current_result = None
             pending_event_version = scheduled_event_version
 
         except asyncio.CancelledError:
+            _cancel_unconsumed_output_ref(result=current_result)
             if pending_send_task is not None:
                 pending_send_task.cancel()
                 await _await_realtime_task(pending_send_task)
             logger.info("generation completed, session_id=%s", session.id)
             break
         except WebSocketDisconnect:
+            _cancel_unconsumed_output_ref(result=current_result)
             if pending_send_task is not None:
                 pending_send_task.cancel()
                 await _await_realtime_task(pending_send_task)
@@ -1217,6 +1234,7 @@ async def _generate_loop_local(ws: WebSocket, session: GenerateSession):
             )
             break
         except Exception as e:
+            _cancel_unconsumed_output_ref(result=current_result)
             if pending_send_task is not None:
                 pending_send_task.cancel()
                 await _await_realtime_task(pending_send_task)
@@ -1299,6 +1317,21 @@ async def _send_output_and_log(
             stage_metrics=stage_metrics,
         )
     return send_stats
+
+
+def _cancel_unconsumed_output_ref(
+    _task: asyncio.Task | None = None,
+    *,
+    result: OutputBatch | None,
+) -> None:
+    if result is None or result.raw_frame_shared_memory_ref is None:
+        return
+    try:
+        cancel_async_raw_rgb_frame_reference(result.raw_frame_shared_memory_ref)
+    except Exception:
+        logger.exception("failed to cancel unconsumed raw-frame reference")
+    finally:
+        result.raw_frame_shared_memory_ref = None
 
 
 async def _wait_for_realtime_interactive_event_window(
