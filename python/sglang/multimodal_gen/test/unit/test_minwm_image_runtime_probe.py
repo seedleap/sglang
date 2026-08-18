@@ -1,4 +1,6 @@
 import json
+import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -183,3 +185,95 @@ def test_fa3_compat_rejects_unsupported_nondefault_only_qv():
 
     with pytest.raises(NotImplementedError, match="does not support only_qv=True"):
         _call_fa3_kernel(legacy_kernel, only_qv=True)
+
+
+def test_fa3_locked_loader_uses_cached_snapshot(tmp_path, monkeypatch):
+    from sglang.jit_kernel.flash_attention_v3 import _load_locked_fa3_kernel
+
+    revision = "15c17db0bf9ce6599db795fa02a8f27467c92860"
+    variant = "torch211-cxx11-cu130-x86_64-linux"
+    snapshot_root = Path(f"/cache/kernels/snapshots/{revision}")
+    metadata_path = snapshot_root / "build" / variant / "metadata.json"
+    lockfile = tmp_path / "kernels.lock"
+    lockfile.write_text(
+        json.dumps(
+            [
+                {
+                    "repo_id": "kernels-community/sgl-flash-attn3",
+                    "sha": revision,
+                    "variants": {variant: {"hash": "sha256-test"}},
+                }
+            ]
+        )
+    )
+    calls = []
+
+    def try_to_load_from_cache(repo_id, filename, **kwargs):
+        calls.append((repo_id, filename, kwargs))
+        return str(metadata_path)
+
+    ops = SimpleNamespace(
+        flash_attn_with_kvcache=object(),
+        flash_attn_varlen_func=object(),
+    )
+    loaded_roots = []
+
+    def get_local_kernel(path):
+        loaded_roots.append(path)
+        return ops
+
+    monkeypatch.delenv("KERNELS_CACHE", raising=False)
+    monkeypatch.setitem(
+        sys.modules,
+        "huggingface_hub",
+        SimpleNamespace(try_to_load_from_cache=try_to_load_from_cache),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "kernels",
+        SimpleNamespace(get_local_kernel=get_local_kernel),
+    )
+
+    assert _load_locked_fa3_kernel(str(lockfile)) is ops
+    assert loaded_roots == [snapshot_root]
+    assert calls == [
+        (
+            "kernels-community/sgl-flash-attn3",
+            f"build/{variant}/metadata.json",
+            {
+                "cache_dir": None,
+                "revision": revision,
+                "repo_type": "kernel",
+            },
+        )
+    ]
+
+
+def test_fa3_locked_loader_requires_cached_variant(tmp_path, monkeypatch):
+    from sglang.jit_kernel.flash_attention_v3 import _load_locked_fa3_kernel
+
+    lockfile = tmp_path / "kernels.lock"
+    lockfile.write_text(
+        json.dumps(
+            [
+                {
+                    "repo_id": "kernels-community/sgl-flash-attn3",
+                    "sha": "a" * 40,
+                    "variants": {"torch211-cxx11-cu130-x86_64-linux": {}},
+                }
+            ]
+        )
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "huggingface_hub",
+        SimpleNamespace(try_to_load_from_cache=lambda *args, **kwargs: None),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "kernels",
+        SimpleNamespace(get_local_kernel=lambda path: pytest.fail("must not load")),
+    )
+
+    with pytest.raises(FileNotFoundError, match="no pre-downloaded locked variant"):
+        _load_locked_fa3_kernel(str(lockfile))

@@ -11,7 +11,8 @@
     "content_length": 10007165995,
     "etag": "ee6a4400158efee70362fd6eeb4ee6a3-1193",
     "checksum_crc64nvme": "GLaCsoJZbwM=",
-    "sha256": "9a2849c8bc91c6cd3766373bd7d2d250043b4653fd03fd80fcbcf15d9bec02b5"
+    "sha256": "9a2849c8bc91c6cd3766373bd7d2d250043b4653fd03fd80fcbcf15d9bec02b5",
+    "model_action_type": "primitive_rope_token_residual"
   },
   "first_frame": {
     "bucket": "leap-world-us-east-2",

@@ -1,5 +1,7 @@
+import json
 import logging
 import os
+from pathlib import Path
 from typing import Optional, Union
 
 import torch
@@ -14,6 +16,55 @@ logger = logging.getLogger(__name__)
 SGL_FA3_KERNEL_REPO = "kernels-community/sgl-flash-attn3"
 SGL_FA3_KERNEL_REVISION = "v1"
 DEFAULT_FA3_KERNEL_LOCKFILE = "kernels.lock"
+
+
+def _load_locked_fa3_kernel(lockfile_path: str):
+    """Load the locked FA3 variant from the pre-populated local Hub cache."""
+    from huggingface_hub import try_to_load_from_cache
+    from kernels import get_local_kernel
+
+    lock_entries = json.loads(Path(lockfile_path).read_text())
+    lock = next(
+        (
+            entry
+            for entry in lock_entries
+            if entry.get("repo_id") == SGL_FA3_KERNEL_REPO
+        ),
+        None,
+    )
+    if lock is None:
+        raise ValueError(f"{SGL_FA3_KERNEL_REPO} is not locked in {lockfile_path}")
+
+    cache_dir = os.environ.get("KERNELS_CACHE") or None
+    snapshot_roots: set[Path] = set()
+    for variant in lock["variants"]:
+        cached_metadata = try_to_load_from_cache(
+            SGL_FA3_KERNEL_REPO,
+            f"build/{variant}/metadata.json",
+            cache_dir=cache_dir,
+            revision=lock["sha"],
+            repo_type="kernel",
+        )
+        if isinstance(cached_metadata, str):
+            snapshot_roots.add(Path(cached_metadata).parents[2])
+
+    if not snapshot_roots:
+        raise FileNotFoundError(
+            f"no pre-downloaded locked variant for {SGL_FA3_KERNEL_REPO}@{lock['sha']}"
+        )
+    if len(snapshot_roots) != 1:
+        roots = sorted(str(path) for path in snapshot_roots)
+        raise RuntimeError(f"locked variants resolved to multiple snapshots: {roots}")
+    snapshot_root = snapshot_roots.pop()
+    ops = get_local_kernel(snapshot_root)
+    logger.info(
+        "Loaded locked FlashAttention v3 kernels provider=kernels-community "
+        "repo=%s revision=%s snapshot=%s",
+        SGL_FA3_KERNEL_REPO,
+        lock["sha"],
+        snapshot_root,
+    )
+    return ops
 
 
 def _call_fa3_kernel(kernel, *args, out=None, only_qv=False, **kwargs):
@@ -54,13 +105,13 @@ def _load_fa3_kernels():
     )
 
     try:
-        from kernels import get_kernel, load_kernel
+        from kernels import get_kernel
 
         # When the lock file provided, load from the kernel cache directory,
         # otherwise, load from the repo, which require download from huggingface hub
         # but always works as long as the repo is accessible.
         if os.path.exists(lockfile_path):
-            ops = load_kernel(SGL_FA3_KERNEL_REPO, lockfile_path)
+            ops = _load_locked_fa3_kernel(lockfile_path)
         else:
             ops = get_kernel(SGL_FA3_KERNEL_REPO, revision=SGL_FA3_KERNEL_REVISION)
 
@@ -80,10 +131,7 @@ def _load_fa3_kernels():
 
 
 def _load_fa3_kernel_from_sgl():
-    from sgl_kernel.flash_attn import (
-        flash_attn_varlen_func,
-        flash_attn_with_kvcache,
-    )
+    from sgl_kernel.flash_attn import flash_attn_varlen_func, flash_attn_with_kvcache
 
     return {
         "flash_attn_with_kvcache": flash_attn_with_kvcache,
