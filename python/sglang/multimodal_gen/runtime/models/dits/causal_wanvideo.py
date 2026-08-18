@@ -15,10 +15,6 @@ from torch.nn.attention.flex_attention import (
     flex_attention,
 )
 
-from sglang.multimodal_gen.runtime.managers.memory_managers.layerwise_offload import (
-    LayerwiseOffloadableModuleMixin,
-)
-
 from sglang.multimodal_gen.configs.models.dits import WanVideoConfig
 from sglang.multimodal_gen.runtime.distributed import (
     divide,
@@ -53,6 +49,9 @@ from sglang.multimodal_gen.runtime.layers.rotary_embedding import (
     get_rotary_pos_embed,
 )
 from sglang.multimodal_gen.runtime.layers.visual_embedding import PatchEmbed
+from sglang.multimodal_gen.runtime.managers.memory_managers.layerwise_offload import (
+    LayerwiseOffloadableModuleMixin,
+)
 from sglang.multimodal_gen.runtime.models.dits.base import BaseDiT
 from sglang.multimodal_gen.runtime.models.dits.wanvideo import (
     WanT2VCrossAttention,
@@ -281,11 +280,33 @@ class CausalWanTransformerBlock(nn.Module):
             self.local_num_heads = divide(num_heads, tp_size)
             head_start = get_tp_rank() * self.local_num_heads
         else:
-            self.to_q = ReplicatedLinear(dim, dim, bias=True, quant_config=quant_config)
-            self.to_k = ReplicatedLinear(dim, dim, bias=True, quant_config=quant_config)
-            self.to_v = ReplicatedLinear(dim, dim, bias=True, quant_config=quant_config)
+            self.to_q = ReplicatedLinear(
+                dim,
+                dim,
+                bias=True,
+                quant_config=quant_config,
+                prefix=add_prefix("to_q", prefix),
+            )
+            self.to_k = ReplicatedLinear(
+                dim,
+                dim,
+                bias=True,
+                quant_config=quant_config,
+                prefix=add_prefix("to_k", prefix),
+            )
+            self.to_v = ReplicatedLinear(
+                dim,
+                dim,
+                bias=True,
+                quant_config=quant_config,
+                prefix=add_prefix("to_v", prefix),
+            )
             self.to_out = ReplicatedLinear(
-                dim, dim, bias=True, quant_config=quant_config
+                dim,
+                dim,
+                bias=True,
+                quant_config=quant_config,
+                prefix=add_prefix("to_out", prefix),
             )
             tp_size = 1
             self.local_num_heads = num_heads
@@ -335,6 +356,7 @@ class CausalWanTransformerBlock(nn.Module):
             eps=eps,
             supported_attention_backends=cross_attn_backends,
             quant_config=quant_config,
+            prefix=add_prefix("attn2", prefix),
         )
         self.cross_attn_residual_norm = ScaleResidualLayerNormScaleShift(
             dim, eps=eps, elementwise_affine=False, dtype=torch.float32
@@ -342,7 +364,11 @@ class CausalWanTransformerBlock(nn.Module):
 
         # 3. Feed-forward
         self.ffn = MLP(
-            dim, ffn_dim, act_type="gelu_pytorch_tanh", quant_config=quant_config
+            dim,
+            ffn_dim,
+            act_type="gelu_pytorch_tanh",
+            quant_config=quant_config,
+            prefix=add_prefix("ffn", prefix),
         )
         self.mlp_residual = MulAdd()
 
@@ -747,37 +773,44 @@ class CausalWanTransformer3DModel(BaseDiT, LayerwiseOffloadableModuleMixin):
         assert encoder_hidden_states.dtype == orig_dtype
 
         # 4. Transformer blocks
-        for block_index, block in enumerate(self.blocks):
-            if torch.is_grad_enabled() and self.gradient_checkpointing:
-                causal_kwargs = {
-                    "kv_cache": kv_cache[block_index],
-                    "current_start": current_start,
-                    "cache_start": cache_start,
-                    "block_mask": self.block_mask,
-                }
-                hidden_states = self._gradient_checkpointing_func(
-                    block,
-                    hidden_states,
-                    encoder_hidden_states,
-                    timestep_proj,
-                    freqs_cis,
-                    **causal_kwargs,
-                )
-            else:
-                causal_kwargs = {
-                    "kv_cache": kv_cache[block_index],
-                    "crossattn_cache": crossattn_cache[block_index],
-                    "current_start": current_start,
-                    "cache_start": cache_start,
-                    "block_mask": self.block_mask,
-                }
-                hidden_states = block(
-                    hidden_states,
-                    encoder_hidden_states,
-                    timestep_proj,
-                    freqs_cis,
-                    **causal_kwargs,
-                )
+        emit_block_nvtx = getattr(self, "_emit_block_phase_nvtx", False)
+        if emit_block_nvtx:
+            torch.cuda.nvtx.range_push("minwm.dit.blocks")
+        try:
+            for block_index, block in enumerate(self.blocks):
+                if torch.is_grad_enabled() and self.gradient_checkpointing:
+                    causal_kwargs = {
+                        "kv_cache": kv_cache[block_index],
+                        "current_start": current_start,
+                        "cache_start": cache_start,
+                        "block_mask": self.block_mask,
+                    }
+                    hidden_states = self._gradient_checkpointing_func(
+                        block,
+                        hidden_states,
+                        encoder_hidden_states,
+                        timestep_proj,
+                        freqs_cis,
+                        **causal_kwargs,
+                    )
+                else:
+                    causal_kwargs = {
+                        "kv_cache": kv_cache[block_index],
+                        "crossattn_cache": crossattn_cache[block_index],
+                        "current_start": current_start,
+                        "cache_start": cache_start,
+                        "block_mask": self.block_mask,
+                    }
+                    hidden_states = block(
+                        hidden_states,
+                        encoder_hidden_states,
+                        timestep_proj,
+                        freqs_cis,
+                        **causal_kwargs,
+                    )
+        finally:
+            if emit_block_nvtx:
+                torch.cuda.nvtx.range_pop()
 
         # 5. Output norm and projection. Model-specific implementations can
         # preserve checkpoint-family rounding boundaries here.

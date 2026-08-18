@@ -5,14 +5,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
+import re
 import subprocess
 import sys
 import time
 from pathlib import Path
 
 import numpy as np
-
 from common import (
     action_label_sequence,
     action_weights,
@@ -53,6 +54,13 @@ def parse_args() -> argparse.Namespace:
         "--sink-size",
         type=int,
         help="Override MinWM V3 generator_config.sink_size.",
+    )
+    parser.add_argument(
+        "--fp8-calibration-output",
+        help=(
+            "Write input activation maxima for the 300 MinWM block linears. "
+            "This synchronizes CUDA and is only intended for calibration."
+        ),
     )
     return parser.parse_args()
 
@@ -105,11 +113,10 @@ def main() -> None:
     sys.path.insert(0, str(minwm_root))
 
     import torch
-    from einops import rearrange
-    from omegaconf import OmegaConf
-
     from configs.configuration import PretrainedConfig
     from dataloader.processors.wan_packed import WanPackedProcessor
+    from einops import rearrange
+    from omegaconf import OmegaConf
     from pipeline import PipelineBase
     from wan_utils.misc import set_seed
 
@@ -167,6 +174,42 @@ def main() -> None:
         low_memory=False,
     )
     processor = WanPackedProcessor(config)
+
+    calibration_amax: dict[str, float] = {}
+    calibration_samples: dict[str, int] = {}
+    calibration_handles = []
+    if args.fp8_calibration_output:
+        block_linear_pattern = re.compile(
+            r"^blocks\.\d+\." r"(?:self_attn\.[qkvo]|cross_attn\.[qkvo]|ffn\.(?:0|2))$"
+        )
+        calibration_modules = {
+            name: module
+            for name, module in pipeline.generator.named_modules()
+            if isinstance(module, torch.nn.Linear)
+            and block_linear_pattern.fullmatch(name)
+        }
+        if len(calibration_modules) != 300:
+            raise RuntimeError(
+                "expected exactly 300 MinWM block linears for FP8 calibration, "
+                f"found {len(calibration_modules)}"
+            )
+
+        def capture_input_amax(name: str):
+            def hook(_module, hook_args):
+                if not hook_args or not isinstance(hook_args[0], torch.Tensor):
+                    raise TypeError(f"{name}: expected tensor as first linear input")
+                value = float(hook_args[0].detach().abs().amax().float().item())
+                if not math.isfinite(value):
+                    raise ValueError(f"{name}: non-finite activation maximum {value}")
+                calibration_amax[name] = max(calibration_amax.get(name, 0.0), value)
+                calibration_samples[name] = calibration_samples.get(name, 0) + 1
+
+            return hook
+
+        calibration_handles = [
+            module.register_forward_pre_hook(capture_input_amax(name))
+            for name, module in calibration_modules.items()
+        ]
 
     dump_root = os.environ.get("MINWM_PARITY_DUMP_DIR")
     if dump_root and args.warmup_runs:
@@ -444,6 +487,40 @@ def main() -> None:
             "cases": run_records,
         },
     )
+    if args.fp8_calibration_output:
+        for handle in calibration_handles:
+            handle.remove()
+        missing = sorted(set(calibration_modules) - set(calibration_amax))
+        if missing:
+            raise RuntimeError(
+                "FP8 calibration did not exercise all block linears: "
+                + ", ".join(missing[:10])
+            )
+        write_json(
+            Path(args.fp8_calibration_output).resolve(),
+            {
+                "format": "minwm-static-fp8-calibration-v1",
+                "scope": "benchmark-only",
+                "contract": {
+                    "cases_file": str(Path(args.cases).resolve()),
+                    "selected_cases": [case["id"] for case in cases],
+                    "height": int(contract["height"]),
+                    "width": int(contract["width"]),
+                    "checkpoint": str(Path(args.checkpoint).resolve()),
+                    "config": str(config_path),
+                    "local_attn_size": effective_local_attn_size,
+                    "sink_size": effective_sink_size,
+                },
+                "module_count": len(calibration_modules),
+                "modules": {
+                    name: {
+                        "input_amax": calibration_amax[name],
+                        "samples": calibration_samples[name],
+                    }
+                    for name in sorted(calibration_modules)
+                },
+            },
+        )
 
 
 if __name__ == "__main__":

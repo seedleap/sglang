@@ -45,6 +45,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--measured-chunks", type=int, default=200)
     parser.add_argument("--kv-cache-num-frames", type=int)
     parser.add_argument("--save-first-measured-frame", action="store_true")
+    parser.add_argument(
+        "--progress-file",
+        type=Path,
+        help="Write the latest completed chunk index for external profiler control.",
+    )
     parser.add_argument("--timeout", type=float, default=1800.0)
     return parser.parse_args()
 
@@ -311,6 +316,14 @@ async def receive_run(args: argparse.Namespace, contract: dict, case: dict) -> d
                 expected_frames=expected_frames,
             ):
                 payload_complete_ns[chunk_index] = time.perf_counter_ns()
+                if args.progress_file is not None:
+                    write_json(
+                        args.progress_file,
+                        {
+                            "completed_chunks": len(payload_complete_ns),
+                            "last_completed_chunk": chunk_index,
+                        },
+                    )
 
     expected_indices = list(range(total_chunks))
     if stats_by_chunk and sorted(stats_by_chunk) != expected_indices:

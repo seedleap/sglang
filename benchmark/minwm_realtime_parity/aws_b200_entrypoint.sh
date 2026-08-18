@@ -21,6 +21,7 @@ set -euo pipefail
   || "${MINWM_BENCHMARK_MODE}" == "triptych720p" \
   || "${MINWM_BENCHMARK_MODE}" == "spmatrix720p" \
   || "${MINWM_BENCHMARK_MODE}" == "cudagraphmatrix" \
+  || "${MINWM_BENCHMARK_MODE}" == "attnffn720p" \
   || "${MINWM_BENCHMARK_MODE}" == "bounded5s" \
   || "${MINWM_BENCHMARK_MODE}" == "dragon60s" ]] || {
   echo "unsupported MINWM_BENCHMARK_MODE=${MINWM_BENCHMARK_MODE}" >&2
@@ -255,6 +256,10 @@ wait_for_server() {
   tail -300 "${log_path}" >&2
   return 1
 }
+
+if [[ "${MINWM_BENCHMARK_MODE}" == "attnffn720p" ]]; then
+  exec bash /workspace/sglang/benchmark/minwm_720p_attn_ffn_20260818/run_matrix.sh
+fi
 
 if [[ "${MINWM_BENCHMARK_MODE}" == "dragon60s" ]]; then
   DRAGON_CASES="${MINWM_CASES_PATH:-${SCRIPT_DIR}/cases_dragon_ride_60s_832x480.json}"

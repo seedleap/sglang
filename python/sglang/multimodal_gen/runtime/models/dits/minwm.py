@@ -83,6 +83,7 @@ _MINWM_CUDA_GRAPH_ACTIVE = False
 _MINWM_CACHE_ROTATED_K = _env_flag("MINWM_CACHE_ROTATED_K", True)
 _MINWM_PRECOMPUTE_CACHE_ROPE = _env_flag("MINWM_PRECOMPUTE_CACHE_ROPE", True)
 _MINWM_CACHE_PACKED_METADATA = _env_flag("MINWM_CACHE_PACKED_METADATA", True)
+_MINWM_NVTX_BLOCK_PHASES = _env_flag("MINWM_NVTX_BLOCK_PHASES", False)
 _MINWM_ANNOUNCED_ATTENTION_BACKENDS: set[tuple[str, str]] = set()
 
 
@@ -840,66 +841,76 @@ class MinWMCausalTransformerBlock(CausalWanTransformerBlock):
         # preserves its non-contiguous 6*D token stride for the compiled AdaLN.
         timestep_modulation = temb[:, frame_index]
 
-        _, norm_hidden_states = _minwm_adaln(
-            hidden_states,
-            modulation[:, 0],
-            modulation[:, 1],
-            timestep_modulation.select(-2, 0),
-            timestep_modulation.select(-2, 1),
-            self.norm1.eps,
-        )
-
-        query, _ = self.to_q(norm_hidden_states)
-        key, _ = self.to_k(norm_hidden_states)
-        value, _ = self.to_v(norm_hidden_states)
-        if self.tp_rmsnorm:
-            query = tensor_parallel_rms_norm(query, self.norm_q)
-            key = tensor_parallel_rms_norm(key, self.norm_k)
-            query = query.squeeze(1).unflatten(2, (self.local_num_heads, self.dim_head))
-            key = key.squeeze(1).unflatten(2, (self.local_num_heads, self.dim_head))
-            qk_already_roped = False
-        else:
-            qk_op = _minwm_qk_norm_rope_op if kv_cache is None else _minwm_qk_norm_op
-            qk_args = [
-                query.squeeze(1),
-                key.squeeze(1),
-                self.norm_q.weight,
-                self.norm_k.weight,
-                self.norm_q.eps,
-            ]
-            if kv_cache is None:
-                qk_args.append(torch.stack(freqs_cis, dim=-1))
-            qk_args.append(self.local_num_heads)
-            # minWM main's inference/cache path calls qk_norm_op eagerly.
-            # Compiling this reduction changes its BF16 rounding boundary.
-            query, key = _minwm_apply_qk_op(
-                qk_op,
-                qk_args,
-                use_cache=kv_cache is not None,
-                use_compile=query.is_cuda,
+        if _MINWM_NVTX_BLOCK_PHASES:
+            torch.cuda.nvtx.range_push("minwm.block.self_attention")
+        try:
+            _, norm_hidden_states = _minwm_adaln(
+                hidden_states,
+                modulation[:, 0],
+                modulation[:, 1],
+                timestep_modulation.select(-2, 0),
+                timestep_modulation.select(-2, 1),
+                self.norm1.eps,
             )
-            qk_already_roped = kv_cache is None
-        value = value.squeeze(1).unflatten(2, (self.local_num_heads, self.dim_head))
-        attn_output = self.attn1(
-            query,
-            key,
-            value,
-            freqs_cis,
-            block_mask,
-            kv_cache,
-            current_start,
-            cache_start,
-            qk_already_roped=qk_already_roped,
-        ).flatten(2)
-        attn_output, _ = self.to_out(attn_output)
-        attn_output = attn_output.squeeze(1)
 
-        hidden_states = _minwm_adaln(
-            hidden_states,
-            y=attn_output,
-            m_gate=modulation[:, 2],
-            e_gate=timestep_modulation.select(-2, 2),
-        )
+            query, _ = self.to_q(norm_hidden_states)
+            key, _ = self.to_k(norm_hidden_states)
+            value, _ = self.to_v(norm_hidden_states)
+            if self.tp_rmsnorm:
+                query = tensor_parallel_rms_norm(query, self.norm_q)
+                key = tensor_parallel_rms_norm(key, self.norm_k)
+                query = query.squeeze(1).unflatten(
+                    2, (self.local_num_heads, self.dim_head)
+                )
+                key = key.squeeze(1).unflatten(2, (self.local_num_heads, self.dim_head))
+                qk_already_roped = False
+            else:
+                qk_op = (
+                    _minwm_qk_norm_rope_op if kv_cache is None else _minwm_qk_norm_op
+                )
+                qk_args = [
+                    query.squeeze(1),
+                    key.squeeze(1),
+                    self.norm_q.weight,
+                    self.norm_k.weight,
+                    self.norm_q.eps,
+                ]
+                if kv_cache is None:
+                    qk_args.append(torch.stack(freqs_cis, dim=-1))
+                qk_args.append(self.local_num_heads)
+                # minWM main's inference/cache path calls qk_norm_op eagerly.
+                # Compiling this reduction changes its BF16 rounding boundary.
+                query, key = _minwm_apply_qk_op(
+                    qk_op,
+                    qk_args,
+                    use_cache=kv_cache is not None,
+                    use_compile=query.is_cuda,
+                )
+                qk_already_roped = kv_cache is None
+            value = value.squeeze(1).unflatten(2, (self.local_num_heads, self.dim_head))
+            attn_output = self.attn1(
+                query,
+                key,
+                value,
+                freqs_cis,
+                block_mask,
+                kv_cache,
+                current_start,
+                cache_start,
+                qk_already_roped=qk_already_roped,
+            ).flatten(2)
+            attn_output, _ = self.to_out(attn_output)
+            attn_output = attn_output.squeeze(1)
+
+            hidden_states = _minwm_adaln(
+                hidden_states,
+                y=attn_output,
+                m_gate=modulation[:, 2],
+                e_gate=timestep_modulation.select(-2, 2),
+            )
+        finally:
+            if _MINWM_NVTX_BLOCK_PHASES:
+                torch.cuda.nvtx.range_pop()
         parity_dump_dir = getattr(self, "_minwm_parity_dump_dir", None)
         parity_index = getattr(self, "_minwm_parity_forward_index", 0)
         if parity_dump_dir is not None:
@@ -910,42 +921,55 @@ class MinWMCausalTransformerBlock(CausalWanTransformerBlock):
                 )
             self._minwm_parity_forward_index = parity_index + 1
 
-        affine_norm = self.self_attn_residual_norm.norm
-        norm_hidden_states = _minwm_layer_norm(
-            hidden_states,
-            eps=affine_norm.eps,
-            weight=affine_norm.weight,
-            bias=affine_norm.bias,
-        )
-        if parity_dump_dir is not None and parity_index < 2:
-            torch.save(
-                norm_hidden_states.detach().cpu(),
-                parity_dump_dir / f"self_residual_norm_{parity_index:03d}.pt",
+        if _MINWM_NVTX_BLOCK_PHASES:
+            torch.cuda.nvtx.range_push("minwm.block.cross_attention")
+        try:
+            affine_norm = self.self_attn_residual_norm.norm
+            norm_hidden_states = _minwm_layer_norm(
+                hidden_states,
+                eps=affine_norm.eps,
+                weight=affine_norm.weight,
+                bias=affine_norm.bias,
             )
-        cross_output = self.attn2(
-            norm_hidden_states,
-            context=encoder_hidden_states,
-            context_lens=None,
-            crossattn_cache=crossattn_cache,
-        )
+            if parity_dump_dir is not None and parity_index < 2:
+                torch.save(
+                    norm_hidden_states.detach().cpu(),
+                    parity_dump_dir / f"self_residual_norm_{parity_index:03d}.pt",
+                )
+            cross_output = self.attn2(
+                norm_hidden_states,
+                context=encoder_hidden_states,
+                context_lens=None,
+                crossattn_cache=crossattn_cache,
+            )
 
-        hidden_states, norm_hidden_states = _minwm_adaln(
-            hidden_states,
-            modulation[:, 3],
-            modulation[:, 4],
-            timestep_modulation.select(-2, 3),
-            timestep_modulation.select(-2, 4),
-            self.cross_attn_residual_norm.norm.eps,
-            r=cross_output,
-        )
+            hidden_states, norm_hidden_states = _minwm_adaln(
+                hidden_states,
+                modulation[:, 3],
+                modulation[:, 4],
+                timestep_modulation.select(-2, 3),
+                timestep_modulation.select(-2, 4),
+                self.cross_attn_residual_norm.norm.eps,
+                r=cross_output,
+            )
+        finally:
+            if _MINWM_NVTX_BLOCK_PHASES:
+                torch.cuda.nvtx.range_pop()
 
-        ff_output = self.ffn(norm_hidden_states)
-        return _minwm_adaln(
-            hidden_states,
-            y=ff_output,
-            m_gate=modulation[:, 5],
-            e_gate=timestep_modulation.select(-2, 5),
-        )
+        if _MINWM_NVTX_BLOCK_PHASES:
+            torch.cuda.nvtx.range_push("minwm.block.ffn")
+        try:
+            ff_output = self.ffn(norm_hidden_states)
+            hidden_states = _minwm_adaln(
+                hidden_states,
+                y=ff_output,
+                m_gate=modulation[:, 5],
+                e_gate=timestep_modulation.select(-2, 5),
+            )
+        finally:
+            if _MINWM_NVTX_BLOCK_PHASES:
+                torch.cuda.nvtx.range_pop()
+        return hidden_states
 
 
 class MinWMCausalTransformer3DModel(CausalWanTransformer3DModel):
@@ -967,18 +991,21 @@ class MinWMCausalTransformer3DModel(CausalWanTransformer3DModel):
         logger.info(
             "MinWM execution profile: attention_impl=%s "
             "packed_deterministic=%s segment_compile=%s cache_rotated_k=%s "
-            "precompute_cache_rope=%s cache_packed_metadata=%s",
+            "precompute_cache_rope=%s cache_packed_metadata=%s "
+            "nvtx_block_phases=%s",
             _MINWM_ATTENTION_IMPL,
             _MINWM_PACKED_ATTENTION_DETERMINISTIC,
             _MINWM_SEGMENT_COMPILE,
             _MINWM_CACHE_ROTATED_K,
             _MINWM_PRECOMPUTE_CACHE_ROPE,
             _MINWM_CACHE_PACKED_METADATA,
+            _MINWM_NVTX_BLOCK_PHASES,
         )
         deterministic = os.environ.get("MINWM_PARITY_DETERMINISTIC", "0")
         if deterministic.strip().lower() not in {"", "0", "false", "no", "off"}:
             torch.use_deterministic_algorithms(True)
         super().__init__(config, hf_config, quant_config)
+        self._emit_block_phase_nvtx = _MINWM_NVTX_BLOCK_PHASES
         self.sp_size = get_sp_world_size()
         ulysses_workspace = _MinWMUlyssesWorkspace() if self.sp_size > 1 else None
         d = self.hidden_size // self.num_attention_heads
@@ -1078,6 +1105,52 @@ class MinWMCausalTransformer3DModel(CausalWanTransformer3DModel):
         return torch.stack([temporal, height_ids, width_ids], dim=-1).reshape(-1, 3)
 
     def forward(
+        self,
+        hidden_states: torch.Tensor,
+        encoder_hidden_states: torch.Tensor | list[torch.Tensor],
+        timestep: torch.LongTensor,
+        encoder_hidden_states_image: torch.Tensor | list[torch.Tensor] | None = None,
+        kv_cache=None,
+        crossattn_cache=None,
+        current_start: int = 0,
+        cache_start: int = 0,
+        start_frame: int = 0,
+        action: torch.Tensor | None = None,
+        precomputed_attention_plan: MinWMCausalAttentionKVPlan | None = None,
+    ) -> torch.Tensor:
+        if not self._emit_block_phase_nvtx:
+            return self._forward_impl(
+                hidden_states,
+                encoder_hidden_states,
+                timestep,
+                encoder_hidden_states_image=encoder_hidden_states_image,
+                kv_cache=kv_cache,
+                crossattn_cache=crossattn_cache,
+                current_start=current_start,
+                cache_start=cache_start,
+                start_frame=start_frame,
+                action=action,
+                precomputed_attention_plan=precomputed_attention_plan,
+            )
+        torch.cuda.nvtx.range_push("minwm.dit.forward")
+        try:
+            return self._forward_impl(
+                hidden_states,
+                encoder_hidden_states,
+                timestep,
+                encoder_hidden_states_image=encoder_hidden_states_image,
+                kv_cache=kv_cache,
+                crossattn_cache=crossattn_cache,
+                current_start=current_start,
+                cache_start=cache_start,
+                start_frame=start_frame,
+                action=action,
+                precomputed_attention_plan=precomputed_attention_plan,
+            )
+        finally:
+            torch.cuda.nvtx.range_pop()
+
+    def _forward_impl(
         self,
         hidden_states: torch.Tensor,
         encoder_hidden_states: torch.Tensor | list[torch.Tensor],
@@ -1228,18 +1301,24 @@ class MinWMCausalTransformer3DModel(CausalWanTransformer3DModel):
                 "MinWM encoder hidden-state dtype must match the latent dtype."
             )
 
-        for block_index, block in enumerate(self.blocks):
-            hidden_states = block(
-                hidden_states,
-                encoder_hidden_states,
-                timestep_proj,
-                freqs_cis,
-                block_mask=self.block_mask,
-                kv_cache=kv_cache[block_index],
-                crossattn_cache=crossattn_cache[block_index],
-                current_start=current_start,
-                cache_start=cache_start,
-            )
+        if self._emit_block_phase_nvtx:
+            torch.cuda.nvtx.range_push("minwm.dit.blocks")
+        try:
+            for block_index, block in enumerate(self.blocks):
+                hidden_states = block(
+                    hidden_states,
+                    encoder_hidden_states,
+                    timestep_proj,
+                    freqs_cis,
+                    block_mask=self.block_mask,
+                    kv_cache=kv_cache[block_index],
+                    crossattn_cache=crossattn_cache[block_index],
+                    current_start=current_start,
+                    cache_start=cache_start,
+                )
+        finally:
+            if self._emit_block_phase_nvtx:
+                torch.cuda.nvtx.range_pop()
 
         hidden_states = self._apply_output_head(
             hidden_states,
