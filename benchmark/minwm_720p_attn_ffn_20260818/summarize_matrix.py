@@ -75,6 +75,35 @@ def backend_evidence(path: Path) -> list[str]:
     return found[-12:]
 
 
+def scheduler_fps_from_log(path: Path, throughput: dict) -> tuple[float | None, int]:
+    """Recover scheduler FPS when this server does not return chunk_stats."""
+    if not path.is_file():
+        return None, 0
+    first = int(throughput["warmup_chunks"])
+    count = int(throughput["measured_chunks"])
+    measured = range(first, first + count)
+    scheduler_ms_by_chunk = {}
+    for line in path.read_text(errors="replace").splitlines():
+        marker = "realtime_trace "
+        offset = line.find(marker)
+        if offset < 0:
+            continue
+        try:
+            event = json.loads(line[offset + len(marker) :])
+        except json.JSONDecodeError:
+            continue
+        if event.get("event") != "server.chunk_complete":
+            continue
+        chunk_index = event.get("chunk_index")
+        scheduler_ms = event.get("scheduler_forward_ms")
+        if chunk_index in measured and scheduler_ms is not None:
+            scheduler_ms_by_chunk[int(chunk_index)] = float(scheduler_ms)
+    if len(scheduler_ms_by_chunk) != count:
+        return None, len(scheduler_ms_by_chunk)
+    measured_frames = int(throughput["measured_frames"])
+    return measured_frames / (sum(scheduler_ms_by_chunk.values()) / 1000.0), count
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("root", type=Path)
@@ -105,6 +134,14 @@ def main() -> None:
             lane["scheduler_fps"] = throughput["server"].get(
                 "scheduler_forward_fps_ratio_of_sums"
             )
+            lane["scheduler_fps_source"] = "client_chunk_stats"
+            if lane["scheduler_fps"] is None:
+                recovered, recovered_chunks = scheduler_fps_from_log(
+                    lane_path / "server.log", throughput
+                )
+                lane["scheduler_fps"] = recovered
+                lane["scheduler_fps_source"] = "server.chunk_complete log"
+                lane["scheduler_fps_recovered_chunks"] = recovered_chunks
             lane["client_fps"] = throughput["client"].get(
                 "steady_received_fps_ratio_of_sums"
             )
@@ -114,35 +151,40 @@ def main() -> None:
 
     if args.reference not in lanes or "throughput" not in lanes[args.reference]:
         raise SystemExit(f"missing successful reference lane {args.reference!r}")
+    successful = [lane for lane in lanes.values() if "throughput" in lane]
+    use_scheduler = all(lane.get("scheduler_fps") is not None for lane in successful)
+    ranking_metric = "scheduler_fps" if use_scheduler else "client_fps"
     reference = lanes[args.reference]["throughput"]
-    reference_scheduler = lanes[args.reference]["scheduler_fps"]
+    reference_fps = lanes[args.reference][ranking_metric]
     for name, lane in lanes.items():
         if "throughput" not in lane:
             continue
         lane["sampled_error_vs_reference"] = sampled_error(
             reference, lane["throughput"]
         )
-        if reference_scheduler and lane["scheduler_fps"]:
-            lane["scheduler_speedup_vs_reference_pct"] = 100 * (
-                lane["scheduler_fps"] / reference_scheduler - 1
+        lane["ranking_fps"] = lane[ranking_metric]
+        if reference_fps and lane["ranking_fps"]:
+            lane["ranking_speedup_vs_reference_pct"] = 100 * (
+                lane["ranking_fps"] / reference_fps - 1
             )
 
     ranked = sorted(
         (
             {
                 "lane": name,
+                "ranking_fps": lane.get("ranking_fps"),
                 "scheduler_fps": lane.get("scheduler_fps"),
                 "client_fps": lane.get("client_fps"),
-                "scheduler_speedup_vs_reference_pct": lane.get(
-                    "scheduler_speedup_vs_reference_pct"
+                "ranking_speedup_vs_reference_pct": lane.get(
+                    "ranking_speedup_vs_reference_pct"
                 ),
                 "peak_gpu_memory_mib": lane.get("peak_gpu_memory_mib"),
                 "sampled_error_vs_reference": lane.get("sampled_error_vs_reference"),
             }
             for name, lane in lanes.items()
-            if lane.get("scheduler_fps") is not None
+            if lane.get("ranking_fps") is not None
         ),
-        key=lambda item: item["scheduler_fps"],
+        key=lambda item: item["ranking_fps"],
         reverse=True,
     )
     for item in ranked:
@@ -171,6 +213,7 @@ def main() -> None:
     result = {
         "schema_version": "minwm-720p-attn-ffn-matrix/v1",
         "reference_lane": args.reference,
+        "ranking_metric": ranking_metric,
         "contract": (
             json.loads((args.root / "contract.json").read_text())
             if (args.root / "contract.json").is_file()
@@ -200,6 +243,8 @@ def main() -> None:
         "",
         "Raw-speed ranking (the quality column is only a sampled corruption screen):",
         "",
+        f"Ranking metric: `{ranking_metric}`",
+        "",
         "| rank | lane | scheduler FPS | client FPS | speedup | peak MiB | sampled PSNR | screen |",
         "|---:|---|---:|---:|---:|---:|---:|:---:|",
     ]
@@ -207,12 +252,20 @@ def main() -> None:
         error = item["sampled_error_vs_reference"] or {}
         psnr = error.get("psnr_db")
         lines.append(
-            "| {rank} | `{lane}` | {scheduler:.3f} | {client:.3f} | {speedup:+.2f}% | {memory} | {psnr} | {screen} |".format(
+            "| {rank} | `{lane}` | {scheduler} | {client} | {speedup:+.2f}% | {memory} | {psnr} | {screen} |".format(
                 rank=index,
                 lane=item["lane"],
-                scheduler=item["scheduler_fps"],
-                client=item["client_fps"],
-                speedup=item["scheduler_speedup_vs_reference_pct"] or 0.0,
+                scheduler=(
+                    f"{item['scheduler_fps']:.3f}"
+                    if item["scheduler_fps"] is not None
+                    else "n/a"
+                ),
+                client=(
+                    f"{item['client_fps']:.3f}"
+                    if item["client_fps"] is not None
+                    else "n/a"
+                ),
+                speedup=item["ranking_speedup_vs_reference_pct"] or 0.0,
                 memory=(
                     f"{item['peak_gpu_memory_mib']:.0f}"
                     if item["peak_gpu_memory_mib"] is not None
@@ -247,6 +300,7 @@ def main() -> None:
         json.dumps(
             {
                 "raw_speed_ranking": ranked,
+                "ranking_metric": ranking_metric,
                 "quality_screened_ranking": quality_screened,
                 "best_eager_lane_raw_speed": result["best_eager_lane_raw_speed"],
                 "best_eager_lane_quality_screened": result[
