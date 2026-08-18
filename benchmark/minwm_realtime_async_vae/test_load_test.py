@@ -112,6 +112,28 @@ def test_init_request_keeps_t2v_frame_count_aligned_with_chunk_count():
     assert request["max_chunks"] == 5
 
 
+def test_init_request_uses_explicit_full_model_and_preview_geometry():
+    args = Namespace(
+        model="/work/model",
+        prompt="test prompt",
+        size="1280x704",
+        preview_max_width=832,
+        preview_quality=70,
+        fps=24,
+        sink=8,
+        window=32,
+    )
+
+    request = init_request(args, total_chunks=5, trace_id="trace-full-size")
+
+    assert request["size"] == "1280x704"
+    assert request["realtime_preview_max_width"] == 832
+    assert request["output_compression"] == 70
+    assert request["num_inference_steps"] == 4
+    assert request["realtime_causal_sink_size"] == 8
+    assert request["realtime_causal_kv_cache_num_frames"] == 32
+
+
 def test_init_request_supports_i2v_reference_bytes():
     args = Namespace(
         model="lingbot-world-v2-14b-causal-fast-diffusers",

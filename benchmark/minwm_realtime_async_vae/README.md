@@ -25,7 +25,13 @@ python benchmark/minwm_realtime_async_vae/load_test.py \
   --profile async \
   --realtime-media-profile rife3x_v1 \
   --expected-media-weights-sha256 8f6fb9105ba9e946762ee7190acbca3ca1cf14193eb81ca0955d492fb8558692 \
-  --concurrency 1,2 \
+  --concurrency 1,2,4 \
+  --size 1280x704 \
+  --preview-max-width 832 \
+  --preview-quality 70 \
+  --fps 24 \
+  --sink 8 \
+  --window 32 \
   --output artifacts/rife3x.json
 
 python benchmark/minwm_realtime_async_vae/summarize.py \
@@ -43,6 +49,13 @@ FPS；独立 output UX 门槛默认检查每会话实测 output/wall `>= 24 FPS`
 timeline 值来判定通过。3x 的 `output_realtime_factor` 定义为
 `output_wall_fps / 72`；它小于 1 只说明没有按 72 FPS 时间轴实时交付，并不等于
 24 FPS 显示门槛失败，也不能替代该门槛。
+
+这里没有修改 SGLang 的默认 FIFO 调度器。`batching-max-size=1` 时，多 Session
+仍按全局到达顺序逐 chunk 共享 denoiser；均衡负载下会自然交错，但不承诺在某个
+Session 暂时不可运行时仍强制 A/B/A/B。上面的正式命令锁定模型计算尺寸
+`1280x704`、4 steps、sink 8、window 32；`832` 只控制浏览器预览编码宽度，不会
+降低 denoiser 的模型计算分辨率。上线前另补一次 `--preview-max-width 1280` 的同尺寸
+浏览器检查，避免把预览缩放误写成模型性能提升。
 
 容量汇总按请求中记录的并发测试阶梯做连续前缀判定：任一较低档位失败或缺失后，
 更高档位即使偶然通过也不能越级成为“最高稳定并发”；重复档位会直接拒绝，避免从
