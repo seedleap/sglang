@@ -183,6 +183,10 @@ assert.match(
   "author styles must not override the hidden parameter panel",
 );
 assert.match(css, /grid-template-columns:\s*repeat\(2,/);
+assert.match(css, /\.model-player-grid\.is-single\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)/);
+assert.match(app, /Array\.isArray\(UI_CONFIG\.modelSlots\)/);
+assert.match(app, /if \(CONFIGURED_MODEL_SLOTS\.length\) return \[\.\.\.CONFIGURED_MODEL_SLOTS\]/);
+assert.match(app, /slotConfig\.hidden = MODEL_SLOTS_LOCKED/);
 assert.match(css, /@media[^}]*max-width[\s\S]*\.model-player-grid\s*\{[\s\S]*grid-template-columns:\s*1fr/);
 assert.match(css, /\.stage\s*\{[\s\S]*container-type:\s*inline-size/);
 assert.match(css, /@container[^}]*max-width:\s*1180px[\s\S]*\.topbar\s*\{[\s\S]*flex-wrap:\s*wrap/);
@@ -216,8 +220,8 @@ assert.match(html, /dual_model_controller\.js\?v=dual-model-v6/);
 assert.match(html, /h264_websocket_session\.js\?v=h264-stage-timing-v1/);
 assert.match(html, /prompt_rewrite_controller\.js\?v=prompt-rewrite-v3/);
 assert.match(html, /world_rules_controller\.js\?v=world-rules-v4/);
-assert.match(html, /styles\.css\?v=world-studio-h264-rules-v6/);
-assert.match(html, /app\.js\?v=world-studio-transport-telemetry-v4/);
+assert.match(html, /styles\.css\?v=world-studio-h264-rules-v7/);
+assert.match(html, /app\.js\?v=world-studio-transport-telemetry-v5/);
 assert.match(html, /id="minwmH264Viewport"/);
 assert.match(html, /id="lingbot2H264Viewport"/);
 assert.match(html, /id="minwmPerfScheduler"/);

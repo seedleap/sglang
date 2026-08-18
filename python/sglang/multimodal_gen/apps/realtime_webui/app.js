@@ -567,9 +567,19 @@ let customWorldPresets = [];
 let customWorldDbPromise = null;
 let customWorldLoadPromise = null;
 const MODEL_SLOT_DEFAULTS = ["minwm", "lingbot2", "happyoyster"];
-let activeModelSlotCount = 2;
+const CONFIGURED_MODEL_SLOTS = Array.isArray(UI_CONFIG.modelSlots)
+  ? UI_CONFIG.modelSlots
+    .map((key) => String(key || "").trim().toLowerCase())
+    .filter((key, index, keys) => (
+      MODEL_SLOT_DEFAULTS.includes(key) && keys.indexOf(key) === index
+    ))
+  : [];
+const MODEL_SLOTS_LOCKED = CONFIGURED_MODEL_SLOTS.length > 0
+  && UI_CONFIG.lockModelSlots !== false;
+let activeModelSlotCount = CONFIGURED_MODEL_SLOTS.length || 2;
 
 function selectedModelKeys() {
+  if (CONFIGURED_MODEL_SLOTS.length) return [...CONFIGURED_MODEL_SLOTS];
   const keys = [];
   for (let index = 0; index < activeModelSlotCount; index += 1) {
     const key = $(`modelSlot${index}`)?.value || MODEL_SLOT_DEFAULTS[index];
@@ -585,6 +595,11 @@ function modelSelected(key) {
 function syncModelSlotUi() {
   const selected = selectedModelKeys();
   const grid = document.querySelector(".model-player-grid");
+  const slotConfig = document.querySelector(".model-slot-config");
+  CONFIGURED_MODEL_SLOTS.forEach((key, index) => {
+    const slot = $(`modelSlot${index}`);
+    if (slot) slot.value = key;
+  });
   for (const key of MODEL_SLOT_DEFAULTS) {
     const player = document.querySelector(`[data-model-key="${key}"]`);
     if (player) player.hidden = !selected.includes(key);
@@ -593,10 +608,12 @@ function syncModelSlotUi() {
     const player = document.querySelector(`[data-model-key="${key}"]`);
     if (player && grid) grid.appendChild(player);
   }
+  if (slotConfig) slotConfig.hidden = MODEL_SLOTS_LOCKED;
+  grid?.classList.toggle("is-single", selected.length === 1);
   grid?.classList.toggle("is-three-up", selected.length === 3);
-  $("modelSlot2Wrap").hidden = activeModelSlotCount < 3;
-  $("addModelSlotBtn").hidden = activeModelSlotCount >= 3;
-  $("removeModelSlotBtn").hidden = activeModelSlotCount < 3;
+  $("modelSlot2Wrap").hidden = MODEL_SLOTS_LOCKED || activeModelSlotCount < 3;
+  $("addModelSlotBtn").hidden = MODEL_SLOTS_LOCKED || activeModelSlotCount >= 3;
+  $("removeModelSlotBtn").hidden = MODEL_SLOTS_LOCKED || activeModelSlotCount < 3;
 }
 
 function ensureUniqueModelSlot(changedIndex) {
