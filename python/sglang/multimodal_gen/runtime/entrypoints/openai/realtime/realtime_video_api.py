@@ -912,6 +912,14 @@ async def _generate_loop_async_vae(ws, session: GenerateSession, server_args):
     coordinator = _OrderedDecodeCoordinator()
 
     try:
+        log_realtime_trace(
+            logger,
+            session,
+            "server.async_vae_open_start",
+            vae_worker_url=vae_worker_url,
+            output_url=getattr(session, "gateway_output_url", None),
+            output_format=output_format,
+        )
         await client.open(
             decoder_backend=session.vae_decoder_backend,
             output_format=output_format,
@@ -923,6 +931,7 @@ async def _generate_loop_async_vae(ws, session: GenerateSession, server_args):
             coordinator_token=getattr(session, "coordinator_token", None),
             worker_epoch=getattr(session, "vae_worker_epoch", None),
         )
+        log_realtime_trace(logger, session, "server.async_vae_open_done")
         while session.can_schedule_chunk():
             if coordinator.pending is not None and coordinator.pending.done():
                 await coordinator.finish()
@@ -1056,6 +1065,13 @@ async def _generate_loop_async_vae(ws, session: GenerateSession, server_args):
                 )
             )
         await coordinator.finish()
+        log_realtime_trace(
+            logger,
+            session,
+            "server.async_vae_loop_exit",
+            next_chunk_index=session.next_chunk_index,
+            max_chunks=session.request.max_chunks,
+        )
     except asyncio.CancelledError:
         await coordinator.cancel()
         raise
@@ -1065,6 +1081,13 @@ async def _generate_loop_async_vae(ws, session: GenerateSession, server_args):
     except Exception as exc:
         await coordinator.cancel()
         err_msg = str(exc).splitlines()[0]
+        log_realtime_trace(
+            logger,
+            session,
+            "server.async_vae_loop_error",
+            exception_type=type(exc).__name__,
+            exception_message=err_msg,
+        )
         logger.error("error during async VAE generate loop: %s", err_msg)
         try:
             await write_error_msg(f"error during generate loop: {err_msg}", ws)
@@ -1358,6 +1381,29 @@ async def _await_realtime_task(task: asyncio.Task | None) -> None:
         pass
     except Exception as e:
         logger.debug("realtime task exited with error: %s", e)
+
+
+def _realtime_task_trace_fields(task: asyncio.Task) -> dict[str, Any]:
+    fields: dict[str, Any] = {
+        "task_name": task.get_name(),
+        "task_cancelled": task.cancelled(),
+    }
+    if task.cancelled():
+        return fields
+    try:
+        exception = task.exception()
+    except asyncio.InvalidStateError:
+        fields["task_done"] = False
+        return fields
+    if exception is None:
+        fields["task_result"] = "completed"
+        return fields
+    fields.update(
+        task_result="error",
+        exception_type=type(exception).__name__,
+        exception_message=str(exception).splitlines()[0],
+    )
+    return fields
 
 
 async def _refresh_latest_queued_controls(
@@ -1820,7 +1866,8 @@ async def generate(websocket: WebSocket):
                     enforce_max_lifetime=not session.trace_id.startswith(
                         "startup-warmup-"
                     ),
-                )
+                ),
+                name="realtime-session-watchdog",
             )
         log_realtime_trace(
             logger,
@@ -1843,7 +1890,9 @@ async def generate(websocket: WebSocket):
                 )
             await _listen_generate_request(ws, session)
 
-        initialization_task = asyncio.create_task(initialize_session())
+        initialization_task = asyncio.create_task(
+            initialize_session(), name="realtime-initialize-session"
+        )
         if watchdog_task is None:
             await initialization_task
             init_close_reason = None
@@ -1864,19 +1913,52 @@ async def generate(websocket: WebSocket):
             return
 
         if worker_reservations is not None and worker_reservation_owner is not None:
-            await worker_reservations.mark_runnable(
-                gateway_config.coordinator_token,
-                owner_id=worker_reservation_owner,
+            log_realtime_trace(
+                logger,
+                session,
+                "server.gateway_reservation_mark_runnable_start",
+            )
+            try:
+                await worker_reservations.mark_runnable(
+                    gateway_config.coordinator_token,
+                    owner_id=worker_reservation_owner,
+                )
+            except WorkerReservationRejected as exc:
+                log_realtime_trace(
+                    logger,
+                    session,
+                    "server.gateway_reservation_mark_runnable_failed",
+                    reason=exc.reason,
+                )
+                raise AdmissionRejected(exc.reason) from exc
+            log_realtime_trace(
+                logger,
+                session,
+                "server.gateway_reservation_mark_runnable_done",
             )
 
         # continuously generate video chunk
-        generate_task = asyncio.create_task(_generate_loop(ws, session))
+        generate_task = asyncio.create_task(
+            _generate_loop(ws, session), name="realtime-generate-loop"
+        )
         # continuously listen for user events
-        listen_task = asyncio.create_task(_listen_events(ws, session))
+        listen_task = asyncio.create_task(
+            _listen_events(ws, session), name="realtime-listen-events"
+        )
         wait_tasks = [generate_task, listen_task]
         if watchdog_task is not None:
             wait_tasks.append(watchdog_task)
-        await asyncio.wait(wait_tasks, return_when=asyncio.FIRST_COMPLETED)
+        done, pending = await asyncio.wait(
+            wait_tasks, return_when=asyncio.FIRST_COMPLETED
+        )
+        for task in done:
+            log_realtime_trace(
+                logger,
+                session,
+                "server.realtime_task_completed",
+                pending_task_count=len(pending),
+                **_realtime_task_trace_fields(task),
+            )
         if generate_task.done() and session.reached_max_chunks():
             close_after_cleanup = (1000, "generation complete")
         elif watchdog_task is not None and watchdog_task.done():
