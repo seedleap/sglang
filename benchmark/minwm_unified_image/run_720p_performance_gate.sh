@@ -23,6 +23,7 @@ case "${MINWM_GPU_FAMILY}" in
     MIN_SCHEDULER_FPS="7.6600772037069795"
     BASELINE_CLIENT_FPS="7.890654071296376"
     MIN_CLIENT_FPS="7.653934449157485"
+    EXPECTED_FA3_PROVIDER_EVIDENCE="Loaded locked FlashAttention v3 kernels provider=kernels-community repo=kernels-community/sgl-flash-attn3 revision=15c17db0bf9ce6599db795fa02a8f27467c92860"
     ;;
   blackwell)
     EXPECTED_GPU_NAME="NVIDIA B200"
@@ -32,6 +33,7 @@ case "${MINWM_GPU_FAMILY}" in
     MIN_SCHEDULER_FPS="13.963921724948854"
     BASELINE_CLIENT_FPS="14.376812178063995"
     MIN_CLIENT_FPS="13.945507812722074"
+    EXPECTED_FA3_PROVIDER_EVIDENCE=""
     ;;
   *)
     printf 'unsupported MINWM_GPU_FAMILY: %s\n' "${MINWM_GPU_FAMILY}" >&2
@@ -213,6 +215,7 @@ for component in text_encoder tokenizer vae scheduler; do
 done
 
 export EXPECTED_GPU_NAME EXPECTED_CAPABILITY EXPECTED_PACKED_BACKEND
+export EXPECTED_FA3_PROVIDER_EVIDENCE
 export BASELINE_SCHEDULER_FPS MIN_SCHEDULER_FPS
 export BASELINE_CLIENT_FPS MIN_CLIENT_FPS
 export CHECKPOINT_URI CHECKPOINT_VERSION CHECKPOINT_BYTES CHECKPOINT_CRC64
@@ -266,7 +269,10 @@ if cases_sha256 != input_contract["cases"]["sha256"]:
         "720p cases file drifted from inputs_720p.json: "
         f"expected {input_contract['cases']['sha256']}, got {cases_sha256}"
     )
-case_contract = json.loads(cases_bytes)["cases"][0]
+cases_manifest = json.loads(cases_bytes)
+case_contract = cases_manifest["cases"][0]
+request_action_type = cases_manifest["contract"]["action_type"]
+request_action_output_format = cases_manifest["contract"]["action_output_format"]
 checkpoint_contract = input_contract["checkpoint"]
 claimed_checkpoint = {
     "uri": os.environ["CHECKPOINT_URI"],
@@ -301,11 +307,16 @@ payload = {
     "checkpoint": {
         **claimed_checkpoint,
         "sha256": checkpoint_contract["sha256"],
+        "model_action_type": checkpoint_contract["model_action_type"],
         "input_contract": str(input_contract_path),
         "input_contract_sha256": hashlib.sha256(input_contract_bytes).hexdigest(),
     },
     "request": {
         "case": "00_forward_080_pottery_720p",
+        # This is the realtime API/action workload contract; it is not the
+        # checkpoint-native action encoder recorded separately above.
+        "api_action_contract_type": request_action_type,
+        "action_output_format": request_action_output_format,
         "cases_file": str(cases_path),
         "cases_sha256": cases_sha256,
         "prompt": case_contract["prompt"],
@@ -465,6 +476,7 @@ python3 "${SOURCE_ROOT}/python/sglang/multimodal_gen/tools/convert_minwm_checkpo
   --source-uri "${CHECKPOINT_SOURCE_URI}" \
   --source-version-id "${CHECKPOINT_SOURCE_VERSION}" \
   --source-etag "${CHECKPOINT_SOURCE_ETAG}" \
+  --action-type auto \
   --local-attn-size -1 \
   --sink-size 0 \
   --sliding-window-num-frames 128 \
@@ -472,7 +484,7 @@ python3 "${SOURCE_ROOT}/python/sglang/multimodal_gen/tools/convert_minwm_checkpo
   --rope-max-frame-gap 1 \
   > "${RESULTS}/conversion.log"
 
-python3 - "${MODEL}" "${CHECKPOINT_BYTES}" <<'PY'
+python3 - "${MODEL}" "${CHECKPOINT_BYTES}" "${INPUT_CONTRACT}" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -480,6 +492,8 @@ from pathlib import Path
 root = Path(sys.argv[1])
 config = json.loads((root / "transformer/config.json").read_text())
 manifest = json.loads((root / "minwm_conversion_manifest.json").read_text())
+input_contract = json.loads(Path(sys.argv[3]).read_text())
+expected_model_action_type = input_contract["checkpoint"]["model_action_type"]
 expected_config = {
     "local_attn_size": -1,
     "sink_size": 0,
@@ -487,7 +501,7 @@ expected_config = {
     "rope_position_mode": "absolute",
     "rope_max_frame_gap": 1,
     "prompt_first_frame_pin_enabled": False,
-    "action_type": "primitive_token_residual",
+    "action_type": expected_model_action_type,
 }
 for key, expected in expected_config.items():
     actual = config.get(key)
@@ -495,7 +509,7 @@ for key, expected in expected_config.items():
         raise RuntimeError(f"converted model {key}: expected {expected!r}, got {actual!r}")
 if manifest["source_checkpoint"]["local_size"] != int(sys.argv[2]):
     raise RuntimeError("converted model recorded the wrong checkpoint size")
-if manifest["generator"]["action_type"] != "primitive_token_residual":
+if manifest["generator"]["action_type"] != expected_model_action_type:
     raise RuntimeError("converted model recorded the wrong action type")
 print(json.dumps({"converted_model_contract": expected_config}, sort_keys=True))
 PY
@@ -595,14 +609,31 @@ client_pid=$!
 # first announcement while the one and only measurement session is still
 # running, so a fallback cannot consume an entire 120-chunk release run.
 backend_selected=0
+provider_selected=0
+if [[ -z "${EXPECTED_FA3_PROVIDER_EVIDENCE}" ]]; then
+  provider_selected=1
+fi
 for _ in $(seq 1 1200); do
   if grep -Fq \
     "MinWM packed-varlen attention backend=${EXPECTED_PACKED_BACKEND} device=cuda:0" \
     "${SERVER_LOG}"; then
     backend_selected=1
+  fi
+  if [[ -n "${EXPECTED_FA3_PROVIDER_EVIDENCE}" ]] &&
+    grep -Fq "${EXPECTED_FA3_PROVIDER_EVIDENCE}" "${SERVER_LOG}"; then
+    provider_selected=1
+  fi
+  if grep -Fq \
+    'Rollback to implementation from sgl-kernel since loading FlashAttention v3' \
+    "${SERVER_LOG}"; then
+    printf 'Hopper FA3 fell back to sgl-kernel during measurement\n' >&2
+    exit 1
+  fi
+  if [[ "${backend_selected}" == "1" && "${provider_selected}" == "1" ]]; then
     break
   fi
-  if grep -Fq 'MinWM packed-varlen attention backend=' "${SERVER_LOG}"; then
+  if [[ "${backend_selected}" != "1" ]] &&
+    grep -Fq 'MinWM packed-varlen attention backend=' "${SERVER_LOG}"; then
     printf 'packed attention selected an unexpected backend\n' >&2
     exit 1
   fi
@@ -618,8 +649,8 @@ for _ in $(seq 1 1200); do
   fi
   sleep 1
 done
-if [[ "${backend_selected}" != "1" ]]; then
-  printf 'packed backend was not announced before timeout\n' >&2
+if [[ "${backend_selected}" != "1" || "${provider_selected}" != "1" ]]; then
+  printf 'packed backend/provider was not announced before timeout\n' >&2
   exit 1
 fi
 
@@ -699,6 +730,12 @@ for evidence in (
 ):
     if evidence not in server_text:
         raise RuntimeError(f"missing server contract evidence: {evidence}")
+fa3_provider_evidence = os.environ["EXPECTED_FA3_PROVIDER_EVIDENCE"]
+if fa3_provider_evidence:
+    if fa3_provider_evidence not in server_text:
+        raise RuntimeError("missing locked kernels-community FA3 provider evidence")
+    if "Rollback to implementation from sgl-kernel since loading FlashAttention v3" in server_text:
+        raise RuntimeError("Hopper FA3 fell back to sgl-kernel")
 
 scheduler_ms_by_chunk = {}
 for line in server_text.splitlines():
@@ -811,6 +848,7 @@ result = {
     "throughput_json_sha256": sha256(throughput_path),
     "server_log_sha256": sha256(server_log_path),
     "backend_evidence": backend_evidence,
+    "fa3_provider_evidence": fa3_provider_evidence or None,
     "execution_profile_evidence": profile_evidence,
 }
 evidence_path = Path(os.environ["RESULTS"], "gate-evidence.json")
@@ -821,7 +859,7 @@ PY
 
 printf '%s\n' '--- selected server contract evidence ---'
 grep -E \
-  'Applying performance_mode=speed|Attention backends for transformer|MinWM execution profile|MinWM packed-varlen attention backend' \
+  'Applying performance_mode=speed|Attention backends for transformer|MinWM execution profile|MinWM packed-varlen attention backend|Loaded locked FlashAttention v3 kernels provider=' \
   "${SERVER_LOG}"
 printf '%s\n' '--- client timing summary ---'
 cat "${CLIENT_LOG}"
