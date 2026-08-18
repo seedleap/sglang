@@ -6,11 +6,13 @@ import time
 from urllib.parse import parse_qs, urlsplit
 
 import httpx
+import pytest
 import uvicorn
 from websockets.asyncio.client import connect
 from websockets.asyncio.server import serve
-from websockets.exceptions import ConnectionClosedOK
+from websockets.exceptions import ConnectionClosed, ConnectionClosedOK
 
+from sglang.multimodal_gen.runtime.entrypoints import realtime_gateway_server
 from sglang.multimodal_gen.runtime.entrypoints.realtime_gateway_server import (
     create_app,
 )
@@ -117,8 +119,14 @@ def test_gateway_routes_control_and_direct_vae_media_and_queries_trace_over_http
             generation_id = query["generation_id"][0]
             output_url = query["gateway_output_url"][0]
             output_token = query["gateway_output_token"][0]
+            assert parse_qs(urlsplit(output_url).query)["completion_ack_timeout_s"] == [
+                "95.000"
+            ]
 
             await connection.send(encode_message("session_ready"))
+            init = decode_message(await connection.recv())
+            assert init["type"] == "init"
+            assert init["max_chunks"] == 1
             async with connect(output_url, max_size=None, compression=None) as output:
                 await output.send(
                     encode_message(
@@ -167,6 +175,7 @@ def test_gateway_routes_control_and_direct_vae_media_and_queries_trace_over_http
                         request_id="request-0",
                         chunk_index=0,
                         num_frames=4,
+                        is_final_chunk=True,
                     )
                 )
                 completion_accepted = decode_message(await output.recv())
@@ -184,6 +193,9 @@ def test_gateway_routes_control_and_direct_vae_media_and_queries_trace_over_http
             internal_output_url=(
                 f"ws://127.0.0.1:{gateway_port}/v1/internal/realtime_output"
             ),
+            output_drain_timeout_s=90,
+            output_completion_timeout_s=90,
+            output_ack_network_margin_s=5,
             trace_query=_TraceQuery(),
             release_grace_s=0.05,
         )
@@ -264,6 +276,412 @@ def test_gateway_routes_control_and_direct_vae_media_and_queries_trace_over_http
         assert len(coordinator.released) == 1
         assert denoiser_close_started_at is not None
         assert coordinator.released_at - denoiser_close_started_at >= 0.045
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "final_num_frames",
+    (0, 1),
+    ids=("empty-final-chunk", "one-frame-final-chunk"),
+)
+def test_gateway_finite_final_marker_completes_while_upstream_remains_open(
+    final_num_frames,
+):
+    async def run():
+        gateway_port = _free_port()
+        denoiser_port = _free_port()
+        observed = {}
+
+        async def denoiser(connection):
+            query = parse_qs(urlsplit(connection.request.path).query)
+            session_id = query["session_id"][0]
+            generation_id = query["generation_id"][0]
+            output_url = query["gateway_output_url"][0]
+            output_token = query["gateway_output_token"][0]
+            assert decode_message(await connection.recv())["max_chunks"] == 1
+
+            async with connect(output_url, max_size=None, compression=None) as output:
+                await output.send(
+                    encode_message(
+                        "session_output_open",
+                        session_id=session_id,
+                        generation_id=generation_id,
+                        token=output_token,
+                    )
+                )
+                assert decode_message(await output.recv())["type"] == (
+                    "session_output_accepted"
+                )
+                if final_num_frames:
+                    await output.send(
+                        encode_message(
+                            "frame_batch",
+                            session_id=session_id,
+                            generation_id=generation_id,
+                            request_id="request-0",
+                            chunk_index=0,
+                            frame_batch_index=0,
+                            payload_lengths=[4],
+                            payload=b"webp",
+                            content_type="image/webp",
+                            width=8,
+                            height=8,
+                            num_frames=1,
+                            is_final_frame_batch=True,
+                        )
+                    )
+                await output.send(
+                    encode_message(
+                        "media_chunk_complete",
+                        session_id=session_id,
+                        generation_id=generation_id,
+                        request_id="request-0",
+                        chunk_index=0,
+                        num_frames=final_num_frames,
+                        is_final_chunk=True,
+                    )
+                )
+                assert decode_message(await output.recv())["type"] == (
+                    "media_chunk_complete_accepted"
+                )
+                # Do not close the Denoiser control route. The browser-visible
+                # final marker itself must wake the Gateway session.
+                await connection.wait_closed()
+                observed["upstream_closed_by_gateway"] = True
+
+        coordinator = _Coordinator(
+            f"ws://127.0.0.1:{denoiser_port}/v1/realtime_video/generate"
+        )
+        app = create_app(
+            coordinator,
+            model_revision="minwm-r1",
+            vae_fingerprint="taew2_2",
+            internal_output_url=(
+                f"ws://127.0.0.1:{gateway_port}/v1/internal/realtime_output"
+            ),
+            release_grace_s=0,
+        )
+
+        async with serve(denoiser, "127.0.0.1", denoiser_port):
+            server, server_task = await _run_gateway(app, gateway_port)
+            try:
+                url = f"ws://127.0.0.1:{gateway_port}/v1/realtime_video/generate"
+                messages = []
+                async with connect(url, max_size=None, compression=None) as browser:
+                    await browser.send(encode_message("init", max_chunks=1))
+                    try:
+                        while True:
+                            messages.append(
+                                decode_message(
+                                    await asyncio.wait_for(browser.recv(), 2)
+                                )
+                            )
+                    except ConnectionClosedOK:
+                        pass
+                    assert browser.close_code == 1000
+            finally:
+                server.should_exit = True
+                await server_task
+
+        assert observed["upstream_closed_by_gateway"] is True
+        expected_types = ["media_chunk_complete"]
+        if final_num_frames:
+            expected_types.insert(0, "frame_batch")
+        assert [message["type"] for message in messages] == expected_types
+        assert messages[-1]["is_final_chunk"] is True
+        assert messages[-1]["num_frames"] == final_num_frames
+
+    asyncio.run(run())
+
+
+def test_gateway_marks_t2v_finite_route_and_ack_window_before_forwarding_init():
+    async def run():
+        gateway_port = _free_port()
+        denoiser_port = _free_port()
+        observed = {}
+        app = None
+
+        async def denoiser(connection):
+            query = parse_qs(urlsplit(connection.request.path).query)
+            session_id = query["session_id"][0]
+            generation_id = query["generation_id"][0]
+            output_url = query["gateway_output_url"][0]
+            output_token = query["gateway_output_token"][0]
+
+            init = decode_message(await connection.recv())
+            route = app.state.output_registry._routes[session_id]
+            observed.update(
+                init=init,
+                route_finite=route.finite_request,
+                route_mode_configured=route.request_mode_configured,
+            )
+            await connection.send(encode_message("session_ready"))
+            async with connect(output_url, max_size=None, compression=None) as output:
+                await output.send(
+                    encode_message(
+                        "session_output_open",
+                        session_id=session_id,
+                        generation_id=generation_id,
+                        token=output_token,
+                    )
+                )
+                assert decode_message(await output.recv())["type"] == (
+                    "session_output_accepted"
+                )
+                for chunk_index in range(3):
+                    await output.send(
+                        encode_message(
+                            "frame_batch",
+                            session_id=session_id,
+                            generation_id=generation_id,
+                            request_id=f"request-{chunk_index}",
+                            chunk_index=chunk_index,
+                            frame_batch_index=0,
+                            payload_lengths=[4],
+                            payload=b"webp",
+                            content_type="image/webp",
+                            width=8,
+                            height=8,
+                            num_frames=1,
+                            is_final_frame_batch=True,
+                        )
+                    )
+                await output.send(
+                    encode_message(
+                        "media_chunk_complete",
+                        session_id=session_id,
+                        generation_id=generation_id,
+                        request_id="request-2",
+                        chunk_index=2,
+                        num_frames=1,
+                    )
+                )
+                # The producer may submit completion before the ACK timeout is
+                # observed.  The finite completion barrier must reject it: the
+                # browser never receives the marker and the VAE receives 1013.
+                try:
+                    await output.recv()
+                except ConnectionClosed as exc:
+                    observed["output_close_code"] = (
+                        exc.rcvd.code if exc.rcvd is not None else None
+                    )
+            await connection.wait_closed()
+
+        coordinator = _Coordinator(
+            f"ws://127.0.0.1:{denoiser_port}/v1/realtime_video/generate"
+        )
+        app = create_app(
+            coordinator,
+            model_revision="minwm-r1",
+            vae_fingerprint="taew2_2",
+            internal_output_url=(
+                f"ws://127.0.0.1:{gateway_port}/v1/internal/realtime_output"
+            ),
+            output_queue_depth=8,
+            output_enqueue_timeout_s=0.5,
+            release_grace_s=0,
+        )
+
+        async with serve(denoiser, "127.0.0.1", denoiser_port):
+            server, server_task = await _run_gateway(app, gateway_port)
+            try:
+                url = (
+                    f"ws://127.0.0.1:{gateway_port}/v1/realtime_video/generate"
+                    "?user_id=user-a&trace_id=trace-finite"
+                )
+                messages = []
+                async with connect(url, max_size=None, compression=None) as browser:
+                    await browser.send(
+                        encode_message(
+                            "init",
+                            num_frames=3,
+                            playback_ack_enabled=True,
+                        )
+                    )
+                    try:
+                        while True:
+                            messages.append(
+                                decode_message(
+                                    await asyncio.wait_for(browser.recv(), 3)
+                                )
+                            )
+                    except ConnectionClosed as exc:
+                        observed["browser_close_code"] = (
+                            exc.rcvd.code if exc.rcvd is not None else None
+                        )
+            finally:
+                server.should_exit = True
+                await server_task
+
+        assert observed["init"].get("generation_mode") is None
+        assert observed["route_finite"] is True
+        assert observed["route_mode_configured"] is True
+        assert observed["output_close_code"] == 1013
+        assert observed["browser_close_code"] == 1013
+        assert [
+            message["chunk_index"]
+            for message in messages
+            if message["type"] == "frame_batch"
+        ] == [0, 1]
+        assert not any(
+            message["type"] == "media_chunk_complete" for message in messages
+        )
+        error = next(message for message in messages if message["type"] == "error")
+        assert "ACK window" in error["content"]
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "failure_mode",
+    ("output_closed", "output_timeout", "missing_final_marker"),
+)
+def test_gateway_finite_session_rejects_missing_final_completion(
+    failure_mode, monkeypatch
+):
+    traces = []
+    monkeypatch.setattr(
+        realtime_gateway_server,
+        "_log_gateway_trace",
+        lambda trace_id, event, **fields: traces.append(
+            {"trace_id": trace_id, "event": event, **fields}
+        ),
+    )
+
+    async def run():
+        gateway_port = _free_port()
+        denoiser_port = _free_port()
+        observed = {}
+
+        async def denoiser(connection):
+            query = parse_qs(urlsplit(connection.request.path).query)
+            session_id = query["session_id"][0]
+            generation_id = query["generation_id"][0]
+            output_url = query["gateway_output_url"][0]
+            output_token = query["gateway_output_token"][0]
+            assert decode_message(await connection.recv())["max_chunks"] == 1
+
+            if failure_mode != "output_timeout":
+                async with connect(
+                    output_url, max_size=None, compression=None
+                ) as output:
+                    await output.send(
+                        encode_message(
+                            "session_output_open",
+                            session_id=session_id,
+                            generation_id=generation_id,
+                            token=output_token,
+                        )
+                    )
+                    assert decode_message(await output.recv())["type"] == (
+                        "session_output_accepted"
+                    )
+                    await output.send(
+                        encode_message(
+                            "frame_batch",
+                            session_id=session_id,
+                            generation_id=generation_id,
+                            request_id="request-0",
+                            chunk_index=0,
+                            frame_batch_index=0,
+                            payload_lengths=[4],
+                            payload=b"webp",
+                            content_type="image/webp",
+                            width=8,
+                            height=8,
+                            num_frames=1,
+                            is_final_frame_batch=True,
+                        )
+                    )
+                    if failure_mode == "missing_final_marker":
+                        await output.send(
+                            encode_message(
+                                "media_chunk_complete",
+                                session_id=session_id,
+                                generation_id=generation_id,
+                                request_id="request-0",
+                                chunk_index=0,
+                                num_frames=1,
+                            )
+                        )
+                        try:
+                            await output.recv()
+                        except ConnectionClosed as exc:
+                            observed["output_close_code"] = (
+                                exc.rcvd.code if exc.rcvd is not None else None
+                            )
+            await connection.close(code=1000, reason="producer stopped")
+
+        coordinator = _Coordinator(
+            f"ws://127.0.0.1:{denoiser_port}/v1/realtime_video/generate"
+        )
+        app = create_app(
+            coordinator,
+            model_revision="minwm-r1",
+            vae_fingerprint="taew2_2",
+            internal_output_url=(
+                f"ws://127.0.0.1:{gateway_port}/v1/internal/realtime_output"
+            ),
+            output_drain_timeout_s=0.05,
+            output_completion_timeout_s=0.05,
+            output_ack_network_margin_s=0.05,
+            release_grace_s=0,
+        )
+
+        async with serve(denoiser, "127.0.0.1", denoiser_port):
+            server, server_task = await _run_gateway(app, gateway_port)
+            try:
+                url = (
+                    f"ws://127.0.0.1:{gateway_port}/v1/realtime_video/generate"
+                    f"?trace_id=trace-{failure_mode}"
+                )
+                messages = []
+                async with connect(url, max_size=None, compression=None) as browser:
+                    await browser.send(encode_message("init", max_chunks=1))
+                    try:
+                        while True:
+                            messages.append(
+                                decode_message(
+                                    await asyncio.wait_for(browser.recv(), 2)
+                                )
+                            )
+                    except ConnectionClosed as exc:
+                        observed["browser_close_code"] = (
+                            exc.rcvd.code if exc.rcvd is not None else None
+                        )
+            finally:
+                server.should_exit = True
+                await server_task
+
+        assert observed["browser_close_code"] == 1011
+        assert not any(
+            message["type"] == "media_chunk_complete" for message in messages
+        )
+        error = next(message for message in messages if message["type"] == "error")
+        if failure_mode == "missing_final_marker":
+            assert "lacks final media marker" in error["content"]
+            assert observed["output_close_code"] == 1008
+            rejected = next(
+                trace for trace in traces if trace["event"] == "gateway.output_rejected"
+            )
+            assert rejected["reject_kind"] == "protocol"
+            assert rejected["reject_reason"] == (
+                "expected final chunk lacks final media marker"
+            )
+            assert rejected["gateway_rejected_completions"] == 1
+        else:
+            assert "final media completion" in error["content"]
+        incomplete = next(
+            trace for trace in traces if trace["event"] == "gateway.output_incomplete"
+        )
+        assert incomplete["gateway_final_completion_forwarded"] is False
+        closed = next(
+            trace for trace in traces if trace["event"] == "gateway.session_closed"
+        )
+        assert closed["session_succeeded"] is False
+        assert closed["session_outcome"] == "output_incomplete"
+        assert closed["close_code"] == 1011
 
     asyncio.run(run())
 

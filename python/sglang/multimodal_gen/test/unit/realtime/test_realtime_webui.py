@@ -62,7 +62,8 @@ def test_realtime_webui_supports_deployment_runtime_config():
     assert 'app.router.add_get("/runtime-config.js", _runtime_config)' in proxy_server
     assert '<script src="./runtime-config.js"></script>' in index_html
     assert 'configuredNumber("targetFps", 24)' in app_js
-    assert "UI_CONFIG.targetFps == null ? preset.fps : DEFAULT_TARGET_FPS" in app_js
+    assert 'modelControl("minwm", "fps").value = UI_CONFIG.targetFps == null' in app_js
+    assert "? preset.fps" in app_js
 
 
 def test_realtime_webui_supports_explicit_minwm_t2v_sessions():
@@ -78,11 +79,14 @@ def test_realtime_webui_supports_explicit_minwm_t2v_sessions():
     assert '<option value="t2v">Text to video (T2V)</option>' in index_html
     assert 'id="referenceSection"' in index_html
     assert 'id="t2vFrameHint"' in index_html
-    assert "styles.css?v=realtime-t2v-dump-trace-v1" in index_html
-    assert "playback_controller.js?v=realtime-playback-v28" in index_html
-    assert "app.js?v=realtime-production-gateway-v17" in index_html
+    assert "styles.css?v=world-studio-zing-only-rife3-finite-v1" in index_html
+    assert "playback_controller.js?v=realtime-playback-v35" in index_html
+    assert "app.js?v=world-studio-zing-only-rife3-finite-v1" in index_html
     assert 'id="size" value="1280x704"' in index_html
-    assert '<option value="smooth_timeline" selected>' in index_html
+    assert (
+        '<option value="smooth_timeline">Smooth realtime (~1s buffer)</option>'
+        in index_html
+    )
     assert "UI_CONFIG.generationModes" in app_js
     assert "UI_CONFIG.generationMode" in app_js
     assert "CONFIGURED_DEFAULT_GENERATION_MODE" in app_js
@@ -139,20 +143,18 @@ def test_realtime_webui_presets_do_not_emit_camera_scripts():
         in index_html
     )
     assert '<option value="webp" selected>WebP preview</option>' in index_html
-    assert 'id="serverSendText"' in index_html
-    assert 'id="theoreticalFpsText"' in index_html
-    assert 'id="renderFps"' in index_html
+    assert 'id="minwmRateText"' in index_html
+    assert 'id="minwmPerfFps"' in index_html
     assert 'id="stageRenderFps"' not in index_html
-    assert "sglang-diffusion Realtime Studio" in index_html
+    assert "World Studio" in index_html
     assert "SGLD" not in index_html
     assert 'class="tabs"' not in index_html
     assert "Recordings" not in index_html
-    assert "API" not in index_html
     assert "Info" not in index_html
     assert 'id="steps" type="number" value="4"' in index_html
     assert 'id="guidance" type="number" value="1"' in index_html
-    assert "styles.css?v=realtime-t2v-dump-trace-v1" in index_html
-    assert "app.js?v=realtime-production-gateway-v17" in index_html
+    assert "styles.css?v=world-studio-zing-only-rife3-finite-v1" in index_html
+    assert "app.js?v=world-studio-zing-only-rife3-finite-v1" in index_html
     assert (
         'const DECODER_WORKER_URL = "./decoder_worker.js?v=rgb-worker-v10";' in app_js
     )
@@ -166,8 +168,9 @@ def test_realtime_webui_presets_do_not_emit_camera_scripts():
         in app_js
     )
     assert "function previewMaxWidthForSize(baseSize)" in app_js
-    assert "const DEFAULT_FRAME_INTERPOLATION_EXP = 1;" in app_js
-    assert "const DEFAULT_FRAME_INTERPOLATION_SCALE = 1.0;" in app_js
+    assert 'const NATIVE_MEDIA_PROFILE = "native_v1";' in app_js
+    assert 'const RIFE2X_MEDIA_PROFILE = "rife2x_v1";' in app_js
+    assert 'const RIFE3X_MEDIA_PROFILE = "rife3x_v1";' in app_js
     assert "const DEFAULT_UPSCALING_SCALE = 2;" in app_js
     assert "const DEFAULT_PREVIEW_SCALE = 100;" in app_js
     assert 'setPreviewState("waiting")' in app_js
@@ -177,12 +180,13 @@ def test_realtime_webui_presets_do_not_emit_camera_scripts():
     assert 'document.querySelector(".model-player-grid")' in app_js
     assert 'previewFrame.style.setProperty("--preview-scale"' in app_js
     assert "cancelAnimationFrame(previewScaleFrame)" in app_js
-    assert "enable_frame_interpolation: true" in app_js
-    assert "frame_interpolation_exp: DEFAULT_FRAME_INTERPOLATION_EXP" in app_js
-    assert "frame_interpolation_scale: DEFAULT_FRAME_INTERPOLATION_SCALE" in app_js
+    assert "realtime_media_profile: RIFE3X_MEDIA_PROFILE" in app_js
+    assert "mediaProfileNegotiated" in app_js
+    assert 'message.type === "session_ready"' in app_js
+    assert "enable_frame_interpolation: true" not in app_js
     assert "readSuperResolutionParams()" in app_js
     assert "enable_upscaling: true" in app_js
-    assert "upscaling_scale: readUpscalingScale()" in app_js
+    assert "upscaling_scale: readUpscalingScale(key)" in app_js
     assert "updateOutputSizeFromHeader(header)" in app_js
     assert "setPreviewScale(DEFAULT_PREVIEW_SCALE)" in app_js
     assert "preview_scale" in app_js
@@ -191,25 +195,12 @@ def test_realtime_webui_presets_do_not_emit_camera_scripts():
     assert (
         "playbackController.enqueueDecodedFrames(header, decodedFrames, now)" in app_js
     )
-    assert (
-        'const REACTOR_PRESET_BASE_URL = "https://www.reactor.inc/lingbot-world-fast-v1";'
-        in app_js
-    )
+    assert 'const PRESET_ASSET_BASE_URL = "./assets/presets/v1";' in app_js
+    assert "Dragon Ride" in app_js
     assert "Dragon Dolly" in app_js
     assert "no creature morphing" in app_js
-    assert "A static album-cover view matching the reference image" in app_js
-    assert "lighthouse remains on the left with its white reflection path" in app_js
-    assert "subtle star twinkle" in app_js
-    assert "Ziggy Stardust" in app_js
-    assert "blue K. West sign" in app_js
-    assert "wet pavement reflecting a yellow streetlamp" in app_js
-    assert "ZiggyStardust.jpg" in app_js
-    assert "A slow aerial orbit around a pastel floating island hotel" not in app_js
     assert app_js.index("Dragon Ride") < app_js.index("Dragon Dolly")
-    assert app_js.index("Ziggy Stardust") < app_js.index("Plastic Beach")
-    assert app_js.index("Dragon Dolly") < app_js.index("Kid A")
-    assert "dragon-ride.jpg" in app_js
-    assert 'referenceUrl: "./assets/dragon-ride.jpg"' in app_js
+    assert "reactor-dragon-ride.png" in app_js
     assert "function createPresetThumbFallback" in app_js
     assert (
         "thumb.onerror = () => thumb.replaceWith(createPresetThumbFallback(preset))"
@@ -325,4 +316,4 @@ def test_realtime_webui_uses_frame_metadata_for_live_business_status():
         "lastSampledEventId = Number(header.event_id || lastSampledEventId)" in app_js
     )
     assert "formatBytes(payloadBytes)" in app_js
-    assert "playback.sourceFps.toFixed(1)" in app_js
+    assert "sourceFps.toFixed(1)" in app_js

@@ -8,6 +8,7 @@ import argparse
 import asyncio
 import logging
 import os
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import quote, urlsplit
@@ -87,6 +88,7 @@ class WorkerHeartbeatReporter:
         self.worker_epoch = (
             resolve_worker_epoch(worker_epoch) if worker_epoch is not None else None
         )
+        self.capacity = capacity
         self.payload = {
             "worker_id": worker_id,
             "role": role,
@@ -106,6 +108,23 @@ class WorkerHeartbeatReporter:
         if not state.is_success:
             return False
         runtime_state = state.json()
+        if not isinstance(runtime_state, Mapping):
+            logger.error("worker runtime state is not a JSON object")
+            return False
+        runtime_capacity = runtime_state.get("capacity")
+        if (
+            isinstance(runtime_capacity, bool)
+            or not isinstance(runtime_capacity, int)
+            or runtime_capacity < 1
+            or runtime_capacity != self.capacity
+        ):
+            logger.error(
+                "worker runtime capacity is missing, invalid, or differs from "
+                "configured heartbeat capacity (runtime=%r configured=%s)",
+                runtime_capacity,
+                self.capacity,
+            )
+            return False
         runtime_epoch = str(runtime_state.get("worker_epoch") or "").strip()
         if not runtime_epoch:
             return False

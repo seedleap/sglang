@@ -51,8 +51,8 @@ async function main() {
   await controller.connect({
     prompt: "shared prompt",
     size: "1280x704",
-    realtime_causal_sink_size: 9,
-    realtime_causal_kv_cache_num_frames: 18,
+    realtime_causal_sink_size: 8,
+    realtime_causal_kv_cache_num_frames: 32,
     trace_id: "trace",
   });
   assert.equal(minwm.connectCalls.length, 1);
@@ -61,8 +61,8 @@ async function main() {
   assert.equal(lingbot2.connectCalls[0].init.model, "lingbot2-model");
   assert.equal(minwm.connectCalls[0].init.prompt, "shared prompt");
   assert.equal(minwm.connectCalls[0].init.size, "1280x704");
-  assert.equal(minwm.connectCalls[0].init.realtime_causal_sink_size, 9);
-  assert.equal(minwm.connectCalls[0].init.realtime_causal_kv_cache_num_frames, 18);
+  assert.equal(minwm.connectCalls[0].init.realtime_causal_sink_size, 8);
+  assert.equal(minwm.connectCalls[0].init.realtime_causal_kv_cache_num_frames, 32);
   assert.equal(lingbot2.connectCalls[0].init.size, "1280x720");
   assert.equal(lingbot2.connectCalls[0].init.realtime_causal_sink_size, 3);
   assert.equal(lingbot2.connectCalls[0].init.realtime_causal_kv_cache_num_frames, 12);

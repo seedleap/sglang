@@ -43,6 +43,31 @@ assert.match(
 );
 assert.match(
   appJs,
+  /const MINWM_CAUSAL_SINK_SIZE\s*=\s*8;/,
+  "Zing requests must use the checkpoint-aligned causal sink",
+);
+assert.match(
+  appJs,
+  /const MINWM_CAUSAL_WINDOW_FRAMES\s*=\s*32;/,
+  "Zing requests must use the checkpoint-aligned attention window",
+);
+assert.match(
+  indexHtml,
+  /<input id="sinkSize" type="number" value="8" min="0" \/>/,
+  "the hidden Zing defaults must advertise the checkpoint-aligned sink",
+);
+assert.match(
+  indexHtml,
+  /<input id="windowFrames" type="number" value="32" min="1" \/>/,
+  "the hidden Zing defaults must advertise the checkpoint-aligned window",
+);
+assert.doesNotMatch(
+  appJs,
+  /configuredNumber\("(?:sinkSize|windowFrames)"/,
+  "deployment UI config must not override Zing checkpoint invariants",
+);
+assert.match(
+  appJs,
   /const DEFAULT_T2V_NUM_FRAMES\s*=\s*9;/,
   "T2V should default to a short user-editable 9-frame request",
 );
@@ -125,6 +150,16 @@ assert.match(
   appJs,
   /const boundedRealtime\s*=\s*playbackMode === "smooth_timeline"/,
   "webui should bound smooth realtime browser decode backlog",
+);
+assert.match(
+  appJs,
+  /function trimDecodeQueue\(\) \{[\s\S]*?if \(currentFiniteSession\) return;/,
+  "finite sessions must preserve their exact decode queue instead of trimming the tail",
+);
+assert.match(
+  appJs,
+  /currentFiniteSession\s*=\s*generationMode === "t2v"[\s\S]*?playbackController\.setFiniteTimeline\(currentFiniteSession\)/,
+  "finite T2V and bounded I2V requests must disable realtime tail dropping",
 );
 assert.match(
   appJs,
@@ -220,6 +255,91 @@ assert.match(
   indexHtml,
   /id="zingFrameInterpolation"[^>]*type="checkbox"/,
   "webui should expose an opt-in Zing frame interpolation control",
+);
+assert.match(
+  appJs,
+  /const NATIVE_MEDIA_PROFILE\s*=\s*"native_v1";[\s\S]*const RIFE2X_MEDIA_PROFILE\s*=\s*"rife2x_v1";[\s\S]*const RIFE3X_MEDIA_PROFILE\s*=\s*"rife3x_v1";/,
+  "Zing interpolation should use versioned media profiles",
+);
+assert.match(
+  appJs,
+  /function readFrameInterpolationParams\(key = "minwm"\)[\s\S]*key !== "minwm"[\s\S]*return \{\};[\s\S]*realtime_media_profile: RIFE3X_MEDIA_PROFILE/,
+  "only Zing should explicitly request the exact RIFE 3x media profile",
+);
+assert.match(
+  appJs,
+  /delete lingbotInit\.realtime_media_profile/,
+  "comparison-model requests must strip Zing's opt-in media profile",
+);
+assert.doesNotMatch(
+  appJs,
+  /enable_frame_interpolation:\s*true/,
+  "the realtime UI must not invoke the legacy download-capable postprocessor",
+);
+assert.match(
+  appJs,
+  /function frameInterpolationMultiplier\(key = "minwm"\)[\s\S]*mediaProfileNegotiated[\s\S]*interpolationMultiplier\(effectiveMediaProfile\)/,
+  "playback FPS should increase only after an effective server acceptance",
+);
+assert.match(
+  appJs,
+  /message\.type === "session_ready"[\s\S]*acceptMediaProfile\(message\)/,
+  "the UI should consume the server's authoritative media-profile receipt",
+);
+assert.match(
+  appJs,
+  /server accepted RIFE without a verified weights digest/,
+  "the UI should fail closed if an accepted RIFE profile has no weight digest",
+);
+assert.match(
+  appJs,
+  /source_timeline_fps[\s\S]*output_timeline_fps/,
+  "requested FPS should be identified as timeline timing, not measured throughput",
+);
+assert.match(
+  appJs,
+  /timeline 不是实际 wall\/presented FPS/,
+  "the UI must not present the negotiated timeline as measured or displayed FPS",
+);
+assert.match(
+  appJs,
+  /source_frames_per_chunk_wall_second[\s\S]*output_frames_per_chunk_wall_second/,
+  "RIFE telemetry should distinguish measured wall throughput from timeline FPS",
+);
+assert.match(
+  appJs,
+  /message\.type === "chunk_telemetry"[\s\S]*playbackController\.observeServerStats\(message, receivedAt\)/,
+  "smooth WebP cadence must consume measured chunk output per wall second",
+);
+assert.match(
+  appJs,
+  /playbackController\.setTargetFps\(previewPlaybackTargetFps\("minwm"\), \{[\s\S]*preserveCadence:[\s\S]*mediaProfileNegotiated && isInterpolatedMediaProfile\(effectiveMediaProfile\)/,
+  "timeline profile acceptance must preserve the conservative startup cadence",
+);
+assert.match(
+  appJs,
+  /source\/wall[\s\S]*interpolated\/wall[\s\S]*presented[\s\S]*timeline/,
+  "the UI should label source, interpolated, presented, and timeline rates",
+);
+assert.match(
+  appJs,
+  /negotiated RIFE requires WebP until H\.264 timebase support is deployed/,
+  "H.264 plus RIFE must fail closed until its timebase is profile aware",
+);
+assert.match(
+  appJs,
+  /const requiresWebP = isInterpolatedMediaProfile\(init\.realtime_media_profile\);[\s\S]*realtime_output_format: "webp"[\s\S]*minwmH264Session && !requiresWebP[\s\S]*else if \(minwmH264Session && requiresWebP\)[\s\S]*return openPrimarySession\(fallbackInit, url\);/,
+  "an interpolated request must bypass H.264 and force the WebP primary session",
+);
+assert.match(
+  appJs,
+  /function fallbackStreamTransportLabel\(key, init = \{\}\)[\s\S]*realtime_output_format[\s\S]*JPEG[\s\S]*Raw RGB[\s\S]*Lossless delta[\s\S]*WebP/,
+  "an H.264 startup fallback should report its effective requested transport",
+);
+assert.match(
+  appJs,
+  /setStreamChipTransport\(key, false, init\)[\s\S]*setStreamChipTransport\("minwm", false, init\)/,
+  "the primary Zing adapter should not leave a false H.264 transport chip after fallback",
 );
 assert.match(
   appJs,

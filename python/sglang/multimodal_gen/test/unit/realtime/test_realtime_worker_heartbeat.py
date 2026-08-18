@@ -30,6 +30,7 @@ class _Client:
         self.health_status = health_status
         self.state_payload = state_payload or {
             "worker_epoch": "epoch-a",
+            "capacity": 4,
             "lifecycle": "ready",
             "active_sessions": 2,
             "runnable_sessions": 1,
@@ -182,6 +183,7 @@ def test_heartbeat_repairs_stale_epoch_file_from_runtime_state(tmp_path):
         client = _Client(
             state_payload={
                 "worker_epoch": "runtime-epoch",
+                "capacity": 4,
                 "lifecycle": "ready",
                 "active_sessions": 0,
                 "runnable_sessions": 0,
@@ -219,6 +221,7 @@ def test_heartbeat_rejects_runtime_mismatch_for_explicit_epoch():
         client = _Client(
             state_payload={
                 "worker_epoch": "runtime-epoch",
+                "capacity": 4,
                 "lifecycle": "ready",
                 "active_sessions": 0,
                 "runnable_sessions": 0,
@@ -245,5 +248,44 @@ def test_heartbeat_rejects_runtime_mismatch_for_explicit_epoch():
 
         with pytest.raises(RuntimeError, match="worker state epoch"):
             await reporter.heartbeat_once()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("runtime_capacity", [None, 0, -1, True, 4.0, "4", 3, 5])
+def test_heartbeat_fails_closed_when_runtime_capacity_is_not_exact(
+    runtime_capacity,
+):
+    async def run():
+        state_payload = {
+            "worker_epoch": "epoch-a",
+            "lifecycle": "ready",
+            "active_sessions": 0,
+            "runnable_sessions": 0,
+            "blocked_sessions": 0,
+            "queue_depth": 0,
+            "service_time_ms": 0,
+        }
+        if runtime_capacity is not None:
+            state_payload["capacity"] = runtime_capacity
+        client = _Client(state_payload=state_payload)
+        reporter = WorkerHeartbeatReporter(
+            client,
+            coordinator_url="http://coordinator:18081",
+            health_url="http://127.0.0.1:30000/health",
+            state_url="http://127.0.0.1:30000/v1/realtime_worker/state",
+            worker_id="pod-123",
+            worker_epoch="epoch-a",
+            role="denoiser",
+            endpoint="ws://10.0.0.7:30000/v1/realtime_video/generate",
+            reservation_endpoint="http://10.0.0.7:30000/v1/realtime_worker",
+            az="us-east-2a",
+            capacity=4,
+            model_revision="model-sha",
+            vae_fingerprint="taew2_2",
+        )
+
+        assert await reporter.heartbeat_once() is False
+        assert client.posts == []
 
     asyncio.run(run())

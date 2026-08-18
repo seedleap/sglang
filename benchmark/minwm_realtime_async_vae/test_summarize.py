@@ -1,4 +1,11 @@
-from summarize import build_report, latency_summary, render_markdown, summarize_runs
+import pytest
+from summarize import (
+    build_report,
+    latency_summary,
+    render_markdown,
+    run_meets_output_slo,
+    summarize_runs,
+)
 
 
 def _run(concurrency, p95, fps, error_rate=0.0):
@@ -32,6 +39,72 @@ def test_report_rejects_high_aggregate_fps_when_one_session_is_slow():
     run["min_session_fps"] = 12
     report = summarize_runs([run])
     assert report["max_supported_concurrency"] == 0
+
+
+def test_rife_slo_uses_source_fps_instead_of_interpolated_output_fps():
+    run = _run(2, p95=800, fps=29.4)
+    run["aggregate_source_fps"] = 29.4
+    run["min_session_source_fps"] = 14.7
+
+    report = summarize_runs([run])
+
+    assert report["max_supported_concurrency"] == 0
+
+
+def test_output_ux_gate_uses_measured_wall_fps_and_monotone_ladder():
+    slow_delivery = _run(2, p95=800, fps=23.9)
+    slow_delivery["min_session_source_fps"] = 12.0
+    slow_delivery["min_session_output_wall_fps"] = 23.9
+    slow_delivery["media_profile_acceptance"] = [
+        {
+            "source_timeline_fps": 24,
+            "output_timeline_fps": 72,
+        }
+    ]
+    assert run_meets_output_slo(slow_delivery) is False
+
+    sustained_delivery = _run(4, p95=1200, fps=24.1)
+    sustained_delivery["min_session_source_fps"] = 8.1
+    sustained_delivery["min_session_output_wall_fps"] = 24.1
+    report = summarize_runs([slow_delivery, sustained_delivery])
+
+    # Model/source and output UX gates are independent, but both capacity
+    # claims must stop at the first failed level in the test ladder.
+    assert report["max_supported_concurrency"] == 0
+    assert report["max_supported_output_concurrency"] == 0
+    assert report["min_output_wall_fps"] == 24.0
+
+
+def test_capacity_ladder_fails_closed_when_declared_level_is_missing():
+    one = _run(1, p95=700, fps=25)
+    four = _run(4, p95=700, fps=25)
+
+    report = summarize_runs(
+        [one, four],
+        expected_concurrencies=[1, 2, 4],
+    )
+
+    assert report["max_supported_concurrency"] == 1
+    assert report["max_supported_output_concurrency"] == 1
+    assert report["missing_concurrency_levels"] == [2]
+
+
+def test_capacity_ladder_rejects_duplicate_trials_instead_of_cherry_picking():
+    first = _run(2, p95=700, fps=25)
+    second = _run(2, p95=700, fps=23)
+
+    with pytest.raises(ValueError, match="duplicate concurrency result: 2"):
+        summarize_runs([first, second])
+
+
+def test_output_ux_gate_fails_closed_without_per_session_wall_evidence():
+    aggregate_only = {
+        "aggregate_output_wall_fps": 96.0,
+        "output_timeline_fps": 72.0,
+        "error_rate": 0.0,
+    }
+
+    assert run_meets_output_slo(aggregate_only) is False
 
 
 def test_report_calculates_async_improvement_at_common_concurrency():
@@ -74,6 +147,8 @@ def test_markdown_contains_hardware_stages_and_per_level_improvement():
     assert "## 异步收益" in markdown
     assert "远端 TAEHV decode：30.0 ms" in markdown
     assert "| 1 | 25.00% | 25.00% | 12.50% |" in markdown
+    assert "output realtime factor = output/wall ÷ 72" in markdown
+    assert "presented FPS rolling p5" in markdown
 
 
 def test_latency_summary_uses_nearest_rank_percentiles():

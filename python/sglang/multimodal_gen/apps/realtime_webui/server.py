@@ -12,9 +12,15 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from aiohttp import ClientError, ClientSession, ClientTimeout, WSMsgType, web
-from h264_websocket_bridge import install_h264_websocket_bridge
-from prompt_rewriter import PromptRewriter
-from world_creator import WorldCreator
+
+if __package__:
+    from .h264_websocket_bridge import install_h264_websocket_bridge
+    from .prompt_rewriter import PromptRewriter
+    from .world_creator import WorldCreator
+else:
+    from h264_websocket_bridge import install_h264_websocket_bridge
+    from prompt_rewriter import PromptRewriter
+    from world_creator import WorldCreator
 
 ROOT = Path(__file__).resolve().parent
 UPSTREAM_HTTP = os.environ.get("REALTIME_UPSTREAM_HTTP", "http://127.0.0.1:30000")
@@ -91,6 +97,12 @@ async def _runtime_config(_request):
         raise web.HTTPInternalServerError(
             text="REALTIME_UI_CONFIG_JSON must contain a JSON object"
         )
+    zing_only = config.get("zingOnly", False)
+    if not isinstance(zing_only, bool):
+        raise web.HTTPInternalServerError(
+            text="REALTIME_UI_CONFIG_JSON.zingOnly must be a boolean"
+        )
+    config["zingOnly"] = zing_only
     return web.Response(
         text=f"globalThis.SGLANG_REALTIME_UI_CONFIG = {json.dumps(config)};\n",
         content_type="application/javascript",

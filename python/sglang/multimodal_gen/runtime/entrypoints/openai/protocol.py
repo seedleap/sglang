@@ -159,6 +159,9 @@ class RealtimeVideoGenerationsRequest(VideoGenerationsRequest):
     profile_all_stages: Optional[bool] = False
     realtime_output_format: Optional[Literal["raw", "webp", "jpeg"]] = None
     realtime_preview_max_width: Optional[int] = None
+    # Negotiated by the remote VAE worker.  `native_v1` is deliberately the
+    # default so existing realtime requests keep their exact media behavior.
+    realtime_media_profile: Literal["native_v1", "rife2x_v1", "rife3x_v1"] = "native_v1"
     realtime_output_pacing: Optional[bool] = False
     realtime_interactive_event_grace_ms: Optional[int] = Field(default=0, ge=0, le=2500)
     playback_ack_enabled: Optional[bool] = False

@@ -50,10 +50,18 @@ from sglang.multimodal_gen.runtime.realtime.async_vae_client import (
     RemoteDecodeHandle,
     RemoteFrameBatch,
 )
+from sglang.multimodal_gen.runtime.realtime.async_vae_protocol import (
+    ProtocolViolation,
+)
 from sglang.multimodal_gen.runtime.realtime.critical_path_metrics import (
     observe_stage_ms,
     observe_stage_seconds,
     result_from_exception,
+)
+from sglang.multimodal_gen.runtime.realtime.media_profile import (
+    RealtimeMediaProfile,
+    parse_media_profile,
+    resolve_remote_media_profile,
 )
 from sglang.multimodal_gen.runtime.realtime.worker_reservation import (
     WorkerReservationRegistry,
@@ -579,6 +587,35 @@ async def _send_chunk_telemetry(
             latent_send_ms=round(remote_result.latent_send_ms, 3),
             vae_credit_wait_ms=round(remote_result.credit_wait_ms, 3),
         )
+        if remote_result.media_profile is not RealtimeMediaProfile.NATIVE_V1:
+            chunk_wall_s = chunk_total_ms / 1000.0 if chunk_total_ms > 0 else 0.0
+            source_wall_fps = (
+                remote_result.source_num_frames / chunk_wall_s
+                if chunk_wall_s > 0
+                else 0.0
+            )
+            output_wall_fps = (
+                remote_result.output_num_frames / chunk_wall_s
+                if chunk_wall_s > 0
+                else 0.0
+            )
+            telemetry.update(
+                source_num_frames=remote_result.source_num_frames,
+                output_num_frames=remote_result.output_num_frames,
+                media_profile=remote_result.media_profile.value,
+                source_timeline_fps=remote_result.source_timeline_fps,
+                output_timeline_fps=remote_result.output_timeline_fps,
+                actor_wait_ms=round(remote_result.actor_wait_ms, 3),
+                rife_interpolation_ms=round(remote_result.rife_interpolation_ms, 3),
+                source_frames_per_chunk_wall_second=round(source_wall_fps, 3),
+                output_frames_per_chunk_wall_second=round(output_wall_fps, 3),
+                source_realtime_factor=round(
+                    source_wall_fps / remote_result.source_timeline_fps, 4
+                ),
+                output_realtime_factor=round(
+                    output_wall_fps / remote_result.output_timeline_fps, 4
+                ),
+            )
     await ws.send_bytes(msgspec.msgpack.encode(telemetry))
 
 
@@ -846,6 +883,13 @@ async def _complete_remote_chunk(
             else None
         ),
         "num_frames": remote_result.num_frames,
+        "source_num_frames": remote_result.source_num_frames,
+        "output_num_frames": remote_result.output_num_frames,
+        "media_profile": remote_result.media_profile.value,
+        "source_timeline_fps": remote_result.source_timeline_fps,
+        "output_timeline_fps": remote_result.output_timeline_fps,
+        "actor_wait_ms": remote_result.actor_wait_ms,
+        "rife_interpolation_ms": remote_result.rife_interpolation_ms,
     }
     if overlap_ms is not None and overlap_ratio is not None:
         remote_fields.update(
@@ -911,7 +955,10 @@ async def _generate_loop_async_vae(ws, session: GenerateSession, server_args):
     coordinator = _OrderedDecodeCoordinator()
 
     try:
-        await client.open(
+        requested_media_profile = parse_media_profile(
+            session.request.realtime_media_profile
+        )
+        acceptance = await client.open(
             decoder_backend=session.vae_decoder_backend,
             output_format=output_format,
             quality=quality,
@@ -921,7 +968,23 @@ async def _generate_loop_async_vae(ws, session: GenerateSession, server_args):
             trace_id=session.trace_id,
             coordinator_token=getattr(session, "coordinator_token", None),
             worker_epoch=getattr(session, "vae_worker_epoch", None),
+            media_profile=requested_media_profile,
+            source_timeline_fps=float(session.request.fps or 24.0),
         )
+        session.media_profile_acceptance = acceptance
+        if requested_media_profile is not RealtimeMediaProfile.NATIVE_V1:
+            await ws.send_bytes(
+                msgspec.msgpack.encode(
+                    {
+                        "type": "session_ready",
+                        "requested_media_profile": acceptance.requested.value,
+                        "effective_media_profile": acceptance.effective.value,
+                        "source_timeline_fps": acceptance.source_timeline_fps,
+                        "output_timeline_fps": acceptance.output_timeline_fps,
+                        "media_weights_sha256": acceptance.weights_sha256,
+                    }
+                )
+            )
         while session.can_schedule_chunk():
             if coordinator.pending is not None and coordinator.pending.done():
                 await coordinator.finish()
@@ -1073,6 +1136,7 @@ async def _generate_loop_async_vae(ws, session: GenerateSession, server_args):
         await client.close()
         session.vae_client = None
         session.vae_decoder_backend = None
+        session.media_profile_acceptance = None
 
 
 async def _generate_loop_local(ws: WebSocket, session: GenerateSession):
@@ -1566,6 +1630,32 @@ async def _listen_generate_request(
                 raise ValueError("generate request must be a map")
 
             realtime_req = RealtimeVideoGenerationsRequest.model_validate(data)
+            server_args = get_global_server_args()
+            remote_vae = uses_remote_vae(server_args.realtime_vae_backend)
+            # Gateway admission currently happens before it reads this init
+            # payload, so it cannot route by media capability.  RIFE may only
+            # be enabled after every worker in the admitted pool reports the
+            # same media_capability_fingerprint.  A mixed pool intentionally
+            # fails closed at the selected worker; mixed rollout is unsupported.
+            requested_media_profile = (
+                resolve_remote_media_profile(
+                    realtime_req.realtime_media_profile,
+                    legacy_enabled=bool(realtime_req.enable_frame_interpolation),
+                    legacy_exp=realtime_req.frame_interpolation_exp,
+                    legacy_scale=realtime_req.frame_interpolation_scale,
+                    legacy_model_path=realtime_req.frame_interpolation_model_path,
+                )
+                if remote_vae
+                else parse_media_profile(realtime_req.realtime_media_profile)
+            )
+            realtime_req.realtime_media_profile = requested_media_profile.value
+            if (
+                requested_media_profile is not RealtimeMediaProfile.NATIVE_V1
+                and not remote_vae
+            ):
+                raise ValueError(
+                    "realtime media profile requires a remote VAE capability"
+                )
             session.bind_trace(realtime_req)
             log_realtime_trace(
                 logger,
@@ -1619,7 +1709,14 @@ async def _listen_generate_request(
                 session.id,
                 e,
             )
-            await write_error_msg("invalid generate request", ws)
+            await write_error_msg(
+                (
+                    str(e)
+                    if isinstance(e, ProtocolViolation)
+                    else "invalid generate request"
+                ),
+                ws,
+            )
             continue
 
 

@@ -50,6 +50,27 @@ The showcase session lifetime is provided by the hidden
 `sessionMaxLifetimeSeconds` runtime setting; the live dual-model launcher uses
 90 seconds, and both model workloads must use the same hard lifetime.
 
+## Zing-only mode
+
+Set the boolean runtime option `zingOnly` to present World Studio as a single
+Zing/MinWM experience:
+
+```bash
+REALTIME_UI_CONFIG_JSON='{"zingOnly":true}' \
+MINWM_UPSTREAM_HTTP=http://127.0.0.1:30000 \
+MINWM_UPSTREAM_WS=ws://127.0.0.1:30000 \
+python server.py
+```
+
+In this mode the comparison picker, LingBot2 player, HappyOyster player, and
+LingBot2 parameters are hidden. The client registers only the MinWM backend for
+connection and shared controls, and creates only the Zing recording. Neither
+`LINGBOT2_UPSTREAM_HTTP`/`LINGBOT2_UPSTREAM_WS` nor HappyOyster credentials or
+production endpoints are required. Omitting `zingOnly`, or setting it to the
+JSON boolean `false`, preserves the existing dual-model UI and behavior. The
+server rejects non-boolean values instead of silently selecting a different
+experience.
+
 ## I2V and T2V
 
 Deployments opt in to the mode selector through runtime config:

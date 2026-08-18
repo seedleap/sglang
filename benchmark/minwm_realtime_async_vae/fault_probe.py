@@ -28,7 +28,7 @@ def _init(model: str, *, chunks: int) -> bytes:
             "generation_mode": "t2v",
             "model": model,
             "prompt": "A smooth forward camera move through a mountain valley",
-            "size": "832x480",
+            "size": "1280x704",
             "fps": 24,
             "num_frames": 1 + (chunks - 1) * 16,
             "max_chunks": chunks,
@@ -37,9 +37,11 @@ def _init(model: str, *, chunks: int) -> bytes:
             "num_inference_steps": 4,
             "guidance_scale": 0.0,
             "realtime_output_format": "webp",
-            "realtime_preview_max_width": 560,
+            "realtime_preview_max_width": 832,
             "realtime_output_pacing": False,
-            "output_compression": 55,
+            "output_compression": 70,
+            "realtime_causal_sink_size": 8,
+            "realtime_causal_kv_cache_num_frames": 32,
         }
     )
 

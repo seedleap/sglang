@@ -169,7 +169,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--browser-metrics-json", type=Path, required=True)
     parser.add_argument("--model", default="/work/model")
     parser.add_argument("--prompt", default="A cinematic forward-moving landscape")
-    parser.add_argument("--size", default="832x480")
+    parser.add_argument("--size", default="1280x704")
     parser.add_argument("--fps", type=int, default=24)
     parser.add_argument("--warmup-chunks", type=int, default=2)
     parser.add_argument("--measured-chunks", type=int, default=6)

@@ -9,7 +9,7 @@ import inspect
 import io
 import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Awaitable, Callable
 
 import torch
@@ -25,6 +25,12 @@ from sglang.multimodal_gen.runtime.realtime.async_vae_protocol import (
     ChunkSequenceTracker,
     LatentChunkHeader,
     ProtocolViolation,
+)
+from sglang.multimodal_gen.runtime.realtime.media_profile import (
+    MediaProfileAcceptance,
+    RealtimeMediaProfile,
+    parse_media_profile,
+    validate_source_timeline_fps,
 )
 from sglang.multimodal_gen.runtime.utils.realtime_video import (
     JPEG_FRAME_CONTENT_TYPE,
@@ -53,6 +59,8 @@ class SessionOpen:
     preview_max_width: int | None = None
     output_url: str | None = None
     output_token: str | None = None
+    media_profile: RealtimeMediaProfile = RealtimeMediaProfile.NATIVE_V1
+    source_timeline_fps: float = 24.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,6 +76,9 @@ class EncodedFrameBatch:
     source_height: int
     preview_width: int
     preview_height: int
+    media_profile: RealtimeMediaProfile
+    source_timeline_fps: float
+    output_timeline_fps: float
 
     @property
     def num_frames(self) -> int:
@@ -78,11 +89,18 @@ class EncodedFrameBatch:
 class DecodeResult:
     disposition: AcceptDisposition
     num_frames: int
+    source_num_frames: int
+    output_num_frames: int
+    media_profile: RealtimeMediaProfile
+    source_timeline_fps: float
+    output_timeline_fps: float
     frame_batches: tuple[EncodedFrameBatch, ...]
     queue_wait_ms: float
+    actor_wait_ms: float
     decode_ms: float
     encode_ms: float
     post_decode_ms: float = 0.0
+    rife_interpolation_ms: float = 0.0
 
 
 FrameBatchCallback = Callable[[EncodedFrameBatch], Awaitable[None]]
@@ -106,6 +124,40 @@ def _next_item(iterator) -> tuple[bool, Any]:
         return False, None
 
 
+async def _run_non_preemptible_thread_call(
+    function: Callable[..., Any],
+    /,
+    *args: Any,
+    **kwargs: Any,
+) -> Any:
+    """Propagate cancellation only after an admitted native call returns.
+
+    Cancelling ``asyncio.to_thread`` never stops the underlying CUDA/native
+    work.  The caller commonly owns the model-wide actor lock, so releasing it
+    early would allow unsafe concurrent reuse by another session.
+    """
+
+    native_task = asyncio.create_task(asyncio.to_thread(function, *args, **kwargs))
+    try:
+        return await asyncio.shield(native_task)
+    except asyncio.CancelledError:
+        # A session runner can be cancelled more than once while close/abort
+        # drains it.  Every later cancellation must remain non-preemptive too;
+        # otherwise it could interrupt this wait and release the actor lock
+        # while the thread is still using the shared CUDA model.
+        while not native_task.done():
+            try:
+                await asyncio.shield(native_task)
+            except asyncio.CancelledError:
+                continue
+        # Consume any native exception so it is not reported as an unhandled
+        # task failure.  The outer cancellation remains authoritative once the
+        # admitted work has drained.
+        if not native_task.cancelled():
+            native_task.exception()
+        raise
+
+
 @dataclass(slots=True)
 class _DecodeJob:
     header: LatentChunkHeader
@@ -122,8 +174,15 @@ class _WorkerSession:
     decoder: Any
     tracker: ChunkSequenceTracker
     queue: asyncio.Queue[_DecodeJob]
+    media_acceptance: MediaProfileAcceptance
     runner: asyncio.Task[None] | None = None
     first_t2v_latent: torch.Tensor | None = None
+    previous_source_frame: torch.Tensor | None = None
+    pending_media_boundary_hold: bool = False
+    media_boundary_initialized: bool = False
+    last_media_event_id: int | None = None
+    last_media_action_version: int = 0
+    last_media_prompt_version: int = 0
     last_activity_at: float = field(default_factory=time.monotonic)
     processing: bool = False
 
@@ -139,6 +198,7 @@ class AsyncVAEWorker:
         queue_depth_per_session: int = 1,
         encoded_frames_per_batch: int = 1,
         encode_workers: int = 4,
+        rife_processor: Any | None = None,
     ) -> None:
         if max_sessions < 1:
             raise ValueError("max_sessions must be positive")
@@ -158,6 +218,7 @@ class AsyncVAEWorker:
         self.queue_depth_per_session = queue_depth_per_session
         self.encoded_frames_per_batch = max(1, encoded_frames_per_batch)
         self.encode_workers = encode_workers
+        self.rife_processor = rife_processor
         self._encode_executor = ThreadPoolExecutor(
             max_workers=encode_workers,
             thread_name_prefix="realtime-webp",
@@ -168,7 +229,67 @@ class AsyncVAEWorker:
         self._actor_lock = asyncio.Lock()
         self._service_time_ms = 0.0
 
-    async def open(self, request: SessionOpen) -> None:
+    @property
+    def supported_media_profiles(self) -> tuple[RealtimeMediaProfile, ...]:
+        profiles = [RealtimeMediaProfile.NATIVE_V1]
+        if self.rife_processor is not None and bool(
+            getattr(self.rife_processor, "ready", False)
+        ):
+            # A legacy injected processor implements only the historical
+            # midpoint API. Do not advertise 3x unless the warmed processor
+            # explicitly declares that capability.
+            declared = getattr(
+                self.rife_processor,
+                "profiles",
+                (RealtimeMediaProfile.RIFE2X_V1.value,),
+            )
+            for value in declared:
+                profile = parse_media_profile(value)
+                if profile.interpolation_enabled and profile not in profiles:
+                    profiles.append(profile)
+        return tuple(profiles)
+
+    @property
+    def media_capability_fingerprint(self) -> str | None:
+        """Fingerprint used to verify a homogeneous RIFE worker pool."""
+
+        if not any(
+            profile.interpolation_enabled for profile in self.supported_media_profiles
+        ):
+            return None
+        profiles = "+".join(
+            profile.value
+            for profile in self.supported_media_profiles
+            if profile.interpolation_enabled
+        )
+        return f"{profiles}:{self.rife_processor.weights_sha256}"
+
+    def _accept_media_profile(self, request: SessionOpen) -> MediaProfileAcceptance:
+        requested = parse_media_profile(request.media_profile)
+        source_timeline_fps = validate_source_timeline_fps(request.source_timeline_fps)
+        if requested not in self.supported_media_profiles:
+            raise ProtocolViolation(
+                f"realtime media profile is unavailable: {requested.value}"
+            )
+        weights_sha256 = None
+        if requested.interpolation_enabled:
+            weights_sha256 = str(
+                getattr(self.rife_processor, "weights_sha256", "") or ""
+            ).lower()
+            if len(weights_sha256) != 64 or any(
+                char not in "0123456789abcdef" for char in weights_sha256
+            ):
+                raise ProtocolViolation("RIFE media capability has no weights digest")
+        return MediaProfileAcceptance(
+            requested=requested,
+            effective=requested,
+            source_timeline_fps=source_timeline_fps,
+            output_timeline_fps=source_timeline_fps
+            * requested.output_timeline_fps_multiplier,
+            weights_sha256=weights_sha256,
+        )
+
+    async def open(self, request: SessionOpen) -> MediaProfileAcceptance:
         if not request.session_id or not request.generation_id:
             raise ProtocolViolation("session generation identity is required")
         if (
@@ -180,6 +301,12 @@ class AsyncVAEWorker:
             )
         if request.response_transport not in {"websocket", "shared_memory"}:
             raise ProtocolViolation("unsupported VAE response transport")
+        media_acceptance = self._accept_media_profile(request)
+        request = replace(
+            request,
+            media_profile=media_acceptance.effective,
+            source_timeline_fps=media_acceptance.source_timeline_fps,
+        )
         identity = (request.session_id, request.generation_id)
         async with self._session_lock:
             if identity in self._sessions:
@@ -194,6 +321,7 @@ class AsyncVAEWorker:
                 decoder=decoder,
                 tracker=ChunkSequenceTracker(*identity),
                 queue=asyncio.Queue(maxsize=self.queue_depth_per_session),
+                media_acceptance=media_acceptance,
             )
             self._sessions[identity] = state
             state.runner = asyncio.create_task(
@@ -201,6 +329,7 @@ class AsyncVAEWorker:
                 name=f"realtime-vae-{request.session_id[:8]}",
             )
             self._update_capacity_metrics()
+        return media_acceptance
 
     async def submit(
         self,
@@ -226,10 +355,17 @@ class AsyncVAEWorker:
                 DecodeResult(
                     disposition=disposition,
                     num_frames=0,
+                    source_num_frames=0,
+                    output_num_frames=0,
+                    media_profile=state.media_acceptance.effective,
+                    source_timeline_fps=state.media_acceptance.source_timeline_fps,
+                    output_timeline_fps=state.media_acceptance.output_timeline_fps,
                     frame_batches=(),
                     queue_wait_ms=0.0,
+                    actor_wait_ms=0.0,
                     decode_ms=0.0,
                     encode_ms=0.0,
+                    rife_interpolation_ms=0.0,
                 )
             )
             return future
@@ -373,6 +509,32 @@ class AsyncVAEWorker:
         remaining_drop = drop_leading_frames
         pending_frames: list[torch.Tensor] = []
         pending_frame_count = 0
+        source_num_frames = 0
+        rife_interpolation_ms = 0.0
+        media_boundary_was_initialized = state.media_boundary_initialized
+        had_previous_source_frame = state.previous_source_frame is not None
+        reset_media_boundary = (
+            not media_boundary_was_initialized
+            or state.last_media_event_id != header.event_id
+            or state.last_media_action_version != header.action_version
+            or state.last_media_prompt_version != header.prompt_version
+        )
+        # The first session chunk naturally omits the seam intermediates.  A
+        # later control cutover must retain the negotiated cadence without
+        # blending old/new states, so all missing seam slots hold the *new*
+        # first frame.
+        if (
+            reset_media_boundary
+            and media_boundary_was_initialized
+            and had_previous_source_frame
+            and state.media_acceptance.interpolation_enabled
+        ):
+            state.pending_media_boundary_hold = True
+        state.media_boundary_initialized = True
+        state.last_media_event_id = header.event_id
+        state.last_media_action_version = header.action_version
+        state.last_media_prompt_version = header.prompt_version
+        reset_media_boundary_pending = reset_media_boundary
 
         def schedule_encode(frames: torch.Tensor) -> None:
             nonlocal callback_tail, frame_batch_index
@@ -391,12 +553,21 @@ class AsyncVAEWorker:
                 int(frames.shape[2]) + self.encoded_frames_per_batch - 1
             ) // self.encoded_frames_per_batch
 
+        actor_wait_started = time.perf_counter()
+        actor_wait_ms = 0.0
+        actor_acquired = False
         try:
             async with self._actor_lock:
+                actor_wait_ms = (time.perf_counter() - actor_wait_started) * 1000.0
+                actor_acquired = True
                 if job.on_decode_started is not None:
                     started = job.on_decode_started()
                     if inspect.isawaitable(started):
                         await started
+                    decode_resume_at = time.perf_counter()
+                elif state.media_acceptance.interpolation_enabled:
+                    # Native keeps its historical aggregate decode metric.  The
+                    # opt-in RIFE profile reports actor serialization separately.
                     decode_resume_at = time.perf_counter()
                 async for raw_frames in self._iter_decoded_frames(
                     state.decoder,
@@ -405,8 +576,15 @@ class AsyncVAEWorker:
                 ):
                     post_started = time.perf_counter()
                     decode_active_s += max(0.0, post_started - decode_resume_at)
-                    frames = self._normalize_frames(raw_frames)
-                    post_decode_ms += (time.perf_counter() - post_started) * 1000.0
+                    try:
+                        frames = self._normalize_frames(
+                            raw_frames,
+                            keep_on_device=(
+                                state.media_acceptance.interpolation_enabled
+                            ),
+                        )
+                    finally:
+                        post_decode_ms += (time.perf_counter() - post_started) * 1000.0
                     if remaining_drop:
                         drop_count = min(remaining_drop, int(frames.shape[2]))
                         frames = frames[:, :, drop_count:]
@@ -414,6 +592,35 @@ class AsyncVAEWorker:
                     if frames.shape[2] == 0:
                         decode_resume_at = time.perf_counter()
                         continue
+
+                    source_num_frames += int(frames.shape[2])
+                    if state.media_acceptance.interpolation_enabled:
+                        interpolation_started = time.perf_counter()
+                        try:
+                            frames = await self._interpolate_rife(
+                                state,
+                                frames,
+                                multiplier=(
+                                    state.media_acceptance.effective.output_timeline_fps_multiplier
+                                ),
+                                hold_new_boundary_frame=(
+                                    state.pending_media_boundary_hold
+                                ),
+                                # A cutover can yield an empty decoder batch.
+                                # Keep both the cadence hold and the old-seam
+                                # reset pending until the first non-empty
+                                # batch succeeds.
+                                reset_previous=(
+                                    reset_media_boundary_pending
+                                    or state.pending_media_boundary_hold
+                                ),
+                            )
+                        finally:
+                            rife_interpolation_ms += (
+                                time.perf_counter() - interpolation_started
+                            ) * 1000.0
+                        state.pending_media_boundary_hold = False
+                        reset_media_boundary_pending = False
 
                     pending_frames.append(frames)
                     pending_frame_count += int(frames.shape[2])
@@ -449,15 +656,32 @@ class AsyncVAEWorker:
             encode_ms = sum(batch.encode_ms for batch in encoded)
         except BaseException as exc:
             result = "cancelled" if isinstance(exc, asyncio.CancelledError) else "error"
+            if state.media_acceptance.interpolation_enabled and not actor_acquired:
+                actor_wait_ms = (time.perf_counter() - actor_wait_started) * 1000.0
             observe_stage("queue_wait", queue_wait_ms, result=result)
             elapsed_decode_ms = max(
                 0.0,
-                (time.perf_counter() - decode_started) * 1000.0 - post_decode_ms,
+                (time.perf_counter() - decode_started) * 1000.0
+                - post_decode_ms
+                - rife_interpolation_ms
+                - (
+                    actor_wait_ms
+                    if state.media_acceptance.interpolation_enabled
+                    else 0.0
+                ),
             )
+            if state.media_acceptance.interpolation_enabled and actor_wait_ms > 0:
+                observe_stage("actor_wait", actor_wait_ms, result=result)
             if elapsed_decode_ms > 0:
                 observe_stage("decode", elapsed_decode_ms, result=result)
             if post_decode_ms > 0:
                 observe_stage("post_decode", post_decode_ms, result=result)
+            if rife_interpolation_ms > 0:
+                observe_stage(
+                    "rife_interpolation",
+                    rife_interpolation_ms,
+                    result=result,
+                )
             raise
 
         codec = _codec_from_content_type(encoded[0].content_type) if encoded else "none"
@@ -467,16 +691,167 @@ class AsyncVAEWorker:
             observe_stage("post_decode", post_decode_ms)
         if encode_ms > 0:
             observe_stage("frame_encode", encode_ms, codec=codec, scope="frame")
+        if state.media_acceptance.interpolation_enabled:
+            observe_stage("actor_wait", actor_wait_ms)
+            observe_stage("rife_interpolation", rife_interpolation_ms)
 
         return DecodeResult(
             disposition=AcceptDisposition.ACCEPT,
             num_frames=sum(batch.num_frames for batch in encoded),
+            source_num_frames=source_num_frames,
+            output_num_frames=sum(batch.num_frames for batch in encoded),
+            media_profile=state.media_acceptance.effective,
+            source_timeline_fps=state.media_acceptance.source_timeline_fps,
+            output_timeline_fps=state.media_acceptance.output_timeline_fps,
             frame_batches=encoded,
             queue_wait_ms=queue_wait_ms,
+            actor_wait_ms=actor_wait_ms,
             decode_ms=decode_ms,
             encode_ms=encode_ms,
             post_decode_ms=post_decode_ms,
+            rife_interpolation_ms=rife_interpolation_ms,
         )
+
+    async def _interpolate_rife(
+        self,
+        state: _WorkerSession,
+        frames: torch.Tensor,
+        *,
+        multiplier: int,
+        hold_new_boundary_frame: bool = False,
+        reset_previous: bool = False,
+    ) -> torch.Tensor:
+        """Interleave exact RIFE samples while preserving seam cadence.
+
+        A control cutover never blends the previous state into the new one.
+        Instead its otherwise-missing seam slots repeat the new first frame,
+        so every non-initial source chunk still emits exactly ``multiplier*N``
+        frames.  The previous-frame state is committed only after every RIFE
+        inference and shape check succeeds.
+        """
+
+        processor = self.rife_processor
+        if processor is None:
+            raise RuntimeError("RIFE media processor is unavailable")
+        if multiplier not in (2, 3):
+            raise RuntimeError(f"unsupported realtime RIFE multiplier: {multiplier}")
+        intermediate_count = multiplier - 1
+        # Preserve the decoder tensor on its current device until RIFE has read
+        # it.  A taehv CUDA frame would otherwise make a needless D2H -> H2D
+        # round trip before interpolation.
+        current = frames[:, :3].contiguous()
+        previous = None if reset_previous else state.previous_source_frame
+        if previous is not None and (
+            previous.shape[0] != current.shape[0]
+            or previous.shape[1] != current.shape[1]
+            or previous.shape[-2:] != current.shape[-2:]
+        ):
+            previous = None
+            hold_new_boundary_frame = True
+        source = current if previous is None else torch.cat((previous, current), dim=2)
+        next_previous = current[:, :, -1:].clone()
+        if source.shape[2] < 2:
+            if hold_new_boundary_frame:
+                current = current.repeat(1, 1, multiplier, 1, 1)
+            output = current.to(device="cpu", dtype=torch.float32)
+            state.previous_source_frame = next_previous
+            return output
+
+        if multiplier == 2:
+            midpoints = await _run_non_preemptible_thread_call(
+                processor.interpolate_midpoints,
+                source,
+            )
+            intermediates = midpoints.unsqueeze(3)
+        else:
+            interpolate = getattr(processor, "interpolate_intermediates", None)
+            if not callable(interpolate):
+                raise RuntimeError("RIFE processor does not support 3x interpolation")
+            intermediates = await _run_non_preemptible_thread_call(
+                interpolate,
+                source,
+                multiplier=multiplier,
+            )
+        expected_pairs = int(source.shape[2]) - 1
+        expected_shape = (
+            int(current.shape[0]),
+            3,
+            expected_pairs,
+            intermediate_count,
+            int(current.shape[-2]),
+            int(current.shape[-1]),
+        )
+        if tuple(intermediates.shape) != expected_shape:
+            raise RuntimeError(
+                "RIFE intermediate shape mismatch: "
+                f"expected {expected_shape}, got {tuple(intermediates.shape)}"
+            )
+        current = current.to(device="cpu", dtype=torch.float32)
+        intermediates = intermediates.to(device="cpu", dtype=torch.float32).contiguous()
+        batch, _channels, current_count, height, width = current.shape
+        if previous is None:
+            if hold_new_boundary_frame:
+                output = torch.empty(
+                    (
+                        batch,
+                        3,
+                        current_count * multiplier,
+                        height,
+                        width,
+                    ),
+                    dtype=torch.float32,
+                )
+                grouped = output.view(
+                    batch, 3, current_count, multiplier, height, width
+                )
+                grouped[:, :, 0] = current[:, :, 0:1].expand(-1, -1, multiplier, -1, -1)
+                if current_count > 1:
+                    grouped[:, :, 1:, :intermediate_count] = intermediates
+                    grouped[:, :, 1:, intermediate_count] = current[:, :, 1:]
+                state.previous_source_frame = next_previous
+                return output
+            output = torch.empty(
+                (
+                    batch,
+                    3,
+                    current_count * multiplier - intermediate_count,
+                    height,
+                    width,
+                ),
+                dtype=torch.float32,
+            )
+            output[:, :, 0] = current[:, :, 0]
+            if current_count > 1:
+                grouped = output[:, :, 1:].view(
+                    batch,
+                    3,
+                    current_count - 1,
+                    multiplier,
+                    height,
+                    width,
+                )
+                grouped[:, :, :, :intermediate_count] = intermediates
+                grouped[:, :, :, intermediate_count] = current[:, :, 1:]
+            state.previous_source_frame = next_previous
+            return output
+
+        output = torch.empty(
+            (
+                batch,
+                3,
+                current_count * multiplier,
+                height,
+                width,
+            ),
+            dtype=torch.float32,
+        )
+        grouped = output.view(batch, 3, current_count, multiplier, height, width)
+        grouped[:, :, :, :intermediate_count] = intermediates
+        grouped[:, :, :, intermediate_count] = current
+        # Commit the seam only after inference, validation, transfer, and
+        # output assembly all succeed. A failed job must be safely retryable.
+        state.previous_source_frame = next_previous
+        return output
 
     async def _iter_decoded_frames(self, decoder, source, *, first_chunk):
         iterator_factory = getattr(self.engine, "iter_decode", None)
@@ -491,25 +866,12 @@ class AsyncVAEWorker:
             else:
                 # Native VAE decode is synchronous. Keep it off the protocol event
                 # loop so the next latent can be admitted while CUDA is busy.
-                decode_task = asyncio.create_task(
-                    asyncio.to_thread(
-                        decode,
-                        decoder,
-                        source,
-                        first_chunk=first_chunk,
-                    )
+                frames = await _run_non_preemptible_thread_call(
+                    decode,
+                    decoder,
+                    source,
+                    first_chunk=first_chunk,
                 )
-                try:
-                    frames = await asyncio.shield(decode_task)
-                except asyncio.CancelledError:
-                    # A native CUDA call keeps running after to_thread is
-                    # cancelled. Do not reset a model-global causal cache while
-                    # that decode (or its distributed collectives) is in flight.
-                    try:
-                        await decode_task
-                    except Exception:
-                        pass
-                    raise
                 if inspect.isawaitable(frames):
                     frames = await frames
             yield frames
@@ -524,7 +886,10 @@ class AsyncVAEWorker:
             return
         iterator = iter(frames)
         while True:
-            has_value, frame_batch = await asyncio.to_thread(_next_item, iterator)
+            has_value, frame_batch = await _run_non_preemptible_thread_call(
+                _next_item,
+                iterator,
+            )
             if not has_value:
                 return
             yield frame_batch
@@ -559,6 +924,14 @@ class AsyncVAEWorker:
                 source_height=batch.source_height,
                 preview_width=batch.preview_width,
                 preview_height=batch.preview_height,
+                media_profile=opened.media_profile,
+                source_timeline_fps=opened.source_timeline_fps,
+                output_timeline_fps=(
+                    opened.source_timeline_fps
+                    * parse_media_profile(
+                        opened.media_profile
+                    ).output_timeline_fps_multiplier
+                ),
             )
             for offset, batch in enumerate(encoded)
         )
@@ -569,7 +942,12 @@ class AsyncVAEWorker:
                 await on_frame_batch(batch)
         return indexed
 
-    def _normalize_frames(self, frames: torch.Tensor) -> torch.Tensor:
+    def _normalize_frames(
+        self,
+        frames: torch.Tensor,
+        *,
+        keep_on_device: bool = False,
+    ) -> torch.Tensor:
         if not isinstance(frames, torch.Tensor) or frames.ndim != 5:
             raise RuntimeError("VAE engine must return a five-dimensional frame tensor")
         if frames.shape[1] not in (1, 3, 4) and frames.shape[2] in (1, 3, 4):
@@ -577,6 +955,8 @@ class AsyncVAEWorker:
         if frames.shape[1] not in (1, 3, 4):
             raise RuntimeError("VAE frame tensor must be BCTHW or BTCHW")
         frames = frames.detach()
+        if keep_on_device:
+            return frames.clamp(0, 1).contiguous()
         if getattr(self.engine, "gpu_rgb8_d2h", False):
             # Keep native exact output on-device. The raw encoder below clamps
             # and quantizes it once, avoiding an extra full-size FP32 copy.
@@ -655,6 +1035,16 @@ class AsyncVAEWorker:
                 source_height=source_height,
                 preview_width=width,
                 preview_height=height,
+                media_profile=parse_media_profile(opened.media_profile),
+                source_timeline_fps=validate_source_timeline_fps(
+                    opened.source_timeline_fps
+                ),
+                output_timeline_fps=(
+                    validate_source_timeline_fps(opened.source_timeline_fps)
+                    * parse_media_profile(
+                        opened.media_profile
+                    ).output_timeline_fps_multiplier
+                ),
             )
             for index, payloads in enumerate(chunks)
         ]
@@ -683,6 +1073,15 @@ class AsyncVAEWorker:
         return buffer.getvalue()
 
     async def close(self, session_id: str, generation_id: str) -> None:
+        """Close a session without preempting an admitted native/GPU call.
+
+        Queued work is cancelled immediately.  If one decode or RIFE call is
+        already running, close waits for that single call to return before the
+        shared actor can serve another session.  This is a work-count bound,
+        not a wall-clock deadline: a hung CUDA call requires process-level
+        recovery rather than unsafe concurrent reuse of its model.
+        """
+
         identity = (session_id, generation_id)
         async with self._session_lock:
             state = self._sessions.pop(identity, None)
@@ -716,6 +1115,16 @@ class AsyncVAEWorker:
     @property
     def active_sessions(self) -> int:
         return len(self._sessions)
+
+    def media_acceptance(
+        self,
+        session_id: str,
+        generation_id: str,
+    ) -> MediaProfileAcceptance:
+        state = self._sessions.get((session_id, generation_id))
+        if state is None:
+            raise ProtocolViolation("unknown VAE session generation")
+        return state.media_acceptance
 
     def runtime_state(self) -> dict[str, int | float]:
         return {

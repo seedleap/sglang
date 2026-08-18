@@ -279,7 +279,38 @@ def test_gateway_cli_defaults_to_a_bounded_64_waiter_queue(monkeypatch):
         ],
     )
 
-    assert _parse_args().max_admission_waiters == 64
+    args = _parse_args()
+    assert args.max_admission_waiters == 64
+    # Zero is intentionally fail-fast for finite output. Operators that want
+    # bounded backpressure must opt into a positive enqueue timeout.
+    assert args.output_enqueue_timeout_s == 0
+    assert args.output_completion_timeout_s is None
+    assert args.output_ack_network_margin_s == 5
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    (
+        ({"output_completion_timeout_s": 0}, "output_completion_timeout_s"),
+        ({"output_ack_network_margin_s": 0}, "output_ack_network_margin_s"),
+        (
+            {
+                "output_completion_timeout_s": 3599,
+                "output_ack_network_margin_s": 2,
+            },
+            "at most 3600s",
+        ),
+    ),
+)
+def test_gateway_rejects_invalid_completion_ack_budget(kwargs, message):
+    with pytest.raises(ValueError, match=message):
+        create_app(
+            _Coordinator(),
+            model_revision="minwm-r1",
+            vae_fingerprint="taew2_2",
+            internal_output_url="ws://gateway/v1/internal/realtime_output",
+            **kwargs,
+        )
 
 
 @pytest.mark.parametrize(

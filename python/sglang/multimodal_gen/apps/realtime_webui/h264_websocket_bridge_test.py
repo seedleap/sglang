@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import time
 
+import msgspec
 from aiohttp import web
 from h264_websocket_bridge import (
     H264WebSocketBridgeManager,
@@ -237,5 +239,535 @@ def test_encoder_drains_frames_immediately_without_server_side_pacing():
         finally:
             encoder_task.cancel()
             await asyncio.gather(encoder_task, return_exceptions=True)
+
+    asyncio.run(exercise())
+
+
+def test_finite_session_backpressures_instead_of_dropping_tail():
+    async def exercise():
+        app = web.Application()
+        manager = H264WebSocketBridgeManager(
+            app,
+            web.AppKey("session", object),
+            lambda backend: f"ws://gateway/{backend}",
+        )
+        manager.max_queued_frames = 1
+        session = H264WebSocketSession(
+            manager=manager,
+            websocket=object(),
+            backend="minwm",
+            init={"type": "init", "max_chunks": 1},
+        )
+        header = {
+            "content_type": "application/x-raw-rgb",
+            "width": 2,
+            "height": 1,
+            "channels": 3,
+            "chunk_index": 0,
+            "num_frames": 1,
+        }
+        await session._handle_frame_payload(header, b"first!")
+        blocked_put = asyncio.create_task(
+            session._handle_frame_payload(header, b"second")
+        )
+        await asyncio.sleep(0)
+
+        assert not blocked_put.done()
+        assert session.dropped_frames == 0
+        first = session.frame_queue.get_nowait()
+        session.frame_queue.task_done()
+        await blocked_put
+        second = session.frame_queue.get_nowait()
+        session.frame_queue.task_done()
+        assert first.rgb == b"first!"
+        assert second.rgb == b"second"
+        assert session.dropped_frames == 0
+
+    asyncio.run(exercise())
+
+
+def test_continuous_session_keeps_existing_live_edge_drop_policy():
+    async def exercise():
+        app = web.Application()
+        manager = H264WebSocketBridgeManager(
+            app,
+            web.AppKey("session", object),
+            lambda backend: f"ws://gateway/{backend}",
+        )
+        manager.max_queued_frames = 1
+        session = H264WebSocketSession(
+            manager=manager,
+            websocket=object(),
+            backend="minwm",
+            init={},
+        )
+        header = {
+            "content_type": "application/x-raw-rgb",
+            "width": 2,
+            "height": 1,
+            "channels": 3,
+            "chunk_index": 0,
+            "num_frames": 1,
+        }
+        await session._handle_frame_payload(header, b"first!")
+        await session._handle_frame_payload(header, b"second")
+
+        retained = session.frame_queue.get_nowait()
+        session.frame_queue.task_done()
+        assert retained.rgb == b"second"
+        assert session.dropped_frames == 1
+
+    asyncio.run(exercise())
+
+
+def test_i2v_num_frames_does_not_turn_default_continuous_stream_finite():
+    app = web.Application()
+    manager = H264WebSocketBridgeManager(
+        app,
+        web.AppKey("session", object),
+        lambda backend: f"ws://gateway/{backend}",
+    )
+
+    continuous_i2v = H264WebSocketSession(
+        manager=manager,
+        websocket=object(),
+        backend="minwm",
+        init={
+            "type": "init",
+            "generation_mode": "i2v",
+            "first_frame": "data:image/png;base64,AA==",
+            "num_frames": 17,
+        },
+    )
+    finite_i2v = H264WebSocketSession(
+        manager=manager,
+        websocket=object(),
+        backend="minwm",
+        init={
+            "type": "init",
+            "generation_mode": "i2v",
+            "first_frame": "data:image/png;base64,AA==",
+            "num_frames": 17,
+            "max_chunks": 1,
+        },
+    )
+    finite_t2v = H264WebSocketSession(
+        manager=manager,
+        websocket=object(),
+        backend="minwm",
+        init={"type": "init", "generation_mode": "t2v", "num_frames": 121},
+    )
+    inferred_t2v = H264WebSocketSession(
+        manager=manager,
+        websocket=object(),
+        backend="minwm",
+        init={"type": "init", "num_frames": 121},
+    )
+    inferred_i2v = H264WebSocketSession(
+        manager=manager,
+        websocket=object(),
+        backend="minwm",
+        init={"type": "init", "first_frame": b"png", "num_frames": 121},
+    )
+
+    assert continuous_i2v.finite_request is False
+    assert finite_i2v.finite_request is True
+    assert finite_t2v.finite_request is True
+    assert inferred_t2v.finite_request is True
+    assert inferred_i2v.finite_request is False
+
+
+def test_finite_upstream_graceful_close_without_final_marker_is_1011():
+    class FakeBrowser:
+        def __init__(self):
+            self.closed = False
+            self.close_code = None
+            self.messages = []
+            self._blocked = asyncio.Event()
+
+        async def send_json(self, payload):
+            self.messages.append(payload)
+
+        async def close(self, *, code=1000, message=b""):
+            del message
+            self.closed = True
+            self.close_code = code
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            await self._blocked.wait()
+            raise StopAsyncIteration
+
+    class FakeUpstream:
+        def __init__(self, close_code):
+            self.close_code = close_code
+            self.closed = False
+            self.sent = []
+
+        async def send_bytes(self, payload):
+            self.sent.append(payload)
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise StopAsyncIteration
+
+    class UpstreamContext:
+        def __init__(self, upstream):
+            self.upstream = upstream
+
+        async def __aenter__(self):
+            return self.upstream
+
+        async def __aexit__(self, *_args):
+            return False
+
+    class FakeClient:
+        def __init__(self, upstream):
+            self.upstream = upstream
+
+        def ws_connect(self, *_args, **_kwargs):
+            return UpstreamContext(self.upstream)
+
+    async def exercise(close_code):
+        app = web.Application()
+        session_key = web.AppKey("session", object)
+        upstream = FakeUpstream(close_code)
+        app[session_key] = FakeClient(upstream)
+        manager = H264WebSocketBridgeManager(
+            app,
+            session_key,
+            lambda backend: f"ws://gateway/{backend}",
+        )
+        browser = FakeBrowser()
+        session = H264WebSocketSession(
+            manager=manager,
+            websocket=browser,
+            backend="minwm",
+            init={"type": "init", "max_chunks": 1},
+        )
+
+        await session.run()
+
+        assert browser.close_code == 1011
+        error = next(
+            message for message in browser.messages if message["type"] == "error"
+        )
+        assert "without final media completion" in error["message"]
+
+    for close_code in (1000, 1001):
+        asyncio.run(exercise(close_code))
+
+
+def test_continuous_upstream_graceful_close_without_final_marker_is_unchanged():
+    class FakeBrowser:
+        closed = False
+
+        def __init__(self):
+            self.messages = []
+            self._blocked = asyncio.Event()
+
+        async def send_json(self, payload):
+            self.messages.append(payload)
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            await self._blocked.wait()
+            raise StopAsyncIteration
+
+    class FakeUpstream:
+        close_code = 1000
+        closed = False
+
+        async def send_bytes(self, _payload):
+            return None
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise StopAsyncIteration
+
+    class UpstreamContext:
+        async def __aenter__(self):
+            return FakeUpstream()
+
+        async def __aexit__(self, *_args):
+            return False
+
+    class FakeClient:
+        def ws_connect(self, *_args, **_kwargs):
+            return UpstreamContext()
+
+    async def exercise():
+        app = web.Application()
+        session_key = web.AppKey("session", object)
+        app[session_key] = FakeClient()
+        manager = H264WebSocketBridgeManager(
+            app,
+            session_key,
+            lambda backend: f"ws://gateway/{backend}",
+        )
+        browser = FakeBrowser()
+        session = H264WebSocketSession(
+            manager=manager,
+            websocket=browser,
+            backend="minwm",
+            init={},
+        )
+
+        await session.run()
+
+        assert browser.closed is False
+        assert not any(message["type"] == "error" for message in browser.messages)
+
+    asyncio.run(exercise())
+
+
+def test_final_completion_is_published_only_after_queue_and_output_flush():
+    class FakeWebSocket:
+        closed = False
+
+        def __init__(self):
+            self.messages = []
+
+        async def send_json(self, payload):
+            self.messages.append(payload)
+
+    async def exercise():
+        app = web.Application()
+        manager = H264WebSocketBridgeManager(
+            app,
+            web.AppKey("session", object),
+            lambda backend: f"ws://gateway/{backend}",
+        )
+        websocket = FakeWebSocket()
+        session = H264WebSocketSession(
+            manager=manager,
+            websocket=websocket,
+            backend="minwm",
+            init={"type": "init", "max_chunks": 1},
+        )
+        await session._receive_binary(
+            msgspec.msgpack.encode(
+                {
+                    "type": "media_chunk_complete",
+                    "chunk_index": 0,
+                    "event_id": 7,
+                    "num_frames": 2,
+                    "is_final_chunk": True,
+                }
+            )
+        )
+        assert websocket.messages == []
+
+        await session.frame_queue.put(b"frame-0")
+        await session.frame_queue.put(b"frame-1")
+        processed = []
+        flushed_after = []
+
+        async def encode():
+            while True:
+                frame = await session.frame_queue.get()
+                try:
+                    await asyncio.sleep(0)
+                    processed.append(frame)
+                    session.frames += 1
+                finally:
+                    session.frame_queue.task_done()
+
+        async def stop_ffmpeg(*, flush_output=False):
+            assert flush_output is True
+            flushed_after.append(tuple(processed))
+
+        session.encoder_task = asyncio.create_task(encode())
+        session._stop_ffmpeg = stop_ffmpeg
+        await session._finish_graceful_stream()
+
+        assert processed == [b"frame-0", b"frame-1"]
+        assert flushed_after == [(b"frame-0", b"frame-1")]
+        assert websocket.messages == [
+            {
+                "type": "stream_complete",
+                "chunk_index": 0,
+                "event_id": 7,
+                "num_frames": 2,
+                "encoded_frames": 2,
+                "dropped_frames": 0,
+                "media_bytes": 0,
+            }
+        ]
+
+    asyncio.run(exercise())
+
+
+def test_ffmpeg_timeout_cancels_blocked_output_before_bounded_kill_wait():
+    shutdown_events = []
+
+    class BlockingWebSocket:
+        def __init__(self):
+            self.send_started = asyncio.Event()
+            self.send_cancelled = asyncio.Event()
+
+        async def send_json(self, _payload):
+            return None
+
+        async def send_bytes(self, _payload):
+            self.send_started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                shutdown_events.append("output_cancelled")
+                self.send_cancelled.set()
+
+    class FakeStdin:
+        def __init__(self):
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+    class OneFragmentStdout:
+        def __init__(self):
+            self.sent = False
+
+        async def read(self, _size):
+            if self.sent:
+                return b""
+            self.sent = True
+            return b"fragment"
+
+    class HungProcess:
+        def __init__(self):
+            self.stdin = FakeStdin()
+            self.stdout = OneFragmentStdout()
+            self.stderr = None
+            self.returncode = None
+            self.killed = False
+            self.exited = asyncio.Event()
+            self.wait_calls = 0
+
+        async def wait(self):
+            self.wait_calls += 1
+            await self.exited.wait()
+            return self.returncode
+
+        def kill(self):
+            self.killed = True
+            shutdown_events.append("process_killed")
+            # Deliberately never resolve wait(): the production code must put
+            # a deadline around the post-kill reap as well.
+
+    async def exercise():
+        app = web.Application()
+        manager = H264WebSocketBridgeManager(
+            app,
+            web.AppKey("session", object),
+            lambda backend: f"ws://gateway/{backend}",
+        )
+        manager.drain_timeout_ms = 20
+        websocket = BlockingWebSocket()
+        session = H264WebSocketSession(
+            manager=manager,
+            websocket=websocket,
+            backend="minwm",
+            init={"type": "init", "max_chunks": 1},
+        )
+        process = HungProcess()
+        session.ffmpeg = process
+        session.stdout_task = asyncio.create_task(session._pump_stdout())
+        await asyncio.wait_for(websocket.send_started.wait(), timeout=0.1)
+
+        started = asyncio.get_running_loop().time()
+        try:
+            await session._stop_ffmpeg(flush_output=True)
+        except TimeoutError:
+            pass
+        else:
+            raise AssertionError("strict flush must report its initial process timeout")
+        elapsed = asyncio.get_running_loop().time() - started
+
+        assert elapsed < 0.5
+        assert process.stdin.closed is True
+        assert websocket.send_cancelled.is_set()
+        assert process.killed is True
+        assert process.wait_calls == 2
+        assert shutdown_events[:2] == ["output_cancelled", "process_killed"]
+        assert session.stdout_task is None
+
+    asyncio.run(exercise())
+
+
+def test_graceful_ffmpeg_flush_keeps_successful_encode_metric(monkeypatch):
+    observations = []
+
+    def observe(stage, _duration, **labels):
+        observations.append((stage, labels.get("result")))
+
+    monkeypatch.setattr("h264_websocket_bridge.observe_stage_seconds", observe)
+
+    class FakeWebSocket:
+        async def send_json(self, _payload):
+            return None
+
+        async def send_bytes(self, _payload):
+            return None
+
+    class FakeStdin:
+        def close(self):
+            return None
+
+    class OneFragmentStdout:
+        def __init__(self):
+            self.sent = False
+
+        async def read(self, _size):
+            if self.sent:
+                return b""
+            self.sent = True
+            await asyncio.sleep(0)
+            return b"fragment"
+
+    class CleanProcess:
+        def __init__(self):
+            self.stdin = FakeStdin()
+            self.stdout = OneFragmentStdout()
+            self.stderr = None
+            self.returncode = 0
+
+        async def wait(self):
+            await asyncio.sleep(0)
+            return self.returncode
+
+    async def exercise():
+        app = web.Application()
+        manager = H264WebSocketBridgeManager(
+            app,
+            web.AppKey("session", object),
+            lambda backend: f"ws://gateway/{backend}",
+        )
+        session = H264WebSocketSession(
+            manager=manager,
+            websocket=FakeWebSocket(),
+            backend="minwm",
+            init={"max_chunks": 1},
+        )
+        process = CleanProcess()
+        session.ffmpeg = process
+        session.encoder_start_times_s.append(time.perf_counter() - 0.01)
+        session.stdout_task = asyncio.create_task(session._pump_stdout(process))
+
+        await session._stop_ffmpeg(flush_output=True)
+
+        frame_results = [
+            result for stage, result in observations if stage == "frame_encode"
+        ]
+        assert frame_results == ["success"]
+        assert not session.encoder_start_times_s
 
     asyncio.run(exercise())

@@ -86,6 +86,7 @@ class GenerateSession:
         self.output_pace_last_event_id: int | None = None
         self.vae_client: Any = None
         self.vae_decoder_backend: str | None = None
+        self.media_profile_acceptance: Any = None
         self.vae_worker_url: str | None = None
         self.vae_worker_epoch: str | None = None
         self.coordinator_token: str | None = None
@@ -123,6 +124,7 @@ class GenerateSession:
         self.output_pace_last_event_id = None
         self.vae_client = None
         self.vae_decoder_backend = None
+        self.media_profile_acceptance = None
         self.pending_control_refresh = None
         self.control_refresh_task = None
         self.input_event_timings.clear()

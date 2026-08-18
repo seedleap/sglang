@@ -14,8 +14,12 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Literal
 from urllib.parse import urlsplit
 
-from prompt_rewriter import DEFAULT_CREDENTIALS_PATH, VERTEX_SCOPE
 from pydantic import BaseModel, ConfigDict, Field
+
+if __package__:
+    from .prompt_rewriter import DEFAULT_CREDENTIALS_PATH, VERTEX_SCOPE
+else:
+    from prompt_rewriter import DEFAULT_CREDENTIALS_PATH, VERTEX_SCOPE
 
 ROOT = Path(__file__).resolve().parent
 SECRETS_ROOT = ROOT.parent / "realtime_webui_secrets"

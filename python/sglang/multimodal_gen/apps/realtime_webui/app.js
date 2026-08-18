@@ -6,6 +6,17 @@ const WEBP_FRAME_CONTENT_TYPE = "image/webp";
 const JPEG_FRAME_CONTENT_TYPE = "image/jpeg";
 const DECODER_WORKER_URL = "./decoder_worker.js?v=rgb-worker-v10";
 const UI_CONFIG = Object.freeze(globalThis.SGLANG_REALTIME_UI_CONFIG || {});
+const EXPERIENCE_MODE = globalThis.SGLangRealtimeExperienceMode || {
+  applyToDocument: () => false,
+  isZingOnly: (config) => config?.zingOnly === true,
+  recordingVariants: (config) => config?.zingOnly === true
+    ? ["zing"]
+    : ["comparison", "zing"],
+  selectedModelKeys: (config, requested) => config?.zingOnly === true
+    ? ["minwm"]
+    : requested,
+};
+const ZING_ONLY = EXPERIENCE_MODE.isZingOnly(UI_CONFIG);
 const DUAL_MODEL_CONFIG = Object.freeze(UI_CONFIG.dualModels || {});
 const H264_MSE_MIME_TYPE = 'video/mp4; codecs="avc1.4D401F"';
 const H264_WEBSOCKET_REQUESTED = UI_CONFIG.h264WebSocketEnabled === true;
@@ -26,7 +37,39 @@ function configuredModelNumber(key, name, fallback) {
   return Number.isFinite(value) ? value : fallback;
 }
 
+function fallbackStreamTransportLabel(key, init = {}) {
+  const requestedFormat = init.realtime_output_format;
+  const selectedFormat = modelControl(key, "transportFormat")?.value;
+  const format = String(
+    requestedFormat ?? selectedFormat ?? DEFAULT_PREVIEW_OUTPUT_FORMAT,
+  ).toLowerCase();
+  if (format === "jpeg") return "JPEG";
+  if (format === "raw") return "Raw RGB";
+  if (format === "") return "Lossless delta";
+  return "WebP";
+}
+
+function setStreamChipTransport(key, useH264, fallbackInit = {}) {
+  const chip = document.querySelector(`[data-model-key="${key}"] .stream-chip`);
+  if (!chip) return;
+  if (!useH264) {
+    chip.textContent = `${fallbackStreamTransportLabel(key, fallbackInit)} · WS`;
+    return;
+  }
+  const bitrateKbps = configuredModelNumber(
+    key,
+    "h264BitrateKbps",
+    configuredNumber("h264CompressedBitrateKbps", 3000),
+  );
+  chip.textContent = `H.264 · WS · ${(bitrateKbps / 1000).toFixed(1)} Mbps`;
+}
+
 function h264CompressionInit(init, key) {
+  if (key === "minwm" && interpolationMultiplier(init.realtime_media_profile) > 1) {
+    throw new Error(
+      "negotiated RIFE requires WebP until H.264 timebase support is deployed",
+    );
+  }
   const bitrateKbps = Math.max(
     250,
     Math.min(
@@ -115,13 +158,35 @@ const SMOOTH_PREVIEW_OUTPUT_QUALITY = 70;
 const SR_PREVIEW_OUTPUT_QUALITY = 70;
 const HEAVY_PREVIEW_OUTPUT_QUALITY = 60;
 const DEFAULT_TARGET_FPS = configuredNumber("targetFps", 24);
+const MINWM_CAUSAL_SINK_SIZE = 8;
+const MINWM_CAUSAL_WINDOW_FRAMES = 32;
 const DEFAULT_LINGBOT2_TARGET_FPS = configuredModelNumber("lingbot2", "targetFps", 16);
 const DEFAULT_LINGBOT2_SINK_SIZE = configuredModelNumber("lingbot2", "sinkSize", 9);
 const DEFAULT_LINGBOT2_WINDOW_FRAMES = configuredModelNumber("lingbot2", "windowFrames", 18);
 const DEFAULT_PREVIEW_MAX_WIDTH = configuredNumber("previewMaxWidth", 832);
 const MAX_AUTO_PREVIEW_WIDTH = configuredNumber("maxAutoPreviewWidth", 1280);
-const DEFAULT_FRAME_INTERPOLATION_EXP = 1;
-const DEFAULT_FRAME_INTERPOLATION_SCALE = 1.0;
+const NATIVE_MEDIA_PROFILE = "native_v1";
+const RIFE2X_MEDIA_PROFILE = "rife2x_v1";
+const RIFE3X_MEDIA_PROFILE = "rife3x_v1";
+const RIFE_MEDIA_MULTIPLIERS = Object.freeze({
+  [RIFE2X_MEDIA_PROFILE]: 2,
+  [RIFE3X_MEDIA_PROFILE]: 3,
+});
+
+function interpolationMultiplier(profile) {
+  return Number(RIFE_MEDIA_MULTIPLIERS[String(profile || "")] || 1);
+}
+
+function isInterpolatedMediaProfile(profile) {
+  return interpolationMultiplier(profile) > 1;
+}
+
+let requestedMediaProfile = NATIVE_MEDIA_PROFILE;
+let effectiveMediaProfile = NATIVE_MEDIA_PROFILE;
+let mediaProfileNegotiated = false;
+let negotiatedSourceTimelineFps = 0;
+let negotiatedOutputTimelineFps = 0;
+let rifeChunkTelemetry = {};
 const DEFAULT_SMOOTH_CATCHUP_RATE = Math.min(
   2.5,
   Math.max(1, configuredNumber("smoothCatchupRateMax", 1.1)),
@@ -219,7 +284,8 @@ const RECORDING_PROMPT_STATUS_HOLD_MS = 1600;
 const RECORDING_READY_TOAST_MS = 5000;
 
 function applyRuntimeUiConfig() {
-  for (const key of ["minwm", "lingbot2"]) {
+  EXPERIENCE_MODE.applyToDocument(document, UI_CONFIG);
+  for (const key of ZING_ONLY ? ["minwm"] : ["minwm", "lingbot2"]) {
     const isLingBot2 = key === "lingbot2";
     modelControl(key, "fps").value = String(
       isLingBot2 ? DEFAULT_LINGBOT2_TARGET_FPS : DEFAULT_TARGET_FPS,
@@ -230,12 +296,12 @@ function applyRuntimeUiConfig() {
     modelControl(key, "sinkSize").value = String(
       isLingBot2
         ? DEFAULT_LINGBOT2_SINK_SIZE
-        : configuredNumber("sinkSize", Number(modelControl(key, "sinkSize").value)),
+        : MINWM_CAUSAL_SINK_SIZE,
     );
     modelControl(key, "windowFrames").value = String(
       isLingBot2
         ? DEFAULT_LINGBOT2_WINDOW_FRAMES
-        : configuredNumber("windowFrames", Number(modelControl(key, "windowFrames").value)),
+        : MINWM_CAUSAL_WINDOW_FRAMES,
     );
   }
   if (UI_CONFIG.titleSuffix) {
@@ -249,10 +315,8 @@ function applyRuntimeUiConfig() {
     });
   }
   if (H264_WEBSOCKET_ENABLED) {
-    const bitrateKbps = configuredNumber("h264CompressedBitrateKbps", 3000);
-    for (const key of ["minwm", "lingbot2"]) {
-      const chip = document.querySelector(`[data-model-key="${key}"] .stream-chip`);
-      if (chip) chip.textContent = `H.264 · WS · ${(bitrateKbps / 1000).toFixed(1)} Mbps`;
+    for (const key of ZING_ONLY ? ["minwm"] : ["minwm", "lingbot2"]) {
+      setStreamChipTransport(key, true);
     }
   } else if (H264_WEBSOCKET_REQUESTED) {
     addHistory("当前浏览器不支持 H.264 MSE，已自动回退 WebP WebSocket");
@@ -510,7 +574,7 @@ let customWorldPresets = [];
 let customWorldDbPromise = null;
 let customWorldLoadPromise = null;
 const MODEL_SLOT_DEFAULTS = ["minwm", "lingbot2", "happyoyster"];
-let activeModelSlotCount = 2;
+let activeModelSlotCount = ZING_ONLY ? 1 : 2;
 
 function selectedModelKeys() {
   const keys = [];
@@ -518,7 +582,7 @@ function selectedModelKeys() {
     const key = $(`modelSlot${index}`)?.value || MODEL_SLOT_DEFAULTS[index];
     if (!keys.includes(key)) keys.push(key);
   }
-  return keys;
+  return EXPERIENCE_MODE.selectedModelKeys(UI_CONFIG, keys);
 }
 
 function modelSelected(key) {
@@ -597,6 +661,7 @@ let queuedDecodeFrames = 0;
 let queuedDecodeBytes = 0;
 let decodeInProgress = false;
 let pendingDecodeBatches = 0;
+let decodePumpGeneration = 0;
 let droppedDecodeFrames = 0;
 let lastDecodeDropAt = 0;
 let lastDecodeDropCount = 0;
@@ -615,9 +680,14 @@ let primaryProtocolStats = {};
 let primaryNetworkSample = null;
 const primaryControlSentEpochByEvent = new Map();
 let encodedDecodeErrors = 0;
+let encodedDecodeErrorTotal = 0;
 let socketHadError = false;
 let socketCloseExpected = false;
 let socketServerError = "";
+let currentFiniteSession = false;
+let lastPrimarySocketCloseCode = null;
+let lastPrimarySocketCloseReason = "";
+let primaryRenderActivity = 0;
 let renderedPreviewFrames = 0;
 let previewScaleFrame = 0;
 let recordingActive = false;
@@ -719,6 +789,13 @@ const playbackController = new RealtimePlaybackController({
   maxDeliveryLeadBoostMs: 0,
   deliveryStallExpectedMultiplier: 1.8,
 });
+const finiteWebpDrainApi = window.SGLangFiniteWebpDrain;
+if (!finiteWebpDrainApi?.FiniteWebpDrainController) {
+  throw new Error("finite WebP drain controller is unavailable");
+}
+const primaryWebpDrainController = new finiteWebpDrainApi.FiniteWebpDrainController({
+  onComplete: (context) => finalizePrimaryWebpDrain(context),
+});
 let lingbot2ReconnectTimer = 0;
 let lingbot2ReconnectAttempt = 0;
 let lingbot2ReconnectInFlight = false;
@@ -732,6 +809,7 @@ function cancelLingbot2Reconnect() {
 
 function canReconnectLingbot2() {
   return (
+    !ZING_ONLY &&
     !sessionLifetimeExpired &&
     selectedGenerationMode() === "i2v" &&
     primarySessionConnected()
@@ -828,6 +906,18 @@ function createH264ModelSession(key) {
     endpoint: h264WebSocketEndpoint(key),
     liveEdgeTargetMs: configuredNumber("h264WebSocketLiveEdgeTargetMs", 80),
     liveEdgeSeekThresholdMs: configuredNumber("h264WebSocketSeekThresholdMs", 420),
+    smoothTimelineStartupBufferMs: configuredNumber(
+      "h264WebSocketSmoothTimelineStartupBufferMs",
+      450,
+    ),
+    smoothTimelineTargetLagMs: configuredNumber(
+      "h264WebSocketSmoothTimelineTargetLagMs",
+      650,
+    ),
+    smoothTimelineMaxLagMs: configuredNumber(
+      "h264WebSocketSmoothTimelineMaxLagMs",
+      1800,
+    ),
     onState: (state, details = {}) => {
       setModelConnectionState(key, state);
       if (state === "connecting") {
@@ -838,6 +928,31 @@ function createH264ModelSession(key) {
         activeH264Models.delete(key);
         video.hidden = true;
         fallbackCanvas.hidden = false;
+      }
+      if (state === "draining" && details.playbackError) {
+        addHistory(
+          `${modelLabel(key)} H.264 tail autoplay rejected · ${details.playbackError}`,
+        );
+      }
+      if (key === "minwm" && state === "closed" && !primaryWebpDrainActive()) {
+        // H264WebSocketSession emits `closed` only after MSE has presented its
+        // buffered tail. Re-enable entry and finish recording at that point,
+        // not when the transport first starts draining.
+        $("connectBtn").disabled = false;
+        setStatus(details.complete ? "Completed" : "Closed");
+        stopWorldExperienceTiming({
+          recordingReason: details.complete ? "generation_complete" : "primary_disconnected",
+        });
+        if (details.complete) {
+          addHistory(
+            `Zing H.264 generation complete · ${Number(details.terminal?.encoded_frames || 0)} frames`,
+          );
+        }
+        if (details.drainTimedOut) {
+          addHistory(
+            `Zing H.264 tail drain timeout · ${Math.round(Number(details.remainingPlaybackMs || 0))}ms remained`,
+          );
+        }
       }
       if (state === "error") {
         addHistory(`${modelLabel(key)} H.264 error · ${details.message || "unknown"}`);
@@ -874,6 +989,7 @@ const minwmH264Session = H264_WEBSOCKET_ENABLED
   ? createH264ModelSession("minwm")
   : null;
 const lingbot2H264Session = H264_WEBSOCKET_ENABLED
+  && !ZING_ONLY
   ? createH264ModelSession("lingbot2")
   : null;
 
@@ -885,6 +1001,7 @@ function preferredRealtimeSession(key, h264Session, fallbackSession) {
         try {
           await h264Session.connect(h264CompressionInit(init, key));
           selected = h264Session;
+          setStreamChipTransport(key, true);
           return;
         } catch (error) {
           await h264Session.close("H.264 startup failed", { emitState: false });
@@ -893,6 +1010,7 @@ function preferredRealtimeSession(key, h264Session, fallbackSession) {
           const fallbackCanvas = key === "lingbot2" ? lingbot2Canvas : canvas;
           video.hidden = true;
           fallbackCanvas.hidden = false;
+          setStreamChipTransport(key, false, init);
         }
       }
       selected = fallbackSession;
@@ -907,7 +1025,10 @@ function preferredRealtimeSession(key, h264Session, fallbackSession) {
       h264Session?.setUnavailable?.(reason);
       fallbackSession?.setUnavailable?.(reason);
     },
-    configure(options) { fallbackSession?.configure?.(options); },
+    configure(options) {
+      h264Session?.configure?.(options);
+      fallbackSession?.configure?.(options);
+    },
     snapshot() { return selected?.snapshot?.() || h264ModelStats[key] || {}; },
     get active() { return Boolean(selected?.active); },
     get connected() { return Boolean(selected?.connected); },
@@ -965,20 +1086,34 @@ function buildHappyOysterInit(init) {
 let primaryUsesH264 = false;
 const primarySessionAdapter = {
   async connect(init, url) {
-    if (minwmH264Session) {
+    const requiresWebP = isInterpolatedMediaProfile(init.realtime_media_profile);
+    const fallbackInit = requiresWebP
+      ? { ...init, realtime_output_format: "webp" }
+      : init;
+    if (minwmH264Session && !requiresWebP) {
       try {
         await minwmH264Session.connect(h264CompressionInit(init, "minwm"));
         primaryUsesH264 = true;
+        setStreamChipTransport("minwm", true);
         return;
       } catch (error) {
         await minwmH264Session.close("H.264 startup failed", { emitState: false });
         addHistory(`Zing H.264 启动失败，自动回退 WebP · ${error.message || error}`);
         minwmH264Video.hidden = true;
         canvas.hidden = false;
+        setStreamChipTransport("minwm", false, init);
       }
+    } else if (minwmH264Session && requiresWebP) {
+      // This is a deliberate fail-closed transport decision, not an H.264
+      // startup failure.  H.264 cannot preserve the negotiated RIFE timebase.
+      await minwmH264Session.close("RIFE requires WebP", { emitState: false });
+      minwmH264Video.hidden = true;
+      canvas.hidden = false;
+      setStreamChipTransport("minwm", false, fallbackInit);
+      addHistory("Zing RIFE 使用 WebP · H.264 timebase 尚未支持");
     }
     primaryUsesH264 = false;
-    return openPrimarySession(init, url);
+    return openPrimarySession(fallbackInit, url);
   },
   sendEvent(envelope) {
     return primaryUsesH264
@@ -993,6 +1128,9 @@ const primarySessionAdapter = {
       return;
     }
     abortCurrentSession(reason, { expectedClose: true });
+  },
+  configure(options) {
+    minwmH264Session?.configure?.(options);
   },
 };
 
@@ -1010,8 +1148,10 @@ function primaryTransportBufferedAmount() {
 const dualModelController = new DualModelController({
   sessions: {
     minwm: primarySessionAdapter,
-    lingbot2: lingbot2Session,
-    happyoyster: happyOysterSession,
+    ...(ZING_ONLY ? {} : {
+      lingbot2: lingbot2Session,
+      happyoyster: happyOysterSession,
+    }),
   },
   backends: {
     minwm: {
@@ -1024,41 +1164,47 @@ const dualModelController = new DualModelController({
       ),
       wsUrl: (init) => backendWebSocketUrl("minwm", init.trace_id),
     },
-    lingbot2: {
-      model: String(
-        DUAL_MODEL_CONFIG.lingbot2?.model
-        || UI_CONFIG.lingbot2Model
-        || DEFAULT_LINGBOT2_MODEL
-      ),
-      transformInit: (init) => {
-        const modelParams = readModelRequestParams("lingbot2", {
-          generationMode: init.generation_mode,
-          firstFrame: init.first_frame,
-        });
-        const interactiveInit = {
-          ...init,
-          ...modelParams,
-          realtime_interactive_event_grace_ms: 1800,
-        };
-        const is720p = interactiveInit.size === "1280x704" || interactiveInit.size === "1280x720";
-        if (!is720p) return interactiveInit;
-        return {
-          ...interactiveInit,
-          size: "1280x720",
-        };
+    ...(ZING_ONLY ? {} : {
+      lingbot2: {
+        model: String(
+          DUAL_MODEL_CONFIG.lingbot2?.model
+          || UI_CONFIG.lingbot2Model
+          || DEFAULT_LINGBOT2_MODEL
+        ),
+        transformInit: (init) => {
+          // This capability belongs to Zing. Do not copy an opt-in RIFE
+          // request into a comparison backend.
+          const lingbotInit = { ...init };
+          delete lingbotInit.realtime_media_profile;
+          const modelParams = readModelRequestParams("lingbot2", {
+            generationMode: init.generation_mode,
+            firstFrame: init.first_frame,
+          });
+          const interactiveInit = {
+            ...lingbotInit,
+            ...modelParams,
+            realtime_interactive_event_grace_ms: 1800,
+          };
+          const is720p = interactiveInit.size === "1280x704" || interactiveInit.size === "1280x720";
+          if (!is720p) return interactiveInit;
+          return {
+            ...interactiveInit,
+            size: "1280x720",
+          };
+        },
+        enabled: (init) => modelSelected("lingbot2") && init.generation_mode !== "t2v",
+        unavailableReason: "T2V unavailable",
+        wsUrl: (init) => backendWebSocketUrl("lingbot2", init.trace_id),
       },
-      enabled: (init) => modelSelected("lingbot2") && init.generation_mode !== "t2v",
-      unavailableReason: "T2V unavailable",
-      wsUrl: (init) => backendWebSocketUrl("lingbot2", init.trace_id),
-    },
-    happyoyster: {
-      model: "happyoyster-adventure",
-      nonBlocking: true,
-      enabled: (init) => modelSelected("happyoyster") && init.generation_mode === "i2v",
-      unavailableReason: "仅支持 I2V Adventure",
-      transformInit: buildHappyOysterInit,
-      wsUrl: "",
-    },
+      happyoyster: {
+        model: "happyoyster-adventure",
+        nonBlocking: true,
+        enabled: (init) => modelSelected("happyoyster") && init.generation_mode === "i2v",
+        unavailableReason: "仅支持 I2V Adventure",
+        transformInit: buildHappyOysterInit,
+        wsUrl: "",
+      },
+    }),
   },
   onBackgroundState: ({ key, state, error }) => {
     if (key !== "happyoyster") return;
@@ -1279,7 +1425,7 @@ function markWorldExperienceReady(modelKey) {
   startSessionCountdown();
   startRecording({ source: "first_visible_frame" });
   worldRulesController?.startSession();
-  setStatus("Live", "live");
+  setPrimaryWebpStreamingStatus();
   $("sessionNotice").hidden = true;
   renderRuntimeSkillBar();
   addHistory(`world ready · ${modelLabel(modelKey)} visible · timer and dual recordings started`);
@@ -1477,12 +1623,19 @@ function setModelConnectionState(key, state) {
     ready: "准备完成",
     connecting: "连接中",
     live: "已连接",
+    draining: "播放收尾",
     unavailable: "不可用",
     error: "连接异常",
     closed: "已断开",
     idle: "待连接",
   }[state] || "待连接";
   renderRuntimeSkillBar();
+}
+
+function setComparisonModelConnectionState(state) {
+  if (ZING_ONLY) return;
+  setModelConnectionState("lingbot2", state);
+  setModelConnectionState("happyoyster", state);
 }
 
 function setHappyOysterStageText(message, state = "") {
@@ -1857,7 +2010,14 @@ function drawIdle() {
 }
 
 function resetStreamStats() {
+  primaryWebpDrainController.cancel();
   pendingHeader = null;
+  requestedMediaProfile = NATIVE_MEDIA_PROFILE;
+  effectiveMediaProfile = NATIVE_MEDIA_PROFILE;
+  mediaProfileNegotiated = false;
+  negotiatedSourceTimelineFps = 0;
+  negotiatedOutputTimelineFps = 0;
+  rifeChunkTelemetry = {};
   h264ModelStats.minwm = {};
   h264ModelStats.lingbot2 = {};
   activeH264Models.clear();
@@ -1874,6 +2034,8 @@ function resetStreamStats() {
   bytes = 0;
   fpsSamples = [];
   clearQueueOnClose = false;
+  decodePumpGeneration += 1;
+  rejectPendingDecodes("stream reset");
   decodeQueue = [];
   queuedDecodeFrames = 0;
   queuedDecodeBytes = 0;
@@ -1889,6 +2051,10 @@ function resetStreamStats() {
   primaryNetworkSample = null;
   primaryControlSentEpochByEvent.clear();
   encodedDecodeErrors = 0;
+  encodedDecodeErrorTotal = 0;
+  currentFiniteSession = false;
+  lastPrimarySocketCloseCode = null;
+  lastPrimarySocketCloseReason = "";
   renderedPreviewFrames = 0;
   lastSentEventId = 0;
   lastRenderedEventId = 0;
@@ -2054,6 +2220,13 @@ function updateStats() {
     lastDecodeMs,
     lastDisplayLagMs,
     renderFps: fpsSamples.length,
+    ...(mediaProfileNegotiated
+      ? {
+          sourceTimelineFps: negotiatedSourceTimelineFps,
+          outputTimelineFps: negotiatedOutputTimelineFps,
+          chunkTelemetry: rifeChunkTelemetry,
+        }
+      : {}),
     droppedFrames: totalDroppedFrames,
     decodeQueueLength: pendingDecodeBatches,
   });
@@ -2108,6 +2281,12 @@ function renderProtocolPerformance(key, stats = {}) {
   const sourceFps = Number(stats.serverFps || stats.sourceFps || 0);
   const deliveryFps = Number(stats.deliveryFps || 0);
   const renderFps = Number(stats.renderFps || 0);
+  const sourceTimelineFps = Number(
+    stats.sourceTimelineFps || negotiatedSourceTimelineFps || 0,
+  );
+  const outputTimelineFps = Number(
+    stats.outputTimelineFps || negotiatedOutputTimelineFps || 0,
+  );
   const vaeQueueMs = protocolMetric(telemetry.vae_queue_wait_ms);
   const vaeDecodeMs = protocolMetric(
     telemetry.vae_decode_ms,
@@ -2138,7 +2317,9 @@ function renderProtocolPerformance(key, stats = {}) {
     ? `${Number(receiveMbps || 0).toFixed(1)} Mb/s`
     : "-";
   $(`${key}PerfFps`).textContent = sourceFps > 0 || deliveryFps > 0 || renderFps > 0
-    ? `源 ${sourceFps.toFixed(1)} · 收 ${deliveryFps.toFixed(1)} · 显 ${renderFps.toFixed(1)}`
+    ? key === "minwm" && mediaProfileNegotiated
+      ? `收 ${deliveryFps.toFixed(1)} · 显 ${renderFps.toFixed(1)} · 时间轴 ${sourceTimelineFps.toFixed(1)}→${outputTimelineFps.toFixed(1)}`
+      : `源 ${sourceFps.toFixed(1)} · 收 ${deliveryFps.toFixed(1)} · 显 ${renderFps.toFixed(1)}`
     : "-";
   $(`${key}PerfUplink`).textContent = protocolMetricText(inputUplinkMs);
   $(`${key}PerfScheduler`).textContent = telemetry.scheduler_forward_ms != null
@@ -2174,6 +2355,18 @@ function renderModelTelemetry(key, stats = {}) {
   const serverFps = Number(stats.serverFps || sourceFps);
   const deliveryFps = Number(stats.deliveryFps || sourceFps);
   const bufferMs = Number(stats.bufferMs || 0);
+  const sourceTimelineFps = Number(
+    stats.sourceTimelineFps || negotiatedSourceTimelineFps || 0,
+  );
+  const outputTimelineFps = Number(
+    stats.outputTimelineFps || negotiatedOutputTimelineFps || 0,
+  );
+  const sourceWallFps = Number(
+    stats.chunkTelemetry?.source_frames_per_chunk_wall_second || 0,
+  );
+  const outputWallFps = Number(
+    stats.chunkTelemetry?.output_frames_per_chunk_wall_second || 0,
+  );
   const queueFrames = Number(stats.queueFrames ?? stats.queueLength ?? 0);
   const droppedFrames = Number(stats.droppedFrames || 0);
   const decodeQueueLength = Number(stats.decodeQueueLength || 0);
@@ -2185,7 +2378,9 @@ function renderModelTelemetry(key, stats = {}) {
   if (frameBatchGapCount) bufferParts.push(`gap ${frameBatchGapCount}`);
   $(`${prefix}ChunkText`).textContent = stats.lastChunk == null ? "-" : `#${stats.lastChunk}`;
   $(`${prefix}RateText`).textContent = serverFps > 0 || deliveryFps > 0 || renderFps > 0
-    ? `${serverFps.toFixed(1)} source · ${deliveryFps.toFixed(1)} recv · ${renderFps} render`
+    ? key === "minwm" && mediaProfileNegotiated
+      ? `${sourceWallFps.toFixed(1)} source/wall · ${outputWallFps.toFixed(1)} interpolated/wall · ${renderFps} presented · timeline ${sourceTimelineFps.toFixed(1)}→${outputTimelineFps.toFixed(1)}`
+      : `${serverFps.toFixed(1)} source · ${deliveryFps.toFixed(1)} recv · ${renderFps} render`
     : "-";
   $(`${prefix}BufferText`).textContent = bufferParts.join(" · ");
   $(`${prefix}FramesText`).textContent = `${totalFrames} · ${(Number(stats.bytes || 0) / 1048576).toFixed(1)} MB`;
@@ -2202,8 +2397,9 @@ function requestedInputFps(key = "minwm") {
 }
 
 function frameInterpolationMultiplier(key = "minwm") {
-  return modelControl(key, "frameInterpolation").checked
-    ? 2 ** DEFAULT_FRAME_INTERPOLATION_EXP
+  if (key !== "minwm") return 1;
+  return mediaProfileNegotiated
+    ? interpolationMultiplier(effectiveMediaProfile)
     : 1;
 }
 
@@ -2212,8 +2408,17 @@ function previewPlaybackTargetFps(key = "minwm") {
 }
 
 function syncPlaybackTargetFps() {
-  playbackController.setTargetFps(previewPlaybackTargetFps("minwm"));
-  lingbot2Session.configure({ targetFps: previewPlaybackTargetFps("lingbot2") });
+  playbackController.setTargetFps(previewPlaybackTargetFps("minwm"), {
+    // A negotiated 3x timeline raises the ceiling from 24 to 72, but it is
+    // not wall-clock production evidence. Keep the conservative pre-profile
+    // cadence until chunk telemetry supplies measured output/wall FPS.
+    preserveCadence:
+      mediaProfileNegotiated && isInterpolatedMediaProfile(effectiveMediaProfile),
+  });
+  primarySessionAdapter.configure({ targetFps: previewPlaybackTargetFps("minwm") });
+  if (!ZING_ONLY) {
+    lingbot2Session.configure({ targetFps: previewPlaybackTargetFps("lingbot2") });
+  }
   updateStats();
 }
 
@@ -2222,7 +2427,8 @@ function syncSmoothCatchupRate() {
   $("smoothCatchupRate").value = String(rate);
   $("smoothCatchupRateText").textContent = `${rate.toFixed(2)}x`;
   playbackController.setSmoothTimelinePlaybackRateMax(rate);
-  lingbot2Session.configure({ smoothTimelinePlaybackRateMax: rate });
+  primarySessionAdapter.configure({ smoothTimelinePlaybackRateMax: rate });
+  if (!ZING_ONLY) lingbot2Session.configure({ smoothTimelinePlaybackRateMax: rate });
 }
 
 function syncZingFrameInterpolation({ fromTopbar = true } = {}) {
@@ -2234,6 +2440,50 @@ function syncZingFrameInterpolation({ fromTopbar = true } = {}) {
   syncPlaybackTargetFps();
 }
 
+function acceptMediaProfile(message) {
+  const requested = String(message.requested_media_profile || NATIVE_MEDIA_PROFILE);
+  const effective = String(message.effective_media_profile || "");
+  const sourceTimelineFps = Number(message.source_timeline_fps || 0);
+  const outputTimelineFps = Number(message.output_timeline_fps || 0);
+  if (requested !== requestedMediaProfile || effective !== requestedMediaProfile) {
+    throw new Error(
+      `media profile mismatch: requested ${requestedMediaProfile}, server accepted ${requested}/${effective || "missing"}`,
+    );
+  }
+  const expectedMultiplier = interpolationMultiplier(effective);
+  if (
+    !Number.isFinite(sourceTimelineFps)
+    || !Number.isFinite(outputTimelineFps)
+    || sourceTimelineFps <= 0
+    || Math.abs(outputTimelineFps - sourceTimelineFps * expectedMultiplier) > 0.01
+  ) {
+    throw new Error("server returned invalid media profile timing");
+  }
+  if (
+    isInterpolatedMediaProfile(effective)
+    && !/^[0-9a-f]{64}$/i.test(String(message.media_weights_sha256 || ""))
+  ) {
+    throw new Error("server accepted RIFE without a verified weights digest");
+  }
+  effectiveMediaProfile = effective;
+  mediaProfileNegotiated = true;
+  negotiatedSourceTimelineFps = sourceTimelineFps;
+  negotiatedOutputTimelineFps = outputTimelineFps;
+  syncPlaybackTargetFps();
+  if (isInterpolatedMediaProfile(effective)) {
+    addHistory(
+      `Zing RIFE ${expectedMultiplier}x accepted · timeline ${sourceTimelineFps.toFixed(1)}→${outputTimelineFps.toFixed(1)} FPS · timeline 不是实际 wall/presented FPS`,
+    );
+  }
+  recordTrajectoryEvent("media_profile_accepted", {
+    requested_media_profile: requested,
+    effective_media_profile: effective,
+    source_timeline_fps: sourceTimelineFps,
+    output_timeline_fps: outputTimelineFps,
+    media_weights_sha256: message.media_weights_sha256 || null,
+  });
+}
+
 function selectedPlaybackMode(key = "minwm") {
   const value = modelControl(key, "playbackMode")?.value;
   if (value === "timeline" || value === "adaptive" || value === "smooth_timeline") return value;
@@ -2242,9 +2492,10 @@ function selectedPlaybackMode(key = "minwm") {
 
 function syncPlaybackMode({ addToHistory = true } = {}) {
   const mode = selectedPlaybackMode("minwm");
-  const lingbot2Mode = selectedPlaybackMode("lingbot2");
+  const lingbot2Mode = ZING_ONLY ? "" : selectedPlaybackMode("lingbot2");
   playbackController.setMode(mode);
-  lingbot2Session.configure({ mode: lingbot2Mode });
+  primarySessionAdapter.configure({ mode });
+  if (!ZING_ONLY) lingbot2Session.configure({ mode: lingbot2Mode });
   if (addToHistory) {
     const historyText =
       mode === "timeline"
@@ -2254,7 +2505,7 @@ function syncPlaybackMode({ addToHistory = true } = {}) {
         : mode === "adaptive"
         ? "playback · adaptive (buffered, fast input)"
         : "playback · low latency (may skip old frames)";
-    addHistory(`${historyText} · LingBot2 ${lingbot2Mode}`);
+    addHistory(ZING_ONLY ? historyText : `${historyText} · LingBot2 ${lingbot2Mode}`);
   }
   trimDecodeQueue();
   updateStats();
@@ -2322,13 +2573,14 @@ function updateRecordButton() {
 function updateRecordingDownloadButton() {
   const button = $("recordDownloadBtn");
   if (!button) return;
-  const ready = recordingDownloads.length === 2;
+  const expectedDownloads = ZING_ONLY ? 1 : 2;
+  const ready = recordingDownloads.length === expectedDownloads;
   button.hidden = !ready;
   button.disabled = !ready || recordingSaving;
   button.setAttribute("aria-disabled", !ready || recordingSaving ? "true" : "false");
   button.title = ready
-    ? `同步下载 ${recordingDownloads.map((item) => item.fileName).join("、")}`
-    : "两份录像生成后可下载";
+    ? `${ZING_ONLY ? "下载" : "同步下载"} ${recordingDownloads.map((item) => item.fileName).join("、")}`
+    : ZING_ONLY ? "Zing 录像生成后可下载" : "两份录像生成后可下载";
 }
 
 function setRecordingDownloads(outputs = []) {
@@ -2345,7 +2597,8 @@ function setRecordingDownloads(outputs = []) {
 }
 
 function downloadGameplayRecordings(event) {
-  if (recordingDownloads.length !== 2 || recordingSaving) {
+  const expectedDownloads = ZING_ONLY ? 1 : 2;
+  if (recordingDownloads.length !== expectedDownloads || recordingSaving) {
     event?.preventDefault?.();
     return;
   }
@@ -2358,7 +2611,9 @@ function downloadGameplayRecordings(event) {
     link.click();
     link.remove();
   }
-  addHistory(`downloaded both gameplay recordings · ${recordingDownloads.map((item) => item.fileName).join(" · ")}`);
+  addHistory(
+    `${ZING_ONLY ? "downloaded Zing gameplay recording" : "downloaded both gameplay recordings"} · ${recordingDownloads.map((item) => item.fileName).join(" · ")}`,
+  );
 }
 
 function resetRecordingPromptOverlay() {
@@ -2531,8 +2786,8 @@ function currentRequestSnapshot() {
     seed: Number($("seed").value),
     num_inference_steps: Number($("steps").value),
     guidance_scale: Number($("guidance").value),
-    realtime_causal_sink_size: readOptionalInteger("sinkSize"),
-    realtime_causal_kv_cache_num_frames: readOptionalInteger("windowFrames"),
+    realtime_causal_sink_size: MINWM_CAUSAL_SINK_SIZE,
+    realtime_causal_kv_cache_num_frames: MINWM_CAUSAL_WINDOW_FRAMES,
     max_chunks: generationMode === "t2v" || $("continuous").checked ? undefined : 1,
     ...readPreviewTransportParams(),
     ...readFrameInterpolationParams(),
@@ -2959,22 +3214,25 @@ function startRecording({ source = "manual" } = {}) {
   }
   recordingActive = true;
   setRecordingDownloads([]);
-  recordingTracks = [
-    createRecordingTrack({
-      key: "comparison",
-      label: "Zing × LingBot2",
-      variant: "comparison",
-      canvas: recordingCanvas,
-      ctx: recordingCtx,
-    }),
-    createRecordingTrack({
+  const variants = EXPERIENCE_MODE.recordingVariants(UI_CONFIG);
+  recordingTracks = variants.map((variant) => {
+    if (variant === "comparison") {
+      return createRecordingTrack({
+        key: "comparison",
+        label: "Zing × LingBot2",
+        variant: "comparison",
+        canvas: recordingCanvas,
+        ctx: recordingCtx,
+      });
+    }
+    return createRecordingTrack({
       key: "zing",
       label: "Zing",
       variant: "zing",
       canvas: zingRecordingCanvas,
       ctx: zingRecordingCtx,
-    }),
-  ];
+    });
+  });
   recordingFrameIndex = 0;
   recordingFps = Math.max(1, Math.min(GAMEPLAY_RECORDING_FPS, previewPlaybackTargetFps()));
   recordingStartedPerfMs = performance.now();
@@ -2990,7 +3248,7 @@ function startRecording({ source = "manual" } = {}) {
     started_client_ms: artifactClientMs(recordingArtifact),
     mode: recordingMode,
     mime_type: recordingTracks[0].mimeType,
-    capture_scope: "stage",
+    capture_scope: ZING_ONLY ? "zing" : "stage",
     capture_width: RECORDING_STAGE_WIDTH,
     capture_height: RECORDING_STAGE_HEIGHT,
     target_fps: recordingFps,
@@ -3006,7 +3264,7 @@ function startRecording({ source = "manual" } = {}) {
   recordingTimer = window.setInterval(updateRecordButton, 250);
   updateRecordButton();
   updateRecordFolderButton();
-  addHistory("dual recording started · comparison + Zing");
+  addHistory(ZING_ONLY ? "Zing recording started" : "dual recording started · comparison + Zing");
 }
 
 async function stopRecording({ reason = "manual" } = {}) {
@@ -3047,9 +3305,20 @@ async function stopRecording({ reason = "manual" } = {}) {
         : await buildMp4RecordingBlob(track),
     })));
     await saveRecordingArtifactFiles(outputs, { deferDownload: true });
-    addHistory(`both gameplay recordings ready · ${recordingFrameIndex} synchronized frames · ${extension}`);
-    if (["session_timeout", "session_closed", "primary_disconnected"].includes(reason)) {
-      showSessionNotice("两份游玩录像已生成，可点击右上角同步下载");
+    addHistory(
+      `${ZING_ONLY ? "Zing gameplay recording" : "both gameplay recordings"} ready · ${recordingFrameIndex} synchronized frames · ${extension}`,
+    );
+    if ([
+      "session_timeout",
+      "session_closed",
+      "primary_disconnected",
+      "generation_complete",
+    ].includes(reason)) {
+      showSessionNotice(
+        ZING_ONLY
+          ? "Zing 游玩录像已生成，可点击右上角下载"
+          : "两份游玩录像已生成，可点击右上角同步下载",
+      );
       showRecordingReadyToast();
     }
   } catch (error) {
@@ -3660,7 +3929,7 @@ function finalizeRecordingArtifact(outputs) {
   const artifact = recordingArtifact || ensureSessionArtifact();
   const primary = outputs.find((output) => output.key === "comparison") || outputs[0];
   if (!primary) throw new Error("No recording outputs were generated");
-  const sidecarBaseName = primary.fileName.replace(/-comparison\.[^.]*$/, "");
+  const sidecarBaseName = primary.fileName.replace(/-(?:comparison|zing)\.[^.]*$/, "");
   const jsonFileName = `${sidecarBaseName}.json`;
   const htmlFileName = `${sidecarBaseName}.html`;
   const tracksByKey = Object.fromEntries(recordingTracks.map((track) => [track.key, track]));
@@ -3684,12 +3953,12 @@ function finalizeRecordingArtifact(outputs) {
     stopped_at: new Date().toISOString(),
     stopped_client_ms: artifactClientMs(artifact),
     mode: recordingMode,
-    mime_type: primary.videoBlob.type || tracksByKey.comparison?.mimeType || "video/mp4",
+    mime_type: primary.videoBlob.type || tracksByKey[primary.key]?.mimeType || "video/mp4",
     fps: recordingFps,
     frames: recordingFrameIndex,
     dropped_frames: recordingDroppedFrames,
     duration_ms: Math.round(recordingElapsedMs),
-    encoded_chunks: videos.comparison?.encoded_chunks || 0,
+    encoded_chunks: videos[primary.key]?.encoded_chunks || 0,
     video_file: primary.fileName,
     video_url: recordingAssetUrl(primary.fileName),
     video_bytes: primary.videoBlob.size,
@@ -4425,6 +4694,121 @@ function hasPendingPlaybackInput() {
   );
 }
 
+function primaryWebpDrainActivity() {
+  return {
+    pendingHeader: Boolean(pendingHeader),
+    decodeInProgress,
+    pendingDecodeBatches,
+    decodeQueueLength: decodeQueue.length,
+    queuedDecodeFrames,
+    queuedDecodeBytes,
+    playbackQueueFrames: playbackController.snapshot().queueFrames,
+    renderActivity: primaryRenderActivity,
+  };
+}
+
+function primaryWebpDrainActive(epoch = undefined) {
+  return primaryWebpDrainController.isActive(epoch);
+}
+
+function setPrimaryWebpStreamingStatus(text = "Live") {
+  if (primaryWebpDrainActive(streamEpoch)) {
+    setStatus("Finishing playback");
+    return false;
+  }
+  setStatus(text, "live");
+  return true;
+}
+
+function beginPrimaryWebpDrain(context) {
+  primaryWebpDrainController.begin(context);
+  controlStateController?.reset({ sendRelease: false });
+  $("connectBtn").disabled = true;
+  setModelConnectionState("minwm", "draining");
+  setStatus("Finishing playback");
+  const activity = primaryWebpDrainActivity();
+  recordTrajectoryEvent("finite_webp_drain_started", {
+    code: context.closeCode,
+    pending_decode_batches: activity.pendingDecodeBatches,
+    playback_queue_frames: activity.playbackQueueFrames,
+  });
+  addHistory(
+    `${context.closeText} · finishing ${activity.pendingDecodeBatches} decode batches and ${activity.playbackQueueFrames} queued frames`,
+  );
+  maybeFinalizePrimaryWebpDrain(context.epoch);
+}
+
+function maybeFinalizePrimaryWebpDrain(epoch = streamEpoch) {
+  return primaryWebpDrainController.completeIfDrained(
+    epoch,
+    primaryWebpDrainActivity(),
+  );
+}
+
+function failPrimaryWebpDrain(context, message, details = {}) {
+  if (!context || context.epoch !== streamEpoch) return false;
+  if (recordingActive) captureRecordingFrame();
+  const hadReadyWorld = Boolean(context.hadReadyWorld || worldExperienceReady);
+  recordTrajectoryEvent("finite_webp_drain_failed", {
+    code: context.closeCode,
+    message,
+    decoded_frames: frames,
+    rendered_preview_frames: renderedPreviewFrames,
+    encoded_decode_errors: encodedDecodeErrorTotal,
+    ...details,
+  });
+  discardPrimaryWebpPlayback(message, { clearFrames: true });
+  promptRewriteController.endSession();
+  stopWorldExperienceTiming({ recordingReason: "primary_disconnected" });
+  if (!ZING_ONLY) lingbot2Session.close("Zing finite playback incomplete");
+  setModelConnectionState("minwm", "error");
+  setStatus("Incomplete playback", "error");
+  $("connectBtn").disabled = false;
+  addHistory(`Zing finite playback incomplete · ${message}`);
+  if (hadReadyWorld) {
+    showSessionNotice("Zing 尾帧未完整播放，请重新进入世界");
+  }
+  if (!renderedPreviewFrames) setPreviewState("idle");
+  void traceHttpClient?.flushClientEvents().catch(() => {});
+  return true;
+}
+
+function finalizePrimaryWebpDrain(context) {
+  if (context.epoch !== streamEpoch) return;
+  const integrity = finiteWebpDrainApi.finitePlaybackIntegrity({
+    decodeErrors: encodedDecodeErrorTotal,
+    decodedFrames: frames,
+    renderedFrames: renderedPreviewFrames,
+  });
+  if (!integrity.complete) {
+    failPrimaryWebpDrain(context, integrity.reason);
+    return;
+  }
+  // The wall-clock recorder may not have sampled the last canvas update yet.
+  // Capture it synchronously before ending the experience and encoder pump.
+  if (recordingActive) captureRecordingFrame();
+  const hadReadyWorld = Boolean(context.hadReadyWorld || worldExperienceReady);
+  promptRewriteController.endSession();
+  stopWorldExperienceTiming({ recordingReason: "generation_complete" });
+  if (!ZING_ONLY) lingbot2Session.close("Zing finite generation complete");
+  recordTrajectoryEvent("finite_webp_drain_complete", {
+    code: context.closeCode,
+    rendered_preview_frames: renderedPreviewFrames,
+    last_rendered_chunk: lastRenderedChunk,
+  });
+  setModelConnectionState("minwm", "closed");
+  setStatus("Closed");
+  $("connectBtn").disabled = false;
+  addHistory(
+    `Zing finite playback complete · ${renderedPreviewFrames} frames rendered before close`,
+  );
+  if (hadReadyWorld) {
+    showSessionNotice("Zing 本轮生成和尾帧播放已完成，游玩录像正在生成");
+  }
+  if (!renderedPreviewFrames) setPreviewState("idle");
+  void traceHttpClient?.flushClientEvents().catch(() => {});
+}
+
 function enqueueDecodeBatch(header, data, epoch) {
   const frameCount = Number(header.num_frames || 1);
   const payloadBytes = payloadByteLength(data);
@@ -4466,6 +4850,9 @@ function payloadByteLength(data) {
 function trimDecodeQueue() {
   if (recordingActive) return;
   if (!decodeQueue.length) return;
+  // A finite request promises an exact timeline. Let websocket backpressure
+  // slow delivery rather than dropping decoded frames from its tail.
+  if (currentFiniteSession) return;
   const playbackMode = selectedPlaybackMode();
   const preservesTimeline = playbackMode === "timeline";
   const boundedRealtime = playbackMode === "smooth_timeline";
@@ -4521,6 +4908,7 @@ async function pumpDecodeQueue() {
   if (decodeInProgress) return;
   const item = decodeQueue.shift();
   if (!item) return;
+  const pumpGeneration = decodePumpGeneration;
   queuedDecodeFrames = Math.max(0, queuedDecodeFrames - item.frameCount);
   queuedDecodeBytes = Math.max(0, queuedDecodeBytes - item.payloadBytes);
   decodeInProgress = true;
@@ -4529,10 +4917,12 @@ async function pumpDecodeQueue() {
   } catch (error) {
     handleReceiveError(error, item.epoch);
   } finally {
+    if (pumpGeneration !== decodePumpGeneration) return;
     pendingDecodeBatches = Math.max(0, pendingDecodeBatches - 1);
     decodeInProgress = false;
     updateStats();
     if (decodeQueue.length) pumpDecodeQueue();
+    else maybeFinalizePrimaryWebpDrain(item.epoch);
   }
 }
 
@@ -4720,6 +5110,7 @@ function loadImageElement(url, createBitmapError) {
 
 function handleEncodedPreviewDecodeError(error, header, data, payloadBytes) {
   encodedDecodeErrors += 1;
+  encodedDecodeErrorTotal += 1;
   const signature = payloadSignature(data);
   const mode = shortPayloadMode(header.content_type);
   const message = error?.message || "encoded preview decode failed";
@@ -4780,6 +5171,7 @@ function drawFrame(image, { close = true, markRendered = true } = {}) {
 }
 
 function renderLoop(now) {
+  primaryRenderActivity += 1;
   renderLoopSamples.push(now);
   renderLoopSamples = renderLoopSamples.filter((t) => now - t < 1000);
   const decision = playbackController.render(now, {
@@ -4815,6 +5207,8 @@ function renderLoop(now) {
   } else if (decision.action === "hold") {
     updateStats();
   }
+  primaryRenderActivity = Math.max(0, primaryRenderActivity - 1);
+  maybeFinalizePrimaryWebpDrain(streamEpoch);
   scheduleRenderLoop();
 }
 
@@ -4875,11 +5269,13 @@ function drawVisibleReferencePlaceholders() {
   if (!selectedReferencePreviewReady) return;
   const referencePreview = $("referencePreview");
   drawPlaceholderImage(canvas, referencePreview, modelControl("minwm", "size").value);
-  drawPlaceholderImage(
-    lingbot2Canvas,
-    referencePreview,
-    modelControl("lingbot2", "size").value,
-  );
+  if (!ZING_ONLY) {
+    drawPlaceholderImage(
+      lingbot2Canvas,
+      referencePreview,
+      modelControl("lingbot2", "size").value,
+    );
+  }
 }
 
 async function drawInitialReferencePlaceholders(firstFrame) {
@@ -4888,11 +5284,13 @@ async function drawInitialReferencePlaceholders(firstFrame) {
   try {
     image = await createImageBitmap(new Blob([firstFrame]));
     drawPlaceholderImage(canvas, image, modelControl("minwm", "size").value);
-    drawPlaceholderImage(
-      lingbot2Canvas,
-      image,
-      modelControl("lingbot2", "size").value,
-    );
+    if (!ZING_ONLY) {
+      drawPlaceholderImage(
+        lingbot2Canvas,
+        image,
+        modelControl("lingbot2", "size").value,
+      );
+    }
   } catch (error) {
     addHistory(`reference placeholder unavailable · ${error?.message || error}`);
   } finally {
@@ -5365,7 +5763,7 @@ function updateWorldDraftState() {
   document.querySelector(".reference-upload").classList.toggle("has-image", hasImage);
   $("referenceUploadTitle").textContent = hasImage ? "更换首帧" : "上传首帧";
   const complete = hasImage && hasDescription;
-  $("connectBtn").disabled = worldCompletionPending;
+  $("connectBtn").disabled = worldCompletionPending || primaryWebpDrainActive();
   $("connectBtn").title = complete
     ? "进入当前世界"
     : "需要首帧图片和世界描述；点击后会提示缺少项";
@@ -5602,6 +6000,22 @@ function showError(error) {
   addHistory(error.message || "reference load failed");
 }
 
+function discardPrimaryWebpPlayback(reason, { clearFrames = true } = {}) {
+  primaryWebpDrainController.cancel();
+  streamEpoch += 1;
+  pendingHeader = null;
+  decodePumpGeneration += 1;
+  decodeQueue = [];
+  queuedDecodeFrames = 0;
+  queuedDecodeBytes = 0;
+  decodeInProgress = false;
+  pendingDecodeBatches = 0;
+  rejectPendingDecodes(reason);
+  resetDecoderState();
+  if (clearFrames) clearFrameQueue();
+  updateStats();
+}
+
 function abortCurrentSession(reason = "session closed by client", {
   clearFrames = true,
   expectedClose = true,
@@ -5615,17 +6029,10 @@ function abortCurrentSession(reason = "session closed by client", {
   });
   const socket = ws;
   ws = null;
-  streamEpoch++;
+  discardPrimaryWebpPlayback(reason, { clearFrames });
   clearQueueOnClose = clearFrames;
   socketCloseExpected = expectedClose;
   if (resetControls) controlStateController?.reset({ sendRelease: false });
-  pendingHeader = null;
-  rejectPendingDecodes("session aborted");
-  resetDecoderState();
-  if (clearFrames) {
-    clearFrameQueue();
-    updateStats();
-  }
   if (!socket) {
     clearQueueOnClose = false;
     if (!keepConnectDisabled) $("connectBtn").disabled = false;
@@ -5667,6 +6074,11 @@ function waitForSocketClose(socket, timeoutMs = RECONNECT_CLOSE_TIMEOUT_MS) {
 }
 
 async function connect() {
+  if (primaryWebpDrainActive()) {
+    $("connectBtn").disabled = true;
+    setStatus("Finishing playback");
+    return;
+  }
   if (recordingActive) {
     await stopRecording({ reason: "session_replaced" });
   }
@@ -5677,8 +6089,7 @@ async function connect() {
   resetSessionLifetimeUi();
   $("connectBtn").disabled = true;
   setModelConnectionState("minwm", "connecting");
-  setModelConnectionState("lingbot2", "connecting");
-  setModelConnectionState("happyoyster", "connecting");
+  setComparisonModelConnectionState("connecting");
   setStatus("Preparing");
   setPreviewState("waiting");
   addHistory("preparing session");
@@ -5705,8 +6116,7 @@ async function connect() {
       setStatus("Complete world first", "error");
       setWorldDraftStatus("请先补齐首帧图片和世界描述", "error");
       setModelConnectionState("minwm", "idle");
-      setModelConnectionState("lingbot2", "idle");
-      setModelConnectionState("happyoyster", "idle");
+      setComparisonModelConnectionState("idle");
       setPreviewState("idle");
       addHistory("world draft incomplete");
       $("connectBtn").disabled = false;
@@ -5730,8 +6140,7 @@ async function connect() {
       firstFrame = enteredFirstFrame;
       if (!firstFrame) {
         setModelConnectionState("minwm", "idle");
-        setModelConnectionState("lingbot2", "idle");
-        setModelConnectionState("happyoyster", "idle");
+        setComparisonModelConnectionState("idle");
         setStatus("Pick a reference", "error");
         setPreviewState("idle");
         addHistory("reference image required for I2V");
@@ -5754,6 +6163,13 @@ async function connect() {
         numFrames: continuousT2V ? undefined : numFrames,
       }),
     });
+    requestedMediaProfile = String(
+      init.realtime_media_profile || NATIVE_MEDIA_PROFILE,
+    );
+    currentFiniteSession = generationMode === "t2v"
+      ? Number.isFinite(Number(init.num_frames)) && Number(init.num_frames) > 0
+      : Number(init.max_chunks || 0) > 0;
+    playbackController.setFiniteTimeline(currentFiniteSession);
     const referenceImage = await createReferenceImageMeta(enteredFirstFrame);
     beginSessionArtifact(init, referenceImage);
     if (currentSessionArtifact && currentTrace) {
@@ -5841,49 +6257,93 @@ function openPrimarySession(init, url) {
       const source = generationMode === "t2v"
         ? `${init.num_frames || "continuous"} frames from text`
         : selectedReferenceLabel || "uploaded reference";
-      addHistory(`${generationMode.toUpperCase()} dual session started · ${source}`);
+      addHistory(
+        `${generationMode.toUpperCase()} ${ZING_ONLY ? "Zing" : "dual"} session started · ${source}`,
+      );
       resolve();
     };
     socket.onclose = (event) => {
       if (epoch !== streamEpoch) return;
       if (ws === socket) ws = null;
+      lastPrimarySocketCloseCode = event.code;
+      lastPrimarySocketCloseReason = event.reason || "";
       markClientTrace("client.ws_close", {
         code: event.code,
         reason: event.reason || "",
       });
-      $("connectBtn").disabled = false;
-      if (clearQueueOnClose) {
-        clearFrameQueue();
-        updateStats();
-      }
-      clearQueueOnClose = false;
       const reason = event.reason ? ` · ${event.reason}` : "";
       const closeText = `Zing socket closed code=${event.code}${reason}`;
       const normalClose = event.code === 1000 || event.code === 1001;
-      setModelConnectionState("minwm", normalClose ? "closed" : "error");
-      if (socketServerError) {
-        setStatus("Server closed", "error");
-        addHistory(`${closeText} · ${socketServerError}`);
-      } else if (socketHadError && !socketCloseExpected && !normalClose) {
-        setStatus("Socket closed", "error");
-        addHistory(`${closeText} · transport error`);
-      } else {
-        setStatus("Closed");
-        addHistory(closeText);
-      }
+      const expectedClose = socketCloseExpected;
+      const shouldClearQueue = clearQueueOnClose;
+      const sessionLifetimeClose = isSessionLifetimeReason(event.reason);
       recordTrajectoryEvent("socket_close", {
         backend: "minwm",
         code: event.code,
         reason: event.reason || "",
         normal_close: normalClose,
-        expected_close: socketCloseExpected,
+        expected_close: expectedClose,
       });
-      if (isSessionLifetimeReason(event.reason)) {
+
+      const shouldDrain = finiteWebpDrainApi.shouldDrainFiniteWebpClose({
+        closeCode: event.code,
+        finiteSession: currentFiniteSession,
+        opened,
+        expectedClose,
+        clearQueueOnClose: shouldClearQueue,
+        serverError: socketServerError,
+        transportError: socketHadError,
+        decodeErrors: encodedDecodeErrorTotal,
+        sessionLifetimeClose,
+        pendingHeader,
+      });
+      clearQueueOnClose = false;
+      socketCloseExpected = false;
+      if (shouldDrain) {
+        beginPrimaryWebpDrain({
+          epoch,
+          closeCode: event.code,
+          closeReason: event.reason || "",
+          closeText,
+          hadReadyWorld: worldExperienceReady,
+        });
+        return;
+      }
+
+      const hadReadyWorld = worldExperienceReady;
+      const incompleteFiniteClose = normalClose && currentFiniteSession && Boolean(pendingHeader);
+      const finiteDecodeFailure = normalClose && currentFiniteSession && encodedDecodeErrorTotal > 0;
+      discardPrimaryWebpPlayback(closeText, { clearFrames: true });
+      $("connectBtn").disabled = false;
+      if (sessionLifetimeClose) {
         expireSessionLifetime({ closeSessions: true });
-      } else if (!socketCloseExpected) {
-        const hadReadyWorld = worldExperienceReady;
+      } else {
         stopWorldExperienceTiming({ recordingReason: "primary_disconnected" });
-        lingbot2Session.close("Zing primary session closed");
+        if (!ZING_ONLY) lingbot2Session.close("Zing primary session closed");
+        const closeIsError = Boolean(
+          socketServerError ||
+          incompleteFiniteClose ||
+          finiteDecodeFailure ||
+          (!normalClose && !expectedClose) ||
+          (socketHadError && !expectedClose)
+        );
+        setModelConnectionState("minwm", closeIsError ? "error" : "closed");
+        if (socketServerError) {
+          setStatus("Server closed", "error");
+          addHistory(`${closeText} · ${socketServerError}`);
+        } else if (incompleteFiniteClose) {
+          setStatus("Incomplete stream", "error");
+          addHistory(`${closeText} · frame payload missing after header`);
+        } else if (finiteDecodeFailure) {
+          setStatus("Incomplete playback", "error");
+          addHistory(`${closeText} · ${encodedDecodeErrorTotal} frame decode errors`);
+        } else if (closeIsError) {
+          setStatus("Socket closed", "error");
+          addHistory(`${closeText} · transport error`);
+        } else {
+          setStatus("Closed");
+          addHistory(closeText);
+        }
         if (hadReadyWorld) {
           showSessionNotice("Zing 连接已中断，已结束计时并生成当前录像");
         }
@@ -5891,7 +6351,6 @@ function openPrimarySession(init, url) {
       void traceHttpClient?.flushClientEvents().catch(() => {});
       if (!renderedPreviewFrames) setPreviewState("idle");
       if (!opened) reject(new Error(`Zing closed before startup (${event.code})`));
-      socketCloseExpected = false;
     };
     socket.onerror = () => {
       if (epoch !== streamEpoch) return;
@@ -5998,15 +6457,41 @@ function receive(data, epoch) {
       }
       return;
     }
+    if (message.type === "session_ready") {
+      acceptMediaProfile(message);
+      return;
+    }
+    if (message.type === "heartbeat") return;
     if (message.type === "chunk_telemetry") {
       primaryProtocolStats = {
         ...primaryProtocolStats,
         chunkTelemetry: { ...message },
       };
+      // Smooth WebP playback follows measured output frames per chunk wall
+      // second. The negotiated output timeline (for example 72 FPS) remains
+      // metadata and must never become a fabricated presentation cadence.
+      playbackController.observeServerStats(message, receivedAt);
+      if (isInterpolatedMediaProfile(message.media_profile)) {
+        rifeChunkTelemetry = { ...message };
+        recordTrajectoryEvent("rife_chunk_telemetry", {
+          chunk_index: Number(message.chunk_index || 0),
+          source_num_frames: Number(message.source_num_frames || 0),
+          output_num_frames: Number(message.output_num_frames || 0),
+          actor_wait_ms: Number(message.actor_wait_ms || 0),
+          rife_interpolation_ms: Number(message.rife_interpolation_ms || 0),
+          source_frames_per_chunk_wall_second: Number(
+            message.source_frames_per_chunk_wall_second || 0,
+          ),
+          output_frames_per_chunk_wall_second: Number(
+            message.output_frames_per_chunk_wall_second || 0,
+          ),
+          source_realtime_factor: Number(message.source_realtime_factor || 0),
+          output_realtime_factor: Number(message.output_realtime_factor || 0),
+        });
+      }
       updateStats();
       return;
     }
-    if (message.type === "session_ready" || message.type === "heartbeat") return;
     if (message.type === "frame_batch") {
       const payload = message.payload;
       delete message.payload;
@@ -6067,8 +6552,16 @@ async function decodeAndEnqueueFrameBatch(header, data, epoch) {
     decodedFrames = await decodeFrameBatch(header, data);
     if (isEncodedPreviewContentType(header.content_type)) encodedDecodeErrors = 0;
   } catch (error) {
+    if (epoch !== streamEpoch) return;
     if (!isEncodedPreviewContentType(header.content_type)) throw error;
     handleEncodedPreviewDecodeError(error, header, data, payloadBytes);
+    if (primaryWebpDrainActive(epoch)) {
+      failPrimaryWebpDrain(
+        primaryWebpDrainController.snapshot(),
+        `tail frame decode failed: ${error?.message || error}`,
+        { chunk_index: Number(header.chunk_index || 0) },
+      );
+    }
     return;
   }
   if (epoch !== streamEpoch) {
@@ -6114,7 +6607,7 @@ async function decodeAndEnqueueFrameBatch(header, data, epoch) {
   }
   primaryNetworkSample = { at: networkNow, bytes };
   updateOutputSizeFromHeader(header);
-  setStatus("Live", "live");
+  setPrimaryWebpStreamingStatus();
   updateStats();
 }
 
@@ -6193,6 +6686,14 @@ function recordChunkFirstRendered(chunkIndex, details = {}) {
 }
 
 function sendEvent(kind, payload, historyText = null) {
+  if (primaryWebpDrainActive()) {
+    addHistory(`${historyText || `${kind} event`} · finite playback is finishing`);
+    recordTrajectoryEvent(`${kind}_event_dropped`, {
+      reason: "finite playback draining",
+      payload,
+    });
+    return null;
+  }
   const delivery = dualModelController.sendEvent(kind, payload);
   const deliveredModels = Object.entries(delivery.sent)
     .filter(([, sent]) => sent)
@@ -6241,7 +6742,7 @@ function sendEvent(kind, payload, historyText = null) {
       });
       updateStats();
     }
-    setStatus("Updating", "live");
+    setPrimaryWebpStreamingStatus("Updating");
   }
   trackPendingModelEvent(delivery, kind);
   addHistory(
@@ -6511,12 +7012,10 @@ function tunePreviewQualityForPostprocess(key = "minwm") {
 }
 
 function readFrameInterpolationParams(key = "minwm") {
-  if (!modelControl(key, "frameInterpolation").checked) return {};
-  return {
-    enable_frame_interpolation: true,
-    frame_interpolation_exp: DEFAULT_FRAME_INTERPOLATION_EXP,
-    frame_interpolation_scale: DEFAULT_FRAME_INTERPOLATION_SCALE,
-  };
+  if (key !== "minwm" || !modelControl(key, "frameInterpolation").checked) {
+    return {};
+  }
+  return { realtime_media_profile: RIFE3X_MEDIA_PROFILE };
 }
 
 function readUpscalingScale(key = "minwm") {
@@ -6546,8 +7045,12 @@ function readModelRequestParams(key, { generationMode, firstFrame, numFrames } =
     seed: Number(modelControl(key, "seed").value),
     num_inference_steps: Number(modelControl(key, "steps").value),
     guidance_scale: Number(modelControl(key, "guidance").value),
-    realtime_causal_sink_size: readOptionalInteger(modelControlId(key, "sinkSize")),
-    realtime_causal_kv_cache_num_frames: readOptionalInteger(modelControlId(key, "windowFrames")),
+    realtime_causal_sink_size: key === "minwm"
+      ? MINWM_CAUSAL_SINK_SIZE
+      : readOptionalInteger(modelControlId(key, "sinkSize")),
+    realtime_causal_kv_cache_num_frames: key === "minwm"
+      ? MINWM_CAUSAL_WINDOW_FRAMES
+      : readOptionalInteger(modelControlId(key, "windowFrames")),
     max_chunks: generationMode === "t2v" || continuous ? undefined : 1,
     first_frame: firstFrame,
     ...readPreviewTransportParams(key),
@@ -6734,7 +7237,7 @@ async function applyQueryParams() {
   const srParam = params.get("sr");
   const smoothParam = params.get("smooth");
   const catchupParam = Number(params.get("catchup"));
-  for (const key of ["minwm", "lingbot2"]) {
+  for (const key of ZING_ONLY ? ["minwm"] : ["minwm", "lingbot2"]) {
     modelControl(key, "transportFormat").value = params.get("transport") || DEFAULT_PREVIEW_OUTPUT_FORMAT;
     modelControl(key, "transportQuality").value = params.get("quality") || String(DEFAULT_PREVIEW_OUTPUT_QUALITY);
     if (
@@ -6894,7 +7397,7 @@ void ensureCustomWorldPresetsLoaded();
 drawIdle();
 setPreviewScale(DEFAULT_PREVIEW_SCALE);
 updateSuperResolutionControls("minwm");
-updateSuperResolutionControls("lingbot2");
+if (!ZING_ONLY) updateSuperResolutionControls("lingbot2");
 applyQueryParams()
   .then(async (query) => {
     if (!query.preset) clearWorldDraft();
@@ -6911,39 +7414,42 @@ updateRecordButton();
 updateRecordFolderButton();
 $("connectBtn").onclick = connect;
 function closeForModelSlotChange() {
+  if (ZING_ONLY) return;
   if (!ws && dualModelController.activeKeys.size === 0 && !happyOysterSession.connected) return;
   closeSession("model comparison selection changed");
   setStatus("Selection changed");
 }
-for (let slotIndex = 0; slotIndex < MODEL_SLOT_DEFAULTS.length; slotIndex += 1) {
-  $(`modelSlot${slotIndex}`).addEventListener("change", () => {
+if (!ZING_ONLY) {
+  for (let slotIndex = 0; slotIndex < MODEL_SLOT_DEFAULTS.length; slotIndex += 1) {
+    $(`modelSlot${slotIndex}`).addEventListener("change", () => {
+      closeForModelSlotChange();
+      ensureUniqueModelSlot(slotIndex);
+    });
+  }
+  $("addModelSlotBtn").onclick = () => {
+    const sessionActive = Boolean(
+      ws
+      || dualModelController.activeKeys.size > 0
+      || happyOysterSession.connected
+    );
+    activeModelSlotCount = 3;
+    ensureUniqueModelSlot(2);
+    if (!sessionActive || !modelSelected("happyoyster")) return;
+    setModelConnectionState("happyoyster", "preparing");
+    setHappyOysterStageText("正在创建快乐生蚝 World…", "preparing");
+    addHistory("正在把快乐生蚝加入当前对比会话");
+    void dualModelController.activate("happyoyster").catch((error) => {
+      const message = error?.message || String(error || "连接失败");
+      setModelConnectionState("happyoyster", "error");
+      setHappyOysterStageText(message, "error");
+    });
+  };
+  $("removeModelSlotBtn").onclick = () => {
     closeForModelSlotChange();
-    ensureUniqueModelSlot(slotIndex);
-  });
+    activeModelSlotCount = 2;
+    syncModelSlotUi();
+  };
 }
-$("addModelSlotBtn").onclick = () => {
-  const sessionActive = Boolean(
-    ws
-    || dualModelController.activeKeys.size > 0
-    || happyOysterSession.connected
-  );
-  activeModelSlotCount = 3;
-  ensureUniqueModelSlot(2);
-  if (!sessionActive || !modelSelected("happyoyster")) return;
-  setModelConnectionState("happyoyster", "preparing");
-  setHappyOysterStageText("正在创建快乐生蚝 World…", "preparing");
-  addHistory("正在把快乐生蚝加入当前对比会话");
-  void dualModelController.activate("happyoyster").catch((error) => {
-    const message = error?.message || String(error || "连接失败");
-    setModelConnectionState("happyoyster", "error");
-    setHappyOysterStageText(message, "error");
-  });
-};
-$("removeModelSlotBtn").onclick = () => {
-  closeForModelSlotChange();
-  activeModelSlotCount = 2;
-  syncModelSlotUi();
-};
 $("clearWorldBtn").onclick = clearWorldDraft;
 $("enhanceBtn").onclick = completeWorldDraft;
 $("prompt").addEventListener("input", () => {
@@ -6962,8 +7468,7 @@ for (const id of ["goalMinPlaySeconds", "goalProbability", "goalRuleInput"]) {
 $("stopBtn").onclick = () => {
   closeSession();
   setModelConnectionState("minwm", "closed");
-  setModelConnectionState("lingbot2", "closed");
-  setModelConnectionState("happyoyster", "closed");
+  setComparisonModelConnectionState("closed");
 };
 
 function setPromptRewriteStatus(message, state = "") {
@@ -7201,7 +7706,7 @@ $("firstFrame").onchange = () => {
 $("generationMode").addEventListener("change", updateGenerationModeUi);
 $("continuous").addEventListener("change", updateGenerationModeUi);
 $("numFrames").addEventListener("input", updateT2VFrameHint);
-for (const key of ["minwm", "lingbot2"]) {
+for (const key of ZING_ONLY ? ["minwm"] : ["minwm", "lingbot2"]) {
   modelControl(key, "size").addEventListener("input", () => {
     if (key === "minwm") updateOutputSizeText();
   });
@@ -7229,7 +7734,9 @@ $("zingFrameInterpolation").addEventListener("change", () => {
   syncZingFrameInterpolation({ fromTopbar: true });
 });
 canvas.addEventListener("pointerdown", () => canvas.focus({ preventScroll: true }));
-lingbot2Canvas.addEventListener("pointerdown", () => canvas.focus({ preventScroll: true }));
+if (!ZING_ONLY) {
+  lingbot2Canvas.addEventListener("pointerdown", () => canvas.focus({ preventScroll: true }));
+}
 $("serverUrl").addEventListener("change", () => {
   queryServerModelInfo({ applyPresetForModel: true }).catch(showError);
 });
@@ -7475,19 +7982,32 @@ window.__sglangRealtimeDebug = () => ({
     ? Array.from(controlStateController.activeActions).sort()
     : [],
   bytes,
+  connectDisabled: $("connectBtn").disabled,
+  currentFiniteSession,
   decodeInProgress,
   queuedDecodeBytes,
   queuedDecodeFrames,
   decodeQueueLength: decodeQueue.length,
   droppedDecodeFrames,
+  encodedDecodeErrorTotal,
+  frameBatchGapCount,
   frames,
   lastDecodeMs,
   lastDisplayLagMs,
   lastSampledEventId,
   lastSentEventId,
+  lastReceivedChunk,
+  lastRenderedChunk,
   pendingDecodeBatches,
   pendingHeader: Boolean(pendingHeader),
   playback: playbackController.snapshot(),
+  playbackRenderedFrames: playbackController.renderedFrames,
+  finiteWebpDrain: primaryWebpDrainController.snapshot(),
+  lastPrimarySocketCloseCode,
+  lastPrimarySocketCloseReason,
+  primaryRenderActivity,
+  recordingActive,
+  recordingSaving,
   renderedFps: fpsSamples.length,
   renderedPreviewFrames,
   renderLoopFps: renderLoopSamples.length,

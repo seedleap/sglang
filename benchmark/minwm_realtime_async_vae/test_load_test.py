@@ -1,6 +1,9 @@
 import asyncio
+import sys
 from argparse import Namespace
 
+import msgspec.msgpack
+import pytest
 from load_test import (
     aggregate_measurement_seconds,
     chunk_stats_from_trace,
@@ -8,14 +11,115 @@ from load_test import (
     completion_chunk,
     derive_trace_http_url,
     final_frame_batch_chunk,
+    frame_batch_contract_metadata,
     init_request,
     measurement_window_start,
+    merged_stage_values,
+    parse_args,
     record_action_latency,
     record_frame_batch,
+    run_session,
     server_action_latencies,
     stage_values,
+    stage_values_from_chunk_messages,
     trace_contract_summary,
+    validate_media_profile_contract,
 )
+
+RIFE_SHA256 = "8f6fb9105ba9e946762ee7190acbca3ca1cf14193eb81ca0955d492fb8558692"
+
+
+def test_cli_defaults_use_the_full_zing_model_profile(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "load_test.py",
+            "--ws-url",
+            "ws://127.0.0.1/realtime",
+            "--profile",
+            "async",
+            "--output",
+            str(tmp_path / "result.json"),
+        ],
+    )
+
+    args = parse_args()
+
+    assert args.size == "1280x704"
+    assert args.preview_max_width == 832
+    assert args.preview_quality == 70
+    assert args.sink == 8
+    assert args.window == 32
+
+
+def _single_chunk_args(ws_url: str) -> Namespace:
+    return Namespace(
+        ws_url=ws_url,
+        warmup_chunks=0,
+        measured_chunks=1,
+        realtime_media_profile="native_v1",
+        model="/work/model",
+        prompt="test",
+        generation_mode="t2v",
+        size="832x480",
+        fps=24,
+        sink=9,
+        window=18,
+        timeout_s=2.0,
+        completion_signal="final-frame",
+        skip_trace_query=True,
+        trace_http_url=None,
+        trace_timeout_s=1.0,
+        expected_media_weights_sha256=None,
+    )
+
+
+@pytest.mark.parametrize(
+    ("code", "reason", "should_pass"),
+    [
+        (1000, "generation complete", True),
+        (1000, "normal", True),
+        (1000, "silent truncation", False),
+        (1011, "backend failed after final frame", False),
+    ],
+)
+def test_run_session_requires_a_normal_finite_websocket_close(
+    code, reason, should_pass
+):
+    async def exercise():
+        import websockets
+
+        async def handler(websocket):
+            await websocket.recv()
+            await websocket.send(
+                msgspec.msgpack.encode(
+                    {
+                        "type": "frame_batch",
+                        "chunk_index": 0,
+                        "num_frames": 1,
+                        "is_final_frame_batch": True,
+                        "source_width": 832,
+                        "source_height": 480,
+                        "preview_width": 560,
+                        "preview_height": 323,
+                        "width": 560,
+                        "height": 323,
+                    }
+                )
+            )
+            await websocket.close(code=code, reason=reason)
+
+        async with websockets.serve(handler, "127.0.0.1", 0) as server:
+            port = server.sockets[0].getsockname()[1]
+            return await run_session(_single_chunk_args(f"ws://127.0.0.1:{port}"), 1, 0)
+
+    if should_pass:
+        result = asyncio.run(exercise())
+        assert result["websocket_close"] == {"code": code, "reason": reason}
+    else:
+        with pytest.raises(RuntimeError, match="did not close normally"):
+            asyncio.run(exercise())
 
 
 def test_init_request_keeps_t2v_frame_count_aligned_with_chunk_count():
@@ -30,6 +134,28 @@ def test_init_request_keeps_t2v_frame_count_aligned_with_chunk_count():
 
     assert request["num_frames"] == 65
     assert request["max_chunks"] == 5
+
+
+def test_init_request_uses_explicit_full_model_and_preview_geometry():
+    args = Namespace(
+        model="/work/model",
+        prompt="test prompt",
+        size="1280x704",
+        preview_max_width=832,
+        preview_quality=70,
+        fps=24,
+        sink=8,
+        window=32,
+    )
+
+    request = init_request(args, total_chunks=5, trace_id="trace-full-size")
+
+    assert request["size"] == "1280x704"
+    assert request["realtime_preview_max_width"] == 832
+    assert request["output_compression"] == 70
+    assert request["num_inference_steps"] == 4
+    assert request["realtime_causal_sink_size"] == 8
+    assert request["realtime_causal_kv_cache_num_frames"] == 32
 
 
 def test_init_request_supports_i2v_reference_bytes():
@@ -54,6 +180,273 @@ def test_init_request_supports_i2v_reference_bytes():
     assert "num_frames" not in request
 
 
+def test_init_request_only_adds_an_explicit_non_native_media_profile():
+    native = Namespace(
+        model="/work/model",
+        prompt="test prompt",
+        size="1280x704",
+        fps=24,
+        realtime_media_profile="native_v1",
+    )
+    rife_values = vars(native).copy()
+    rife_values["realtime_media_profile"] = "rife2x_v1"
+    rife = Namespace(**rife_values)
+    rife3_values = vars(native).copy()
+    rife3_values["realtime_media_profile"] = "rife3x_v1"
+    rife3 = Namespace(**rife3_values)
+
+    assert "realtime_media_profile" not in init_request(
+        native, total_chunks=2, trace_id="native"
+    )
+    assert (
+        init_request(rife, total_chunks=2, trace_id="rife")["realtime_media_profile"]
+        == "rife2x_v1"
+    )
+    assert (
+        init_request(rife3, total_chunks=2, trace_id="rife3")["realtime_media_profile"]
+        == "rife3x_v1"
+    )
+
+
+def test_rife_contract_requires_exact_wire_counts_and_timeline():
+    result = validate_media_profile_contract(
+        media_profile="rife2x_v1",
+        requested_fps=24,
+        expected_media_weights_sha256=RIFE_SHA256,
+        session_ready={
+            "requested_media_profile": "rife2x_v1",
+            "effective_media_profile": "rife2x_v1",
+            "source_timeline_fps": 24,
+            "output_timeline_fps": 48,
+            "media_weights_sha256": RIFE_SHA256,
+        },
+        completions={
+            0: {
+                "media_profile": "rife2x_v1",
+                "source_num_frames": 4,
+                "output_num_frames": 7,
+                "num_frames": 7,
+                "source_timeline_fps": 24,
+                "output_timeline_fps": 48,
+            },
+            1: {
+                "media_profile": "rife2x_v1",
+                "source_num_frames": 4,
+                "output_num_frames": 8,
+                "num_frames": 8,
+                "source_timeline_fps": 24,
+                "output_timeline_fps": 48,
+            },
+        },
+        frame_counts={0: 7, 1: 8},
+        frame_messages={
+            0: [
+                {
+                    "media_profile": "rife2x_v1",
+                    "source_timeline_fps": 24,
+                    "output_timeline_fps": 48,
+                }
+            ],
+            1: [
+                {
+                    "media_profile": "rife2x_v1",
+                    "source_timeline_fps": 24,
+                    "output_timeline_fps": 48,
+                }
+            ],
+        },
+        expected_chunks={0, 1},
+    )
+
+    assert result["source_frames"] == 8
+    assert result["output_frames"] == 15
+    assert result["acceptance"]["output_timeline_fps"] == 48
+
+
+def test_rife3x_contract_keeps_timeline_72_separate_from_exact_wire_counts():
+    result = validate_media_profile_contract(
+        media_profile="rife3x_v1",
+        requested_fps=24,
+        expected_media_weights_sha256=RIFE_SHA256,
+        session_ready={
+            "requested_media_profile": "rife3x_v1",
+            "effective_media_profile": "rife3x_v1",
+            "source_timeline_fps": 24,
+            "output_timeline_fps": 72,
+            "media_weights_sha256": RIFE_SHA256,
+        },
+        completions={
+            0: {
+                "media_profile": "rife3x_v1",
+                "source_num_frames": 0,
+                "output_num_frames": 0,
+                "num_frames": 0,
+                "source_timeline_fps": 24,
+                "output_timeline_fps": 72,
+            },
+            1: {
+                "media_profile": "rife3x_v1",
+                "source_num_frames": 4,
+                "output_num_frames": 10,
+                "num_frames": 10,
+                "source_timeline_fps": 24,
+                "output_timeline_fps": 72,
+            },
+            2: {
+                "media_profile": "rife3x_v1",
+                "source_num_frames": 4,
+                "output_num_frames": 12,
+                "num_frames": 12,
+                "source_timeline_fps": 24,
+                "output_timeline_fps": 72,
+            },
+        },
+        frame_counts={1: 10, 2: 12},
+        frame_messages={
+            1: [
+                {
+                    "media_profile": "rife3x_v1",
+                    "source_timeline_fps": 24,
+                    "output_timeline_fps": 72,
+                }
+            ],
+            2: [
+                {
+                    "media_profile": "rife3x_v1",
+                    "source_timeline_fps": 24,
+                    "output_timeline_fps": 72,
+                }
+            ],
+        },
+        expected_chunks={0, 1, 2},
+    )
+
+    assert result["source_frames"] == 8
+    assert result["output_frames"] == 22
+    assert result["acceptance"]["output_timeline_fps"] == 72
+
+
+def test_rife_contract_rejects_silent_frame_loss():
+    try:
+        validate_media_profile_contract(
+            media_profile="rife2x_v1",
+            requested_fps=24,
+            expected_media_weights_sha256=RIFE_SHA256,
+            session_ready={
+                "requested_media_profile": "rife2x_v1",
+                "effective_media_profile": "rife2x_v1",
+                "source_timeline_fps": 24,
+                "output_timeline_fps": 48,
+                "media_weights_sha256": RIFE_SHA256,
+            },
+            completions={
+                0: {
+                    "media_profile": "rife2x_v1",
+                    "source_num_frames": 4,
+                    "output_num_frames": 7,
+                    "num_frames": 7,
+                    "source_timeline_fps": 24,
+                    "output_timeline_fps": 48,
+                }
+            },
+            frame_counts={0: 6},
+            frame_messages={
+                0: [
+                    {
+                        "media_profile": "rife2x_v1",
+                        "source_timeline_fps": 24,
+                        "output_timeline_fps": 48,
+                    }
+                ]
+            },
+            expected_chunks={0},
+        )
+    except RuntimeError as exc:
+        assert "frame count mismatch" in str(exc)
+    else:
+        raise AssertionError("RIFE frame loss must fail the load-test contract")
+
+
+@pytest.mark.parametrize(
+    ("receipt_updates", "error"),
+    [
+        ({"media_weights_sha256": "bogus"}, "invalid weights digest"),
+        ({"media_weights_sha256": "0" * 64}, "weights digest mismatch"),
+        ({"source_timeline_fps": float("nan")}, "non-finite timeline"),
+        ({"output_timeline_fps": float("nan")}, "non-finite timeline"),
+    ],
+)
+def test_rife_contract_rejects_untrusted_acceptance(receipt_updates, error):
+    receipt = {
+        "requested_media_profile": "rife2x_v1",
+        "effective_media_profile": "rife2x_v1",
+        "source_timeline_fps": 24,
+        "output_timeline_fps": 48,
+        "media_weights_sha256": RIFE_SHA256,
+        **receipt_updates,
+    }
+
+    with pytest.raises(RuntimeError, match=error):
+        validate_media_profile_contract(
+            media_profile="rife2x_v1",
+            requested_fps=24,
+            expected_media_weights_sha256=RIFE_SHA256,
+            session_ready=receipt,
+            completions={},
+            frame_counts={},
+            frame_messages={},
+            expected_chunks=set(),
+        )
+
+
+@pytest.mark.parametrize(
+    ("completion_updates", "error"),
+    [
+        ({"num_frames": 999}, "frame count mismatch"),
+        ({"source_timeline_fps": 12}, "completion timeline drifted"),
+        ({"output_timeline_fps": 24}, "completion timeline drifted"),
+    ],
+)
+def test_rife_contract_rejects_conflicting_completion_metadata(
+    completion_updates, error
+):
+    completion = {
+        "media_profile": "rife2x_v1",
+        "source_num_frames": 4,
+        "output_num_frames": 7,
+        "num_frames": 7,
+        "source_timeline_fps": 24,
+        "output_timeline_fps": 48,
+        **completion_updates,
+    }
+
+    with pytest.raises(RuntimeError, match=error):
+        validate_media_profile_contract(
+            media_profile="rife2x_v1",
+            requested_fps=24,
+            expected_media_weights_sha256=RIFE_SHA256,
+            session_ready={
+                "requested_media_profile": "rife2x_v1",
+                "effective_media_profile": "rife2x_v1",
+                "source_timeline_fps": 24,
+                "output_timeline_fps": 48,
+                "media_weights_sha256": RIFE_SHA256,
+            },
+            completions={0: completion},
+            frame_counts={0: 7},
+            frame_messages={
+                0: [
+                    {
+                        "media_profile": "rife2x_v1",
+                        "source_timeline_fps": 24,
+                        "output_timeline_fps": 48,
+                    }
+                ]
+            },
+            expected_chunks={0},
+        )
+
+
 def test_record_frame_batch_counts_all_batches_in_the_same_chunk():
     frame_counts = {}
 
@@ -61,6 +454,22 @@ def test_record_frame_batch_counts_all_batches_in_the_same_chunk():
     record_frame_batch({"chunk_index": 3, "num_frames": 8}, frame_counts=frame_counts)
 
     assert frame_counts == {3: 16}
+
+
+def test_frame_batch_contract_metadata_drops_encoded_payload():
+    assert frame_batch_contract_metadata(
+        {
+            "media_profile": "rife2x_v1",
+            "source_timeline_fps": 24,
+            "output_timeline_fps": 48,
+            "payload": b"encoded-frame" * 100,
+            "unrelated": "value",
+        }
+    ) == {
+        "media_profile": "rife2x_v1",
+        "source_timeline_fps": 24,
+        "output_timeline_fps": 48,
+    }
 
 
 def test_final_frame_batch_is_the_media_websocket_completion_signal():
@@ -192,6 +601,98 @@ def test_stage_values_excludes_warmup_and_records_local_vae():
         "denoise_ms": [310.0],
         "vae_decode_ms": [16.0],
     }
+
+
+def test_stage_values_records_remote_rife_costs_separately():
+    result = stage_values(
+        [
+            {
+                "event": "server.remote_vae_complete",
+                "chunk_index": 3,
+                "vae_decode_ms": 12.0,
+                "vae_post_decode_ms": 3.0,
+                "actor_wait_ms": 4.0,
+                "rife_interpolation_ms": 21.0,
+            }
+        ]
+    )
+
+    assert result == {
+        "vae_decode_ms": [12.0],
+        "vae_post_decode_ms": [3.0],
+        "actor_wait_ms": [4.0],
+        "rife_interpolation_ms": [21.0],
+    }
+
+
+def test_chunk_telemetry_provides_rife_stages_without_trace_api():
+    result = stage_values_from_chunk_messages(
+        {
+            0: {"chunk_total_ms": 900, "rife_interpolation_ms": 18},
+            1: {
+                "chunk_total_ms": 1100,
+                "actor_wait_ms": 3,
+                "rife_interpolation_ms": 20,
+                "source_realtime_factor": 0.62,
+                "output_realtime_factor": 0.62,
+            },
+        },
+        min_chunk_index=1,
+    )
+
+    assert result == {
+        "chunk_total_ms": [1100.0],
+        "actor_wait_ms": [3.0],
+        "rife_interpolation_ms": [20.0],
+        "source_realtime_factor": [0.62],
+        "output_realtime_factor": [0.62],
+    }
+
+
+def test_trace_stages_override_shared_fields_without_dropping_realtime_factor():
+    result = merged_stage_values(
+        [
+            {
+                "event": "server.remote_vae_complete",
+                "chunk_index": 2,
+                "vae_decode_ms": 11,
+            }
+        ],
+        {
+            2: {
+                "type": "chunk_telemetry",
+                "vae_decode_ms": 99,
+                "source_realtime_factor": 0.62,
+                "output_realtime_factor": 0.62,
+            }
+        },
+        min_chunk_index=2,
+    )
+
+    assert result == {
+        "vae_decode_ms": [11.0],
+        "source_realtime_factor": [0.62],
+        "output_realtime_factor": [0.62],
+    }
+
+
+def test_partial_trace_column_does_not_replace_complete_chunk_telemetry():
+    result = merged_stage_values(
+        [
+            {
+                "event": "server.remote_vae_complete",
+                "chunk_index": 2,
+                "vae_decode_ms": 11,
+            }
+        ],
+        {
+            2: {"vae_decode_ms": 21},
+            3: {"vae_decode_ms": 22},
+        },
+        min_chunk_index=2,
+    )
+
+    assert result == {"vae_decode_ms": [21.0, 22.0]}
 
 
 def test_trace_http_url_is_derived_from_the_public_websocket_origin():

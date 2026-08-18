@@ -66,6 +66,7 @@ class WorkerSlot:
     model_revision: str
     vae_fingerprint: str
     worker_epoch: str = ""
+    heartbeat_generation: str = ""
     lifecycle: WorkerLifecycle = "ready"
     active_sessions: int = 0
     runnable_sessions: int = 0
@@ -611,6 +612,7 @@ class DynamoDBCoordinatorStore:
             model_revision=self._read_s(item, "model_revision"),
             vae_fingerprint=self._read_s(item, "vae_fingerprint"),
             worker_epoch=self._read_optional_s(item, "worker_epoch"),
+            heartbeat_generation=self._read_optional_s(item, "heartbeat_generation"),
             lifecycle=self._read_optional_s(item, "lifecycle", "ready"),
             active_sessions=int(self._read_optional_n(item, "active_sessions")),
             runnable_sessions=int(self._read_optional_n(item, "runnable_sessions")),
@@ -695,11 +697,31 @@ class DynamoDBCoordinatorStore:
         client = self._get_client()
         now_epoch = int(self._wall_clock())
         heartbeat_expires = now_epoch + max(1, int(self.worker_ttl_s))
-        client.put_item(
-            TableName=self.table_name,
-            Item={
-                "pk": {"S": f"WORKER#{heartbeat.worker_id}"},
-                "sk": {"S": "HEARTBEAT"},
+        heartbeat_generation = uuid4().hex
+        worker_key = {
+            "pk": {"S": f"WORKER#{heartbeat.worker_id}"},
+            "sk": {"S": "HEARTBEAT"},
+        }
+        getter = getattr(client, "get_item", None)
+        previous = None
+        previous_capacity = 0
+        previous_heartbeat_generation = ""
+        if getter is not None:
+            previous = getter(
+                TableName=self.table_name,
+                Key=worker_key,
+                ConsistentRead=True,
+            ).get("Item")
+            if previous and self._read_optional_s(previous, "role") == heartbeat.role:
+                previous_capacity = int(self._read_optional_n(previous, "capacity", 0))
+                previous_heartbeat_generation = self._read_optional_s(
+                    previous, "heartbeat_generation"
+                )
+
+        put_worker = {
+            "TableName": self.table_name,
+            "Item": {
+                **worker_key,
                 "item_type": {"S": "worker"},
                 "role": {"S": heartbeat.role},
                 "endpoint": {"S": heartbeat.endpoint},
@@ -708,6 +730,7 @@ class DynamoDBCoordinatorStore:
                 "model_revision": {"S": heartbeat.model_revision},
                 "vae_fingerprint": {"S": heartbeat.vae_fingerprint},
                 "worker_epoch": {"S": heartbeat.worker_epoch},
+                "heartbeat_generation": {"S": heartbeat_generation},
                 "lifecycle": {"S": heartbeat.lifecycle},
                 "active_sessions": {"N": str(heartbeat.active_sessions)},
                 "runnable_sessions": {"N": str(heartbeat.runnable_sessions)},
@@ -725,12 +748,137 @@ class DynamoDBCoordinatorStore:
                     else {}
                 ),
             },
+        }
+        if getter is not None:
+            if previous is None:
+                put_worker["ConditionExpression"] = "attribute_not_exists(pk)"
+            else:
+                previous_role = self._read_optional_s(previous, "role")
+                previous_record_capacity = int(
+                    self._read_optional_n(previous, "capacity", 0)
+                )
+                previous_record_epoch = self._read_optional_s(previous, "worker_epoch")
+                epoch_condition = (
+                    "worker_epoch = :previous_worker_epoch"
+                    if previous_record_epoch
+                    else "attribute_not_exists(worker_epoch)"
+                )
+                heartbeat_generation_condition = (
+                    "heartbeat_generation = :previous_heartbeat_generation"
+                    if previous_heartbeat_generation
+                    else "attribute_not_exists(heartbeat_generation)"
+                )
+                put_worker["ConditionExpression"] = (
+                    f"{epoch_condition} AND {heartbeat_generation_condition} AND "
+                    "#capacity = :previous_capacity AND #role = :previous_role"
+                )
+                put_worker["ExpressionAttributeNames"] = {
+                    "#capacity": "capacity",
+                    "#role": "role",
+                }
+                put_worker["ExpressionAttributeValues"] = {
+                    ":previous_capacity": {"N": str(previous_record_capacity)},
+                    ":previous_role": {"S": previous_role},
+                    **(
+                        {":previous_worker_epoch": {"S": previous_record_epoch}}
+                        if previous_record_epoch
+                        else {}
+                    ),
+                    **(
+                        {
+                            ":previous_heartbeat_generation": {
+                                "S": previous_heartbeat_generation
+                            }
+                        }
+                        if previous_heartbeat_generation
+                        else {}
+                    ),
+                }
+
+        # A GSI is eventually consistent, so shrinking only the worker record can
+        # leave an old high-numbered slot selectable until its TTL elapses. Retire
+        # every removed slot atomically with publishing the smaller capacity.
+        # Lease ownership fields are deliberately preserved so an already active
+        # assignment can still perform its idempotent release.
+        removed_slot_count = max(0, previous_capacity - heartbeat.capacity)
+        if removed_slot_count > 99:
+            raise RuntimeError(
+                "cannot atomically retire more than 99 worker slots in one heartbeat"
+            )
+        client_exceptions = getattr(client, "exceptions", None)
+        heartbeat_retryable = tuple(
+            exception_type
+            for exception_type in (
+                getattr(client_exceptions, "TransactionCanceledException", None),
+                getattr(client_exceptions, "TransactionConflictException", None),
+            )
+            if isinstance(exception_type, type)
         )
+        if removed_slot_count:
+            # The conditional worker Put in this same transaction is the sole
+            # ordering fence. Once it wins, these updates must be able to retire
+            # slots left at any stale epoch/capacity by a partial publication.
+            retire_updates = [{"Put": put_worker}]
+            for slot_index in range(heartbeat.capacity, previous_capacity):
+                retire_updates.append(
+                    {
+                        "Update": {
+                            "TableName": self.table_name,
+                            "Key": {
+                                "pk": {
+                                    "S": self._slot_pk(
+                                        heartbeat.role,
+                                        heartbeat.worker_id,
+                                        slot_index,
+                                    )
+                                },
+                                "sk": {"S": "LEASE"},
+                            },
+                            "UpdateExpression": (
+                                "SET #lifecycle = :failed, "
+                                "heartbeat_expires_at = :now, "
+                                "heartbeat_generation = :heartbeat_generation, "
+                                "#capacity = :capacity, #ttl = :ttl "
+                                "REMOVE allocation_key, allocation_sort"
+                            ),
+                            "ExpressionAttributeNames": {
+                                "#capacity": "capacity",
+                                "#lifecycle": "lifecycle",
+                                "#ttl": "ttl",
+                            },
+                            "ExpressionAttributeValues": {
+                                ":failed": {"S": "failed"},
+                                ":now": {"N": str(now_epoch)},
+                                ":capacity": {"N": str(heartbeat.capacity)},
+                                ":heartbeat_generation": {"S": heartbeat_generation},
+                                ":ttl": {"N": str(now_epoch + 86400)},
+                            },
+                        }
+                    }
+                )
+            for attempt in range(3):
+                try:
+                    client.transact_write_items(TransactItems=retire_updates)
+                    break
+                except Exception as exc:
+                    if (
+                        not heartbeat_retryable
+                        or not isinstance(exc, heartbeat_retryable)
+                        or attempt == 2
+                    ):
+                        raise
+                    time.sleep(0.01 * (2**attempt))
+        else:
+            client.put_item(**put_worker)
         allocation_key = self._allocation_key(
             heartbeat.role,
             model_revision=heartbeat.model_revision,
             vae_fingerprint=heartbeat.vae_fingerprint,
         )
+        # Bind each slot write to the exact worker publication. That worker fence
+        # makes the current publication authoritative over any stale slot epoch,
+        # while a delayed transaction fails after any newer worker publication.
+        slot_updates = []
         for slot_index in range(heartbeat.capacity):
             update = {
                 "TableName": self.table_name,
@@ -747,7 +895,9 @@ class DynamoDBCoordinatorStore:
                     "worker_id = :worker_id, endpoint = :endpoint, az = :az, "
                     "slot_index = :slot_index, model_revision = :model_revision, "
                     "vae_fingerprint = :vae_fingerprint, "
-                    "worker_epoch = :worker_epoch, lifecycle = :lifecycle, "
+                    "worker_epoch = :worker_epoch, "
+                    "heartbeat_generation = :heartbeat_generation, "
+                    "lifecycle = :lifecycle, "
                     "#capacity = :capacity, active_sessions = :active_sessions, "
                     "runnable_sessions = :runnable_sessions, "
                     "blocked_sessions = :blocked_sessions, "
@@ -772,6 +922,7 @@ class DynamoDBCoordinatorStore:
                     ":model_revision": {"S": heartbeat.model_revision},
                     ":vae_fingerprint": {"S": heartbeat.vae_fingerprint},
                     ":worker_epoch": {"S": heartbeat.worker_epoch},
+                    ":heartbeat_generation": {"S": heartbeat_generation},
                     ":lifecycle": {"S": heartbeat.lifecycle},
                     ":capacity": {"N": str(heartbeat.capacity)},
                     ":active_sessions": {"N": str(heartbeat.active_sessions)},
@@ -788,12 +939,35 @@ class DynamoDBCoordinatorStore:
                     ":ttl": {"N": str(heartbeat_expires + 86400)},
                 },
             }
+            slot_updates.append({"Update": update})
+        # One worker check plus at most 99 slot updates stays within DynamoDB's
+        # 100-item transaction limit without adding a round trip per slot.
+        for batch_start in range(0, len(slot_updates), 99):
+            slot_publication = [
+                {
+                    "ConditionCheck": {
+                        "TableName": self.table_name,
+                        "Key": worker_key,
+                        "ConditionExpression": (
+                            "heartbeat_generation = :heartbeat_generation"
+                        ),
+                        "ExpressionAttributeValues": {
+                            ":heartbeat_generation": {"S": heartbeat_generation}
+                        },
+                    }
+                },
+                *slot_updates[batch_start : batch_start + 99],
+            ]
             for attempt in range(3):
                 try:
-                    client.update_item(**update)
+                    client.transact_write_items(TransactItems=slot_publication)
                     break
-                except client.exceptions.TransactionConflictException:
-                    if attempt == 2:
+                except Exception as exc:
+                    if (
+                        not heartbeat_retryable
+                        or not isinstance(exc, heartbeat_retryable)
+                        or attempt == 2
+                    ):
                         raise
                     time.sleep(0.01 * (2**attempt))
 
@@ -906,9 +1080,12 @@ class DynamoDBCoordinatorStore:
             "IndexName": "allocation-index",
             "KeyConditionExpression": "allocation_key = :allocation",
             "FilterExpression": (
+                "attribute_exists(heartbeat_generation) AND "
                 "heartbeat_expires_at > :now AND lifecycle = :ready AND "
+                "#capacity > slot_index AND "
                 "(attribute_not_exists(lease_token) OR lease_expires_at <= :now)"
             ),
+            "ExpressionAttributeNames": {"#capacity": "capacity"},
             "ExpressionAttributeValues": {
                 ":allocation": {
                     "S": self._allocation_key(
@@ -1049,12 +1226,44 @@ class DynamoDBCoordinatorStore:
             ":ttl": {"N": str(expires_epoch + 86400)},
         }
         slot_updates = []
+        worker_checks = []
         for slot in (denoiser, vae):
             slot_values = {
                 **values,
                 ":worker_epoch": {"S": slot.worker_epoch},
+                ":heartbeat_generation": {"S": slot.heartbeat_generation},
                 ":ready": {"S": "ready"},
+                ":slot_index": {"N": str(slot.slot_index)},
             }
+            worker_checks.append(
+                {
+                    "ConditionCheck": {
+                        "TableName": self.table_name,
+                        "Key": {
+                            "pk": {"S": f"WORKER#{slot.worker_id}"},
+                            "sk": {"S": "HEARTBEAT"},
+                        },
+                        "ConditionExpression": (
+                            "worker_epoch = :worker_epoch AND "
+                            "heartbeat_generation = :heartbeat_generation AND "
+                            "heartbeat_expires_at > :now AND "
+                            "#lifecycle = :ready AND "
+                            "#capacity > :slot_index"
+                        ),
+                        "ExpressionAttributeNames": {
+                            "#capacity": "capacity",
+                            "#lifecycle": "lifecycle",
+                        },
+                        "ExpressionAttributeValues": {
+                            ":worker_epoch": {"S": slot.worker_epoch},
+                            ":heartbeat_generation": {"S": slot.heartbeat_generation},
+                            ":now": {"N": str(now_epoch)},
+                            ":ready": {"S": "ready"},
+                            ":slot_index": {"N": str(slot.slot_index)},
+                        },
+                    }
+                }
+            )
             slot_updates.append(
                 {
                     "Update": {
@@ -1074,11 +1283,17 @@ class DynamoDBCoordinatorStore:
                         ),
                         "ConditionExpression": (
                             "heartbeat_expires_at > :now AND "
-                            "worker_epoch = :worker_epoch AND lifecycle = :ready AND "
+                            "worker_epoch = :worker_epoch AND "
+                            "heartbeat_generation = :heartbeat_generation AND "
+                            "lifecycle = :ready AND "
+                            "#capacity > :slot_index AND "
                             "(attribute_not_exists(lease_token) OR "
                             "lease_expires_at <= :now)"
                         ),
-                        "ExpressionAttributeNames": {"#ttl": "ttl"},
+                        "ExpressionAttributeNames": {
+                            "#capacity": "capacity",
+                            "#ttl": "ttl",
+                        },
                         "ExpressionAttributeValues": slot_values,
                     }
                 }
@@ -1092,10 +1307,12 @@ class DynamoDBCoordinatorStore:
             "denoiser_slot": {"N": str(denoiser.slot_index)},
             "denoiser_endpoint": {"S": denoiser.endpoint},
             "denoiser_worker_epoch": {"S": denoiser.worker_epoch},
+            "denoiser_heartbeat_generation": {"S": denoiser.heartbeat_generation},
             "vae_worker_id": {"S": vae.worker_id},
             "vae_slot": {"N": str(vae.slot_index)},
             "vae_endpoint": {"S": vae.endpoint},
             "vae_worker_epoch": {"S": vae.worker_epoch},
+            "vae_heartbeat_generation": {"S": vae.heartbeat_generation},
         }
         try:
             client.transact_write_items(
@@ -1131,6 +1348,7 @@ class DynamoDBCoordinatorStore:
                             },
                         }
                     },
+                    *worker_checks,
                     *slot_updates,
                 ]
             )
