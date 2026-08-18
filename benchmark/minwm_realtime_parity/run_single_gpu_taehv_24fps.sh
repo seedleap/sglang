@@ -487,7 +487,6 @@ for field in (
     "chunk_total_ms",
     "model_vae_encode_ms",
     "model_denoise_ms",
-    "model_vae_decode_ms",
     "raw_payload_build_ms",
     "ws_write_ms",
 ):
@@ -496,6 +495,15 @@ for field in (
         result["server"][field],
     )
     assert result["server"][field]["missing_count"] == 0
+vae_decode = result["server"]["model_vae_decode_ms"]
+if os.environ["MINWM_VAE_TOPOLOGY"] == "local":
+    assert vae_decode["sample_count"] == expected_measured, vae_decode
+    assert vae_decode["missing_count"] == 0, vae_decode
+else:
+    # The remote worker owns decode, so the denoiser process must not report a
+    # local VAE stage. End-to-end chunk/client timings remain the A/B headline.
+    assert vae_decode["sample_count"] == 0, vae_decode
+    assert vae_decode["missing_count"] == expected_measured, vae_decode
 if (
     os.environ["MINWM_REQUIRE_CANDIDATE_EVIDENCE"] == "true"
     and os.environ["MINWM_VAE_TOPOLOGY"] == "local"

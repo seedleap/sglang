@@ -605,6 +605,10 @@ def test_render_preserves_single_gpu_hardware_and_profile_contract(
     assert 'kill -KILL "${server_pid}"' in runner
     assert runner.count("timeout --kill-after=5s 20s") == 2
     assert 'result["server"]["raw_frame_async_enqueue_ms"]' in runner
+    assert 'vae_decode = result["server"]["model_vae_decode_ms"]' in runner
+    assert 'os.environ["MINWM_VAE_TOPOLOGY"] == "local"' in runner
+    assert 'vae_decode["sample_count"] == 0' in runner
+    assert 'vae_decode["missing_count"] == expected_measured' in runner
     assert '"model_vae_encode_ms",' in runner
     assert 'model_vae_encode_ms"]["sample_count"] == 0' not in runner
     assert 'structured_marker = "MINWM_RUNTIME_ALIGNMENT_JSON "' in runner
