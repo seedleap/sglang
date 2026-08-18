@@ -146,6 +146,16 @@ assert.match(
   /"h264StartupDropFrames",[\s\S]*?key === "lingbot2" \? 8 : 0/,
   "LingBot2 should hide eight startup transition frames without changing Zing",
 );
+assert.match(
+  app,
+  /const openEndedRequest = generationMode === "i2v" \|\| continuousT2V;[\s\S]*?num_frames: openEndedRequest \? undefined : numFrames,[\s\S]*?max_chunks: generationMode === "t2v" \|\| openEndedRequest \? undefined : 1,/,
+  "shared i2v realtime snapshots must be open-ended and rely on the server lifetime watchdog",
+);
+assert.match(
+  app,
+  /const openEndedRequest = generationMode === "i2v" \|\| continuous;[\s\S]*?num_frames: openEndedRequest \? undefined : requestedFrames,[\s\S]*?max_chunks: generationMode === "t2v" \|\| openEndedRequest \? undefined : 1,/,
+  "per-model i2v realtime init must not inherit preset num_frames/max_chunks",
+);
 for (const id of [
   "size", "fps", "numFrames", "seed", "steps", "guidance", "sinkSize",
   "windowFrames", "transportFormat", "transportQuality", "playbackMode",

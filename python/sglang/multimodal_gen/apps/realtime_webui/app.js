@@ -2638,6 +2638,7 @@ function artifactClientMs(artifact = currentSessionArtifact) {
 function currentRequestSnapshot() {
   const generationMode = selectedGenerationMode();
   const continuousT2V = generationMode === "t2v" && $("continuous").checked;
+  const openEndedRequest = generationMode === "i2v" || continuousT2V;
   const numFrames = generationMode === "t2v"
     ? (continuousT2V ? undefined : readT2VNumFrames())
     : Number($("numFrames").value);
@@ -2648,13 +2649,13 @@ function currentRequestSnapshot() {
     prompt: $("prompt").value,
     size: $("size").value,
     fps: Number($("fps").value || DEFAULT_TARGET_FPS),
-    num_frames: continuousT2V ? undefined : numFrames,
+    num_frames: openEndedRequest ? undefined : numFrames,
     seed: Number($("seed").value),
     num_inference_steps: Number($("steps").value),
     guidance_scale: Number($("guidance").value),
     realtime_causal_sink_size: readOptionalInteger("sinkSize"),
     realtime_causal_kv_cache_num_frames: readOptionalInteger("windowFrames"),
-    max_chunks: generationMode === "t2v" || $("continuous").checked ? undefined : 1,
+    max_chunks: generationMode === "t2v" || openEndedRequest ? undefined : 1,
     ...readPreviewTransportParams(),
     ...readFrameInterpolationParams(),
     ...readSuperResolutionParams(),
@@ -6808,19 +6809,20 @@ function readSuperResolutionParams(key = "minwm") {
 
 function readModelRequestParams(key, { generationMode, firstFrame, numFrames } = {}) {
   const continuous = modelControl(key, "continuous").checked;
+  const openEndedRequest = generationMode === "i2v" || continuous;
   const requestedFrames = numFrames ?? Number(modelControl(key, "numFrames").value);
   return compact({
     generation_mode: generationMode,
     prompt: $("prompt").value,
     size: modelControl(key, "size").value,
     fps: requestedInputFps(key),
-    num_frames: generationMode === "t2v" && continuous ? undefined : requestedFrames,
+    num_frames: openEndedRequest ? undefined : requestedFrames,
     seed: Number(modelControl(key, "seed").value),
     num_inference_steps: Number(modelControl(key, "steps").value),
     guidance_scale: Number(modelControl(key, "guidance").value),
     realtime_causal_sink_size: readOptionalInteger(modelControlId(key, "sinkSize")),
     realtime_causal_kv_cache_num_frames: readOptionalInteger(modelControlId(key, "windowFrames")),
-    max_chunks: generationMode === "t2v" || continuous ? undefined : 1,
+    max_chunks: generationMode === "t2v" || openEndedRequest ? undefined : 1,
     first_frame: firstFrame,
     ...readPreviewTransportParams(key),
     ...readFrameInterpolationParams(key),
