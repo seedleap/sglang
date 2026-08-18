@@ -31,6 +31,8 @@ COPY python/sglang/multimodal_gen/apps/realtime_webui \
      /opt/sglang/python/sglang/multimodal_gen/apps/realtime_webui
 COPY python/sglang/multimodal_gen/runtime/realtime/critical_path_metrics.py \
      /opt/sglang/python/sglang/multimodal_gen/runtime/realtime/critical_path_metrics.py
+COPY python/sglang/multimodal_gen/runtime/realtime/critical_path_metrics.py \
+     /opt/sglang/python/sglang/multimodal_gen/apps/realtime_webui/critical_path_metrics.py
 
 RUN chmod 0644 \
       /opt/sglang/python/sglang/multimodal_gen/apps/realtime_webui/happyoyster_prebuilt_worlds.json
@@ -39,7 +41,8 @@ RUN install -d -o 65532 -g 65532 \
       /opt/sglang/python/sglang/multimodal_gen/apps/realtime_webui_generated && \
     python -m compileall -q \
       /opt/sglang/python/sglang/multimodal_gen/apps/realtime_webui \
-      /opt/sglang/python/sglang/multimodal_gen/runtime/realtime/critical_path_metrics.py && \
+      /opt/sglang/python/sglang/multimodal_gen/runtime/realtime/critical_path_metrics.py \
+      /opt/sglang/python/sglang/multimodal_gen/apps/realtime_webui/critical_path_metrics.py && \
     ffmpeg -hide_banner -encoders 2>/dev/null | grep -q 'libx264'
 
 LABEL org.opencontainers.image.title="minwm-dual-realtime-webui" \

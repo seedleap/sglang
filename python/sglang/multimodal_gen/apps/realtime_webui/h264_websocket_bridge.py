@@ -28,13 +28,22 @@ import msgspec
 from aiohttp import WSMsgType, web
 from PIL import Image
 
-from sglang.multimodal_gen.runtime.realtime.critical_path_metrics import (
-    observe_client_metric_event,
-    observe_stage_seconds,
-    prometheus_content_type,
-    prometheus_latest,
-    result_from_exception,
-)
+try:
+    from sglang.multimodal_gen.runtime.realtime.critical_path_metrics import (
+        observe_client_metric_event,
+        observe_stage_seconds,
+        prometheus_content_type,
+        prometheus_latest,
+        result_from_exception,
+    )
+except ModuleNotFoundError:
+    from critical_path_metrics import (
+        observe_client_metric_event,
+        observe_stage_seconds,
+        prometheus_content_type,
+        prometheus_latest,
+        result_from_exception,
+    )
 
 LOGGER = logging.getLogger(__name__)
 H264_WS_MANAGER = web.AppKey("h264_websocket_bridge_manager", object)
