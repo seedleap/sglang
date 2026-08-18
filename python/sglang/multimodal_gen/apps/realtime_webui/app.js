@@ -19,6 +19,11 @@ const H264_CONNECT_RETRY_BASE_MS = Math.max(
   0,
   Math.min(10000, Math.trunc(Number(UI_CONFIG.h264WebSocketRetryBaseMs) || 350)),
 );
+const H264_RUNTIME_RECONNECT_MAX_ATTEMPTS = Math.max(
+  1,
+  Math.min(10, Math.trunc(Number(UI_CONFIG.h264WebSocketRuntimeReconnectAttempts) || 4)),
+);
+const H264_RUNTIME_RECONNECT_DELAYS_MS = [250, 1000, 2500, 4000];
 const DEFAULT_LINGBOT2_MODEL = "robbyant/lingbot-world-v2-14b-causal-fast-diffusers";
 const SESSION_ARTIFACT_SCHEMA_VERSION = 1;
 const SESSION_ARTIFACT_EVENT_LIMIT = 20000;
@@ -124,6 +129,7 @@ async function connectH264SessionWithRetry(key, h264Session, init) {
         addHistory(`${modelLabel(key)} H.264 reconnect ${attempt}/${H264_CONNECT_MAX_ATTEMPTS}`);
       }
       await h264Session.connect(h264CompressionInit(init, key));
+      resetH264RuntimeReconnect(key);
       return;
     } catch (error) {
       lastError = error;
@@ -766,9 +772,82 @@ const playbackController = new RealtimePlaybackController({
   maxDeliveryLeadBoostMs: 0,
   deliveryStallExpectedMultiplier: 1.8,
 });
+const h264RuntimeReconnectState = {
+  minwm: { timer: 0, attempt: 0, inFlight: false },
+  lingbot2: { timer: 0, attempt: 0, inFlight: false },
+};
 let lingbot2ReconnectTimer = 0;
 let lingbot2ReconnectAttempt = 0;
 let lingbot2ReconnectInFlight = false;
+
+function resetH264RuntimeReconnect(key) {
+  const state = h264RuntimeReconnectState[key];
+  if (!state) return;
+  if (state.timer) window.clearTimeout(state.timer);
+  state.timer = 0;
+  state.attempt = 0;
+  state.inFlight = false;
+}
+
+function cancelAllH264RuntimeReconnects() {
+  for (const key of Object.keys(h264RuntimeReconnectState)) {
+    resetH264RuntimeReconnect(key);
+  }
+}
+
+function canReconnectH264Model(key) {
+  return Boolean(
+    H264_WEBSOCKET_REQUESTED &&
+    !sessionLifetimeExpired &&
+    modelSelected(key) &&
+    dualModelController?.baseInit
+  );
+}
+
+function scheduleH264RuntimeReconnect(key, reason = "H.264 stream closed") {
+  if (isSessionLifetimeReason(reason)) return;
+  const state = h264RuntimeReconnectState[key];
+  if (!state) return;
+  if (!canReconnectH264Model(key)) {
+    setModelConnectionState(key, "error");
+    return;
+  }
+  if (state.timer || state.inFlight) return;
+  if (state.attempt >= H264_RUNTIME_RECONNECT_MAX_ATTEMPTS) {
+    setModelConnectionState(key, "error");
+    addHistory(`${modelLabel(key)} H.264 reconnect exhausted · ${reason}`);
+    return;
+  }
+  const delayMs = H264_RUNTIME_RECONNECT_DELAYS_MS[
+    Math.min(state.attempt, H264_RUNTIME_RECONNECT_DELAYS_MS.length - 1)
+  ];
+  state.attempt += 1;
+  setModelConnectionState(key, "recovering");
+  addHistory(`${modelLabel(key)} H.264 recovering in ${delayMs}ms · ${reason}`);
+  state.timer = window.setTimeout(async () => {
+    state.timer = 0;
+    if (!canReconnectH264Model(key)) return;
+    state.inFlight = true;
+    setModelConnectionState(key, "recovering");
+    try {
+      const restored = await dualModelController.reconnect(key);
+      if (!restored || !canReconnectH264Model(key)) return;
+      state.attempt = 0;
+      addHistory(`${modelLabel(key)} H.264 connection restored`);
+    } catch (error) {
+      const message = error?.message || String(error || "retry failed");
+      state.inFlight = false;
+      if (isSessionLifetimeReason(message)) {
+        expireSessionLifetime({ closeSessions: true });
+        return;
+      }
+      addHistory(`${modelLabel(key)} H.264 recovery failed · ${message}`);
+      scheduleH264RuntimeReconnect(key, message);
+    } finally {
+      state.inFlight = false;
+    }
+  }, delayMs);
+}
 
 function cancelLingbot2Reconnect() {
   if (lingbot2ReconnectTimer) window.clearTimeout(lingbot2ReconnectTimer);
@@ -877,6 +956,7 @@ function createH264ModelSession(key) {
     liveEdgeSeekThresholdMs: configuredNumber("h264WebSocketSeekThresholdMs", 420),
     onState: (state, details = {}) => {
       setModelConnectionState(key, state);
+      if (state === "live") resetH264RuntimeReconnect(key);
       if (state === "connecting") {
         video.hidden = true;
         fallbackCanvas.hidden = false;
@@ -885,6 +965,9 @@ function createH264ModelSession(key) {
         activeH264Models.delete(key);
         video.hidden = true;
         fallbackCanvas.hidden = false;
+      }
+      if (state === "closed" && isSessionLifetimeReason(details.reason || details.message)) {
+        expireSessionLifetime({ closeSessions: true });
       }
       if (state === "error") {
         addHistory(`${modelLabel(key)} H.264 error · ${details.message || "unknown"}`);
@@ -911,8 +994,11 @@ function createH264ModelSession(key) {
       renderModelTelemetry(key, h264ModelStats[key]);
       renderProtocolPerformance(key, { ...h264ModelStats[key], transport: "h264" });
     },
-    onError: (error) => {
-      addHistory(`${modelLabel(key)} H.264 session failed · ${error.message || error}`);
+    onError: (error, details = {}) => {
+      const message = details.message || error?.message || String(error || "unknown");
+      addHistory(`${modelLabel(key)} H.264 session failed · ${message}`);
+      if (details.phase === "startup" || error?.h264Phase === "startup") return;
+      scheduleH264RuntimeReconnect(key, message);
     },
   });
 }
@@ -938,6 +1024,7 @@ function preferredRealtimeSession(key, h264Session, fallbackSession) {
     },
     sendEvent(envelope) { return selected?.sendEvent(envelope) || false; },
     close(reason) {
+      resetH264RuntimeReconnect(key);
       void h264Session?.close(reason);
       fallbackSession?.close?.(reason);
     },
@@ -1017,6 +1104,7 @@ const primarySessionAdapter = {
       : sendPrimaryEventEnvelope(envelope);
   },
   close(reason) {
+    resetH264RuntimeReconnect("minwm");
     if (primaryUsesH264) {
       streamEpoch += 1;
       primaryUsesH264 = false;
@@ -1290,6 +1378,7 @@ function isSessionLifetimeReason(reason) {
 }
 
 function resetSessionLifetimeUi() {
+  cancelAllH264RuntimeReconnects();
   sessionLifetimeGuard.cancel();
   stopSessionCountdown();
   hideRecordingReadyToast({ immediate: true });
@@ -1507,6 +1596,7 @@ function setModelConnectionState(key, state) {
     preparing: "构建中",
     ready: "准备完成",
     connecting: "连接中",
+    recovering: "重连中",
     live: "已连接",
     unavailable: "不可用",
     error: "连接异常",

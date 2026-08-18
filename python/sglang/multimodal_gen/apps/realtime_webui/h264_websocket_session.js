@@ -44,6 +44,29 @@
     return "error";
   }
 
+  function closeDetails(event) {
+    const code = Number(event?.code || 0);
+    const reason = String(event?.reason || "");
+    return {
+      code,
+      reason,
+      wasClean: Boolean(event?.wasClean),
+      message: `H.264 WebSocket closed (${code || "unknown"}): ${reason || "unknown"}`,
+    };
+  }
+
+  function isTerminalCloseReason(reason) {
+    const value = String(reason || "").toLowerCase();
+    return [
+      "maximum session lifetime reached",
+      "generation complete",
+      "session idle timeout",
+      "session closed",
+      "session closed by client",
+      "disabled for request",
+    ].some((token) => value.includes(token));
+  }
+
   class H264WebSocketSession {
     constructor({
       video,
@@ -90,6 +113,7 @@
       this.generation = 0;
       this.state = "idle";
       this.playable = false;
+      this.startupConnected = false;
       this.expectedClose = false;
       this.appendQueue = [];
       this.appendQueueBytes = 0;
@@ -148,6 +172,7 @@
       const generation = ++this.generation;
       this.expectedClose = false;
       this.playable = false;
+      this.startupConnected = false;
       this.traceId = String(init.trace_id || "");
       this.mediaFps = Math.max(1, Number(init.fps || 24));
       this.playbackAckEnabled = init.playback_ack_enabled === true;
@@ -229,6 +254,7 @@
           try {
             const event = JSON.parse(message.data);
             if (event.type === "status" && event.state === "connected") {
+              this.startupConnected = true;
               if (!settled) {
                 settled = true;
                 global.clearTimeout(timer);
@@ -239,35 +265,34 @@
             if (event.type === "error") throw new Error(event.message || "H.264 WebSocket error");
             this._handleMetadata(event);
           } catch (error) {
+            const phase = settled ? "runtime" : "startup";
             if (!settled) {
               settled = true;
               global.clearTimeout(timer);
               reject(error);
             }
-            this._fail(error);
+            error.h264Phase = phase;
+            this._fail(error, {
+              phase,
+              recoverable: phase === "runtime",
+            });
           }
         };
         socket.onerror = () => {
           if (generation !== this.generation) return;
           const error = new Error("H.264 WebSocket transport error");
+          error.h264Phase = settled ? "runtime" : "startup";
           if (!settled) {
             settled = true;
             global.clearTimeout(timer);
             reject(error);
           }
-          this._fail(error);
+          this._fail(error, { phase: error.h264Phase, recoverable: error.h264Phase === "runtime" });
         };
         socket.onclose = (event) => {
           if (generation !== this.generation) return;
           global.clearTimeout(timer);
-          this.socket = null;
-          if (!this.expectedClose) {
-            const error = new Error(
-              `H.264 WebSocket closed (${event.code}): ${event.reason || "unknown"}`,
-            );
-            if (!settled) reject(error);
-            this._fail(error);
-          }
+          settled = this._handleSocketClose(event, { settled, reject });
         };
       });
     }
@@ -341,6 +366,40 @@
       this.metricFlushTimer = 0;
     }
 
+    _stopTimersAndFlushMetrics() {
+      if (this.statsTimer) global.clearInterval(this.statsTimer);
+      this.statsTimer = 0;
+      this._flushClientMetrics();
+      this._clearMetricFlushTimer();
+    }
+
+    _handleSocketClose(event, { settled = true, reject = () => {} } = {}) {
+      const details = closeDetails(event);
+      this.socket = null;
+      if (this.expectedClose) return settled;
+
+      if (settled && isTerminalCloseReason(details.reason)) {
+        this._stopTimersAndFlushMetrics();
+        this._setState("closed", details);
+        return true;
+      }
+
+      const error = new Error(details.message);
+      error.h264CloseCode = details.code;
+      error.h264CloseReason = details.reason;
+      error.h264WasClean = details.wasClean;
+      error.h264Phase = settled ? "runtime" : "startup";
+      if (!settled) {
+        reject(error);
+      }
+      this._fail(error, {
+        phase: error.h264Phase,
+        recoverable: error.h264Phase === "runtime",
+        ...details,
+      });
+      return true;
+    }
+
     async close(reason = "H.264 WebSocket session closed", { emitState = true } = {}) {
       const hadSession = this.active;
       this.expectedClose = true;
@@ -377,6 +436,7 @@
       this.mediaBatches = [];
       this.controlSentEpochByEvent.clear();
       this.playable = false;
+      this.startupConnected = false;
       if (emitState && hadSession) this._setState("closed", { reason });
     }
 
@@ -769,19 +829,28 @@
       this.state = state;
       if (this.root) this.root.dataset.sessionState = state;
       if (this.overlay?.style) {
-        this.overlay.style.display = state === "connecting" && !this.playable ? "grid" : "none";
+        this.overlay.style.display = ["connecting", "recovering"].includes(state) && !this.playable
+          ? "grid"
+          : "none";
       }
       this.onState(state, details);
     }
 
-    _fail(error) {
+    _fail(error, details = {}) {
       if (this.expectedClose) return;
-      this._flushClientMetrics();
-      this._clearMetricFlushTimer();
-      this._setState("error", { message: error.message || String(error) });
-      this.onError(error);
+      this._stopTimersAndFlushMetrics();
+      const phase = details.phase || (this.startupConnected ? "runtime" : "startup");
+      const recoverable = details.recoverable === true || phase === "runtime";
+      this._setState(recoverable ? "recovering" : "error", {
+        ...details,
+        phase,
+        message: error.message || String(error),
+      });
+      this.onError(error, { ...details, phase, recoverable });
     }
   }
+
+  H264WebSocketSession.isTerminalCloseReason = isTerminalCloseReason;
 
   global.H264WebSocketSession = H264WebSocketSession;
   if (typeof module !== "undefined" && module.exports) {

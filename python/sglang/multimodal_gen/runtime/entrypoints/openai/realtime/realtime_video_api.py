@@ -347,8 +347,8 @@ def _user_id_fingerprint(user_id: str) -> str:
 
 async def _session_watchdog(
     session: GenerateSession,
-    controller: RealtimeAdmissionController,
-    lease: SessionLease,
+    controller: RealtimeAdmissionController | None,
+    lease: SessionLease | None,
     *,
     idle_timeout_s: float,
     max_lifetime_s: float,
@@ -374,7 +374,8 @@ async def _session_watchdog(
         ):
             return "session idle timeout"
         try:
-            await controller.renew(lease)
+            if controller is not None and lease is not None:
+                await controller.renew(lease)
         except AdmissionRejected:
             return "session lease lost"
 
@@ -1803,6 +1804,11 @@ async def generate(websocket: WebSocket):
                     reason=exc.reason,
                 )
                 return
+        if (
+            controller is not None
+            or server_args.realtime_session_idle_timeout_s > 0
+            or server_args.realtime_session_max_lifetime_s > 0
+        ):
             watchdog_task = asyncio.create_task(
                 _session_watchdog(
                     session,

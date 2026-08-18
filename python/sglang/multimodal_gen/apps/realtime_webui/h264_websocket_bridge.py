@@ -66,6 +66,22 @@ def _bounded_int(value: Any, *, default: int, minimum: int, maximum: int) -> int
     return max(minimum, min(maximum, parsed))
 
 
+def _safe_websocket_close_code(value: Any, *, default: int = 1000) -> int:
+    try:
+        code = int(value)
+    except (TypeError, ValueError):
+        code = default
+    if code in {1005, 1006, 1015}:
+        return 1011
+    if 1000 <= code < 5000:
+        return code
+    return default
+
+
+def _websocket_close_message(reason: Any) -> bytes:
+    return str(reason or "").encode("utf-8")[:120]
+
+
 def _decode_first_frame(value: Any) -> Any:
     if not isinstance(value, str) or not value.startswith("data:"):
         return value
@@ -310,6 +326,11 @@ class H264WebSocketSession:
             elif message.type == WSMsgType.TEXT:
                 await self._send_json({"type": "upstream", "data": message.data})
             elif message.type in {WSMsgType.CLOSE, WSMsgType.CLOSED, WSMsgType.ERROR}:
+                if not self.websocket.closed:
+                    await self.websocket.close(
+                        code=_safe_websocket_close_code(message.data),
+                        message=_websocket_close_message(message.extra),
+                    )
                 break
 
     async def _receive_controls(self) -> None:

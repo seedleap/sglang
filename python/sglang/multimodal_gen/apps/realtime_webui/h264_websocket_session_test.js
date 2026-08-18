@@ -97,4 +97,42 @@ session._handleAppendEnd();
 assert.ok(stats.at(-1).lastMseQueueMs >= 7);
 assert.ok(stats.at(-1).lastMseAppendMs >= 5);
 
+const normalCloseStates = [];
+const normalCloseErrors = [];
+const normalCloseSession = new H264WebSocketSession({
+  video,
+  WebSocketImpl: FakeWebSocket,
+  MediaSourceImpl: FakeMediaSource,
+  onState: (state, details) => normalCloseStates.push({ state, details }),
+  onError: (error) => normalCloseErrors.push(error),
+});
+normalCloseSession._setState("live");
+normalCloseSession._handleSocketClose(
+  { code: 1000, reason: "maximum session lifetime reached", wasClean: true },
+  { settled: true, reject: () => assert.fail("normal runtime close must not reject") },
+);
+assert.equal(normalCloseStates.at(-1).state, "closed");
+assert.equal(normalCloseStates.at(-1).details.reason, "maximum session lifetime reached");
+assert.equal(normalCloseErrors.length, 0);
+
+const recoverableCloseStates = [];
+const recoverableCloseErrors = [];
+const recoverableCloseSession = new H264WebSocketSession({
+  video,
+  WebSocketImpl: FakeWebSocket,
+  MediaSourceImpl: FakeMediaSource,
+  onState: (state, details) => recoverableCloseStates.push({ state, details }),
+  onError: (error) => recoverableCloseErrors.push(error),
+});
+recoverableCloseSession._setState("live");
+recoverableCloseSession._handleSocketClose(
+  { code: 1006, reason: "", wasClean: false },
+  { settled: true, reject: () => assert.fail("runtime close must not reject startup") },
+);
+assert.equal(recoverableCloseStates.at(-1).state, "recovering");
+assert.equal(recoverableCloseErrors.length, 1);
+assert.match(recoverableCloseErrors[0].message, /H\.264 WebSocket closed/);
+assert.equal(H264WebSocketSession.isTerminalCloseReason("generation complete"), true);
+assert.equal(H264WebSocketSession.isTerminalCloseReason("upstream unavailable"), false);
+
 console.log("h264_websocket_session_test: ok");

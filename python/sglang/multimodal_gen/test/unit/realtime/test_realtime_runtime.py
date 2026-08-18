@@ -1426,6 +1426,22 @@ def test_session_watchdog_starts_max_lifetime_after_media_is_playable():
     assert asyncio.run(run()) == "maximum session lifetime reached"
 
 
+def test_session_watchdog_enforces_lifetime_without_admission_controller():
+    async def run():
+        session = GenerateSession()
+        session.mark_playable()
+        return await realtime_video_api._session_watchdog(
+            session,
+            None,
+            None,
+            idle_timeout_s=0,
+            max_lifetime_s=0.01,
+            lease_ttl_s=0.03,
+        )
+
+    assert asyncio.run(run()) == "maximum session lifetime reached"
+
+
 def test_playback_ack_marks_ack_aware_session_playable_without_model_ingest():
     class RejectingAdapter:
         def ingest_event(self, *_args):

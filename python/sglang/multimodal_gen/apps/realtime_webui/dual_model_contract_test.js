@@ -203,11 +203,11 @@ for (const selector of ["model-slot-config", "stage-controls", "prompt-update-he
 assert.match(html, /playback_controller\.js\?v=realtime-playback-v34/);
 assert.match(html, /model_session\.js\?v=dual-h264-telemetry-v1/);
 assert.match(html, /dual_model_controller\.js\?v=dual-model-v6/);
-assert.match(html, /h264_websocket_session\.js\?v=h264-stage-timing-v1/);
+assert.match(html, /h264_websocket_session\.js\?v=h264-runtime-reconnect-v2/);
 assert.match(html, /prompt_rewrite_controller\.js\?v=prompt-rewrite-v3/);
 assert.match(html, /world_rules_controller\.js\?v=world-rules-v4/);
 assert.match(html, /styles\.css\?v=world-studio-h264-rules-v6/);
-assert.match(html, /app\.js\?v=world-studio-h264-no-webp-adotfix-v1/);
+assert.match(html, /app\.js\?v=world-studio-h264-runtime-reconnect-v2/);
 assert.match(html, /id="minwmH264Viewport"/);
 assert.match(html, /id="lingbot2H264Viewport"/);
 assert.match(html, /id="minwmPerfScheduler"/);
@@ -328,6 +328,8 @@ assert.match(app, /UI_CONFIG\.h264WebSocketBaseUrl/);
 assert.match(app, /endpoint: h264WebSocketEndpoint\(key\)/);
 assert.match(app, /async function connectH264SessionWithRetry\(key, h264Session, init\)/);
 assert.match(app, /H264_CONNECT_MAX_ATTEMPTS/);
+assert.match(app, /H264_RUNTIME_RECONNECT_MAX_ATTEMPTS/);
+assert.match(app, /recovering: "重连中"/);
 assert.doesNotMatch(app, /自动回退 WebP/);
 assert.match(
   app,
