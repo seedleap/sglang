@@ -1,5 +1,6 @@
 ARG CUDA_VERSION=13.0.1
-FROM nvidia/cuda:${CUDA_VERSION}-cudnn-devel-ubuntu24.04 AS base
+ARG CUDA_BASE_IMAGE=nvidia/cuda:${CUDA_VERSION}-cudnn-devel-ubuntu24.04
+FROM ${CUDA_BASE_IMAGE} AS base
 
 ARG TARGETARCH
 ARG BUILD_TYPE=all
@@ -19,6 +20,7 @@ ARG PIP_DEFAULT_INDEX
 ARG UBUNTU_MIRROR
 ARG GITHUB_ARTIFACTORY=github.com
 ARG INSTALL_FLASHINFER_JIT_CACHE=0
+ARG REQUIRE_KERNELS_DOWNLOAD=0
 ARG FLASHINFER_VERSION=0.6.12
 ARG MOONCAKE_VERSION=0.3.11.post1
 ARG MSCCLPP_VERSION=sglang-v0.9.1
@@ -646,6 +648,7 @@ ARG CUDA_VERSION
 ARG SGL_VERSION
 ARG USE_LATEST_SGLANG
 ARG INSTALL_DYNAMO=0
+ARG REQUIRE_KERNELS_DOWNLOAD
 
 WORKDIR /sgl-workspace
 
@@ -666,7 +669,7 @@ RUN if [ "$BRANCH_TYPE" = "local" ]; then \
 RUN --mount=type=cache,target=/root/.cache/pip \
     cd /sgl-workspace/sglang \
     && python3 -m pip install --no-deps -e "python[${BUILD_TYPE}]" \
-    && kernels lock python \
+    && ( if [ ! -f python/kernels.lock ]; then kernels lock python; fi ) \
     && ( success=0; \
          # aarch64: kernels-community/sgl-flash-attn3 ships no arm variants; JIT-compile at runtime.
          # Remove this branch once arm cubins are published upstream.
@@ -684,6 +687,10 @@ RUN --mount=type=cache,target=/root/.cache/pip \
              # combo (e.g. cu129 publishes no torch>=2.10 cubin), fall back to \
              # runtime JIT instead of failing the build, mirroring the aarch64 branch. \
              if [ "$success" != "1" ]; then \
+                 if [ "$REQUIRE_KERNELS_DOWNLOAD" = "1" ]; then \
+                     echo "ERROR: required kernels-community artifacts were not downloaded"; \
+                     exit 1; \
+                 fi; \
                  echo "WARNING: no matching sgl-flash-attn3 cubin variant for this torch+CUDA; kernels will be JIT-compiled at runtime"; \
                  success=1; \
              fi; \
@@ -715,10 +722,13 @@ WORKDIR /sgl-workspace/sglang
 ARG SGLANG_BUILD_COMMIT=unknown
 ARG SGLANG_BUILD_URL=
 ARG SGLANG_IMAGE_TAG=local/sglang:dev
+ARG SGLANG_BUILD_SOURCE=https://github.com/sgl-project/sglang
+ARG SGLANG_USE_SGL_FA3_KERNEL=1
 ENV SGLANG_BUILD_COMMIT=${SGLANG_BUILD_COMMIT:-unknown} \
     SGLANG_BUILD_URL=${SGLANG_BUILD_URL:-} \
-    SGLANG_IMAGE_TAG=${SGLANG_IMAGE_TAG:-local/sglang:dev}
-LABEL org.opencontainers.image.source="https://github.com/sgl-project/sglang" \
+    SGLANG_IMAGE_TAG=${SGLANG_IMAGE_TAG:-local/sglang:dev} \
+    SGLANG_USE_SGL_FA3_KERNEL=${SGLANG_USE_SGL_FA3_KERNEL}
+LABEL org.opencontainers.image.source="${SGLANG_BUILD_SOURCE}" \
       org.opencontainers.image.revision="${SGLANG_BUILD_COMMIT}" \
       org.opencontainers.image.version="${SGLANG_IMAGE_TAG}" \
       org.opencontainers.image.url="${SGLANG_BUILD_URL}" \
@@ -744,7 +754,7 @@ LABEL org.opencontainers.image.source="https://github.com/sgl-project/sglang" \
 # - Ready-to-run inference server environment
 #
 # Note: Uses devel base for complete NVCC toolchain required by DeepGEMM JIT
-FROM nvidia/cuda:${CUDA_VERSION}-cudnn-devel-ubuntu24.04 AS runtime
+FROM ${CUDA_BASE_IMAGE} AS runtime
 
 ARG CUDA_VERSION
 ARG TARGETARCH
@@ -868,10 +878,13 @@ WORKDIR /sgl-workspace/sglang
 ARG SGLANG_BUILD_COMMIT=unknown
 ARG SGLANG_BUILD_URL=
 ARG SGLANG_IMAGE_TAG=local/sglang:dev
+ARG SGLANG_BUILD_SOURCE=https://github.com/sgl-project/sglang
+ARG SGLANG_USE_SGL_FA3_KERNEL=1
 ENV SGLANG_BUILD_COMMIT=${SGLANG_BUILD_COMMIT:-unknown} \
     SGLANG_BUILD_URL=${SGLANG_BUILD_URL:-} \
-    SGLANG_IMAGE_TAG=${SGLANG_IMAGE_TAG:-local/sglang:dev}
-LABEL org.opencontainers.image.source="https://github.com/sgl-project/sglang" \
+    SGLANG_IMAGE_TAG=${SGLANG_IMAGE_TAG:-local/sglang:dev} \
+    SGLANG_USE_SGL_FA3_KERNEL=${SGLANG_USE_SGL_FA3_KERNEL}
+LABEL org.opencontainers.image.source="${SGLANG_BUILD_SOURCE}" \
       org.opencontainers.image.revision="${SGLANG_BUILD_COMMIT}" \
       org.opencontainers.image.version="${SGLANG_IMAGE_TAG}" \
       org.opencontainers.image.url="${SGLANG_BUILD_URL}" \
