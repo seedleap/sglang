@@ -196,7 +196,11 @@ def observe_stage_seconds(
     stage = str(stage or "")
     result = str(result or "")
     scope = str(scope or "")
-    if stage not in VALID_STAGES or result not in VALID_RESULTS or scope not in VALID_SCOPES:
+    if (
+        stage not in VALID_STAGES
+        or result not in VALID_RESULTS
+        or scope not in VALID_SCOPES
+    ):
         return False
     duration = _coerce_duration_seconds(duration_s)
     if duration is None:
