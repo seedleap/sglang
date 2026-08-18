@@ -26,6 +26,9 @@ function extractFunction(name) {
 }
 
 const unpack = new Function(`${extractFunction("unpack")}; return unpack;`)();
+const protocolVersionConst = appJs.match(/const REALTIME_PROTOCOL_VERSION = \d+;/)?.[0];
+assert.ok(protocolVersionConst, "realtime protocol version constant should exist");
+const pack = new Function(`${protocolVersionConst}\n${extractFunction("pack")}; return pack;`)();
 
 function utf8(value) {
   return Array.from(new TextEncoder().encode(value));
@@ -55,6 +58,16 @@ assert.deepStrictEqual(
   unpack(payload),
   { server_epoch_ms: epochMs },
   "trace msgpack payloads should decode uint64 timestamps emitted by Python",
+);
+assert.deepStrictEqual(
+  unpack(pack({ type: "init", model: "test-model" })),
+  { version: 2, type: "init", model: "test-model" },
+  "realtime websocket envelopes should include the current protocol version",
+);
+assert.deepStrictEqual(
+  unpack(pack({ version: 7, type: "init", model: "legacy-test" })),
+  { version: 7, type: "init", model: "legacy-test" },
+  "explicit protocol versions should be preserved for compatibility tests",
 );
 
 assert.doesNotMatch(

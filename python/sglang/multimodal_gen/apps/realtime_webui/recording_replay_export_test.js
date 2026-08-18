@@ -21,13 +21,28 @@ assert.match(
 );
 assert.match(
   appJs,
+  /configuredNumber\("gameplayRecordingWidth", 1920\)/,
+  "stage recording should default to a higher-resolution 1080p canvas",
+);
+assert.match(
+  appJs,
+  /recordingCtx\.imageSmoothingQuality = "high"/,
+  "stage recording should use high-quality canvas resampling",
+);
+assert.match(
+  appJs,
+  /video_bits_per_second: recordingVideoBitrate/,
+  "recording metadata should expose the high-quality bitrate target",
+);
+assert.match(
+  appJs,
   /timing:\s*"wall_clock"/,
   "gameplay recordings should preserve real user timing independently of model FPS",
 );
 assert.match(
   appJs,
   /function startRecordingFramePump\(\)/,
-  "recording should use a wall-clock frame pump",
+  "recording should use a lightweight frame pump",
 );
 assert.match(
   appJs,
@@ -36,7 +51,7 @@ assert.match(
 );
 assert.match(
   appJs,
-  /track\.encoder\?\.encodeQueueSize > 4/,
+  /RECORDING_MAX_ENCODER_QUEUE_SIZE/,
   "recording backpressure should drop capture frames instead of stalling realtime play",
 );
 assert.doesNotMatch(
@@ -78,6 +93,11 @@ assert.match(
   appJs,
   /setRecordingDownloads\(outputs\)/,
   "both finalized gameplay videos should be exposed through one download control",
+);
+assert.doesNotMatch(
+  appJs,
+  /getDisplayMedia|display-media-webm|key: "screen"/,
+  "recording should not use browser screen capture or single-screen artifacts",
 );
 assert.match(
   appJs,
