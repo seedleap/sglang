@@ -31,6 +31,16 @@ session.socket = {
   send: (value) => sent.push(JSON.parse(value)),
 };
 
+session._queueMetric("client_render_wait", 4.5, {
+  codec: "h264",
+  scope: "frame",
+});
+session._flushClientMetrics();
+assert.equal(sent[0].type, "client_metric");
+assert.equal(sent[0].stage, "client_render_wait");
+assert.equal(sent[0].codec, "h264");
+sent.length = 0;
+
 assert.equal(session.bufferedAmount, 17);
 assert.equal(session.sendEvent({
   type: "event",

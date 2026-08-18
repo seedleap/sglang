@@ -61,7 +61,11 @@ def test_coordinator_http_session_lifecycle_and_structured_rejection(caplog):
         "trace_id": "trace-a",
     }
     with caplog.at_level(logging.INFO):
-        response = client.post("/v1/sessions/admit", json=request)
+        response = client.post(
+            "/v1/sessions/admit",
+            json=request,
+            headers={"X-World-Model-Family": "wan"},
+        )
     assert response.status_code == 200
     assignment = response.json()
     assert assignment["denoiser"]["worker_id"] == "denoiser-a"

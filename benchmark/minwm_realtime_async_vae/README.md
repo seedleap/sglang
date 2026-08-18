@@ -41,3 +41,19 @@ python benchmark/minwm_realtime_async_vae/e2e_production_chain.py \
   --browser-metrics-json artifacts/browser.json \
   --output-dir artifacts/production-run
 ```
+
+## World Model 指标合同
+
+实时链路统一暴露
+`world_model_critical_path_stage_duration_seconds`。为避免 Prometheus 标签基数失控：
+
+- `model` 只允许模型族 `wan`、`lingbot2`；模型目录、release、Git SHA 不进入标签。
+- `codec` 只允许 `none`、`webp`、`h264`、`jpeg`。
+- `result` 只允许 `success`、`error`、`timeout`、`cancelled`。
+- `scope` 只允许 `request`、`chunk`、`frame`，聚合时不得跨 scope 混算。
+- 0–1 秒区间按 50ms 分桶，并保留 0.5/1/2.5/5/10/25ms 的短延迟桶。
+
+每次成功观测还会向 stdout 输出一行 `event=world_model_metric` 的 JSON。现有
+Vector 日志采集可原样写入 ClickHouse，用于精确分位数或单事件排查；Prometheus
+Histogram 用于实时运维。可将 `WORLD_MODEL_METRIC_STRUCTURED_LOGS=false` 作为紧急
+止血开关，但默认开启。未执行到的阶段保持无数据，不用 `0` 伪造。
