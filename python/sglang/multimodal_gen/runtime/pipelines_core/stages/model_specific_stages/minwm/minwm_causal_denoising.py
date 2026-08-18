@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Callable
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +32,7 @@ from sglang.multimodal_gen.runtime.distributed.parallel_state import (
 )
 from sglang.multimodal_gen.runtime.managers.forward_context import set_forward_context
 from sglang.multimodal_gen.runtime.models.dits.minwm import (
+    apply_minwm_rotary_embedding,
     set_minwm_cuda_graph_active,
 )
 from sglang.multimodal_gen.runtime.models.dits.minwm_action import (
@@ -76,6 +78,23 @@ MINWM_T2V_FIRST_LATENT_CACHE = "minwm_t2v_first_latent"
 
 logger = init_logger(__name__)
 
+_MINWM_CUDA_GRAPH_CLEAN_COMMIT = os.environ.get(
+    "MINWM_CUDA_GRAPH_CLEAN_COMMIT", "0"
+).strip().lower() in {"1", "true", "yes", "on"}
+_MINWM_CUDA_GRAPH_DMD0_PRECOMMIT = os.environ.get(
+    "MINWM_CUDA_GRAPH_DMD0_PRECOMMIT", "0"
+).strip().lower() in {"1", "true", "yes", "on"}
+_MINWM_SATURATED_RECOMPUTE_GRAPH = "saturated_recompute"
+
+
+def _validate_minwm_cuda_graph_experiments(
+    *, clean_commit_enabled: bool, dmd0_precommit_enabled: bool
+) -> None:
+    if dmd0_precommit_enabled and not clean_commit_enabled:
+        raise ValueError(
+            "MINWM_CUDA_GRAPH_DMD0_PRECOMMIT requires MINWM_CUDA_GRAPH_CLEAN_COMMIT=1"
+        )
+
 
 def _static_cuda_graph_tensor(value: torch.Tensor) -> torch.Tensor:
     static = torch.empty_strided(
@@ -89,7 +108,9 @@ def _static_cuda_graph_tensor(value: torch.Tensor) -> torch.Tensor:
 
 
 def _cuda_graph_tensor_signature(value: torch.Tensor) -> tuple:
-    return (value.shape, value.stride(), value.dtype, value.device)
+    # Runtime sources are copied into fixed-layout capture buffers. Their source
+    # strides may vary without changing the captured addresses or graph contract.
+    return (value.shape, value.dtype, value.device)
 
 
 _MINWM_CUDA_GRAPH_PLAN_INPUTS = (
@@ -168,7 +189,7 @@ class _MinWMCudaGraphRunner:
                 source
             ):
                 raise RuntimeError(
-                    f"MinWM CUDA graph attention-plan input {name} changed shape"
+                    f"MinWM CUDA graph attention-plan input {name} changed contract"
                 )
             if target.data_ptr() != source.data_ptr():
                 target.copy_(source)
@@ -407,8 +428,14 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
     """One clean reference commit followed by four-frame action DMD chunks."""
 
     def __init__(self, transformer, scheduler) -> None:
+        _validate_minwm_cuda_graph_experiments(
+            clean_commit_enabled=_MINWM_CUDA_GRAPH_CLEAN_COMMIT,
+            dmd0_precommit_enabled=_MINWM_CUDA_GRAPH_DMD0_PRECOMMIT,
+        )
         super().__init__(transformer, scheduler)
         self._minwm_cuda_graph_enabled = False
+        self._minwm_cuda_graph_clean_commit_enabled = _MINWM_CUDA_GRAPH_CLEAN_COMMIT
+        self._minwm_cuda_graph_dmd0_precommit_enabled = _MINWM_CUDA_GRAPH_DMD0_PRECOMMIT
         self._minwm_cuda_graph_runner: _MinWMCudaGraphRunner | None = None
 
     def _causal_sequence_shard_enabled(self, batch: Req) -> bool:
@@ -687,6 +714,16 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
             original_dtype
         )
 
+    def _causal_context_cache_timestep_dtype(self) -> torch.dtype:
+        if getattr(self, "_minwm_cuda_graph_clean_commit_enabled", False) and getattr(
+            self, "_minwm_cuda_graph_enabled", False
+        ):
+            # MinWM's timestep embedder promotes both integer and FP32 zero to
+            # FP64 before the sinusoid. FP32 aligns the clean commit with DMD
+            # recompute graphs without changing the embedded value.
+            return torch.float32
+        return super()._causal_context_cache_timestep_dtype()
+
     def _get_causal_dmd_scheduler(self, batch: Req, server_args: ServerArgs):
         if batch.scheduler is None:
             raise ValueError("MinWM requires DMDTimestepPreparationStage")
@@ -942,6 +979,79 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
         self._parity_forward_index = index + 1
         return output
 
+    def _minwm_cuda_graph_family(
+        self, *, forward_kind: str, current_timestep: int
+    ) -> str | None:
+        if forward_kind == "dmd":
+            if current_timestep == 0:
+                return None
+            return _MINWM_SATURATED_RECOMPUTE_GRAPH
+        if forward_kind == "cache_commit" and getattr(
+            self, "_minwm_cuda_graph_clean_commit_enabled", False
+        ):
+            return _MINWM_SATURATED_RECOMPUTE_GRAPH
+        return None
+
+    def _minwm_cuda_graph_coverage_mode(self) -> str:
+        if getattr(self, "_minwm_cuda_graph_dmd0_precommit_enabled", False):
+            return "5/5 steady-state"
+        if getattr(self, "_minwm_cuda_graph_clean_commit_enabled", False):
+            return "4/5"
+        return "3/5"
+
+    def _log_minwm_cuda_graph_use_once(
+        self, *, forward_kind: str, current_timestep: int
+    ) -> None:
+        graph_use = (forward_kind, current_timestep)
+        logged_uses = getattr(self, "_minwm_cuda_graph_logged_uses", None)
+        if logged_uses is None:
+            logged_uses = set()
+            self._minwm_cuda_graph_logged_uses = logged_uses
+        if graph_use in logged_uses:
+            return
+        logged_uses.add(graph_use)
+        logger.info(
+            "MinWM CUDA graph use forward_kind=%s current_timestep=%d",
+            forward_kind,
+            current_timestep,
+        )
+
+    def _log_minwm_dmd0_precommit_success_once(
+        self, plan: MinWMCausalAttentionKVPlan
+    ) -> None:
+        if getattr(self, "_minwm_dmd0_precommit_success_logged", False):
+            return
+        self._minwm_dmd0_precommit_success_logged = True
+        logger.info(
+            "MinWM DMD0 CUDA graph precommit succeeded "
+            "current_chunk_start=%d selected_tokens=%d",
+            plan.current_chunk_start,
+            plan.selected_len,
+        )
+
+    def _abort_minwm_dmd0_precommit(
+        self, *, session, phase: str, error: Exception
+    ) -> None:
+        self._minwm_cuda_graph_runner = None
+        if session is not None:
+            session.poison(
+                f"MinWM DMD0 precommit {phase} failed: {type(error).__name__}: {error}"
+            )
+
+    @contextmanager
+    def _guard_minwm_dmd0_precommit(self, *, session, active: bool):
+        """Poison a session if anything fails after its cache was precommitted."""
+        try:
+            yield
+        except Exception as error:
+            if active:
+                self._abort_minwm_dmd0_precommit(
+                    session=session,
+                    phase="graph execution",
+                    error=error,
+                )
+            raise
+
     def _minwm_cuda_graph_key(
         self,
         *,
@@ -953,11 +1063,19 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
         pos_cond_kwargs: dict[str, Any],
         image_kwargs: dict[str, Any],
         current_timestep: int,
+        forward_kind: str,
         attn_metadata,
+        graph_family: str | None = None,
+        attention_plan: MinWMCausalAttentionKVPlan | None = None,
     ) -> tuple | None:
+        if graph_family is None:
+            graph_family = self._minwm_cuda_graph_family(
+                forward_kind=forward_kind,
+                current_timestep=current_timestep,
+            )
         if (
             not getattr(self, "_minwm_cuda_graph_enabled", False)
-            or current_timestep == 0
+            or graph_family is None
             or attn_metadata is not None
             or image_kwargs
             or set(pos_cond_kwargs) != {"action"}
@@ -977,7 +1095,7 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
         first_cache = kv_cache[0]
         if not isinstance(first_cache, MinWMCausalSelfAttentionKVCache):
             return None
-        plan = first_cache.last_attention_plan
+        plan = attention_plan or first_cache.last_attention_plan
         if (
             first_cache.allow_growth
             or first_cache.rope_position_mode != "block_relative"
@@ -1014,6 +1132,7 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
             _cuda_graph_attention_plan_signature(plan),
         )
         return (
+            graph_family,
             cache_pointers,
             crossattn_pointers,
             plan_signature,
@@ -1022,6 +1141,156 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
             _cuda_graph_tensor_signature(timestep),
             _cuda_graph_tensor_signature(action),
         )
+
+    def _try_precommit_dmd0_for_cuda_graph(
+        self,
+        *,
+        latent_model_input: torch.Tensor,
+        prompt_embeds: torch.Tensor,
+        timestep: torch.Tensor,
+        kv_cache: list,
+        crossattn_cache: list,
+        current_start_tokens: int,
+        start_frame: int,
+        pos_cond_kwargs: dict[str, Any],
+        image_kwargs: dict[str, Any],
+        current_timestep: int,
+        forward_kind: str,
+        attn_metadata,
+        session,
+    ) -> tuple[MinWMCausalAttentionKVPlan, tuple] | None:
+        runner = self._minwm_cuda_graph_runner
+        if (
+            not getattr(self, "_minwm_cuda_graph_clean_commit_enabled", False)
+            or not getattr(self, "_minwm_cuda_graph_dmd0_precommit_enabled", False)
+            or forward_kind != "dmd"
+            or current_timestep != 0
+            or runner is None
+            or runner.graph is None
+            or not kv_cache
+            or session is None
+        ):
+            return None
+
+        first_cache = kv_cache[0]
+        if not isinstance(first_cache, MinWMCausalSelfAttentionKVCache):
+            return None
+        # All layers must share one host metadata snapshot before append-plan
+        # preparation or cache storage mutation.
+        for cache in kv_cache:
+            if not isinstance(cache, MinWMCausalSelfAttentionKVCache):
+                return None
+            if (
+                cache.position_ids is not first_cache.position_ids
+                or cache.rope_position_ids is not first_cache.rope_position_ids
+                or cache.token_ids is not first_cache.token_ids
+                or cache.rope_temporal_offset != first_cache.rope_temporal_offset
+                or cache.pinned_token_start != first_cache.pinned_token_start
+                or cache.pinned_token_end != first_cache.pinned_token_end
+                or cache.prompt_pin_frame != first_cache.prompt_pin_frame
+                or cache.pending_prompt_switch != first_cache.pending_prompt_switch
+                or cache.pending_scene_cut_pin != first_cache.pending_scene_cut_pin
+            ):
+                return None
+
+        # Plan preparation can resolve pending prompt/scene-cut pins on the
+        # metadata layer. Treat that as a host transaction: a failed graph gate
+        # restores the exact pre-plan state so the eager path prepares once from
+        # the same inputs; a successful gate commits the plan to every layer.
+        host_plan_fields = (
+            "pinned_token_start",
+            "pinned_token_end",
+            "prompt_pin_frame",
+            "pending_prompt_switch",
+            "pending_scene_cut_pin",
+            "last_attention_plan",
+        )
+        host_plan_snapshot = {
+            name: getattr(first_cache, name) for name in host_plan_fields
+        }
+
+        def restore_host_plan_snapshot() -> None:
+            for name, value in host_plan_snapshot.items():
+                setattr(first_cache, name, value)
+
+        try:
+            append_plan = self.transformer.prepare_causal_attention_plan(
+                latent_model_input,
+                kv_cache=kv_cache,
+                current_start=current_start_tokens,
+                start_frame=start_frame,
+            )
+        except Exception:
+            restore_host_plan_snapshot()
+            raise
+        candidate_key = self._minwm_cuda_graph_key(
+            latent_model_input=latent_model_input,
+            prompt_embeds=prompt_embeds,
+            timestep=timestep,
+            kv_cache=kv_cache,
+            crossattn_cache=crossattn_cache,
+            pos_cond_kwargs=pos_cond_kwargs,
+            image_kwargs=image_kwargs,
+            current_timestep=current_timestep,
+            forward_kind=forward_kind,
+            attn_metadata=attn_metadata,
+            graph_family=_MINWM_SATURATED_RECOMPUTE_GRAPH,
+            attention_plan=append_plan,
+        )
+        if candidate_key is None or candidate_key != runner.key:
+            restore_host_plan_snapshot()
+            return None
+
+        try:
+            for cache in kv_cache:
+                cache.validate_saturated_append_precommit(append_plan)
+        except (TypeError, ValueError, RuntimeError) as error:
+            restore_host_plan_snapshot()
+            if not getattr(self, "_minwm_dmd0_precommit_warning_logged", False):
+                self._minwm_dmd0_precommit_warning_logged = True
+                logger.warning(
+                    "MinWM DMD0 CUDA graph precommit fell back to eager: %s", error
+                )
+            return None
+
+        # This try begins before the first cache mutation. Any failure after
+        # this boundary leaves layer/cache metadata potentially divergent and
+        # must make the session permanently non-reusable.
+        try:
+            recompute_plan = None
+            for cache in kv_cache:
+                layer_plan = cache.precommit_saturated_append(append_plan)
+                if recompute_plan is None:
+                    recompute_plan = layer_plan
+            assert recompute_plan is not None
+            for cache in kv_cache:
+                self._refresh_precommitted_rotated_history(cache, recompute_plan)
+                cache.last_attention_plan = recompute_plan
+            self._log_minwm_dmd0_precommit_success_once(recompute_plan)
+            return recompute_plan, candidate_key
+        except Exception as error:
+            self._abort_minwm_dmd0_precommit(
+                session=session,
+                phase="cache mutation",
+                error=error,
+            )
+            raise
+
+    @staticmethod
+    def _refresh_precommitted_rotated_history(
+        cache: MinWMCausalSelfAttentionKVCache,
+        plan: MinWMCausalAttentionKVPlan,
+    ) -> None:
+        old_count = plan.current_local_start
+        if cache.rotated_k is None or plan.key_cos is None or plan.key_sin is None:
+            raise RuntimeError("MinWM precommit is missing its rotated-K workspace")
+        rotated_history = apply_minwm_rotary_embedding(
+            cache.k[:, :old_count],
+            plan.key_cos[:old_count],
+            plan.key_sin[:old_count],
+        ).type_as(cache.rotated_k)
+        cache.rotated_k[:, :old_count].copy_(rotated_history)
+        cache.rotated_k_is_valid = True
 
     def _forward_causal_transformer_impl(
         self,
@@ -1040,21 +1309,48 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
         attn_metadata,
         target_dtype: torch.dtype,
         autocast_enabled: bool,
+        forward_kind: str,
     ) -> torch.Tensor:
         graph_key = None
+        attention_plan = None
+        precommit_committed = False
         if not self._causal_sequence_shard_enabled(batch):
-            graph_key = self._minwm_cuda_graph_key(
+            precommitted = self._try_precommit_dmd0_for_cuda_graph(
                 latent_model_input=latent_model_input,
                 prompt_embeds=prompt_embeds,
                 timestep=timestep,
                 kv_cache=kv_cache,
                 crossattn_cache=crossattn_cache,
+                current_start_tokens=current_start_tokens,
+                start_frame=start_frame,
                 pos_cond_kwargs=pos_cond_kwargs,
                 image_kwargs=image_kwargs,
                 current_timestep=current_timestep,
+                forward_kind=forward_kind,
                 attn_metadata=attn_metadata,
+                session=getattr(batch, "session", None),
             )
+            if precommitted is None:
+                graph_key = self._minwm_cuda_graph_key(
+                    latent_model_input=latent_model_input,
+                    prompt_embeds=prompt_embeds,
+                    timestep=timestep,
+                    kv_cache=kv_cache,
+                    crossattn_cache=crossattn_cache,
+                    pos_cond_kwargs=pos_cond_kwargs,
+                    image_kwargs=image_kwargs,
+                    current_timestep=current_timestep,
+                    forward_kind=forward_kind,
+                    attn_metadata=attn_metadata,
+                )
+            else:
+                attention_plan, graph_key = precommitted
+                precommit_committed = True
         with (
+            self._guard_minwm_dmd0_precommit(
+                session=getattr(batch, "session", None),
+                active=precommit_committed,
+            ),
             torch.autocast(
                 device_type=current_platform.device_type,
                 dtype=target_dtype,
@@ -1086,7 +1382,7 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
                 self._minwm_cuda_graph_runner = _MinWMCudaGraphRunner(graph_key)
             runner = self._minwm_cuda_graph_runner
             action = pos_cond_kwargs["action"]
-            attention_plan = kv_cache[0].last_attention_plan
+            attention_plan = attention_plan or kv_cache[0].last_attention_plan
             if not isinstance(attention_plan, MinWMCausalAttentionKVPlan):
                 raise RuntimeError("MinWM CUDA graph requires an attention plan")
 
@@ -1140,6 +1436,10 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
                     attention_plan=attention_plan,
                     capture_forward=capture_forward,
                 )
+                self._log_minwm_cuda_graph_use_once(
+                    forward_kind=forward_kind,
+                    current_timestep=current_timestep,
+                )
                 # The captured graph owns a single static output allocation.
                 # Downstream scheduler work can still consume it when the next
                 # denoising replay starts, so hand out an independent snapshot.
@@ -1183,6 +1483,16 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
             getattr(server_args, "enable_cuda_graph", False)
         )
         set_minwm_cuda_graph_active(self._minwm_cuda_graph_enabled)
+        if self._minwm_cuda_graph_enabled and not getattr(
+            self, "_minwm_cuda_graph_coverage_logged", False
+        ):
+            self._minwm_cuda_graph_coverage_logged = True
+            logger.info(
+                "MinWM CUDA graph coverage mode=%s clean_commit=%s dmd0_precommit=%s",
+                self._minwm_cuda_graph_coverage_mode(),
+                self._minwm_cuda_graph_clean_commit_enabled,
+                self._minwm_cuda_graph_dmd0_precommit_enabled,
+            )
         if self._minwm_cuda_graph_enabled and bool(
             getattr(server_args, "enable_torch_compile", False)
         ):
@@ -1280,6 +1590,7 @@ class MinWMCausalUniPCDenoisingStage(MinWMCausalDMDDenoisingStage):
                 attn_metadata=attn_metadata,
                 target_dtype=target_dtype,
                 autocast_enabled=autocast_enabled,
+                forward_kind="dmd",
             )
             flow_prediction_btchw = flow_prediction.permute(0, 2, 1, 3, 4)
             latents_btchw = scheduler.step(

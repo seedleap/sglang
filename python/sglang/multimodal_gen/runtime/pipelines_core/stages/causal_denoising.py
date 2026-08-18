@@ -513,7 +513,9 @@ class CausalDMDDenoisingStage(DenoisingStage):
         attn_metadata,
         target_dtype: torch.dtype,
         autocast_enabled: bool,
+        forward_kind: str,
     ) -> torch.Tensor:
+        del forward_kind
         with (
             torch.autocast(
                 device_type=current_platform.device_type,
@@ -586,6 +588,7 @@ class CausalDMDDenoisingStage(DenoisingStage):
             attn_metadata=attn_metadata,
             target_dtype=target_dtype,
             autocast_enabled=autocast_enabled,
+            forward_kind="dmd",
         )
         pred_noise_btchw = pred_noise.permute(0, 2, 1, 3, 4)
         x0_btchw = self._flow_prediction_to_x0(
@@ -711,7 +714,7 @@ class CausalDMDDenoisingStage(DenoisingStage):
             (context_input.shape[0], 1),
             int(context_noise),
             device=context_input.device,
-            dtype=torch.long,
+            dtype=self._causal_context_cache_timestep_dtype(),
         )
         self._forward_causal_transformer(
             batch,
@@ -728,7 +731,11 @@ class CausalDMDDenoisingStage(DenoisingStage):
             attn_metadata=attn_metadata,
             target_dtype=target_dtype,
             autocast_enabled=autocast_enabled,
+            forward_kind="cache_commit",
         )
+
+    def _causal_context_cache_timestep_dtype(self) -> torch.dtype:
+        return torch.long
 
     def _warm_up_causal_context_cache(
         self,

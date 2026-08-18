@@ -318,6 +318,30 @@ def test_realtime_session_cache_reuses_and_releases_state():
     assert not cache.release("session-a")
 
 
+def test_poisoned_realtime_session_requires_cache_release_before_replacement():
+    cache = RealtimeSessionCache(max_sessions=1)
+    first = _Req(realtime_session_id="session-a", block_idx=0, session=None)
+    cache.attach(first)
+    state = first.session.get_or_create_state(_State)
+
+    first.session.poison("graph replay failed after cache precommit")
+
+    assert first.session.is_poisoned
+    assert state.disposed
+    with pytest.raises(RuntimeError, match="poisoned and must be released"):
+        first.session.get_state(_State)
+    with pytest.raises(RuntimeError, match="poisoned and must be released"):
+        first.session.get_or_create_state(_State)
+    with pytest.raises(RuntimeError, match="poisoned and must be released"):
+        cache.attach(_Req(realtime_session_id="session-a", block_idx=0, session=None))
+
+    assert cache.release("session-a")
+    replacement = _Req(realtime_session_id="session-a", block_idx=0, session=None)
+    cache.attach(replacement)
+    assert replacement.session is not first.session
+    assert not replacement.session.is_poisoned
+
+
 def test_realtime_session_cache_rejects_missing_nonzero_chunk():
     cache = RealtimeSessionCache(max_sessions=1)
     req = _Req(realtime_session_id="missing", block_idx=1, session=None)
@@ -816,10 +840,8 @@ def test_scheduler_applies_realtime_replacement_that_arrives_before_request():
     scheduler = Scheduler.__new__(Scheduler)
     scheduler.waiting_queue = deque()
     replies = []
-    scheduler.return_result = (
-        lambda output, identity, should_not_return: replies.append(
-            (output.output, identity, should_not_return)
-        )
+    scheduler.return_result = lambda output, identity, should_not_return: (
+        replies.append((output.output, identity, should_not_return))
     )
     original = Req.__new__(Req)
     original.request_id = "request-1"
@@ -868,10 +890,8 @@ def test_scheduler_reports_realtime_replacement_after_dispatch_as_too_late():
     scheduler = Scheduler.__new__(Scheduler)
     scheduler.waiting_queue = deque()
     replies = []
-    scheduler.return_result = (
-        lambda output, identity, should_not_return: replies.append(
-            (output.output, identity, should_not_return)
-        )
+    scheduler.return_result = lambda output, identity, should_not_return: (
+        replies.append((output.output, identity, should_not_return))
     )
     dispatched = Req.__new__(Req)
     dispatched.request_id = "request-1"
@@ -919,8 +939,8 @@ def test_scheduler_rejects_replacement_with_mismatched_envelope_identity():
     scheduler = Scheduler.__new__(Scheduler)
     scheduler.waiting_queue = deque()
     replies = []
-    scheduler.return_result = (
-        lambda output, identity, should_not_return: replies.append(output.output)
+    scheduler.return_result = lambda output, identity, should_not_return: (
+        replies.append(output.output)
     )
     replacement = Req.__new__(Req)
     replacement.request_id = "other-request"

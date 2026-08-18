@@ -27,6 +27,7 @@ class RealtimeSession:
 
     def __init__(self) -> None:
         self._states: dict[type[BaseRealtimeState], BaseRealtimeState] = {}
+        self._poison_reason: str | None = None
 
     @staticmethod
     def resolve_session_id(req: Any) -> str | None:
@@ -39,6 +40,7 @@ class RealtimeSession:
         self, state_cls: type[BaseRealtimeState]
     ) -> BaseRealtimeState:
         """returns the BaseRealtimeState instance hold by the current RealtimeSession"""
+        self._raise_if_poisoned()
         state = self._states.get(state_cls)
         if state is None:
             state = state_cls()
@@ -46,7 +48,35 @@ class RealtimeSession:
         return state
 
     def get_state(self, state_cls: type[BaseRealtimeState]) -> BaseRealtimeState | None:
+        self._raise_if_poisoned()
         return self._states.get(state_cls)
+
+    @property
+    def is_poisoned(self) -> bool:
+        return self._poison_reason is not None
+
+    def _raise_if_poisoned(self) -> None:
+        if self._poison_reason is not None:
+            raise RuntimeError(
+                "Realtime session is poisoned and must be released before reuse: "
+                f"{self._poison_reason}"
+            )
+
+    def poison(self, reason: str) -> None:
+        """Dispose persistent state and permanently reject reuse of this object."""
+        if self._poison_reason is None:
+            self._poison_reason = str(reason)
+        states = list(self._states.values())
+        self._states.clear()
+        for state in states:
+            try:
+                state.dispose()
+            except Exception as error:
+                logger.warning(
+                    "Failed to dispose poisoned realtime session state %s: %s",
+                    type(state).__name__,
+                    error,
+                )
 
     def dispose(self) -> None:
         for state in list(self._states.values()):
@@ -121,7 +151,11 @@ class RealtimeSessionCache:
         now = self._clock()
         self._prune_stale(now)
 
-        if session_id not in self._sessions:
+        existing_session = self._sessions.get(session_id)
+        if existing_session is not None and existing_session.is_poisoned:
+            existing_session._raise_if_poisoned()
+
+        if existing_session is None:
             if req.block_idx > 0:
                 raise ValueError(
                     "Missing realtime session state for "
@@ -132,10 +166,13 @@ class RealtimeSessionCache:
                     "Realtime session capacity exhausted: "
                     f"active={len(self._sessions)} max={self.max_sessions}"
                 )
-            self._sessions[session_id] = req.session or RealtimeSession()
-        elif req.block_idx == 0:
-            old_session = self._sessions[session_id]
             new_session = req.session or RealtimeSession()
+            new_session._raise_if_poisoned()
+            self._sessions[session_id] = new_session
+        elif req.block_idx == 0:
+            old_session = existing_session
+            new_session = req.session or RealtimeSession()
+            new_session._raise_if_poisoned()
             if old_session is not new_session:
                 self._dispose_session(session_id, old_session)
             self._sessions[session_id] = new_session

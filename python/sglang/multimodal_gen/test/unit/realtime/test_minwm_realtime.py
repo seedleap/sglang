@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from contextlib import contextmanager
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -64,6 +65,7 @@ from sglang.multimodal_gen.runtime.models.dits.minwm_action import (
     validate_action_weights,
 )
 from sglang.multimodal_gen.runtime.models.dits.minwm_kv_cache import (
+    MinWMCausalAttentionKVPlan,
     MinWMCausalSelfAttentionKVCache,
 )
 from sglang.multimodal_gen.runtime.pipelines.minwm_causal_dmd_pipeline import (
@@ -77,12 +79,16 @@ from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.m
     MinWMCausalVaeDecodingStage,
     MinWMChunkLatentPreparationStage,
     _cuda_graph_attention_plan_signature,
+    _static_cuda_graph_tensor,
     _MinWMCudaGraphRunner,
 )
 from sglang.multimodal_gen.runtime.pipelines_core.stages.realtime.vae import (
     CausalVaeDecodingStage,
 )
 from sglang.multimodal_gen.runtime.realtime.session import RealtimeSession
+from sglang.multimodal_gen.runtime.realtime.states import (
+    get_realtime_causal_dit_state,
+)
 from sglang.multimodal_gen.tools.convert_minwm_checkpoint import (
     ACTION_HIDDEN_BIAS_KEYS,
     DEFAULT_SOURCE_URI,
@@ -476,6 +482,16 @@ def _append_minwm_test_frames(cache, frames, *, token_start):
     )
 
 
+def _set_minwm_test_plan_rope(plan, *, phase=0.0):
+    key_angle = plan.key_position_ids[:, :1].float().mul_(0.2).add_(phase)
+    query_angle = plan.query_position_ids[:, :1].float().mul_(0.2).add_(phase)
+    plan.key_cos = key_angle.cos()
+    plan.key_sin = key_angle.sin()
+    plan.query_cos = query_angle.cos()
+    plan.query_sin = query_angle.sin()
+    return plan
+
+
 def test_minwm_raw_k_cache_overwrites_active_chunk_without_appending():
     cache = _make_minwm_test_cache(cache_size=4, sink_tokens=0)
     first = _append_minwm_test_frames(cache, [0, 1], token_start=0)
@@ -551,6 +567,109 @@ def test_minwm_cache_append_does_not_repack_visible_history(monkeypatch):
     assert cache.last_attention_plan.preserves_all_history
     assert cache.token_ids.tolist() == [0, 1, 2, 3]
     assert cache.k[0, :4, 0, 0].tolist() == [0.0, 1.0, 2.0, 3.0]
+
+
+def test_minwm_saturated_append_precommit_matches_eager_rotary_attention():
+    cache = _make_minwm_test_cache(
+        cache_size=6,
+        sink_tokens=1,
+        rope_position_mode="block_relative",
+    )
+    _append_minwm_test_frames(cache, [0, 1], token_start=0)
+    _append_minwm_test_frames(cache, [2, 3], token_start=2)
+    _append_minwm_test_frames(cache, [4, 5], token_start=4)
+    previous_plan = _set_minwm_test_plan_rope(cache.last_attention_plan, phase=0.4)
+    cache.rotated_k = apply_minwm_rotary_embedding(
+        cache.k, previous_plan.key_cos, previous_plan.key_sin
+    )
+    cache.rotated_k_is_valid = True
+
+    append_plan = _set_minwm_test_plan_rope(
+        cache.prepare_attention_plan(
+            current_chunk_start=6,
+            position_ids=torch.tensor([[6, 0, 0], [7, 0, 0]]),
+        )
+    )
+    old_indices = append_plan.old_selected_indices
+    assert old_indices is not None
+    expected_history = apply_minwm_rotary_embedding(
+        cache.k[:, old_indices],
+        append_plan.key_cos[: old_indices.numel()],
+        append_plan.key_sin[: old_indices.numel()],
+    )
+    assert not torch.allclose(cache.rotated_k[:, old_indices], expected_history)
+    recompute_plan = cache.precommit_saturated_append(append_plan)
+
+    assert cache._read_indices() == (8, 6)
+    assert cache.token_ids.tolist() == [0, 3, 4, 5, 6, 7]
+    assert cache.k[0, :4, 0, 0].tolist() == [0.0, 3.0, 4.0, 5.0]
+    assert not cache.rotated_k_is_valid
+    assert recompute_plan.is_recompute
+    assert recompute_plan.current_local_start == 4
+    assert recompute_plan.current_local_end == 6
+
+    MinWMCausalDMDDenoisingStage._refresh_precommitted_rotated_history(
+        cache, recompute_plan
+    )
+    torch.testing.assert_close(cache.rotated_k[:, :4], expected_history, rtol=0, atol=0)
+    cache.set_prepared_attention_plan(recompute_plan)
+    current_k = torch.tensor([60.0, 70.0]).view(1, 2, 1, 1).expand(-1, -1, -1, 2)
+    cache.update_and_get_attention_kv(
+        key=current_k,
+        value=-current_k,
+        current_chunk_start=6,
+    )
+    cache.rotated_k[:, 4:6].copy_(
+        apply_minwm_rotary_embedding(
+            current_k,
+            recompute_plan.key_cos[4:6],
+            recompute_plan.key_sin[4:6],
+        )
+    )
+    eager_rotated_k = apply_minwm_rotary_embedding(
+        cache.k,
+        recompute_plan.key_cos,
+        recompute_plan.key_sin,
+    )
+    torch.testing.assert_close(cache.rotated_k, eager_rotated_k, rtol=0, atol=0)
+    query = torch.tensor([[[[0.25, -0.75]], [[1.5, 0.5]]]])
+    precommit_scores = torch.einsum("bqhd,bkhd->bhqk", query, cache.rotated_k)
+    eager_scores = torch.einsum("bqhd,bkhd->bhqk", query, eager_rotated_k)
+    precommit_attention = torch.einsum(
+        "bhqk,bkhd->bqhd", precommit_scores.softmax(dim=-1), cache.v
+    )
+    eager_attention = torch.einsum(
+        "bhqk,bkhd->bqhd", eager_scores.softmax(dim=-1), cache.v
+    )
+    torch.testing.assert_close(precommit_attention, eager_attention, rtol=0, atol=0)
+
+
+def test_minwm_saturated_append_precommit_validates_before_mutating():
+    cache = _make_minwm_test_cache(cache_size=4, sink_tokens=0)
+    _append_minwm_test_frames(cache, [0, 1], token_start=0)
+    _append_minwm_test_frames(cache, [2, 3], token_start=2)
+    append_plan = cache.prepare_attention_plan(
+        current_chunk_start=4,
+        position_ids=torch.tensor([[4, 0, 0], [5, 0, 0]]),
+    )
+    before_k = cache.k.clone()
+    before_indices = cache._read_indices()
+    new_selected_indices = append_plan.new_selected_indices
+    assert new_selected_indices is not None
+    append_plan.new_selected_indices = new_selected_indices.flip(0)
+
+    with pytest.raises(ValueError, match="chronological old history"):
+        cache.precommit_saturated_append(append_plan)
+
+    torch.testing.assert_close(cache.k, before_k, rtol=0, atol=0)
+    assert cache._read_indices() == before_indices
+    append_plan.new_selected_indices = new_selected_indices
+
+    with pytest.raises(RuntimeError, match="valid rotated-K"):
+        cache.precommit_saturated_append(append_plan)
+
+    torch.testing.assert_close(cache.k, before_k, rtol=0, atol=0)
+    assert cache._read_indices() == before_indices
 
 
 def test_minwm_fixed_shape_metadata_is_cached():
@@ -1171,6 +1290,704 @@ def test_minwm_cuda_graph_accepts_bounded_block_relative_cache():
     assert kwargs["rope_position_mode"] == "block_relative"
 
 
+@pytest.mark.parametrize(
+    (
+        "clean_commit_enabled",
+        "dmd0_precommit_enabled",
+        "expected_clean_family",
+        "expected_coverage",
+    ),
+    [
+        (False, False, None, "3/5"),
+        (True, False, "saturated_recompute", "4/5"),
+        (True, True, "saturated_recompute", "5/5 steady-state"),
+    ],
+)
+def test_minwm_cuda_graph_experiment_coverage_gating(
+    clean_commit_enabled,
+    dmd0_precommit_enabled,
+    expected_clean_family,
+    expected_coverage,
+):
+    stage = MinWMCausalDMDDenoisingStage.__new__(MinWMCausalDMDDenoisingStage)
+    stage._minwm_cuda_graph_clean_commit_enabled = clean_commit_enabled
+    stage._minwm_cuda_graph_dmd0_precommit_enabled = dmd0_precommit_enabled
+
+    actual = [
+        stage._minwm_cuda_graph_family(
+            forward_kind=forward_kind,
+            current_timestep=current_timestep,
+        )
+        for forward_kind, current_timestep in [
+            ("dmd", 0),
+            ("dmd", 1),
+            ("dmd", 2),
+            ("dmd", 3),
+            ("cache_commit", 0),
+        ]
+    ]
+
+    assert actual == [
+        None,
+        "saturated_recompute",
+        "saturated_recompute",
+        "saturated_recompute",
+        expected_clean_family,
+    ]
+    assert stage._minwm_cuda_graph_coverage_mode() == expected_coverage
+
+
+def test_minwm_cuda_graph_dmd0_precommit_requires_clean_commit(monkeypatch):
+    from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.minwm import (
+        minwm_causal_denoising as denoising_module,
+    )
+
+    monkeypatch.setattr(denoising_module, "_MINWM_CUDA_GRAPH_CLEAN_COMMIT", False)
+    monkeypatch.setattr(denoising_module, "_MINWM_CUDA_GRAPH_DMD0_PRECOMMIT", True)
+    monkeypatch.setattr(
+        denoising_module.CausalDMDDenoisingStage,
+        "__init__",
+        lambda *_args, **_kwargs: None,
+    )
+    with pytest.raises(ValueError, match="MINWM_CUDA_GRAPH_DMD0_PRECOMMIT requires"):
+        denoising_module.MinWMCausalDMDDenoisingStage(None, None)
+
+
+@pytest.mark.parametrize(
+    ("clean_commit_enabled", "expected_dtype"),
+    [(False, torch.long), (True, torch.float32)],
+)
+def test_minwm_cuda_graph_clean_commit_aligns_timestep_and_forward_kind(
+    clean_commit_enabled, expected_dtype
+):
+    stage = MinWMCausalDMDDenoisingStage.__new__(MinWMCausalDMDDenoisingStage)
+    stage._minwm_cuda_graph_enabled = True
+    stage._minwm_cuda_graph_clean_commit_enabled = clean_commit_enabled
+    stage._minwm_cuda_graph_dmd0_precommit_enabled = False
+    calls = []
+    stage._forward_causal_transformer = lambda _batch, **kwargs: calls.append(kwargs)
+
+    stage._update_causal_context_cache(
+        SimpleNamespace(),
+        SimpleNamespace(pipeline_config=SimpleNamespace(context_noise=0)),
+        context_input=torch.zeros(1, 2, 4, 3, 3),
+        prompt_embeds=torch.zeros(1, 2, 3),
+        kv_cache=[object()],
+        crossattn_cache=[object()],
+        current_start_tokens=48,
+        start_frame=12,
+        image_kwargs={},
+        pos_cond_kwargs={"action": torch.zeros(1, 4, dtype=torch.long)},
+        attn_metadata=None,
+        target_dtype=torch.float32,
+        autocast_enabled=False,
+    )
+
+    assert calls[0]["timestep"].dtype == expected_dtype
+    assert calls[0]["timestep"].item() == 0.0
+    assert calls[0]["forward_kind"] == "cache_commit"
+    assert calls[0]["current_timestep"] == 0
+
+
+def test_minwm_dmd0_precommit_shares_recompute_plan_across_layers(monkeypatch):
+    from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.minwm import (
+        minwm_causal_denoising as denoising_module,
+    )
+
+    monkeypatch.setattr(denoising_module.logger, "info", lambda *_args: None)
+    caches = [
+        _make_minwm_test_cache(
+            cache_size=6,
+            sink_tokens=1,
+            rope_position_mode="block_relative",
+        )
+        for _ in range(2)
+    ]
+
+    def append_layers(token_start):
+        positions = torch.tensor([[token_start, 0, 0], [token_start + 1, 0, 0]])
+        plan = caches[0].prepare_attention_plan(
+            current_chunk_start=token_start,
+            position_ids=positions,
+        )
+        for layer, cache in enumerate(caches):
+            cache.set_prepared_attention_plan(plan)
+            values = (
+                torch.tensor([token_start, token_start + 1], dtype=torch.float32)
+                .view(1, 2, 1, 1)
+                .expand(-1, -1, -1, 2)
+                .add(layer * 100)
+            )
+            cache.update_and_get_attention_kv(
+                key=values,
+                value=-values,
+                current_chunk_start=token_start,
+            )
+
+    append_layers(0)
+    append_layers(2)
+    append_layers(4)
+    for cache in caches:
+        cache.rotated_k = cache.k.clone().add_(1000)
+        cache.rotated_k_is_valid = True
+
+    append_plan = _set_minwm_test_plan_rope(
+        caches[0].prepare_attention_plan(
+            current_chunk_start=6,
+            position_ids=torch.tensor([[6, 0, 0], [7, 0, 0]]),
+        )
+    )
+    stage = MinWMCausalDMDDenoisingStage.__new__(MinWMCausalDMDDenoisingStage)
+    stage._minwm_cuda_graph_enabled = True
+    stage._minwm_cuda_graph_clean_commit_enabled = True
+    stage._minwm_cuda_graph_dmd0_precommit_enabled = True
+    stage._minwm_cuda_graph_runner = SimpleNamespace(graph=object(), key=("graph",))
+    stage.transformer = SimpleNamespace(
+        prepare_causal_attention_plan=lambda *_args, **_kwargs: append_plan
+    )
+    stage._minwm_cuda_graph_key = lambda **_kwargs: ("graph",)
+
+    recompute_plan, key = stage._try_precommit_dmd0_for_cuda_graph(
+        latent_model_input=torch.zeros(1, 2, 2, 3, 3),
+        prompt_embeds=torch.zeros(1, 2, 3),
+        timestep=torch.zeros(1, 1),
+        kv_cache=caches,
+        crossattn_cache=[SimpleNamespace(is_init=True)],
+        current_start_tokens=6,
+        start_frame=6,
+        pos_cond_kwargs={"action": torch.zeros(1, 2, dtype=torch.long)},
+        image_kwargs={},
+        current_timestep=0,
+        forward_kind="dmd",
+        attn_metadata=None,
+        session=RealtimeSession(),
+    )
+
+    assert key == ("graph",)
+    assert recompute_plan.is_recompute
+    assert all(cache.last_attention_plan is recompute_plan for cache in caches)
+    assert all(cache._read_indices() == (8, 6) for cache in caches)
+    assert caches[0].token_ids.tolist() == [0, 3, 4, 5, 6, 7]
+    assert caches[0].k[0, :4, 0, 0].tolist() == [0.0, 3.0, 4.0, 5.0]
+    assert caches[1].k[0, :4, 0, 0].tolist() == [100.0, 103.0, 104.0, 105.0]
+
+
+def test_minwm_dmd0_precommit_rolls_back_host_plan_on_fallback():
+    cache = _make_minwm_test_cache(
+        cache_size=4,
+        sink_tokens=1,
+        rope_position_mode="block_relative",
+    )
+    _append_minwm_test_frames(cache, [0, 1], token_start=0)
+    _append_minwm_test_frames(cache, [2, 3], token_start=2)
+    cache.rotated_k = cache.k.clone()
+    cache.rotated_k_is_valid = True
+    cache.pending_scene_cut_pin = True
+    before = (
+        cache._read_indices(),
+        cache.position_ids,
+        cache.rope_position_ids,
+        cache.token_ids,
+        cache.last_attention_plan,
+    )
+
+    stage = MinWMCausalDMDDenoisingStage.__new__(MinWMCausalDMDDenoisingStage)
+    stage._minwm_cuda_graph_enabled = True
+    stage._minwm_cuda_graph_clean_commit_enabled = True
+    stage._minwm_cuda_graph_dmd0_precommit_enabled = True
+    stage._minwm_cuda_graph_runner = SimpleNamespace(graph=object(), key=("graph",))
+    stage.transformer = SimpleNamespace(
+        prepare_causal_attention_plan=lambda *_args, **_kwargs: (
+            cache.prepare_attention_plan(
+                current_chunk_start=4,
+                position_ids=torch.tensor([[4, 0, 0], [5, 0, 0]]),
+            )
+        )
+    )
+
+    result = stage._try_precommit_dmd0_for_cuda_graph(
+        latent_model_input=torch.zeros(1, 2, 2, 3, 3),
+        prompt_embeds=torch.zeros(1, 2, 3),
+        timestep=torch.zeros(1, 1),
+        kv_cache=[cache],
+        crossattn_cache=[SimpleNamespace(is_init=True)],
+        current_start_tokens=4,
+        start_frame=4,
+        pos_cond_kwargs={"action": torch.zeros(1, 2, dtype=torch.long)},
+        image_kwargs={},
+        current_timestep=0,
+        forward_kind="dmd",
+        attn_metadata=None,
+        session=RealtimeSession(),
+    )
+
+    assert result is None
+    assert cache.pending_scene_cut_pin
+    assert cache._read_indices() == before[0]
+    assert cache.position_ids is before[1]
+    assert cache.rope_position_ids is before[2]
+    assert cache.token_ids is before[3]
+    assert cache.last_attention_plan is before[4]
+
+
+@pytest.mark.parametrize("fault_phase", ["partial_layer", "rotary_refresh"])
+def test_minwm_dmd0_cache_mutation_fault_poisons_session(monkeypatch, fault_phase):
+    caches = [
+        _make_minwm_test_cache(
+            cache_size=6,
+            sink_tokens=1,
+            rope_position_mode="block_relative",
+        )
+        for _ in range(2)
+    ]
+
+    def append_layers(token_start):
+        positions = torch.tensor([[token_start, 0, 0], [token_start + 1, 0, 0]])
+        plan = caches[0].prepare_attention_plan(
+            current_chunk_start=token_start,
+            position_ids=positions,
+        )
+        for layer, cache in enumerate(caches):
+            cache.set_prepared_attention_plan(plan)
+            values = torch.full((1, 2, 1, 2), float(token_start + layer * 100))
+            cache.update_and_get_attention_kv(
+                key=values,
+                value=-values,
+                current_chunk_start=token_start,
+            )
+
+    append_layers(0)
+    append_layers(2)
+    append_layers(4)
+    for cache in caches:
+        cache.rotated_k = cache.k.clone()
+        cache.rotated_k_is_valid = True
+    append_plan = _set_minwm_test_plan_rope(
+        caches[0].prepare_attention_plan(
+            current_chunk_start=6,
+            position_ids=torch.tensor([[6, 0, 0], [7, 0, 0]]),
+        )
+    )
+
+    session = RealtimeSession()
+    causal_state = get_realtime_causal_dit_state(session)
+    causal_state.kv_cache = caches
+    causal_state.crossattn_cache = [object()]
+    stage = MinWMCausalDMDDenoisingStage.__new__(MinWMCausalDMDDenoisingStage)
+    stage._minwm_cuda_graph_enabled = True
+    stage._minwm_cuda_graph_clean_commit_enabled = True
+    stage._minwm_cuda_graph_dmd0_precommit_enabled = True
+    stage._minwm_cuda_graph_runner = SimpleNamespace(graph=object(), key=("graph",))
+    stage.transformer = SimpleNamespace(
+        prepare_causal_attention_plan=lambda *_args, **_kwargs: append_plan
+    )
+    stage._minwm_cuda_graph_key = lambda **_kwargs: ("graph",)
+
+    if fault_phase == "partial_layer":
+        original_precommit = MinWMCausalSelfAttentionKVCache.precommit_saturated_append
+
+        def fail_second_layer(cache, plan):
+            if cache is caches[1]:
+                raise RuntimeError("injected second-layer compact failure")
+            return original_precommit(cache, plan)
+
+        monkeypatch.setattr(
+            MinWMCausalSelfAttentionKVCache,
+            "precommit_saturated_append",
+            fail_second_layer,
+        )
+    else:
+        stage._refresh_precommitted_rotated_history = lambda _cache, _plan: (
+            _ for _ in ()
+        ).throw(RuntimeError("injected retained-RoPE refresh failure"))
+
+    with pytest.raises(RuntimeError, match="injected"):
+        stage._try_precommit_dmd0_for_cuda_graph(
+            latent_model_input=torch.zeros(1, 2, 2, 3, 3),
+            prompt_embeds=torch.zeros(1, 2, 3),
+            timestep=torch.zeros(1, 1),
+            kv_cache=caches,
+            crossattn_cache=[SimpleNamespace(is_init=True)],
+            current_start_tokens=6,
+            start_frame=6,
+            pos_cond_kwargs={"action": torch.zeros(1, 2, dtype=torch.long)},
+            image_kwargs={},
+            current_timestep=0,
+            forward_kind="dmd",
+            attn_metadata=None,
+            session=session,
+        )
+
+    assert stage._minwm_cuda_graph_runner is None
+    assert session.is_poisoned
+    assert causal_state.kv_cache is None
+    assert causal_state.crossattn_cache is None
+    with pytest.raises(RuntimeError, match="poisoned and must be released"):
+        get_realtime_causal_dit_state(session)
+
+
+def test_minwm_cuda_graph_key_ignores_runtime_source_stride_and_copy_is_exact(
+    monkeypatch,
+):
+    def strided_copy(value):
+        storage = torch.empty((*value.shape, 2), dtype=value.dtype)
+        view = storage[..., 0]
+        view.copy_(value)
+        assert not view.is_contiguous()
+        return view
+
+    cache = _make_minwm_test_cache(
+        cache_size=4,
+        sink_tokens=0,
+        rope_position_mode="block_relative",
+    )
+    _append_minwm_test_frames(cache, [0, 1], token_start=0)
+    _append_minwm_test_frames(cache, [2, 3], token_start=2)
+    plan = _set_minwm_test_plan_rope(cache.last_attention_plan)
+    plan_inputs = (
+        "key_position_ids",
+        "query_position_ids",
+        "key_cos",
+        "key_sin",
+        "query_cos",
+        "query_sin",
+    )
+    captured_plan = replace(
+        plan,
+        **{name: strided_copy(getattr(plan, name)) for name in plan_inputs},
+    )
+    runtime_plan = replace(
+        plan,
+        **{
+            name: (
+                getattr(plan, name).contiguous().add(0.5)
+                if getattr(plan, name).is_floating_point()
+                else getattr(plan, name).contiguous().add(1)
+            )
+            for name in plan_inputs
+        },
+    )
+    cache.rotated_k = torch.empty_like(cache.k)
+    crossattn_cache = [
+        SimpleNamespace(
+            k=torch.zeros(1, 1, 1, 1),
+            v=torch.zeros(1, 1, 1, 1),
+            is_init=True,
+        )
+    ]
+    dmd1_static_source = strided_copy(
+        torch.arange(36, dtype=torch.float32).reshape(1, 2, 2, 3, 3)
+    )
+    dmd0_runtime_source = dmd1_static_source.contiguous().add(100)
+    prompt = torch.zeros(1, 2, 3)
+    timestep = torch.ones(1, 1)
+    action = torch.zeros(1, 2, dtype=torch.long)
+    stage = MinWMCausalDMDDenoisingStage.__new__(MinWMCausalDMDDenoisingStage)
+    stage._minwm_cuda_graph_enabled = True
+    stage._minwm_cuda_graph_clean_commit_enabled = True
+    stage._minwm_cuda_graph_dmd0_precommit_enabled = True
+    monkeypatch.setattr(torch.Tensor, "is_cuda", property(lambda _self: True))
+
+    captured_key = stage._minwm_cuda_graph_key(
+        latent_model_input=dmd1_static_source,
+        prompt_embeds=prompt,
+        timestep=timestep,
+        kv_cache=[cache],
+        crossattn_cache=crossattn_cache,
+        pos_cond_kwargs={"action": action},
+        image_kwargs={},
+        current_timestep=1,
+        forward_kind="dmd",
+        attn_metadata=None,
+        attention_plan=captured_plan,
+    )
+    candidate_key = stage._minwm_cuda_graph_key(
+        latent_model_input=dmd0_runtime_source,
+        prompt_embeds=prompt,
+        timestep=timestep,
+        kv_cache=[cache],
+        crossattn_cache=crossattn_cache,
+        pos_cond_kwargs={"action": action},
+        image_kwargs={},
+        current_timestep=0,
+        forward_kind="dmd",
+        attn_metadata=None,
+        graph_family="saturated_recompute",
+        attention_plan=runtime_plan,
+    )
+
+    assert captured_key is not None
+    assert candidate_key == captured_key
+
+    runner = _MinWMCudaGraphRunner(captured_key)
+    runner.static_latent = _static_cuda_graph_tensor(dmd1_static_source)
+    runner.static_prompt = _static_cuda_graph_tensor(prompt)
+    runner.static_timestep = _static_cuda_graph_tensor(timestep)
+    runner.static_action = _static_cuda_graph_tensor(action)
+    captured_stride = runner.static_latent.stride()
+    runner._copy_inputs(dmd0_runtime_source, prompt, timestep, action)
+    assert runner.static_latent.stride() == captured_stride
+    torch.testing.assert_close(
+        runner.static_latent, dmd0_runtime_source, rtol=0, atol=0
+    )
+
+    runner.capture_dependencies = captured_plan
+    captured_plan_strides = {
+        name: getattr(captured_plan, name).stride() for name in plan_inputs
+    }
+    runner._copy_attention_plan_inputs(runtime_plan)
+    for name in plan_inputs:
+        assert getattr(captured_plan, name).stride() == captured_plan_strides[name]
+        torch.testing.assert_close(
+            getattr(captured_plan, name), getattr(runtime_plan, name), rtol=0, atol=0
+        )
+
+
+@pytest.mark.parametrize(
+    (
+        "clean_commit_enabled",
+        "dmd0_precommit_enabled",
+        "expected_graph_runs",
+        "expected_eager_calls",
+    ),
+    [
+        (False, False, 6, 4),
+        (True, False, 8, 2),
+        (True, True, 9, 1),
+    ],
+)
+def test_minwm_cuda_graph_coverage_capture_count_stays_stable(
+    monkeypatch,
+    clean_commit_enabled,
+    dmd0_precommit_enabled,
+    expected_graph_runs,
+    expected_eager_calls,
+):
+    from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.minwm import (
+        minwm_causal_denoising as denoising_module,
+    )
+
+    metadata = {"global_end": 0, "commits": 0}
+    runners = []
+
+    class Transformer:
+        def __init__(self):
+            self.action_in = SimpleNamespace(validate_runtime_action=True)
+            self.eager_calls = 0
+
+        def __call__(self, latent, _prompt, timestep, **_kwargs):
+            self.eager_calls += 1
+            if bool(torch.count_nonzero(timestep).item()):
+                metadata["global_end"] += 4
+                metadata["commits"] += 1
+            return latent
+
+    class Runner:
+        def __init__(self, key):
+            self.key = key
+            self.graph = object()
+            self.run_count = 0
+            runners.append(self)
+
+        def run(self, *, latent, **_kwargs):
+            self.run_count += 1
+            return latent
+
+    stage = MinWMCausalDMDDenoisingStage.__new__(MinWMCausalDMDDenoisingStage)
+    stage.transformer = Transformer()
+    stage._minwm_cuda_graph_clean_commit_enabled = clean_commit_enabled
+    stage._minwm_cuda_graph_dmd0_precommit_enabled = dmd0_precommit_enabled
+    stage._minwm_cuda_graph_runner = None
+    stage._causal_sequence_shard_enabled = lambda _batch: False
+    stage._log_minwm_cuda_graph_use_once = lambda **_kwargs: None
+    graph_key = ("saturated_recompute",)
+    plan = MinWMCausalAttentionKVPlan.__new__(MinWMCausalAttentionKVPlan)
+
+    def key_for_step(*, forward_kind, current_timestep, **_kwargs):
+        family = stage._minwm_cuda_graph_family(
+            forward_kind=forward_kind,
+            current_timestep=current_timestep,
+        )
+        return None if family is None else graph_key
+
+    def precommit_if_ready(*, forward_kind, current_timestep, **_kwargs):
+        if (
+            forward_kind == "dmd"
+            and current_timestep == 0
+            and stage._minwm_cuda_graph_clean_commit_enabled
+            and stage._minwm_cuda_graph_dmd0_precommit_enabled
+            and stage._minwm_cuda_graph_runner is not None
+        ):
+            metadata["global_end"] += 4
+            metadata["commits"] += 1
+            return plan, graph_key
+        return None
+
+    stage._minwm_cuda_graph_key = key_for_step
+    stage._try_precommit_dmd0_for_cuda_graph = precommit_if_ready
+    monkeypatch.setattr(denoising_module, "_MinWMCudaGraphRunner", Runner)
+    monkeypatch.setattr(
+        denoising_module, "current_platform", SimpleNamespace(device_type="cpu")
+    )
+
+    latent = torch.zeros(1, 2, 4, 3, 3)
+    common = dict(
+        prompt_embeds=torch.zeros(1, 2, 3),
+        kv_cache=[SimpleNamespace(last_attention_plan=plan)],
+        crossattn_cache=[object()],
+        start_frame=0,
+        image_kwargs={},
+        pos_cond_kwargs={"action": torch.zeros(1, 4, dtype=torch.long)},
+        attn_metadata=None,
+        target_dtype=torch.float32,
+        autocast_enabled=False,
+    )
+    for chunk in range(2):
+        for forward_kind, current_timestep in [
+            ("dmd", 0),
+            ("dmd", 1),
+            ("dmd", 2),
+            ("dmd", 3),
+            ("cache_commit", 0),
+        ]:
+            stage._forward_causal_transformer_impl(
+                SimpleNamespace(enable_sequence_shard=False, session=None),
+                latent_model_input=latent,
+                timestep=(
+                    torch.zeros(1, 1)
+                    if forward_kind == "cache_commit"
+                    else torch.ones(1, 1)
+                ),
+                current_start_tokens=chunk * 4,
+                forward_kind=forward_kind,
+                current_timestep=current_timestep,
+                **common,
+            )
+
+    assert len(runners) == 1
+    assert runners[0].run_count == expected_graph_runs
+    assert stage.transformer.eager_calls == expected_eager_calls
+    assert metadata == {"global_end": 8, "commits": 2}
+
+
+@pytest.mark.parametrize("fault_site", ["replay", "output_clone"])
+def test_minwm_dmd0_graph_fault_poisons_session(monkeypatch, fault_site):
+    from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.minwm import (
+        minwm_causal_denoising as denoising_module,
+    )
+
+    class CloneFault:
+        def clone(self):
+            raise RuntimeError("injected output clone failure")
+
+    class FaultRunner:
+        key = ("graph",)
+        graph = object()
+
+        def run(self, **_kwargs):
+            if fault_site == "replay":
+                raise RuntimeError("injected graph replay failure")
+            return CloneFault()
+
+    session = RealtimeSession()
+    causal_state = get_realtime_causal_dit_state(session)
+    causal_state.kv_cache = [object()]
+    causal_state.crossattn_cache = [object()]
+    plan = MinWMCausalAttentionKVPlan.__new__(MinWMCausalAttentionKVPlan)
+    runner = FaultRunner()
+    stage = MinWMCausalDMDDenoisingStage.__new__(MinWMCausalDMDDenoisingStage)
+    stage.transformer = SimpleNamespace(
+        action_in=SimpleNamespace(validate_runtime_action=True)
+    )
+    stage._minwm_cuda_graph_runner = runner
+    stage._causal_sequence_shard_enabled = lambda _batch: False
+    stage._try_precommit_dmd0_for_cuda_graph = lambda **_kwargs: (plan, ("graph",))
+    stage._log_minwm_cuda_graph_use_once = lambda **_kwargs: None
+    monkeypatch.setattr(
+        denoising_module, "current_platform", SimpleNamespace(device_type="cpu")
+    )
+
+    with pytest.raises(RuntimeError, match="injected"):
+        stage._forward_causal_transformer_impl(
+            SimpleNamespace(enable_sequence_shard=False, session=session),
+            latent_model_input=torch.zeros(1, 2, 4, 3, 3),
+            prompt_embeds=torch.zeros(1, 2, 3),
+            timestep=torch.ones(1, 1),
+            kv_cache=[SimpleNamespace(last_attention_plan=plan)],
+            crossattn_cache=[object()],
+            current_start_tokens=4,
+            start_frame=4,
+            image_kwargs={},
+            pos_cond_kwargs={"action": torch.zeros(1, 4, dtype=torch.long)},
+            current_timestep=0,
+            forward_kind="dmd",
+            attn_metadata=None,
+            target_dtype=torch.float32,
+            autocast_enabled=False,
+        )
+
+    assert stage._minwm_cuda_graph_runner is None
+    assert session.is_poisoned
+    assert causal_state.kv_cache is None
+    assert causal_state.crossattn_cache is None
+    with pytest.raises(RuntimeError, match="poisoned and must be released"):
+        get_realtime_causal_dit_state(session)
+
+
+def test_minwm_clean_only_graph_fault_does_not_poison_session(monkeypatch):
+    from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.minwm import (
+        minwm_causal_denoising as denoising_module,
+    )
+
+    class FaultRunner:
+        key = ("graph",)
+        graph = object()
+
+        def run(self, **_kwargs):
+            raise RuntimeError("injected clean replay failure")
+
+    session = RealtimeSession()
+    causal_state = get_realtime_causal_dit_state(session)
+    causal_state.kv_cache = [object()]
+    plan = MinWMCausalAttentionKVPlan.__new__(MinWMCausalAttentionKVPlan)
+    runner = FaultRunner()
+    stage = MinWMCausalDMDDenoisingStage.__new__(MinWMCausalDMDDenoisingStage)
+    stage.transformer = SimpleNamespace(
+        action_in=SimpleNamespace(validate_runtime_action=True)
+    )
+    stage._minwm_cuda_graph_runner = runner
+    stage._causal_sequence_shard_enabled = lambda _batch: False
+    stage._try_precommit_dmd0_for_cuda_graph = lambda **_kwargs: None
+    stage._minwm_cuda_graph_key = lambda **_kwargs: ("graph",)
+    monkeypatch.setattr(
+        denoising_module, "current_platform", SimpleNamespace(device_type="cpu")
+    )
+
+    with pytest.raises(RuntimeError, match="injected clean replay failure"):
+        stage._forward_causal_transformer_impl(
+            SimpleNamespace(enable_sequence_shard=False, session=session),
+            latent_model_input=torch.zeros(1, 2, 4, 3, 3),
+            prompt_embeds=torch.zeros(1, 2, 3),
+            timestep=torch.zeros(1, 1),
+            kv_cache=[SimpleNamespace(last_attention_plan=plan)],
+            crossattn_cache=[object()],
+            current_start_tokens=4,
+            start_frame=4,
+            image_kwargs={},
+            pos_cond_kwargs={"action": torch.zeros(1, 4, dtype=torch.long)},
+            current_timestep=0,
+            forward_kind="cache_commit",
+            attn_metadata=None,
+            target_dtype=torch.float32,
+            autocast_enabled=False,
+        )
+
+    assert stage._minwm_cuda_graph_runner is runner
+    assert not session.is_poisoned
+    assert session.get_state(type(causal_state)) is causal_state
+    assert causal_state.kv_cache is not None
+
+
 def test_minwm_sequence_shard_forward_bypasses_cuda_graph(monkeypatch):
     from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.minwm import (
         minwm_causal_denoising as denoising_module,
@@ -1216,6 +2033,7 @@ def test_minwm_sequence_shard_forward_bypasses_cuda_graph(monkeypatch):
         image_kwargs={},
         pos_cond_kwargs={"action": torch.zeros(1, 4, dtype=torch.long)},
         current_timestep=1,
+        forward_kind="dmd",
         attn_metadata=None,
         target_dtype=torch.float32,
         autocast_enabled=False,

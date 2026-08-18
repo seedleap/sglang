@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import torch
 
@@ -503,6 +503,110 @@ class MinWMCausalSelfAttentionKVCache(CausalSelfAttentionKVCache):
     def set_prepared_attention_plan(self, plan: MinWMCausalAttentionKVPlan) -> None:
         self.current_position_ids = plan.current_position_ids
         self.prepared_attention_plan = plan
+
+    def validate_saturated_append_precommit(
+        self, plan: MinWMCausalAttentionKVPlan
+    ) -> None:
+        """Validate a saturated append before splitting host commit from DiT."""
+        global_end, local_end = self._read_indices()
+        old_indices = plan.old_selected_indices
+        new_indices = plan.new_selected_indices
+        if plan.is_recompute or plan.preserves_all_history:
+            raise ValueError("MinWM precommit requires an evicting append plan")
+        if global_end != plan.global_end_before or local_end != plan.local_end_before:
+            raise RuntimeError("MinWM precommit cache metadata is out of sync")
+        if local_end != self.cache_size or plan.selected_len != self.cache_size:
+            raise ValueError("MinWM precommit requires a saturated cache window")
+        if old_indices is None or new_indices is None:
+            raise ValueError("MinWM precommit requires fixed old/new selections")
+        old_count = int(old_indices.numel())
+        new_count = int(new_indices.numel())
+        if (
+            new_count != plan.num_new_tokens
+            or old_count + new_count != plan.selected_len
+            or plan.current_local_start != old_count
+            or plan.current_local_end != plan.selected_len
+        ):
+            raise ValueError(
+                "MinWM precommit requires old history followed by the full current chunk"
+            )
+        expected_new_indices = torch.arange(
+            plan.num_new_tokens,
+            dtype=new_indices.dtype,
+            device=new_indices.device,
+        )
+        if not torch.equal(new_indices, expected_new_indices) or (
+            old_count > 1
+            and not bool(torch.all(old_indices[1:] > old_indices[:-1]).item())
+        ):
+            raise ValueError(
+                "MinWM precommit requires chronological old history and current tail"
+            )
+        if (
+            self.position_ids is None
+            or self.rope_position_ids is None
+            or self.token_ids is None
+        ):
+            raise RuntimeError("MinWM precommit requires initialized position metadata")
+        if self.rotated_k is None or not self.rotated_k_is_valid:
+            raise RuntimeError("MinWM precommit requires a valid rotated-K cache")
+        if (
+            plan.key_cos is None
+            or plan.key_sin is None
+            or plan.key_cos.shape[0] != plan.selected_len
+            or plan.key_sin.shape != plan.key_cos.shape
+        ):
+            raise RuntimeError("MinWM precommit requires full precomputed key RoPE")
+
+    def precommit_saturated_append(
+        self, plan: MinWMCausalAttentionKVPlan
+    ) -> MinWMCausalAttentionKVPlan:
+        """Compact committed history and reserve the current tail for graph replay."""
+        self.validate_saturated_append_precommit(plan)
+        old_indices = plan.old_selected_indices
+        assert old_indices is not None
+        old_count = int(old_indices.numel())
+
+        self.k[:, :old_count].copy_(self.k[:, old_indices].contiguous())
+        self.v[:, :old_count].copy_(self.v[:, old_indices].contiguous())
+        # A block-relative window roll can change the RoPE of retained history.
+        # The stage must rebuild this prefix with the append plan's new key RoPE
+        # before replaying the recompute graph, which only rotates current K.
+        self.rotated_k_is_valid = False
+
+        self.position_ids = plan.position_ids
+        self.rope_position_ids = plan.rope_position_ids
+        self.token_ids = plan.token_ids
+        self.current_position_ids = plan.current_position_ids
+        self.rope_temporal_offset = plan.rope_temporal_offset
+        self.pinned_token_start = plan.pinned_token_start
+        self.pinned_token_end = plan.pinned_token_end
+        self.prompt_pin_frame = plan.prompt_pin_frame
+        self.pending_prompt_switch = plan.pending_prompt_switch
+        self.pending_scene_cut_pin = plan.pending_scene_cut_pin
+        self.prepared_attention_plan = None
+        self._write_indices(
+            global_end_index=plan.current_chunk_end,
+            local_end_index=plan.selected_len,
+        )
+
+        recompute_plan = replace(
+            plan,
+            state_key=self._attention_plan_state_key(
+                current_chunk_start=plan.current_chunk_start,
+                num_new_tokens=plan.num_new_tokens,
+                position_ids=plan.current_position_ids,
+            ),
+            global_end_before=plan.current_chunk_end,
+            local_end_before=plan.selected_len,
+            required_tokens=plan.selected_len,
+            old_selected_indices=None,
+            new_selected_indices=None,
+            preserves_all_history=True,
+            is_recompute=True,
+        )
+        self.last_attention_plan = recompute_plan
+        return recompute_plan
 
     @staticmethod
     def _select_kv_with_plan(
