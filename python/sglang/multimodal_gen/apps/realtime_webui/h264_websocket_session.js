@@ -51,8 +51,13 @@
       root = null,
       endpoint = "/api/h264ws",
       startupTimeoutMs = 30000,
-      liveEdgeTargetMs = 80,
-      liveEdgeSeekThresholdMs = 420,
+      liveEdgeTargetMs = 700,
+      liveEdgeSeekThresholdMs = 2200,
+      liveEdgeSeekCooldownMs = 3000,
+      playbackStartupBufferTimeoutMs = 3000,
+      initialPlaybackRate = 0.55,
+      minPlaybackRate = 0.35,
+      maxPlaybackRate = 1.08,
       onState = () => {},
       onPlayable = () => {},
       onPresentedFrame = () => {},
@@ -72,7 +77,21 @@
       this.liveEdgeTargetMs = Math.max(0, Number(liveEdgeTargetMs) || 0);
       this.liveEdgeSeekThresholdMs = Math.max(
         this.liveEdgeTargetMs,
-        Number(liveEdgeSeekThresholdMs) || 420,
+        Number(liveEdgeSeekThresholdMs) || 2200,
+      );
+      this.liveEdgeSeekCooldownMs = Math.max(0, Number(liveEdgeSeekCooldownMs) || 0);
+      this.playbackStartupBufferTimeoutMs = Math.max(
+        0,
+        Number(playbackStartupBufferTimeoutMs) || 0,
+      );
+      this.minPlaybackRate = Math.max(0.1, Number(minPlaybackRate) || 0.35);
+      this.maxPlaybackRate = Math.max(
+        this.minPlaybackRate,
+        Number(maxPlaybackRate) || 1.08,
+      );
+      this.initialPlaybackRate = Math.min(
+        this.maxPlaybackRate,
+        Math.max(this.minPlaybackRate, Number(initialPlaybackRate) || 0.55),
       );
       this.onState = onState;
       this.onPlayable = onPlayable;
@@ -115,6 +134,14 @@
       this.mediaFps = 24;
       this.playbackAckEnabled = false;
       this.lastStats = {};
+      this.playbackStarted = false;
+      this.firstBufferedAtMs = 0;
+      this.lastLiveEdgeSeekAtMs = -Infinity;
+      this.liveEdgeSeekCount = 0;
+      this.estimatedDeliveryFps = 0;
+      this.arrivalChunkIndex = null;
+      this.arrivalChunkStartedAtMs = 0;
+      this.arrivalChunkFrames = 0;
       this.handlePlayable = () => this._markPlayable();
       for (const name of ["loadeddata", "playing", "resize", "timeupdate"]) {
         this.video.addEventListener(name, this.handlePlayable);
@@ -167,6 +194,15 @@
       this.networkSample = null;
       this.lastStats = {};
       this.lastRenderedChunk = null;
+      this.playbackStarted = false;
+      this.firstBufferedAtMs = 0;
+      this.lastLiveEdgeSeekAtMs = -Infinity;
+      this.liveEdgeSeekCount = 0;
+      this.estimatedDeliveryFps = 0;
+      this.arrivalChunkIndex = null;
+      this.arrivalChunkStartedAtMs = 0;
+      this.arrivalChunkFrames = 0;
+      this.video.playbackRate = this.initialPlaybackRate;
       this._clearMetricFlushTimer();
       this.metricBuffer = [];
       this._setState("connecting", { codec: "h264", protocol: "websocket" });
@@ -377,6 +413,13 @@
       this.mediaBatches = [];
       this.controlSentEpochByEvent.clear();
       this.playable = false;
+      this.playbackStarted = false;
+      this.firstBufferedAtMs = 0;
+      this.estimatedDeliveryFps = 0;
+      this.arrivalChunkIndex = null;
+      this.arrivalChunkStartedAtMs = 0;
+      this.arrivalChunkFrames = 0;
+      this.video.playbackRate = 1;
       if (emitState && hadSession) this._setState("closed", { reason });
     }
 
@@ -469,15 +512,41 @@
     _maintainLiveEdge() {
       const sourceBuffer = this.sourceBuffer;
       if (!sourceBuffer || !sourceBuffer.buffered?.length) return;
+      const now = performance.now();
       const end = sourceBuffer.buffered.end(sourceBuffer.buffered.length - 1);
       const current = Number(this.video.currentTime || 0);
       const leadMs = Math.max(0, (end - current) * 1000);
       let playbackBufferMs = leadMs;
-      if (leadMs > this.liveEdgeSeekThresholdMs) {
+      if (!this.firstBufferedAtMs) this.firstBufferedAtMs = now;
+      if (!this.playbackStarted) {
+        const startupWaitMs = now - this.firstBufferedAtMs;
+        if (
+          leadMs < this.liveEdgeTargetMs
+          && startupWaitMs < this.playbackStartupBufferTimeoutMs
+        ) {
+          this._emitStats({
+            mseBufferMs: leadMs,
+            playbackBufferMs: leadMs,
+            appendQueueBytes: this.appendQueueBytes,
+            playbackRate: this.video.playbackRate,
+            estimatedDeliveryFps: this.estimatedDeliveryFps,
+            playbackState: "buffering",
+          });
+          return;
+        }
+        this.playbackStarted = true;
+      }
+      if (
+        leadMs > this.liveEdgeSeekThresholdMs
+        && now - this.lastLiveEdgeSeekAtMs >= this.liveEdgeSeekCooldownMs
+      ) {
         const liveEdge = Math.max(0, end - this.liveEdgeTargetMs / 1000);
         this.video.currentTime = liveEdge;
         playbackBufferMs = Math.max(0, (end - liveEdge) * 1000);
+        this.lastLiveEdgeSeekAtMs = now;
+        this.liveEdgeSeekCount += 1;
       }
+      this._updatePlaybackRate(playbackBufferMs);
       if (!sourceBuffer.updating && current > 6) {
         const removeEnd = current - 3;
         if (removeEnd > 0 && sourceBuffer.buffered.start(0) < removeEnd) {
@@ -490,13 +559,74 @@
         mseBufferMs: playbackBufferMs,
         playbackBufferMs,
         appendQueueBytes: this.appendQueueBytes,
+        playbackRate: this.video.playbackRate,
+        estimatedDeliveryFps: this.estimatedDeliveryFps,
+        liveEdgeSeekCount: this.liveEdgeSeekCount,
+        playbackState: "playing",
       });
+    }
+
+    _observeChunkArrival(event, receivedAtMs) {
+      const chunkIndex = Number(event.chunk_index);
+      if (!Number.isFinite(chunkIndex)) return;
+      const frameCount = Math.max(1, Number(event.num_frames || 1));
+      if (this.arrivalChunkIndex === null) {
+        this.arrivalChunkIndex = chunkIndex;
+        this.arrivalChunkStartedAtMs = receivedAtMs;
+        this.arrivalChunkFrames = frameCount;
+        return;
+      }
+      if (chunkIndex === this.arrivalChunkIndex) {
+        this.arrivalChunkFrames += frameCount;
+        return;
+      }
+      const elapsedMs = receivedAtMs - this.arrivalChunkStartedAtMs;
+      if (elapsedMs >= 100 && elapsedMs <= 10000 && this.arrivalChunkFrames > 0) {
+        const observedFps = this.arrivalChunkFrames * 1000 / elapsedMs;
+        if (observedFps > 0 && observedFps <= this.mediaFps * 2) {
+          this.estimatedDeliveryFps = this.estimatedDeliveryFps > 0
+            ? this.estimatedDeliveryFps * 0.65 + observedFps * 0.35
+            : observedFps;
+        }
+      }
+      this.arrivalChunkIndex = chunkIndex;
+      this.arrivalChunkStartedAtMs = receivedAtMs;
+      this.arrivalChunkFrames = frameCount;
+    }
+
+    _updatePlaybackRate(bufferMs) {
+      if (!this.playbackStarted) return;
+      const measuredRate = this.estimatedDeliveryFps > 0
+        ? this.estimatedDeliveryFps / this.mediaFps
+        : this.initialPlaybackRate;
+      // Chunk-bound delivery slightly overstates sustainable throughput. Keep a
+      // small reserve so cadence jitter does not drain the MSE buffer between chunks.
+      const conservativeMeasuredRate = measuredRate * 0.92;
+      const baseRate = Math.min(
+        this.maxPlaybackRate,
+        Math.max(this.minPlaybackRate, conservativeMeasuredRate),
+      );
+      const bufferErrorMs = bufferMs - this.liveEdgeTargetMs;
+      const normalizedError = this.liveEdgeTargetMs > 0
+        ? bufferErrorMs / this.liveEdgeTargetMs
+        : 0;
+      const correction = Math.max(-0.3, Math.min(0.4, normalizedError * 0.3));
+      const desiredRate = Math.min(
+        this.maxPlaybackRate,
+        Math.max(this.minPlaybackRate, baseRate + correction),
+      );
+      const currentRate = Number(this.video.playbackRate || this.initialPlaybackRate);
+      this.video.playbackRate = Math.min(
+        this.maxPlaybackRate,
+        Math.max(this.minPlaybackRate, currentRate * 0.55 + desiredRate * 0.45),
+      );
     }
 
     _handleMetadata(event) {
       if (event.type === "media_batch") {
         const receivedAt = performance.now();
         const frameCount = Math.max(1, Number(event.num_frames || 1));
+        this._observeChunkArrival(event, receivedAt);
         for (let index = 0; index < frameCount; index += 1) {
           this.deliverySamples.push(receivedAt);
           if (!event.repeated_frame) this.sourceSamples.push(receivedAt);
@@ -718,6 +848,7 @@
         const buffered = this.sourceBuffer?.buffered;
         const end = buffered?.length ? buffered.end(buffered.length - 1) : 0;
         const bufferMs = Math.max(0, (end - Number(this.video.currentTime || 0)) * 1000);
+        this._updatePlaybackRate(bufferMs);
         this._emitStats({
           bytesReceived: this.bytesReceived,
           bytes: this.bytesReceived,
@@ -730,6 +861,9 @@
           sourceFps: this.mediaFps,
           serverFps: this.sourceSamples.length,
           deliveryFps: this.deliverySamples.length,
+          playbackRate: this.video.playbackRate,
+          estimatedDeliveryFps: this.estimatedDeliveryFps,
+          liveEdgeSeekCount: this.liveEdgeSeekCount,
           protocol: "websocket",
           codec: "h264",
         });

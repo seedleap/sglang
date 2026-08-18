@@ -24,7 +24,7 @@ BASE_DIR="${BASE_DIR:-/data/zing-realtime}"
 DOCKER_NETWORK="${DOCKER_NETWORK:-zing-realtime}"
 PUBLIC_WEB_PORT="${PUBLIC_WEB_PORT:-80}"
 
-UI_CONFIG_JSON="${UI_CONFIG_JSON:-{\"generationModes\":[\"i2v\"],\"defaultGenerationMode\":\"i2v\",\"modelSlots\":[\"minwm\"],\"lockModelSlots\":true,\"size\":\"832x480\",\"targetFps\":24,\"sessionMaxLifetimeSeconds\":70,\"playbackAckEnabled\":false,\"h264WebSocketEnabled\":true,\"h264CompressedBitrateKbps\":3000,\"h264CompressedCrf\":20,\"h264CompressedPreset\":\"fast\",\"h264CompressedGopSeconds\":2,\"h264CompressedVbvBufferMs\":250,\"h264WebSocketLiveEdgeTargetMs\":80,\"h264WebSocketSeekThresholdMs\":260,\"singleExperience\":false,\"smoothCatchupRateMax\":1.1,\"dualModels\":{\"minwm\":{\"label\":\"Zing\",\"size\":\"832x480\",\"targetFps\":24,\"sinkSize\":8,\"windowFrames\":32,\"continuous\":true,\"h264StartupDropFrames\":0}}}}"
+UI_CONFIG_JSON="${UI_CONFIG_JSON:-{\"generationModes\":[\"i2v\"],\"defaultGenerationMode\":\"i2v\",\"modelSlots\":[\"minwm\"],\"lockModelSlots\":true,\"size\":\"832x480\",\"targetFps\":24,\"sessionMaxLifetimeSeconds\":70,\"playbackAckEnabled\":false,\"h264WebSocketEnabled\":true,\"h264CompressedBitrateKbps\":3000,\"h264CompressedCrf\":20,\"h264CompressedPreset\":\"fast\",\"h264CompressedGopSeconds\":2,\"h264CompressedVbvBufferMs\":250,\"h264WebSocketLiveEdgeTargetMs\":700,\"h264WebSocketSeekThresholdMs\":2200,\"h264WebSocketSeekCooldownMs\":3000,\"h264WebSocketStartupBufferTimeoutMs\":3000,\"h264WebSocketInitialPlaybackRate\":0.55,\"singleExperience\":false,\"smoothCatchupRateMax\":1.1,\"dualModels\":{\"minwm\":{\"label\":\"Zing\",\"size\":\"832x480\",\"targetFps\":24,\"sinkSize\":8,\"windowFrames\":32,\"continuous\":true,\"h264StartupDropFrames\":0}}}}"
 
 log() {
   printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"
@@ -175,12 +175,8 @@ stop_old_containers() {
   for gpu in 1 2 3 4 5; do
     names+=("zing-denoiser-${gpu}" "zing-denoiser-${gpu}-heartbeat")
   done
-  # Remove only legacy Zing workers from the GPUs reserved for the other team.
-  # No new worker is started on GPU 6 or 7 below.
-  names+=(
-    zing-denoiser-6 zing-denoiser-6-heartbeat
-    zing-denoiser-7 zing-denoiser-7-heartbeat
-  )
+  # GPUs 6 and 7 are reserved for another team. Do not stop or replace any
+  # containers associated with those devices during a Zing deployment.
   docker rm -f "${names[@]}" >/dev/null 2>&1 || true
   docker network inspect "${DOCKER_NETWORK}" >/dev/null 2>&1 || \
     docker network create "${DOCKER_NETWORK}" >/dev/null

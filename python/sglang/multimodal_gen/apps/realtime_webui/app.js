@@ -901,8 +901,14 @@ function createH264ModelSession(key) {
     overlay: $(`${key}PreviewOverlay`),
     root: document.querySelector(`[data-model-key="${key}"]`),
     endpoint: h264WebSocketEndpoint(key),
-    liveEdgeTargetMs: configuredNumber("h264WebSocketLiveEdgeTargetMs", 80),
-    liveEdgeSeekThresholdMs: configuredNumber("h264WebSocketSeekThresholdMs", 420),
+    liveEdgeTargetMs: configuredNumber("h264WebSocketLiveEdgeTargetMs", 700),
+    liveEdgeSeekThresholdMs: configuredNumber("h264WebSocketSeekThresholdMs", 2200),
+    liveEdgeSeekCooldownMs: configuredNumber("h264WebSocketSeekCooldownMs", 3000),
+    playbackStartupBufferTimeoutMs: configuredNumber(
+      "h264WebSocketStartupBufferTimeoutMs",
+      3000,
+    ),
+    initialPlaybackRate: configuredNumber("h264WebSocketInitialPlaybackRate", 0.55),
     onState: (state, details = {}) => {
       setModelConnectionState(key, state);
       if (state === "connecting") {
