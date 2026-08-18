@@ -40,6 +40,7 @@ function h264CompressionInit(init, key) {
   );
   return {
     ...init,
+    user_id: backendUserId(key),
     h264_bitrate_kbps: bitrateKbps,
     h264_crf: configuredModelNumber(
       key,
@@ -189,6 +190,16 @@ const CONTROL_KEY_ACTIONS = new Map([
   ["arrowleft", "j"],
   ["arrowdown", "k"],
   ["arrowright", "l"],
+]);
+const CONTROL_OPPOSITE_ACTIONS = new Map([
+  ["w", "s"],
+  ["s", "w"],
+  ["a", "d"],
+  ["d", "a"],
+  ["i", "k"],
+  ["k", "i"],
+  ["j", "l"],
+  ["l", "j"],
 ]);
 const CONTROL_ACTION_META = {
   w: {
@@ -719,6 +730,51 @@ const playbackController = new RealtimePlaybackController({
 let lingbot2ReconnectTimer = 0;
 let lingbot2ReconnectAttempt = 0;
 let lingbot2ReconnectInFlight = false;
+let minwmReconnectTimer = 0;
+let minwmReconnectAttempt = 0;
+let minwmReconnectInFlight = false;
+
+function cancelMinwmReconnect() {
+  if (minwmReconnectTimer) window.clearTimeout(minwmReconnectTimer);
+  minwmReconnectTimer = 0;
+  minwmReconnectAttempt = 0;
+  minwmReconnectInFlight = false;
+}
+
+function canReconnectMinwm() {
+  return (
+    !sessionLifetimeExpired &&
+    selectedGenerationMode() === "i2v" &&
+    modelSelected("minwm") &&
+    Boolean(dualModelController?.baseInit)
+  );
+}
+
+function scheduleMinwmReconnect(reason = "media stream unavailable") {
+  if (!canReconnectMinwm() || minwmReconnectTimer || minwmReconnectInFlight) return;
+  const delaysMs = [250, 1000, 2500, 4000];
+  const delayMs = delaysMs[Math.min(minwmReconnectAttempt, delaysMs.length - 1)];
+  minwmReconnectAttempt += 1;
+  addHistory(`Zing recovering in ${delayMs}ms · ${reason}`);
+  minwmReconnectTimer = window.setTimeout(async () => {
+    minwmReconnectTimer = 0;
+    if (!canReconnectMinwm()) return;
+    minwmReconnectInFlight = true;
+    try {
+      const restored = await dualModelController.reconnect("minwm");
+      if (!restored || !canReconnectMinwm()) return;
+      minwmReconnectAttempt = 0;
+      addHistory("Zing connection restored");
+    } catch (error) {
+      addHistory(`Zing recovery failed · ${error.message || error}`);
+      minwmReconnectInFlight = false;
+      scheduleMinwmReconnect(error.message || "retry failed");
+      return;
+    } finally {
+      minwmReconnectInFlight = false;
+    }
+  }, delayMs);
+}
 
 function cancelLingbot2Reconnect() {
   if (lingbot2ReconnectTimer) window.clearTimeout(lingbot2ReconnectTimer);
@@ -862,6 +918,9 @@ function createH264ModelSession(key) {
     },
     onError: (error) => {
       addHistory(`${modelLabel(key)} H.264 session failed · ${error.message || error}`);
+      if (key === "minwm") {
+        scheduleMinwmReconnect(error.message || "stream failed");
+      }
     },
   });
 }
@@ -1552,6 +1611,13 @@ function stableBrowserUserId() {
 
 const browserUserId = stableBrowserUserId();
 
+function backendUserId(key) {
+  const configuredUserId = UI_CONFIG.singleExperienceUserIds?.[key];
+  return UI_CONFIG.singleExperience && configuredUserId
+    ? String(configuredUserId)
+    : `${browserUserId}:${key}`;
+}
+
 function traceWebSocketUrl(baseUrl) {
   try {
     const url = new URL(baseUrl, window.location.href);
@@ -1570,10 +1636,7 @@ function traceWebSocketUrl(baseUrl) {
 function backendWebSocketUrl(key, traceId) {
   const configuredUrl = DUAL_MODEL_CONFIG[key]?.wsUrl;
   const baseUrl = configuredUrl || $("serverUrl").value;
-  const configuredUserId = UI_CONFIG.singleExperienceUserIds?.[key];
-  const backendUserId = UI_CONFIG.singleExperience && configuredUserId
-    ? String(configuredUserId)
-    : `${browserUserId}:${key}`;
+  const userId = backendUserId(key);
   try {
     const url = new URL(baseUrl, window.location.href);
     if (!configuredUrl) {
@@ -1581,7 +1644,7 @@ function backendWebSocketUrl(key, traceId) {
       url.search = "";
     }
     if (traceId) url.searchParams.set("trace_id", traceId);
-    url.searchParams.set("user_id", backendUserId);
+    url.searchParams.set("user_id", userId);
     return url.toString();
   } catch {
     return baseUrl;
@@ -5604,6 +5667,7 @@ function abortCurrentSession(reason = "session closed by client", {
 
 function closeSession(reason = "session closed by client", clearFrames = true) {
   promptRewriteController.endSession();
+  cancelMinwmReconnect();
   cancelLingbot2Reconnect();
   stopWorldExperienceTiming({ recordingReason: "session_closed" });
   clearQueueOnClose = clearFrames;
@@ -5634,6 +5698,7 @@ async function connect() {
   promptRewriteController.endSession();
   worldRulesController.endSession();
   setPromptRewriteStatus("进入世界后可发送新指令", "");
+  cancelMinwmReconnect();
   cancelLingbot2Reconnect();
   resetSessionLifetimeUi();
   $("connectBtn").disabled = true;
@@ -5751,6 +5816,9 @@ async function connect() {
       if (connectionReport.failed.some(({ key }) => key === "lingbot2")) {
         scheduleLingbot2Reconnect("initial connection failed");
       }
+      if (connectionReport.failed.some(({ key }) => key === "minwm")) {
+        scheduleMinwmReconnect("initial connection failed");
+      }
     }
     if (connectionReport.pending?.includes("happyoyster")) {
       setHappyOysterStageText("正在创建快乐生蚝 World…", "preparing");
@@ -5845,6 +5913,7 @@ function openPrimarySession(init, url) {
         const hadReadyWorld = worldExperienceReady;
         stopWorldExperienceTiming({ recordingReason: "primary_disconnected" });
         lingbot2Session.close("Zing primary session closed");
+        scheduleMinwmReconnect(event.reason || `socket closed (${event.code})`);
         if (hadReadyWorld) {
           showSessionNotice("Zing 连接已中断，已结束计时并生成当前录像");
         }
@@ -7191,6 +7260,8 @@ class ControlStateController {
     const hadAction = this.activeActions.has(action);
     if (active === hadAction) return false;
     if (active) {
+      const oppositeAction = CONTROL_OPPOSITE_ACTIONS.get(action);
+      if (oppositeAction) this.activeActions.delete(oppositeAction);
       this.activeActions.add(action);
       if (recordingActive) {
         recordingActionPulseUntil.set(action, performance.now() + 120);

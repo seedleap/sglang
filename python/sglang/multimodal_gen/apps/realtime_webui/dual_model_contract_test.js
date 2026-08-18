@@ -51,6 +51,16 @@ assert.match(
   /if \(immediate\) this\.flush\(\);\s*else this\.scheduleFlush\(\);/,
   "key releases should retain the transition batching window",
 );
+assert.match(
+  app,
+  /const oppositeAction = CONTROL_OPPOSITE_ACTIONS\.get\(action\);\s*if \(oppositeAction\) this\.activeActions\.delete\(oppositeAction\);/,
+  "mutually exclusive controls should use the most recently pressed direction",
+);
+assert.match(
+  app,
+  /scheduleMinwmReconnect\(error\.message \|\| "stream failed"\)/,
+  "Zing should recover an interrupted H.264 session automatically",
+);
 assert.doesNotMatch(
   app,
   /for \(const key of \["minwm", "lingbot2"\]\) \{\s*modelControl\(key, "fps"\)\.value = UI_CONFIG\.targetFps/s,

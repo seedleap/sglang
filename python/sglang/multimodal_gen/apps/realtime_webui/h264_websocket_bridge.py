@@ -223,7 +223,9 @@ class H264WebSocketSession:
     def upstream_url(self) -> str:
         parsed = urlsplit(self.manager.upstream_url(self.backend))
         query = dict(parse_qsl(parsed.query, keep_blank_values=True))
-        query["user_id"] = f"h264ws-{self.session_id}"
+        query["user_id"] = str(
+            self.init.get("user_id") or f"h264ws-{self.session_id}"
+        )
         query["trace_id"] = str(self.init.get("trace_id") or self.session_id)
         return urlunsplit(parsed._replace(query=urlencode(query)))
 

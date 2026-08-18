@@ -17,8 +17,13 @@ assert.match(
 );
 assert.match(
   appJs,
-  /url\.searchParams\.set\("user_id", backendUserId\)/,
+  /url\.searchParams\.set\("user_id", userId\)/,
   "dual-model websocket URLs should not share one coordinator user fence",
+);
+assert.match(
+  appJs,
+  /user_id: backendUserId\(key\)/,
+  "the H.264 bridge init should preserve the same per-backend browser identity",
 );
 assert.match(
   appJs,

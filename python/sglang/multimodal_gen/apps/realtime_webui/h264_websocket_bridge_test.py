@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from urllib.parse import parse_qs, urlsplit
 
 from aiohttp import web
 from h264_websocket_bridge import (
@@ -87,6 +88,26 @@ def test_session_accepts_bounded_encoder_overrides(monkeypatch):
     assert session.encoder_vbv_buffer_ms == 250
     assert session.encoder_gop_seconds == 2
     assert session.startup_drop_frames == 0
+
+
+def test_session_preserves_frontend_user_id_for_coordinator_routing():
+    app = web.Application()
+    manager = H264WebSocketBridgeManager(
+        app,
+        web.AppKey("session", object),
+        lambda backend: f"ws://gateway/{backend}",
+    )
+    session = H264WebSocketSession(
+        manager=manager,
+        websocket=object(),
+        backend="minwm",
+        init={"user_id": "browser-session:minwm", "trace_id": "trace-1"},
+    )
+
+    query = parse_qs(urlsplit(session.upstream_url).query)
+
+    assert query["user_id"] == ["browser-session:minwm"]
+    assert query["trace_id"] == ["trace-1"]
 
 
 def test_lingbot_drops_transition_frames_before_encoder_start(monkeypatch):
