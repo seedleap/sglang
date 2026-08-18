@@ -35,6 +35,8 @@ assert.match(
 assert.match(html, /id="size" value="1280x704"/, "MinWM should keep the 720p default");
 assert.match(html, /id="lingbot2Size" value="832x480"/, "LingBot2 should use its native default size");
 assert.match(html, /id="fps" type="number" value="24"/, "Zing should keep its 24 FPS default");
+assert.match(html, /id="sinkSize" type="number" value="8"/, "Zing should use the checkpoint sink size");
+assert.match(html, /id="windowFrames" type="number" value="32"/, "Zing should use the checkpoint attention window");
 assert.match(html, /id="lingbot2Fps" type="number" value="16"/, "LingBot2 should use its official 16 FPS default");
 assert.match(html, /id="lingbot2SinkSize" type="number" value="9"/, "LingBot2 should match the official sink size");
 assert.match(html, /id="lingbot2WindowFrames" type="number" value="18"/, "LingBot2 should match the official attention window");

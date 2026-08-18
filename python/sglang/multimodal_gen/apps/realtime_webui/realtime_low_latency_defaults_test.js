@@ -43,6 +43,31 @@ assert.match(
 );
 assert.match(
   appJs,
+  /const MINWM_CAUSAL_SINK_SIZE\s*=\s*8;/,
+  "Zing requests must use the checkpoint-aligned causal sink",
+);
+assert.match(
+  appJs,
+  /const MINWM_CAUSAL_WINDOW_FRAMES\s*=\s*32;/,
+  "Zing requests must use the checkpoint-aligned attention window",
+);
+assert.match(
+  indexHtml,
+  /<input id="sinkSize" type="number" value="8" min="0" \/>/,
+  "the hidden Zing defaults must advertise the checkpoint-aligned sink",
+);
+assert.match(
+  indexHtml,
+  /<input id="windowFrames" type="number" value="32" min="1" \/>/,
+  "the hidden Zing defaults must advertise the checkpoint-aligned window",
+);
+assert.doesNotMatch(
+  appJs,
+  /configuredNumber\("(?:sinkSize|windowFrames)"/,
+  "deployment UI config must not override Zing checkpoint invariants",
+);
+assert.match(
+  appJs,
   /const DEFAULT_T2V_NUM_FRAMES\s*=\s*9;/,
   "T2V should default to a short user-editable 9-frame request",
 );

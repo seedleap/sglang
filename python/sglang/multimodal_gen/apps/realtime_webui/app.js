@@ -147,6 +147,8 @@ const SMOOTH_PREVIEW_OUTPUT_QUALITY = 70;
 const SR_PREVIEW_OUTPUT_QUALITY = 70;
 const HEAVY_PREVIEW_OUTPUT_QUALITY = 60;
 const DEFAULT_TARGET_FPS = configuredNumber("targetFps", 24);
+const MINWM_CAUSAL_SINK_SIZE = 8;
+const MINWM_CAUSAL_WINDOW_FRAMES = 32;
 const DEFAULT_LINGBOT2_TARGET_FPS = configuredModelNumber("lingbot2", "targetFps", 16);
 const DEFAULT_LINGBOT2_SINK_SIZE = configuredModelNumber("lingbot2", "sinkSize", 9);
 const DEFAULT_LINGBOT2_WINDOW_FRAMES = configuredModelNumber("lingbot2", "windowFrames", 18);
@@ -282,12 +284,12 @@ function applyRuntimeUiConfig() {
     modelControl(key, "sinkSize").value = String(
       isLingBot2
         ? DEFAULT_LINGBOT2_SINK_SIZE
-        : configuredNumber("sinkSize", Number(modelControl(key, "sinkSize").value)),
+        : MINWM_CAUSAL_SINK_SIZE,
     );
     modelControl(key, "windowFrames").value = String(
       isLingBot2
         ? DEFAULT_LINGBOT2_WINDOW_FRAMES
-        : configuredNumber("windowFrames", Number(modelControl(key, "windowFrames").value)),
+        : MINWM_CAUSAL_WINDOW_FRAMES,
     );
   }
   if (UI_CONFIG.titleSuffix) {
@@ -2708,8 +2710,8 @@ function currentRequestSnapshot() {
     seed: Number($("seed").value),
     num_inference_steps: Number($("steps").value),
     guidance_scale: Number($("guidance").value),
-    realtime_causal_sink_size: readOptionalInteger("sinkSize"),
-    realtime_causal_kv_cache_num_frames: readOptionalInteger("windowFrames"),
+    realtime_causal_sink_size: MINWM_CAUSAL_SINK_SIZE,
+    realtime_causal_kv_cache_num_frames: MINWM_CAUSAL_WINDOW_FRAMES,
     max_chunks: generationMode === "t2v" || $("continuous").checked ? undefined : 1,
     ...readPreviewTransportParams(),
     ...readFrameInterpolationParams(),
@@ -6675,8 +6677,12 @@ function readModelRequestParams(key, { generationMode, firstFrame, numFrames } =
     seed: Number(modelControl(key, "seed").value),
     num_inference_steps: Number(modelControl(key, "steps").value),
     guidance_scale: Number(modelControl(key, "guidance").value),
-    realtime_causal_sink_size: readOptionalInteger(modelControlId(key, "sinkSize")),
-    realtime_causal_kv_cache_num_frames: readOptionalInteger(modelControlId(key, "windowFrames")),
+    realtime_causal_sink_size: key === "minwm"
+      ? MINWM_CAUSAL_SINK_SIZE
+      : readOptionalInteger(modelControlId(key, "sinkSize")),
+    realtime_causal_kv_cache_num_frames: key === "minwm"
+      ? MINWM_CAUSAL_WINDOW_FRAMES
+      : readOptionalInteger(modelControlId(key, "windowFrames")),
     max_chunks: generationMode === "t2v" || continuous ? undefined : 1,
     first_frame: firstFrame,
     ...readPreviewTransportParams(key),
