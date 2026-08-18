@@ -596,6 +596,7 @@ function syncModelSlotUi() {
   const selected = selectedModelKeys();
   const grid = document.querySelector(".model-player-grid");
   const slotConfig = document.querySelector(".model-slot-config");
+  const promptBroadcastHint = $("promptBroadcastHint");
   CONFIGURED_MODEL_SLOTS.forEach((key, index) => {
     const slot = $(`modelSlot${index}`);
     if (slot) slot.value = key;
@@ -607,6 +608,11 @@ function syncModelSlotUi() {
   for (const key of selected) {
     const player = document.querySelector(`[data-model-key="${key}"]`);
     if (player && grid) grid.appendChild(player);
+  }
+  if (promptBroadcastHint) {
+    promptBroadcastHint.textContent = selected.length > 1
+      ? `AI 改写后同时发送至 ${selected.map(modelLabel).join(" 与 ")}`
+      : `AI 改写后发送至 ${modelLabel(selected[0] || "minwm")}`;
   }
   if (slotConfig) slotConfig.hidden = MODEL_SLOTS_LOCKED;
   grid?.classList.toggle("is-single", selected.length === 1);
