@@ -157,10 +157,18 @@ def action_sinusoidal_embedding_1d(dim: int, position: torch.Tensor) -> torch.Te
 
 
 class CausalActionTemporalBlock(nn.Module):
-    def __init__(self, in_channels: int, out_channels: int, kernel_size: int):
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        kernel_size: int,
+        bias: bool = True,
+    ):
         super().__init__()
-        self.conv = nn.Conv1d(in_channels, out_channels, kernel_size=kernel_size)
-        self.norm = nn.LayerNorm(out_channels)
+        self.conv = nn.Conv1d(
+            in_channels, out_channels, kernel_size=kernel_size, bias=bias
+        )
+        self.norm = nn.LayerNorm(out_channels, bias=bias)
         self.causal_pad = kernel_size - 1
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -279,6 +287,7 @@ class PrimitiveRoPETokenResidualActionEncoder(nn.Module):
         embed_dim: int = 256,
         hidden_dim: int = 512,
         kernel_size: int = 3,
+        non_proj_bias: bool = True,
     ) -> None:
         super().__init__()
         if embed_dim % (2 * BITS_PER_SUBSET):
@@ -287,16 +296,21 @@ class PrimitiveRoPETokenResidualActionEncoder(nn.Module):
                 f"{2 * BITS_PER_SUBSET}"
             )
         self.embed_dim = embed_dim
+        hidden_bias = bool(non_proj_bias)
         self.fuse = nn.Sequential(
-            nn.Linear(embed_dim * 2, embed_dim * 2),
+            nn.Linear(embed_dim * 2, embed_dim * 2, bias=hidden_bias),
             nn.SiLU(),
-            nn.Linear(embed_dim * 2, embed_dim * 2),
+            nn.Linear(embed_dim * 2, embed_dim * 2, bias=hidden_bias),
         )
         self.encode_1 = CausalActionTemporalBlock(
-            embed_dim * 2, hidden_dim, kernel_size
+            embed_dim * 2, hidden_dim, kernel_size, bias=hidden_bias
         )
-        self.encode_2 = CausalActionTemporalBlock(hidden_dim, hidden_dim, kernel_size)
-        self.proj = nn.Linear(hidden_dim, dim)
+        self.encode_2 = CausalActionTemporalBlock(
+            hidden_dim, hidden_dim, kernel_size, bias=hidden_bias
+        )
+        # Keep the final bias: with hidden biases disabled, idle actions map to
+        # this single frame-independent residual.
+        self.proj = nn.Linear(hidden_dim, dim, bias=True)
         # Keep non-checkpoint buffers concrete while the model is initialized on
         # meta; the loader only materializes parameters present in the state dict.
         self.register_buffer("_label_to_bits", _LABEL_TO_BITS.clone(), persistent=False)

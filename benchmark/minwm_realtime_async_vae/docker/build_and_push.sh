@@ -5,6 +5,23 @@ set -euo pipefail
 : "${ECR_REPOSITORY:?set ECR_REPOSITORY, for example leap-world/minwm-realtime}"
 : "${PYTHON_IMAGE_DIGEST:?set PYTHON_IMAGE_DIGEST to an immutable image reference}"
 : "${GPU_IMAGE_DIGEST:?set GPU_IMAGE_DIGEST to an immutable image reference}"
+ROLES="${ROLES:-gateway coordinator denoiser vae}"
+
+read -r -a ROLE_LIST <<<"${ROLES}"
+if (( ${#ROLE_LIST[@]} == 0 )); then
+  echo "ROLES must contain at least one image role" >&2
+  exit 1
+fi
+for ROLE in "${ROLE_LIST[@]}"; do
+  case "${ROLE}" in
+    gateway|coordinator|denoiser|vae)
+      ;;
+    *)
+      echo "unsupported image role: ${ROLE}" >&2
+      exit 1
+      ;;
+  esac
+done
 
 for IMAGE in "${PYTHON_IMAGE_DIGEST}" "${GPU_IMAGE_DIGEST}"; do
   if ! [[ "${IMAGE}" =~ @sha256:[0-9a-f]{64}$ ]]; then
@@ -14,6 +31,10 @@ for IMAGE in "${PYTHON_IMAGE_DIGEST}" "${GPU_IMAGE_DIGEST}"; do
 done
 
 ROOT="$(git rev-parse --show-toplevel)"
+if [[ -n "$(git -C "${ROOT}" status --porcelain --untracked-files=normal)" ]]; then
+  echo "refusing to build from a dirty worktree; commit the reviewed source first" >&2
+  exit 1
+fi
 GIT_SHA="$(git -C "${ROOT}" rev-parse HEAD)"
 ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
 REGISTRY="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
@@ -26,7 +47,7 @@ aws ecr describe-repositories \
 aws ecr get-login-password --region "${AWS_REGION}" | \
   docker login --username AWS --password-stdin "${REGISTRY}"
 
-for ROLE in gateway coordinator denoiser vae; do
+for ROLE in "${ROLE_LIST[@]}"; do
   TAG="${ROLE}-${GIT_SHA}"
   docker buildx build \
     --platform linux/amd64 \
@@ -42,7 +63,7 @@ done
 
 OUTPUT="${ROOT}/benchmark/minwm_realtime_async_vae/.env.images"
 : >"${OUTPUT}"
-for ROLE in gateway coordinator denoiser vae; do
+for ROLE in "${ROLE_LIST[@]}"; do
   TAG="${ROLE}-${GIT_SHA}"
   DIGEST="$(aws ecr describe-images \
     --region "${AWS_REGION}" \

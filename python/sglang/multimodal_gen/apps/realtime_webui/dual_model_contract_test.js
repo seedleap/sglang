@@ -43,6 +43,26 @@ assert.match(app, /const DEFAULT_LINGBOT2_SINK_SIZE\s*=\s*configuredModelNumber\
 assert.match(app, /const DEFAULT_LINGBOT2_WINDOW_FRAMES\s*=\s*configuredModelNumber\("lingbot2", "windowFrames", 18\)/);
 assert.match(
   app,
+  /startupTimeoutMs:\s*configuredModelNumber\("lingbot2", "startupTimeoutMs", 60000\)/,
+  "LingBot2 should wait for its measured cold first-frame latency instead of the generic 12s timeout",
+);
+assert.match(
+  app,
+  /if \(message\.type === "chunk_telemetry"\) \{[\s\S]*?chunkTelemetry: \{ \.\.\.message \}[\s\S]*?return;/,
+  "Zing must consume chunk telemetry as control data instead of treating it as a legacy frame header",
+);
+assert.match(
+  app,
+  /message\.type === "frame_batch_header" \|\| \(!message\.type && message\.content_type\)/,
+  "only an explicit or structurally valid legacy frame header may arm the binary payload path",
+);
+assert.doesNotMatch(
+  app,
+  /\n\s*pendingHeader = message;\n\s*if \(pendingHeader && !renderedPreviewFrames\)/,
+  "unknown control messages must not become Zing frame headers",
+);
+assert.match(
+  app,
   /this\.enqueueTransition\(\{ immediate: active \}\)/,
   "key presses should bypass the transition batching delay",
 );
@@ -101,6 +121,36 @@ assert.match(app, /\$\(`\$\{key\}PerfMseQueue`\)\.textContent/);
 assert.match(app, /\$\(`\$\{key\}PerfMseAppend`\)\.textContent/);
 assert.match(app, /\$\(`\$\{key\}PerfPlaybackBuffer`\)\.textContent/);
 assert.match(app, /activeH264Models\.has\("minwm"\)/, "H.264 stats should not be overwritten by WebP playback stats");
+assert.match(
+  app,
+  /renderProtocolPerformance\("minwm", \{[\s\S]*?bytes,[\s\S]*?transport: "webp"/,
+  "Zing WebP telemetry should receive measured bytes and an explicit transport",
+);
+assert.match(
+  app,
+  /receiveMbps: Math\.max\([\s\S]*?bytes - primaryNetworkSample\.bytes/,
+  "Zing should calculate rolling WebP receive bandwidth",
+);
+assert.match(
+  app,
+  /server_sent_epoch_ms[\s\S]*?lastDownlinkMs: Math\.max/,
+  "Zing should derive WebSocket downlink latency from frame timestamps",
+);
+assert.match(
+  app,
+  /primaryControlSentEpochByEvent[\s\S]*?lastControlToVideoMs: Math\.max/,
+  "Zing should measure the first rendered frame after each control event",
+);
+assert.match(
+  app,
+  /const isH264 = stats\.transport === "h264"[\s\S]*?: "不适用"/,
+  "WebP sessions should mark H.264/MSE-only metrics as not applicable",
+);
+assert.match(
+  app,
+  /function protocolMetricText\(value\) \{[\s\S]*?value === null \? "-" : performanceMs\(value\)/,
+  "measured zero latency must render as 0 ms rather than missing data",
+);
 assert.match(
   app,
   /"h264StartupDropFrames",[\s\S]*?key === "lingbot2" \? 8 : 0/,
@@ -165,9 +215,9 @@ assert.match(html, /model_session\.js\?v=dual-h264-telemetry-v1/);
 assert.match(html, /dual_model_controller\.js\?v=dual-model-v6/);
 assert.match(html, /h264_websocket_session\.js\?v=h264-stage-timing-v1/);
 assert.match(html, /prompt_rewrite_controller\.js\?v=prompt-rewrite-v3/);
-assert.match(html, /world_rules_controller\.js\?v=world-rules-v3/);
-assert.match(html, /styles\.css\?v=world-studio-h264-rules-v5/);
-assert.match(html, /app\.js\?v=world-studio-h264-rules-v5/);
+assert.match(html, /world_rules_controller\.js\?v=world-rules-v4/);
+assert.match(html, /styles\.css\?v=world-studio-h264-rules-v6/);
+assert.match(html, /app\.js\?v=world-studio-transport-telemetry-v3/);
 assert.match(html, /id="minwmH264Viewport"/);
 assert.match(html, /id="lingbot2H264Viewport"/);
 assert.match(html, /id="minwmPerfScheduler"/);
@@ -196,9 +246,13 @@ assert.match(html, /id="worldDescriptionState"/, "description completeness shoul
 assert.match(html, /<details id="worldRulesPanel" class="world-rules-panel">/, "world rules should be optional and collapsed by default");
 assert.doesNotMatch(html, /<details id="worldRulesPanel"[^>]*\sopen/, "world rules must not occupy sidebar space until expanded");
 assert.match(html, /id="addSkillRuleBtn"/, "world rules should support multiple skills");
-assert.match(html, /id="goalMinPlaySeconds"[^>]*min="0"[^>]*max="3600"/, "goals should configure a minimum play duration");
-assert.match(html, /id="goalProbability"[^>]*min="0"[^>]*max="1"/, "goal probability should be constrained to 0-1");
-assert.match(html, /id="goalRuleInput"/, "a goal should use one reward-or-prompt input");
+assert.match(html, /id="addGoalRuleBtn"/, "world rules should support multiple goals");
+assert.match(html, /id="goalRuleList"/, "goals should render as a dynamic list");
+assert.match(html, /目标<\/b><small>最多 9 个<\/small>/, "goals should have the same maximum as skills");
+assert.doesNotMatch(html, /id="goalMinPlaySeconds"|id="goalProbability"|id="goalRuleInput"/, "goals should no longer be a singleton static form");
+assert.match(app, /minPlay\.max = String\(MAX_GOAL_MIN_PLAY_SECONDS\)/, "goals should configure a bounded minimum play duration");
+assert.match(app, /probability\.max = "1"/, "goal probability should be constrained to 0-1");
+assert.match(app, /function addGoalRule\(goal = \{\}/, "goals should use the same add/remove pattern as skills");
 assert.doesNotMatch(html, /id="goalName"|id="goalPrompt"/, "a goal must not require separate name and prompt fields");
 assert.match(html, /id="runtimeSkillBar"[^>]*hidden/, "prepared skills should render above movement controls only when active");
 assert.match(html, /id="runtimeSkillHint"[^>]*>[^<]*共享 10s CD/, "skill controls should disclose the shared cooldown");
@@ -282,6 +336,19 @@ assert.match(app, /secureBaseUrl/);
 assert.match(app, /function h264WebSocketEndpoint\(key\)/);
 assert.match(app, /UI_CONFIG\.h264WebSocketBaseUrl/);
 assert.match(app, /endpoint: h264WebSocketEndpoint\(key\)/);
+assert.match(app, /async function connectH264SessionWithRetry\(key, h264Session, init\)/);
+assert.match(app, /H264_CONNECT_MAX_ATTEMPTS/);
+assert.doesNotMatch(app, /自动回退 WebP/);
+assert.match(
+  app,
+  /if \(H264_WEBSOCKET_REQUESTED\) \{[\s\S]*?await connectH264SessionWithRetry\("minwm", minwmH264Session, init\);[\s\S]*?return;[\s\S]*?\}[\s\S]*?return openPrimarySession\(init, url\);/,
+  "Zing should retry H.264 and only use WebP when H.264 is explicitly disabled",
+);
+assert.match(
+  app,
+  /if \(H264_WEBSOCKET_REQUESTED\) \{[\s\S]*?await connectH264SessionWithRetry\(key, h264Session, init\);[\s\S]*?return;[\s\S]*?\}[\s\S]*?return fallbackSession\.connect\(init, url\);/,
+  "secondary models should retry H.264 and must not automatically fall back to WebP",
+);
 assert.match(app, /"not-allowed": "麦克风未授权"/);
 assert.match(app, /status\.textContent = next \? "正在聆听" : idleStatus/);
 assert.match(

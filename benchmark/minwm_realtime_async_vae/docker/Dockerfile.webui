@@ -6,6 +6,7 @@ ARG SOURCE_REVISION
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/opt/sglang/python \
     WEBUI_HOST=0.0.0.0 \
     WEBUI_PORT=18080
 
@@ -23,10 +24,15 @@ RUN --mount=type=cache,target=/root/.cache/pip \
       'msgspec==0.21.1' \
       'openai==3.0.0' \
       'pillow==12.3.0' \
+      'prometheus-client>=0.20.0' \
       'pydantic==2.13.4'
 
 COPY python/sglang/multimodal_gen/apps/realtime_webui \
      /opt/sglang/python/sglang/multimodal_gen/apps/realtime_webui
+COPY python/sglang/multimodal_gen/runtime/realtime/critical_path_metrics.py \
+     /opt/sglang/python/sglang/multimodal_gen/runtime/realtime/critical_path_metrics.py
+COPY python/sglang/multimodal_gen/runtime/realtime/critical_path_metrics.py \
+     /opt/sglang/python/sglang/multimodal_gen/apps/realtime_webui/critical_path_metrics.py
 
 RUN chmod 0644 \
       /opt/sglang/python/sglang/multimodal_gen/apps/realtime_webui/happyoyster_prebuilt_worlds.json
@@ -34,7 +40,9 @@ RUN chmod 0644 \
 RUN install -d -o 65532 -g 65532 \
       /opt/sglang/python/sglang/multimodal_gen/apps/realtime_webui_generated && \
     python -m compileall -q \
-      /opt/sglang/python/sglang/multimodal_gen/apps/realtime_webui && \
+      /opt/sglang/python/sglang/multimodal_gen/apps/realtime_webui \
+      /opt/sglang/python/sglang/multimodal_gen/runtime/realtime/critical_path_metrics.py \
+      /opt/sglang/python/sglang/multimodal_gen/apps/realtime_webui/critical_path_metrics.py && \
     ffmpeg -hide_banner -encoders 2>/dev/null | grep -q 'libx264'
 
 LABEL org.opencontainers.image.title="minwm-dual-realtime-webui" \
