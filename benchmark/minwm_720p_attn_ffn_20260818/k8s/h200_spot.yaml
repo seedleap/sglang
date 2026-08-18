@@ -58,7 +58,6 @@ spec:
       nodeSelector:
         karpenter.sh/capacity-type: spot
         karpenter.sh/nodepool: minwm-test-phx2-p5e-spot
-        seedleap.ai/capacity-pool: minwm-test-phx2-karpenter
         node.kubernetes.io/instance-type: p5e.48xlarge
         topology.kubernetes.io/zone: us-west-2-phx-2a
       containers:

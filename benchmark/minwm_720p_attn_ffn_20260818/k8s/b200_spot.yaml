@@ -58,7 +58,6 @@ spec:
       nodeSelector:
         karpenter.sh/capacity-type: spot
         karpenter.sh/nodepool: minwm-sp12-usw2d-p6-spot
-        seedleap.ai/capacity-pool: minwm-sp12-usw2d-karpenter
         node.kubernetes.io/instance-type: p6-b200.48xlarge
         topology.kubernetes.io/zone: us-west-2d
       containers:
