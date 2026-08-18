@@ -35,6 +35,7 @@ def test_gpu_nodepools_are_capacity_bounded():
     for pool_name in (
         "minwm-async-denoiser-h100",
         "minwm-async-denoiser-h100-8x",
+        "minwm-async-denoiser-h200-8x",
         "minwm-async-vae-l4",
         "minwm-async-vae-l4-spot",
     ):
@@ -90,10 +91,17 @@ def test_kustomize_does_not_namespace_cluster_scoped_resources():
         assert "namespace" not in nodepool["metadata"]
 
 
-def test_h100_pool_uses_one_fully_utilized_spot_node():
-    documents = load_documents(("8gpu-nodeclass.yaml", "h100-denoiser.yaml"))
+def test_h100_and_h200_pools_use_fully_utilized_spot_nodes():
+    documents = load_documents(
+        (
+            "8gpu-nodeclass.yaml",
+            "h100-denoiser.yaml",
+            "h200-denoiser-capacity.yaml",
+        )
+    )
     single = find(documents, "NodePool", "minwm-async-denoiser-h100")
     packed = find(documents, "NodePool", "minwm-async-denoiser-h100-8x")
+    h200 = find(documents, "NodePool", "minwm-async-denoiser-h200-8x")
     deployment = find(documents, "StatefulSet", "minwm-async-denoiser")
 
     assert requirement_values(single, "node.kubernetes.io/instance-type") == [
@@ -101,6 +109,10 @@ def test_h100_pool_uses_one_fully_utilized_spot_node():
     ]
     assert requirement_values(packed, "node.kubernetes.io/instance-type") == [
         "p5.48xlarge",
+    ]
+    assert requirement_values(h200, "node.kubernetes.io/instance-type") == [
+        "p5e.48xlarge",
+        "p6-b200.48xlarge",
     ]
     nodeclass = find(documents, "EC2NodeClass", "minwm-async-denoiser-8gpu-nvme-ec2")
     assert packed["spec"]["template"]["spec"]["nodeClassRef"]["name"] == (
@@ -125,11 +137,13 @@ def test_h100_pool_uses_one_fully_utilized_spot_node():
     assert int(single["spec"]["limits"]["cpu"]) >= 192
     assert int(packed["spec"]["limits"]["cpu"]) >= 192
     assert int(packed["spec"]["limits"]["nvidia.com/gpu"]) == 8
+    assert int(h200["spec"]["limits"]["nvidia.com/gpu"]) == 8
     assert requirement_values(packed, "karpenter.sh/capacity-type") == ["spot"]
+    assert requirement_values(h200, "karpenter.sh/capacity-type") == ["spot"]
     assert deployment["spec"]["replicas"] == "REPLACE_WITH_DENOISER_BASE_REPLICAS"
     selector = deployment["spec"]["template"]["spec"]["nodeSelector"]
     assert selector == {
-        "karpenter.sh/nodepool": "REPLACE_WITH_DENOISER_NODEPOOL",
+        "seedleap.ai/denoiser-worker": "true",
         "karpenter.sh/capacity-type": "spot",
         "seedleap.ai/model-cache-storage": "local-nvme",
     }
@@ -254,7 +268,7 @@ def test_lingbot_denoiser_is_coordinator_managed_sp4_with_remote_vae():
     command = " ".join(denoiser["args"])
     heartbeat = " ".join(_init_container(workload, "denoiser-heartbeat")["args"])
 
-    assert workload["spec"]["replicas"] == 1
+    assert workload["spec"]["replicas"] == "REPLACE_WITH_LINGBOT_DENOISER_REPLICAS"
     assert workload["spec"]["ordinals"]["start"] == 1
     assert workload["spec"]["updateStrategy"]["type"] == "OnDelete"
     assert "affinity" not in workload["spec"]["template"]["spec"]
@@ -858,8 +872,9 @@ def test_capacity_scaler_uses_the_shared_coordinator_snapshot():
     deploy_script = (ROOT.parent / "deploy_production.sh").read_text()
     assert "GPU_EVENT_SCALER_SUSPEND" in deploy_script
     assert "GPU_EVENT_SCALER_REPLICAS" in deploy_script
-    assert 'DENOISER_BASE_REPLICAS="${DENOISER_BASE_REPLICAS:-2}"' in deploy_script
-    assert 'DENOISER_PEAK_REPLICAS="${DENOISER_PEAK_REPLICAS:-2}"' in deploy_script
+    assert 'DENOISER_BASE_REPLICAS="${DENOISER_BASE_REPLICAS:-4}"' in deploy_script
+    assert 'DENOISER_PEAK_REPLICAS="${DENOISER_PEAK_REPLICAS:-4}"' in deploy_script
+    assert 'LINGBOT_DENOISER_REPLICAS="${LINGBOT_DENOISER_REPLICAS:-2}"' in deploy_script
     assert "leap-world-model-serving-829115578968-us-east-2" in deploy_script
 
 

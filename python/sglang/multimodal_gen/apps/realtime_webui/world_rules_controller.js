@@ -1,5 +1,6 @@
 (function (global) {
   const MAX_WORLD_SKILLS = 9;
+  const MAX_WORLD_GOALS = 9;
   const DEFAULT_GOAL_PROBABILITY = 0.2;
   const DEFAULT_GOAL_MIN_PLAY_SECONDS = 10;
   const MAX_GOAL_MIN_PLAY_SECONDS = 3600;
@@ -32,6 +33,21 @@
     return seconds;
   }
 
+  function normalizeGoal(rawGoal, index) {
+    const goalInput = normalizedText(rawGoal?.input)
+      || normalizedText(rawGoal?.instruction)
+      || normalizedText(rawGoal?.name);
+    if (!goalInput) return null;
+    return {
+      id: normalizedText(rawGoal?.id) || `goal-${index + 1}`,
+      probability: normalizeProbability(rawGoal?.probability),
+      min_play_seconds: normalizeMinPlaySeconds(
+        rawGoal?.min_play_seconds ?? rawGoal?.minPlaySeconds,
+      ),
+      input: goalInput,
+    };
+  }
+
   function normalizeWorldRulesDraft(draft = {}) {
     const skills = (Array.isArray(draft.skills) ? draft.skills : [])
       .map((skill, index) => ({
@@ -45,21 +61,24 @@
       throw new Error(`最多可以配置 ${MAX_WORLD_SKILLS} 个技能`);
     }
 
-    const rawGoal = draft.goal || {};
-    const goalInput = normalizedText(rawGoal.input)
-      || normalizedText(rawGoal.instruction)
-      || normalizedText(rawGoal.name);
-    let goal = null;
-    if (goalInput) {
-      goal = {
-        probability: normalizeProbability(rawGoal.probability),
-        min_play_seconds: normalizeMinPlaySeconds(
-          rawGoal.min_play_seconds ?? rawGoal.minPlaySeconds,
-        ),
-        input: goalInput,
-      };
+    const rawGoals = Array.isArray(draft.goals) ? draft.goals : (
+      draft.goal ? [draft.goal] : []
+    );
+    const usedGoalIds = new Set();
+    const goals = rawGoals
+      .map((goal, index) => normalizeGoal(goal, index))
+      .filter(Boolean)
+      .map((goal, index) => {
+        let id = goal.id;
+        if (usedGoalIds.has(id)) id = `goal-${index + 1}`;
+        while (usedGoalIds.has(id)) id = `goal-${usedGoalIds.size + 1}`;
+        usedGoalIds.add(id);
+        return { ...goal, id };
+      });
+    if (goals.length > MAX_WORLD_GOALS) {
+      throw new Error(`最多可以配置 ${MAX_WORLD_GOALS} 个目标`);
     }
-    return { skills, goal };
+    return { skills, goals };
   }
 
   function normalizePreparedResult(result) {
@@ -108,12 +127,12 @@
       this.onGoalResult = onGoalResult;
       this.onGoalError = onGoalError;
       this.onStateChange = onStateChange;
-      this.activeRules = { skills: [], goal: null };
-      this.goalTriggered = false;
-      this.goalAttempted = false;
-      this.goalPending = false;
-      this.goalTriggerTimer = null;
-      this.achievementTimer = null;
+      this.activeRules = { skills: [], goals: [] };
+      this.goalTriggeredIds = new Set();
+      this.goalAttemptedIds = new Set();
+      this.goalPendingIds = new Set();
+      this.goalTriggerTimers = new Map();
+      this.achievementTimers = new Map();
       this.skillCooldownTimer = null;
       this.skillCooldownDeadlineMs = 0;
       this.sessionGeneration = 0;
@@ -124,7 +143,7 @@
     async prepare(draft, previousPrompt) {
       const normalized = normalizeWorldRulesDraft(draft);
       const basePrompt = normalizedText(previousPrompt);
-      if ((normalized.skills.length || normalized.goal) && !basePrompt) {
+      if ((normalized.skills.length || normalized.goals.length) && !basePrompt) {
         throw new Error("世界描述为空，无法预先润色规则 Prompt");
       }
       const skillPromise = Promise.all(normalized.skills.map(async (skill) => ({
@@ -136,73 +155,79 @@
         })),
         instruction: skill.input,
       })));
-      const goalPromise = normalized.goal
-        ? this.completeRule({
+      const goalPromise = Promise.all(normalized.goals.map(async (goal) => ({
+        ...goal,
+        ...normalizeCompletedRule(await this.completeRule({
           kind: "goal",
-          input: normalized.goal.input,
+          input: goal.input,
           previous_prompt: basePrompt,
-        }).then((result) => ({
-          ...normalized.goal,
-          ...normalizeCompletedRule(result),
-          instruction: normalized.goal.input,
-        }))
-        : Promise.resolve(null);
-      const [skills, goal] = await Promise.all([skillPromise, goalPromise]);
-      return { skills, goal };
+        })),
+        instruction: goal.input,
+      })));
+      const [skills, goals] = await Promise.all([skillPromise, goalPromise]);
+      return { skills, goals };
     }
 
     activate(preparedRules = {}) {
       this.endSession();
+      const legacyGoal = preparedRules.goal ? [preparedRules.goal] : [];
       this.activeRules = {
         skills: Array.isArray(preparedRules.skills) ? preparedRules.skills : [],
-        goal: preparedRules.goal || null,
+        goals: Array.isArray(preparedRules.goals) ? preparedRules.goals : legacyGoal,
       };
       this.onStateChange(this.snapshot());
       return this.snapshot();
     }
 
     startSession() {
-      if (this.goalTriggerTimer !== null) this.clearTimer(this.goalTriggerTimer);
-      this.goalTriggerTimer = null;
+      this.clearGoalTimers();
       this.sessionStarted = true;
-      const goal = this.activeRules.goal;
-      if (!goal || this.goalAttempted || this.goalTriggered) {
+      const goals = this.activeRules.goals;
+      if (!goals.length) {
         this.onStateChange(this.snapshot());
         return this.snapshot();
       }
       const generation = this.sessionGeneration;
-      const delayMs = Math.max(0, Number(goal.min_play_seconds || 0) * 1000);
-      this.goalTriggerTimer = this.setTimer(async () => {
-        this.goalTriggerTimer = null;
-        try {
-          const result = await this.maybeTriggerGoal("elapsed_time", generation);
-          if (generation === this.sessionGeneration && !result?.canceled) {
-            this.onGoalResult(result, goal);
+      goals.forEach((goal) => {
+        if (this.goalAttemptedIds.has(goal.id) || this.goalTriggeredIds.has(goal.id)) return;
+        const delayMs = Math.max(0, Number(goal.min_play_seconds || 0) * 1000);
+        const timer = this.setTimer(async () => {
+          this.goalTriggerTimers.delete(goal.id);
+          try {
+            const result = await this.maybeTriggerGoal(goal.id, "elapsed_time", generation);
+            if (generation === this.sessionGeneration && !result?.canceled) {
+              this.onGoalResult(result, goal);
+            }
+          } catch (error) {
+            if (generation === this.sessionGeneration) this.onGoalError(error, goal);
           }
-        } catch (error) {
-          if (generation === this.sessionGeneration) this.onGoalError(error, goal);
-        }
-      }, delayMs);
+        }, delayMs);
+        this.goalTriggerTimers.set(goal.id, timer);
+      });
       this.onStateChange(this.snapshot());
       return this.snapshot();
     }
 
     endSession() {
       this.sessionGeneration += 1;
-      if (this.goalTriggerTimer !== null) this.clearTimer(this.goalTriggerTimer);
-      if (this.achievementTimer !== null) this.clearTimer(this.achievementTimer);
+      this.clearGoalTimers();
+      this.achievementTimers.forEach((timer) => this.clearTimer(timer));
       if (this.skillCooldownTimer !== null) this.clearTimer(this.skillCooldownTimer);
-      this.goalTriggerTimer = null;
-      this.achievementTimer = null;
+      this.achievementTimers.clear();
       this.skillCooldownTimer = null;
       this.skillCooldownDeadlineMs = 0;
-      this.goalTriggered = false;
-      this.goalAttempted = false;
-      this.goalPending = false;
+      this.goalTriggeredIds.clear();
+      this.goalAttemptedIds.clear();
+      this.goalPendingIds.clear();
       this.sessionStarted = false;
       this.pendingSkillIds.clear();
-      this.activeRules = { skills: [], goal: null };
+      this.activeRules = { skills: [], goals: [] };
       this.onStateChange(this.snapshot());
+    }
+
+    clearGoalTimers() {
+      this.goalTriggerTimers.forEach((timer) => this.clearTimer(timer));
+      this.goalTriggerTimers.clear();
     }
 
     skillCooldownRemainingMs() {
@@ -255,63 +280,79 @@
       }
     }
 
-    async maybeTriggerGoal(source = "elapsed_time", generation = this.sessionGeneration) {
-      const goal = this.activeRules.goal;
+    async maybeTriggerGoal(goalId, source = "elapsed_time", generation = this.sessionGeneration) {
+      const goal = this.activeRules.goals.find((item) => item.id === goalId);
       if (
         generation !== this.sessionGeneration
         || !goal
-        || this.goalTriggered
-        || this.goalAttempted
-        || this.goalPending
+        || this.goalTriggeredIds.has(goal.id)
+        || this.goalAttemptedIds.has(goal.id)
+        || this.goalPendingIds.has(goal.id)
       ) {
         return { triggered: false, canceled: generation !== this.sessionGeneration };
       }
-      this.goalAttempted = true;
+      this.goalAttemptedIds.add(goal.id);
       const roll = Number(this.random());
       if (goal.probability <= 0 || roll >= goal.probability) {
         this.onStateChange(this.snapshot());
         return { triggered: false, roll };
       }
-      this.goalPending = true;
+      this.goalPendingIds.add(goal.id);
       this.onStateChange(this.snapshot());
       try {
         const result = await this.dispatchPrepared(goal.prepared, {
           trigger: "rule",
           rule: "goal_time_probability",
+          goalId: goal.id,
           goalName: goal.name,
           probability: goal.probability,
           minPlaySeconds: goal.min_play_seconds,
           source,
           instruction: goal.instruction,
         });
-        if (generation !== this.sessionGeneration || goal !== this.activeRules.goal) {
+        if (
+          generation !== this.sessionGeneration
+          || goal !== this.activeRules.goals.find((item) => item.id === goal.id)
+        ) {
           return { triggered: false, canceled: true, roll };
         }
         if (result?.ignored) return { triggered: false, ignored: true, roll };
-        this.goalTriggered = true;
-        this.achievementTimer = this.setTimer(() => {
-          this.achievementTimer = null;
+        this.goalTriggeredIds.add(goal.id);
+        if (this.achievementTimers.has(goal.id)) {
+          this.clearTimer(this.achievementTimers.get(goal.id));
+        }
+        const achievementTimer = this.setTimer(() => {
+          this.achievementTimers.delete(goal.id);
           this.onAchievement(goal);
         }, this.achievementDelayMs);
+        this.achievementTimers.set(goal.id, achievementTimer);
         return { triggered: true, roll, result };
       } finally {
-        this.goalPending = false;
+        this.goalPendingIds.delete(goal.id);
         this.onStateChange(this.snapshot());
       }
     }
 
     snapshot() {
       const skillCooldownRemainingMs = this.skillCooldownRemainingMs();
+      const goals = this.activeRules.goals.map((goal) => ({
+        ...goal,
+        pending: this.goalPendingIds.has(goal.id),
+        attempted: this.goalAttemptedIds.has(goal.id),
+        triggered: this.goalTriggeredIds.has(goal.id),
+        scheduled: this.goalTriggerTimers.has(goal.id),
+      }));
       return {
         skills: this.activeRules.skills.map((skill) => ({
           ...skill,
           pending: this.pendingSkillIds.has(skill.id),
         })),
-        goal: this.activeRules.goal,
-        goalTriggered: this.goalTriggered,
-        goalAttempted: this.goalAttempted,
-        goalPending: this.goalPending,
-        goalScheduled: this.goalTriggerTimer !== null,
+        goals,
+        goal: goals[0] || null,
+        goalTriggered: goals.some((goal) => goal.triggered),
+        goalAttempted: goals.some((goal) => goal.attempted),
+        goalPending: goals.some((goal) => goal.pending),
+        goalScheduled: goals.some((goal) => goal.scheduled),
         sessionStarted: this.sessionStarted,
         sharedSkillCooldownMs: this.skillCooldownMs,
         skillCooldownRemainingMs,
@@ -329,6 +370,7 @@
       DEFAULT_SHARED_SKILL_COOLDOWN_MS,
       GOAL_ACHIEVEMENT_DELAY_MS,
       MAX_GOAL_MIN_PLAY_SECONDS,
+      MAX_WORLD_GOALS,
       MAX_WORLD_SKILLS,
       WorldRulesController,
       normalizeWorldRulesDraft,

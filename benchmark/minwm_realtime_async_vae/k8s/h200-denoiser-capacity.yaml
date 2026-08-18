@@ -1,0 +1,49 @@
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: minwm-async-denoiser-h200-8x
+  labels:
+    app.kubernetes.io/part-of: minwm-realtime
+    seedleap.ai/environment: production
+spec:
+  limits:
+    # One p5e.48xlarge or p6-b200.48xlarge node: two Zing SP=2 workers plus
+    # one LingBot2 SP=4 worker consume all eight GPUs. Karpenter may use B200
+    # when H200 Spot capacity is unavailable.
+    cpu: "192"
+    nvidia.com/gpu: "8"
+  disruption:
+    consolidationPolicy: WhenEmpty
+    consolidateAfter: 1m
+  template:
+    metadata:
+      labels:
+        seedleap.ai/capacity-pool: minwm-async-denoiser-h200-8x
+        seedleap.ai/denoiser-worker: "true"
+        seedleap.ai/environment: production
+        seedleap.ai/model-cache-storage: local-nvme
+    spec:
+      expireAfter: Never
+      nodeClassRef:
+        group: karpenter.k8s.aws
+        kind: EC2NodeClass
+        # This class provisions AL2023/NVIDIA, encrypted gp3 root, EFA, and
+        # RAID0 across all eight 3.8 TB instance-store NVMe devices.
+        name: minwm-async-denoiser-8gpu-nvme-ec2
+      requirements:
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: [spot]
+        - key: kubernetes.io/arch
+          operator: In
+          values: [amd64]
+        - key: topology.kubernetes.io/zone
+          operator: In
+          values: [us-east-2a, us-east-2b, us-east-2c]
+        - key: node.kubernetes.io/instance-type
+          operator: In
+          values: [p5e.48xlarge, p6-b200.48xlarge]
+      taints:
+        - key: nvidia.com/gpu
+          value: "true"
+          effect: NoSchedule
