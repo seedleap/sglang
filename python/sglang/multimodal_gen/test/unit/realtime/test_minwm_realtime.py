@@ -6,6 +6,10 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from sglang.multimodal_gen.configs.models.dits.minwm import (
+    MinWMVideoArchConfig,
+    MinWMVideoConfig,
+)
 from sglang.multimodal_gen.configs.pipeline_configs.minwm import (
     MINWM_ACTION_LABELS_CONDITION,
     MINWM_ACTION_WEIGHTS_CONDITION,
@@ -80,9 +84,11 @@ from sglang.multimodal_gen.runtime.pipelines_core.stages.realtime.vae import (
 )
 from sglang.multimodal_gen.runtime.realtime.session import RealtimeSession
 from sglang.multimodal_gen.tools.convert_minwm_checkpoint import (
+    ACTION_HIDDEN_BIAS_KEYS,
     DEFAULT_SOURCE_URI,
     TRANSFORMER_CONFIG,
     build_transformer_config,
+    validate_generator_state_dict,
 )
 
 
@@ -386,6 +392,44 @@ def test_minwm_primitive_rope_action_binary_windows_match_labels():
         rtol=0,
         atol=0,
     )
+
+
+def test_minwm_rope_action_non_proj_bias_controls_hidden_biases():
+    with_bias = PrimitiveRoPETokenResidualActionEncoder(
+        dim=24, embed_dim=8, hidden_dim=16, kernel_size=3, non_proj_bias=True
+    )
+    without_bias = PrimitiveRoPETokenResidualActionEncoder(
+        dim=24, embed_dim=8, hidden_dim=16, kernel_size=3, non_proj_bias=False
+    )
+
+    assert {
+        name for name, _ in without_bias.named_parameters() if name.endswith(".bias")
+    } == {"proj.bias"}
+    assert {
+        name for name, _ in with_bias.named_parameters() if name.endswith(".bias")
+    } == {
+        "fuse.0.bias",
+        "fuse.2.bias",
+        "encode_1.conv.bias",
+        "encode_1.norm.bias",
+        "encode_2.conv.bias",
+        "encode_2.norm.bias",
+        "proj.bias",
+    }
+
+
+def test_minwm_rope_action_without_hidden_bias_has_constant_idle_residual():
+    encoder = PrimitiveRoPETokenResidualActionEncoder(
+        dim=24, embed_dim=8, hidden_dim=16, kernel_size=3, non_proj_bias=False
+    )
+    with torch.no_grad():
+        for parameter in encoder.parameters():
+            parameter.normal_()
+
+    states = encoder.frame_states(torch.zeros(2, 4, 3, 8))
+    expected = encoder.proj.bias[None, None].expand_as(states)
+
+    torch.testing.assert_close(states, expected, rtol=0, atol=0)
 
 
 def _make_minwm_test_cache(
@@ -1657,6 +1701,64 @@ def test_minwm_converter_records_explicit_cache_policy():
             sink_size=8,
             sliding_window_num_frames=128,
         )
+
+
+def _minimal_minwm_rope_state_dict(*, non_proj_bias: bool):
+    state_dict = {
+        "patch_embedding.weight": torch.empty(3072, 48, 1, 2, 2, device="meta"),
+        "patch_embedding.bias": torch.empty(3072, device="meta"),
+        "action_in.encode_1.conv.weight": torch.empty(512, 512, 3, device="meta"),
+        "action_in.encode_2.conv.weight": torch.empty(512, 512, 3, device="meta"),
+        "action_in.proj.weight": torch.empty(3072, 512, device="meta"),
+        "action_in.proj.bias": torch.empty(3072, device="meta"),
+        "head.head.weight": torch.empty(192, 3072, device="meta"),
+    }
+    state_dict.update(
+        {
+            f"blocks.{block_index}.marker": torch.empty((), device="meta")
+            for block_index in range(30)
+        }
+    )
+    if non_proj_bias:
+        state_dict.update(
+            {name: torch.empty(512, device="meta") for name in ACTION_HIDDEN_BIAS_KEYS}
+        )
+    return state_dict
+
+
+@pytest.mark.parametrize("non_proj_bias", [True, False])
+def test_minwm_converter_infers_rope_action_hidden_bias_contract(non_proj_bias):
+    summary = validate_generator_state_dict(
+        _minimal_minwm_rope_state_dict(non_proj_bias=non_proj_bias)
+    )
+
+    assert summary["action_type"] == "primitive_rope_token_residual"
+    assert summary["action_non_proj_bias"] is non_proj_bias
+
+
+def test_minwm_converter_rejects_partial_rope_action_hidden_biases():
+    state_dict = _minimal_minwm_rope_state_dict(non_proj_bias=False)
+    state_dict[ACTION_HIDDEN_BIAS_KEYS[0]] = torch.empty(512, device="meta")
+
+    with pytest.raises(ValueError, match="partial primitive RoPE action hidden biases"):
+        validate_generator_state_dict(state_dict)
+
+
+def test_minwm_non_proj_bias_is_written_to_and_loaded_from_transformer_config():
+    transformer_config = build_transformer_config(
+        local_attn_size=-1,
+        sink_size=0,
+        sliding_window_num_frames=128,
+        action_type="primitive_rope_token_residual",
+        action_non_proj_bias=False,
+    )
+    model_config = MinWMVideoConfig()
+    model_config.update_model_arch(transformer_config)
+
+    assert transformer_config["action_non_proj_bias"] is False
+    assert model_config.arch_config.action_non_proj_bias is False
+    assert MinWMVideoArchConfig().action_non_proj_bias is True
+    assert TRANSFORMER_CONFIG["action_non_proj_bias"] is True
 
 
 @pytest.mark.parametrize("degree", [2, 4, 8])

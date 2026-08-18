@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>World Studio · 实时模型对比</title>
-    <link rel="stylesheet" href="./styles.css?v=world-studio-h264-rules-v5" />
+    <link rel="stylesheet" href="./styles.css?v=world-studio-h264-rules-v6" />
   </head>
   <body class="world-studio">
     <header class="app-header">
@@ -103,22 +103,11 @@
             </section>
             <section class="rule-editor rule-editor-goal" aria-labelledby="goalRuleTitle">
               <header>
-                <span><b id="goalRuleTitle">目标</b><small>最多 1 个</small></span>
+                <span><b id="goalRuleTitle">目标</b><small>最多 9 个</small></span>
+                <button id="addGoalRuleBtn" type="button">＋ 添加目标</button>
               </header>
-              <div class="goal-rule-fields">
-                <label class="goal-min-play-field">
-                  <span>至少游玩（秒）</span>
-                  <input id="goalMinPlaySeconds" type="number" min="0" max="3600" step="1" placeholder="10" inputmode="decimal" />
-                </label>
-                <label class="goal-probability-field">
-                  <span>触发概率</span>
-                  <input id="goalProbability" type="number" min="0" max="1" step="0.01" placeholder="0.2" inputmode="decimal" />
-                </label>
-                <label class="goal-rule-input-field">
-                  <span>达成奖励或触发效果</span>
-                  <textarea id="goalRuleInput" rows="3" maxlength="2000" placeholder="例如：星光徽章；或：天空落下一枚发光徽章，被主角稳稳接住……"></textarea>
-                </label>
-              </div>
+              <div id="goalRuleList" class="goal-rule-list"></div>
+              <p id="goalRuleEmpty" class="rule-empty">添加后会在满足游玩时间和概率时自动触发</p>
             </section>
             <p id="worldRulesStatus" class="world-rules-status" role="status" aria-live="polite">规则非必填</p>
           </div>
@@ -409,10 +398,10 @@
     <script src="./happy_oyster_session.js?v=happyoyster-session-v5"></script>
     <script src="./session_lifetime.js?v=session-lifetime-v1"></script>
     <script src="./prompt_rewrite_controller.js?v=prompt-rewrite-v3"></script>
-    <script src="./world_rules_controller.js?v=world-rules-v3"></script>
+    <script src="./world_rules_controller.js?v=world-rules-v4"></script>
     <script src="./fullscreen_controller.js?v=fullscreen-focus-v1"></script>
     <script src="./trace_topology.js?v=realtime-trace-topology-v6"></script>
     <script src="./trace_transport.js?v=realtime-trace-http-v2"></script>
-    <script src="./app.js?v=world-studio-control-protocol-v6"></script>
+    <script src="./app.js?v=world-studio-transport-telemetry-v3"></script>
   </body>
 </html>

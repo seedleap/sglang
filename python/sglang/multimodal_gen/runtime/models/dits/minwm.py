@@ -1011,12 +1011,14 @@ class MinWMCausalTransformer3DModel(CausalWanTransformer3DModel):
             if config.action_type == "primitive_rope_token_residual"
             else PrimitiveTokenResidualActionEncoder
         )
-        self.action_in = action_encoder_cls(
-            self.hidden_size,
-            embed_dim=config.action_embed_dim,
-            hidden_dim=config.action_hidden_dim,
-            kernel_size=config.action_kernel_size,
-        )
+        action_encoder_kwargs = {
+            "embed_dim": config.action_embed_dim,
+            "hidden_dim": config.action_hidden_dim,
+            "kernel_size": config.action_kernel_size,
+        }
+        if action_encoder_cls is PrimitiveRoPETokenResidualActionEncoder:
+            action_encoder_kwargs["non_proj_bias"] = config.action_non_proj_bias
+        self.action_in = action_encoder_cls(self.hidden_size, **action_encoder_kwargs)
         self.action_history_frames = config.action_history_frames
         expected_history = 2 * (config.action_kernel_size - 1)
         if self.action_history_frames != expected_history:

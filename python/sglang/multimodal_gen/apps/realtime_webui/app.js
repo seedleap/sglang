@@ -649,6 +649,7 @@ let selectedReferenceMimeType = "";
 let selectedReferencePreviewReady = false;
 let worldCompletionPending = false;
 let skillRuleNextId = 1;
+let goalRuleNextId = 1;
 let preparedWorldRulesCache = null;
 let worldRulesDraftGeneration = 0;
 let sessionLifetimeExpired = false;
@@ -685,15 +686,10 @@ let lastRenderedChunk = null;
 let lastReceivedChunk = null;
 let lastReceivedFrameBatchIndex = null;
 let frameBatchGapCount = 0;
-let encodedDecodeErrors = 0;
-let primaryChunkTelemetry = {};
-let primaryLastInputUplinkMs = 0;
-let primaryReceiveMbps = 0;
-let primaryReceivedBytes = 0;
-let primaryLastNetworkSample = null;
-let primaryLastDownlinkMs = 0;
-let primaryLastControlToVideoMs = 0;
+let primaryProtocolStats = {};
+let primaryNetworkSample = null;
 const primaryControlSentEpochByEvent = new Map();
+let encodedDecodeErrors = 0;
 let socketHadError = false;
 let socketCloseExpected = false;
 let socketServerError = "";
@@ -852,6 +848,7 @@ const lingbot2FallbackSession = new RealtimeModelSession({
   unpack,
   workerUrl: DECODER_WORKER_URL,
   startupMinChunk: 1,
+  startupTimeoutMs: configuredModelNumber("lingbot2", "startupTimeoutMs", 60000),
   onState: (state, details) => {
     setModelConnectionState("lingbot2", state);
     if (state === "error") {
@@ -867,7 +864,7 @@ const lingbot2FallbackSession = new RealtimeModelSession({
     root.dataset.chunk = stats.lastChunk ?? "";
     root.dataset.frames = String(stats.frames || 0);
     renderModelTelemetry("lingbot2", stats);
-    renderProtocolPerformance("lingbot2", stats);
+    renderProtocolPerformance("lingbot2", { ...stats, transport: "webp" });
     markModelEventApplied("lingbot2", stats.lastAppliedEventId);
   },
   onFrame: () => markSessionPlayable("lingbot2"),
@@ -940,7 +937,7 @@ function createH264ModelSession(key) {
         root.dataset.frames = String(h264ModelStats[key].frames || 0);
       }
       renderModelTelemetry(key, h264ModelStats[key]);
-      renderProtocolPerformance(key, h264ModelStats[key]);
+      renderProtocolPerformance(key, { ...h264ModelStats[key], transport: "h264" });
     },
     onError: (error) => {
       addHistory(`${modelLabel(key)} H.264 session failed · ${error.message || error}`);
@@ -1963,15 +1960,10 @@ function resetStreamStats() {
   lastReceivedChunk = null;
   lastReceivedFrameBatchIndex = null;
   frameBatchGapCount = 0;
-  encodedDecodeErrors = 0;
-  primaryChunkTelemetry = {};
-  primaryLastInputUplinkMs = 0;
-  primaryReceiveMbps = 0;
-  primaryReceivedBytes = 0;
-  primaryLastNetworkSample = null;
-  primaryLastDownlinkMs = 0;
-  primaryLastControlToVideoMs = 0;
+  primaryProtocolStats = {};
+  primaryNetworkSample = null;
   primaryControlSentEpochByEvent.clear();
+  encodedDecodeErrors = 0;
   renderedPreviewFrames = 0;
   lastSentEventId = 0;
   lastRenderedEventId = 0;
@@ -2122,17 +2114,16 @@ function isWorkerDecodableRawContentType(contentType) {
 function updateStats() {
   if (activeH264Models.has("minwm")) {
     renderModelTelemetry("minwm", h264ModelStats.minwm);
-    renderProtocolPerformance("minwm", h264ModelStats.minwm);
+    renderProtocolPerformance("minwm", { ...h264ModelStats.minwm, transport: "h264" });
     return;
   }
   const playback = playbackController.snapshot();
   const totalDroppedFrames = playback.droppedFrames + droppedDecodeFrames;
-  const primaryStats = {
+  renderModelTelemetry("minwm", {
     ...playback,
+    ...primaryProtocolStats,
     frames,
     bytes,
-    bytesReceived: primaryReceivedBytes,
-    receiveMbps: primaryReceiveMbps,
     lastChunk: lastRenderedChunk,
     frameBatchGapCount,
     lastDecodeMs,
@@ -2140,13 +2131,13 @@ function updateStats() {
     renderFps: fpsSamples.length,
     droppedFrames: totalDroppedFrames,
     decodeQueueLength: pendingDecodeBatches,
-    chunkTelemetry: primaryChunkTelemetry,
-    lastInputUplinkMs: primaryLastInputUplinkMs,
-    lastDownlinkMs: primaryLastDownlinkMs,
-    lastControlToVideoMs: primaryLastControlToVideoMs,
-  };
-  renderModelTelemetry("minwm", primaryStats);
-  renderProtocolPerformance("minwm", primaryStats);
+  });
+  renderProtocolPerformance("minwm", {
+    ...playback,
+    ...primaryProtocolStats,
+    bytes,
+    transport: "webp",
+  });
 }
 
 function resetModelTelemetry(key) {
@@ -2171,72 +2162,84 @@ function performanceMs(value) {
     : "-";
 }
 
+function protocolMetric(...values) {
+  for (const value of values) {
+    if (value === null || value === undefined || value === "") continue;
+    const number = Number(value);
+    if (Number.isFinite(number) && number >= 0) return number;
+  }
+  return null;
+}
+
+function protocolMetricText(value) {
+  return value === null ? "-" : performanceMs(value);
+}
+
 function renderProtocolPerformance(key, stats = {}) {
   const telemetry = stats.chunkTelemetry || {};
-  const receiveMbps = Number(stats.receiveMbps || 0);
+  const isH264 = stats.transport === "h264" || stats.codec === "h264";
+  const receiveMbps = protocolMetric(stats.receiveMbps);
   const bytesReceived = Number(stats.bytesReceived ?? stats.bytes ?? 0);
   const sourceFps = Number(stats.serverFps || stats.sourceFps || 0);
   const deliveryFps = Number(stats.deliveryFps || 0);
   const renderFps = Number(stats.renderFps || 0);
-  const vaeQueueMs = Number(telemetry.vae_queue_wait_ms || 0);
-  const vaeDecodeMs = Number(
-    telemetry.vae_decode_ms || telemetry.model_vae_decode_ms || 0,
+  const vaeQueueMs = protocolMetric(telemetry.vae_queue_wait_ms);
+  const vaeDecodeMs = protocolMetric(
+    telemetry.vae_decode_ms,
+    telemetry.model_vae_decode_ms,
   );
-  const h264FeedMs = Number(stats.lastBridgeEncoderFeedMs || 0);
-  const bridgeQueueMs = Number(stats.lastBridgeQueueMs || 0);
-  const webSocketDownlinkMs = Number(
-    stats.lastWebSocketDownlinkMs || stats.lastDownlinkMs || 0,
+  const h264FeedMs = protocolMetric(stats.lastBridgeEncoderFeedMs);
+  const bridgeQueueMs = protocolMetric(stats.lastBridgeQueueMs);
+  const webSocketDownlinkMs = protocolMetric(
+    stats.lastWebSocketDownlinkMs,
+    stats.lastDownlinkMs,
   );
-  const mseQueueMs = Number(stats.lastMseQueueMs || 0);
-  const mseAppendMs = Number(stats.lastMseAppendMs || 0);
-  const playbackBufferMs = Number(
-    stats.playbackBufferMs ?? stats.mseBufferMs ?? stats.bufferMs ?? 0,
+  const mseQueueMs = protocolMetric(stats.lastMseQueueMs);
+  const mseAppendMs = protocolMetric(stats.lastMseAppendMs);
+  const playbackBufferMs = protocolMetric(
+    stats.playbackBufferMs,
+    stats.mseBufferMs,
+    stats.bufferMs,
   );
-  const inputUplinkMs = Number(
-    stats.lastInputUplinkMs || telemetry.input_uplink_ms,
+  const inputUplinkMs = protocolMetric(
+    stats.lastInputUplinkMs,
+    telemetry.input_uplink_ms,
   );
-  const e2eMs = Number(
-    stats.lastPresentedControlToVideoMs || stats.lastControlToVideoMs || 0,
+  const e2eMs = protocolMetric(
+    stats.lastPresentedControlToVideoMs,
+    stats.lastControlToVideoMs,
   );
-  const webpActive = bytesReceived > 0 && !activeH264Models.has(key);
-  const unavailableForTransport = webpActive ? "WebP 未启用" : "-";
   $(`${key}PerfData`).textContent = bytesReceived > 0
-    ? `${receiveMbps.toFixed(1)} Mb/s`
+    ? `${Number(receiveMbps || 0).toFixed(1)} Mb/s`
     : "-";
   $(`${key}PerfFps`).textContent = sourceFps > 0 || deliveryFps > 0 || renderFps > 0
     ? `源 ${sourceFps.toFixed(1)} · 收 ${deliveryFps.toFixed(1)} · 显 ${renderFps.toFixed(1)}`
     : "-";
-  $(`${key}PerfUplink`).textContent = inputUplinkMs > 0
-    ? performanceMs(inputUplinkMs)
-    : "-";
+  $(`${key}PerfUplink`).textContent = protocolMetricText(inputUplinkMs);
   $(`${key}PerfScheduler`).textContent = telemetry.scheduler_forward_ms != null
     ? performanceMs(telemetry.scheduler_forward_ms)
     : "-";
   $(`${key}PerfDenoise`).textContent = telemetry.model_denoise_ms != null
     ? performanceMs(telemetry.model_denoise_ms)
     : "-";
-  $(`${key}PerfVae`).textContent = vaeQueueMs > 0 || vaeDecodeMs > 0
-    ? `q ${performanceMs(vaeQueueMs)} · dec ${performanceMs(vaeDecodeMs)}`
+  $(`${key}PerfVae`).textContent = vaeQueueMs !== null || vaeDecodeMs !== null
+    ? `q ${protocolMetricText(vaeQueueMs)} · dec ${protocolMetricText(vaeDecodeMs)}`
     : "-";
-  $(`${key}PerfH264Queue`).textContent = bridgeQueueMs > 0
-    ? performanceMs(bridgeQueueMs)
-    : unavailableForTransport;
-  $(`${key}PerfH264Feed`).textContent = h264FeedMs > 0
-    ? performanceMs(h264FeedMs)
-    : unavailableForTransport;
-  $(`${key}PerfDownlink`).textContent = webSocketDownlinkMs > 0
-    ? performanceMs(webSocketDownlinkMs)
-    : "-";
-  $(`${key}PerfMseQueue`).textContent = mseQueueMs > 0
-    ? performanceMs(mseQueueMs)
-    : unavailableForTransport;
-  $(`${key}PerfMseAppend`).textContent = mseAppendMs > 0
-    ? performanceMs(mseAppendMs)
-    : unavailableForTransport;
-  $(`${key}PerfPlaybackBuffer`).textContent = bytesReceived > 0
-    ? performanceMs(playbackBufferMs)
-    : "-";
-  $(`${key}PerfE2E`).textContent = e2eMs > 0 ? performanceMs(e2eMs) : "-";
+  $(`${key}PerfH264Queue`).textContent = isH264
+    ? protocolMetricText(bridgeQueueMs)
+    : "不适用";
+  $(`${key}PerfH264Feed`).textContent = isH264
+    ? protocolMetricText(h264FeedMs)
+    : "不适用";
+  $(`${key}PerfDownlink`).textContent = protocolMetricText(webSocketDownlinkMs);
+  $(`${key}PerfMseQueue`).textContent = isH264
+    ? protocolMetricText(mseQueueMs)
+    : "不适用";
+  $(`${key}PerfMseAppend`).textContent = isH264
+    ? protocolMetricText(mseAppendMs)
+    : "不适用";
+  $(`${key}PerfPlaybackBuffer`).textContent = protocolMetricText(playbackBufferMs);
+  $(`${key}PerfE2E`).textContent = protocolMetricText(e2eMs);
 }
 
 function renderModelTelemetry(key, stats = {}) {
@@ -4870,15 +4873,16 @@ function renderLoop(now) {
     fpsSamples = fpsSamples.filter((t) => now - t < 1000);
     lastRenderedChunk = item.chunk;
     lastRenderedEventId = Number(item.eventId || lastRenderedEventId || 0);
-    const renderedControlEventIds = Array.from(primaryControlSentEpochByEvent.keys())
+    const appliedEventIds = Array.from(primaryControlSentEpochByEvent.keys())
       .filter((eventId) => eventId <= lastRenderedEventId)
       .sort((left, right) => left - right);
-    if (renderedControlEventIds.length) {
-      const sentEpochMs = primaryControlSentEpochByEvent.get(renderedControlEventIds[0]);
-      primaryLastControlToVideoMs = Math.max(0, Date.now() - sentEpochMs);
-      for (const eventId of renderedControlEventIds) {
-        primaryControlSentEpochByEvent.delete(eventId);
-      }
+    if (appliedEventIds.length) {
+      const sentEpochMs = primaryControlSentEpochByEvent.get(appliedEventIds[0]);
+      primaryProtocolStats = {
+        ...primaryProtocolStats,
+        lastControlToVideoMs: Math.max(0, Date.now() - sentEpochMs),
+      };
+      for (const eventId of appliedEventIds) primaryControlSentEpochByEvent.delete(eventId);
     }
     lastDisplayLagMs = now - (item.receivedAt || now);
     recordChunkFirstRendered(item.chunk, {
@@ -5059,6 +5063,10 @@ function skillRuleElements() {
   return Array.from(document.querySelectorAll(".skill-rule-item"));
 }
 
+function goalRuleElements() {
+  return Array.from(document.querySelectorAll(".goal-rule-item"));
+}
+
 function setWorldRulesStatus(message, state = "") {
   const status = $("worldRulesStatus");
   status.textContent = message;
@@ -5067,29 +5075,43 @@ function setWorldRulesStatus(message, state = "") {
 }
 
 function readWorldRulesDraft() {
-  const goalInput = $("goalRuleInput").value;
-  const goalMinPlaySeconds = $("goalMinPlaySeconds").value;
-  if (goalInput.trim() && goalMinPlaySeconds !== "") {
-    const seconds = Number(goalMinPlaySeconds);
-    if (!Number.isFinite(seconds) || seconds < 0 || seconds > MAX_GOAL_MIN_PLAY_SECONDS) {
-      throw new Error(`目标至少游玩时间必须在 0–${MAX_GOAL_MIN_PLAY_SECONDS} 秒之间`);
+  const goals = goalRuleElements().map((item) => {
+    const goalInput = item.querySelector("[data-rule-field='input']").value;
+    const goalMinPlaySeconds = item.querySelector("[data-rule-field='min_play_seconds']").value;
+    if (goalInput.trim() && goalMinPlaySeconds !== "") {
+      const seconds = Number(goalMinPlaySeconds);
+      if (!Number.isFinite(seconds) || seconds < 0 || seconds > MAX_GOAL_MIN_PLAY_SECONDS) {
+        throw new Error(`目标至少游玩时间必须在 0–${MAX_GOAL_MIN_PLAY_SECONDS} 秒之间`);
+      }
     }
-  }
+    return {
+      id: item.dataset.goalRuleId,
+      min_play_seconds: goalMinPlaySeconds,
+      probability: item.querySelector("[data-rule-field='probability']").value,
+      input: goalInput,
+    };
+  });
   return {
     skills: skillRuleElements().map((item) => ({
       id: item.dataset.skillRuleId,
       input: item.querySelector("[data-rule-field='input']").value,
     })),
-    goal: {
-      min_play_seconds: goalMinPlaySeconds,
-      probability: $("goalProbability").value,
-      input: goalInput,
-    },
+    goals,
   };
 }
 
 function normalizedWorldRulesForStorage(draft = readWorldRulesDraft()) {
   return normalizeWorldRulesDraft(draft);
+}
+
+function worldRulesGoalCount(normalized) {
+  if (Array.isArray(normalized?.goals)) return normalized.goals.length;
+  return normalized?.goal ? 1 : 0;
+}
+
+function worldRulesRuleCount(normalized) {
+  return (Array.isArray(normalized?.skills) ? normalized.skills.length : 0)
+    + worldRulesGoalCount(normalized);
 }
 
 function worldRulesStorageSignature(draft = readWorldRulesDraft()) {
@@ -5103,7 +5125,7 @@ function worldRulesStorageSignature(draft = readWorldRulesDraft()) {
 function hasConfiguredWorldRules(draft = readWorldRulesDraft()) {
   try {
     const normalized = normalizedWorldRulesForStorage(draft);
-    return Boolean(normalized.skills.length || normalized.goal);
+    return Boolean(worldRulesRuleCount(normalized));
   } catch {
     return true;
   }
@@ -5126,6 +5148,13 @@ function invalidatePreparedWorldRules() {
       : "填写技能标签或动作描述后启用";
     delete state.dataset.state;
   });
+  goalRuleElements().forEach((item) => {
+    const state = item.querySelector(".goal-rule-state");
+    state.textContent = item.querySelector("[data-rule-field='input']").value.trim()
+      ? "待进入世界时由 AI 补全"
+      : "填写奖励或触发效果后启用";
+    delete state.dataset.state;
+  });
 }
 
 function updateWorldRulesDraftUi() {
@@ -5135,15 +5164,26 @@ function updateWorldRulesDraftUi() {
   });
   $("skillRuleEmpty").hidden = items.length > 0;
   $("addSkillRuleBtn").disabled = items.length >= 9;
+  const goalItems = goalRuleElements();
+  goalItems.forEach((item, index) => {
+    item.querySelector(".goal-rule-key").textContent = String(index + 1);
+    item.querySelector(".goal-rule-title").textContent = `目标 ${index + 1}`;
+  });
+  $("goalRuleEmpty").hidden = goalItems.length > 0;
+  $("addGoalRuleBtn").disabled = goalItems.length >= 9;
   const skillCount = items.filter((item) => (
     item.querySelector("[data-rule-field='input']").value.trim()
   )).length;
-  const hasGoal = Boolean($("goalRuleInput").value.trim());
+  const configuredGoalItems = goalItems.filter((item) => (
+    item.querySelector("[data-rule-field='input']").value.trim()
+  ));
   const parts = [];
   if (skillCount) parts.push(`${skillCount} 个技能`);
-  if (hasGoal) {
-    const minPlaySeconds = $("goalMinPlaySeconds").value.trim() || "10";
-    parts.push(`1 个目标 · ≥${minPlaySeconds}s`);
+  if (configuredGoalItems.length) {
+    const minPlaySecondsText = configuredGoalItems
+      .map((item) => item.querySelector("[data-rule-field='min_play_seconds']").value.trim() || "10")
+      .join("/");
+    parts.push(`${configuredGoalItems.length} 个目标 · ≥${minPlaySecondsText}s`);
   }
   $("worldRulesSummary").textContent = parts.length ? parts.join(" · ") : "未配置";
 
@@ -5221,19 +5261,115 @@ function addSkillRule(skill = {}, { focus = true } = {}) {
   return item;
 }
 
+function addGoalRule(goal = {}, { focus = true } = {}) {
+  const list = $("goalRuleList");
+  if (goalRuleElements().length >= 9) {
+    setWorldRulesStatus("最多可以配置 9 个目标", "error");
+    return null;
+  }
+  const item = document.createElement("article");
+  item.className = "goal-rule-item";
+  const existingIds = new Set(goalRuleElements().map((entry) => entry.dataset.goalRuleId));
+  let goalId = String(goal.id || "").trim();
+  if (!goalId || existingIds.has(goalId)) {
+    do {
+      goalId = `goal-${goalRuleNextId++}`;
+    } while (existingIds.has(goalId));
+  } else {
+    const numericId = /^goal-(\d+)$/.exec(goalId);
+    if (numericId) goalRuleNextId = Math.max(goalRuleNextId, Number(numericId[1]) + 1);
+  }
+  item.dataset.goalRuleId = goalId;
+
+  const head = document.createElement("div");
+  head.className = "goal-rule-item-head";
+  const key = document.createElement("span");
+  key.className = "goal-rule-key";
+  key.setAttribute("aria-hidden", "true");
+  const title = document.createElement("strong");
+  title.className = "goal-rule-title";
+  const remove = document.createElement("button");
+  remove.className = "goal-rule-remove";
+  remove.type = "button";
+  remove.setAttribute("aria-label", "删除目标");
+  remove.title = "删除目标";
+  remove.textContent = "×";
+  head.append(key, title, remove);
+
+  const fields = document.createElement("div");
+  fields.className = "goal-rule-fields";
+  const minLabel = document.createElement("label");
+  minLabel.className = "goal-min-play-field";
+  minLabel.innerHTML = "<span>至少游玩（秒）</span>";
+  const minPlay = document.createElement("input");
+  minPlay.type = "number";
+  minPlay.min = "0";
+  minPlay.max = String(MAX_GOAL_MIN_PLAY_SECONDS);
+  minPlay.step = "1";
+  minPlay.placeholder = "10";
+  minPlay.inputMode = "decimal";
+  minPlay.value = goal.min_play_seconds == null
+    ? (goal.minPlaySeconds == null ? "" : String(goal.minPlaySeconds))
+    : String(goal.min_play_seconds);
+  minPlay.dataset.ruleField = "min_play_seconds";
+  minPlay.setAttribute("aria-label", "目标至少游玩秒数");
+  minLabel.appendChild(minPlay);
+
+  const probabilityLabel = document.createElement("label");
+  probabilityLabel.className = "goal-probability-field";
+  probabilityLabel.innerHTML = "<span>触发概率</span>";
+  const probability = document.createElement("input");
+  probability.type = "number";
+  probability.min = "0";
+  probability.max = "1";
+  probability.step = "0.01";
+  probability.placeholder = "0.2";
+  probability.inputMode = "decimal";
+  probability.value = goal.probability == null ? "" : String(goal.probability);
+  probability.dataset.ruleField = "probability";
+  probability.setAttribute("aria-label", "目标触发概率");
+  probabilityLabel.appendChild(probability);
+
+  const inputLabel = document.createElement("label");
+  inputLabel.className = "goal-rule-input-field";
+  inputLabel.innerHTML = "<span>达成奖励或触发效果</span>";
+  const input = document.createElement("textarea");
+  input.rows = 3;
+  input.maxLength = 2000;
+  input.placeholder = "例如：星光徽章；或：天空落下一枚发光徽章，被主角稳稳接住……";
+  input.value = String(goal.input || goal.instruction || goal.name || "");
+  input.dataset.ruleField = "input";
+  input.setAttribute("aria-label", "目标达成奖励或触发效果");
+  inputLabel.appendChild(input);
+
+  fields.append(minLabel, probabilityLabel, inputLabel);
+  const state = document.createElement("span");
+  state.className = "goal-rule-state";
+  state.textContent = input.value.trim()
+    ? "待进入世界时由 AI 补全"
+    : "填写奖励或触发效果后启用";
+  item.append(head, fields, state);
+  list.appendChild(item);
+
+  for (const control of [minPlay, probability, input]) {
+    control.addEventListener("input", handleWorldRulesDraftInput);
+  }
+  remove.onclick = () => {
+    item.remove();
+    handleWorldRulesDraftInput();
+  };
+  updateWorldRulesDraftUi();
+  if (focus) input.focus({ preventScroll: true });
+  return item;
+}
+
 function applyWorldRulesDraft(draft = null) {
   $("skillRuleList").innerHTML = "";
+  $("goalRuleList").innerHTML = "";
   const skills = Array.isArray(draft?.skills) ? draft.skills : [];
   skills.slice(0, 9).forEach((skill) => addSkillRule(skill, { focus: false }));
-  $("goalMinPlaySeconds").value = draft?.goal?.min_play_seconds == null
-    ? (draft?.goal?.minPlaySeconds == null ? "" : String(draft.goal.minPlaySeconds))
-    : String(draft.goal.min_play_seconds);
-  $("goalProbability").value = draft?.goal?.probability == null
-    ? ""
-    : String(draft.goal.probability);
-  $("goalRuleInput").value = String(
-    draft?.goal?.input || draft?.goal?.instruction || draft?.goal?.name || "",
-  );
+  const goals = Array.isArray(draft?.goals) ? draft.goals : (draft?.goal ? [draft.goal] : []);
+  goals.slice(0, 9).forEach((goal) => addGoalRule(goal, { focus: false }));
   invalidatePreparedWorldRules();
   updateWorldRulesDraftUi();
 }
@@ -5244,6 +5380,7 @@ function setWorldRulesPreparing(pending) {
     control.disabled = pending;
   });
   $("addSkillRuleBtn").disabled = pending || skillRuleElements().length >= 9;
+  $("addGoalRuleBtn").disabled = pending || goalRuleElements().length >= 9;
 }
 
 async function prepareWorldRulesForEntry(description) {
@@ -5253,10 +5390,10 @@ async function prepareWorldRulesForEntry(description) {
     return preparedWorldRulesCache.prepared;
   }
   const normalized = normalizedWorldRulesForStorage(draft);
-  const ruleCount = normalized.skills.length + (normalized.goal ? 1 : 0);
+  const ruleCount = worldRulesRuleCount(normalized);
   if (!ruleCount) {
     setWorldRulesStatus("当前世界未配置规则", "");
-    return { skills: [], goal: null };
+    return { skills: [], goals: [] };
   }
 
   const generation = worldRulesDraftGeneration;
@@ -5285,6 +5422,18 @@ async function prepareWorldRulesForEntry(description) {
         : `✓ ${skill.name} · 持久`;
       state.dataset.state = "ready";
     });
+    const preparedGoals = Array.isArray(prepared.goals) ? prepared.goals : (
+      prepared.goal ? [prepared.goal] : []
+    );
+    preparedGoals.forEach((goal) => {
+      const item = goalRuleElements().find((candidate) => (
+        candidate.dataset.goalRuleId === goal.id
+      ));
+      const state = item?.querySelector(".goal-rule-state");
+      if (!state) return;
+      state.textContent = `✓ ${goal.name} · ≥${goal.min_play_seconds}s · p=${goal.probability}`;
+      state.dataset.state = "ready";
+    });
     preparedWorldRulesCache = { signature, prepared };
     setWorldRulesStatus(`${ruleCount} 条规则已补全；技能可立即使用，目标将按时间自动触发`, "ready");
     return prepared;
@@ -5292,6 +5441,13 @@ async function prepareWorldRulesForEntry(description) {
     $("worldRulesPanel").open = true;
     skillRuleElements().forEach((item) => {
       const state = item.querySelector(".skill-rule-state");
+      if (!state.dataset.state) {
+        state.textContent = "补全失败，请重试";
+        state.dataset.state = "error";
+      }
+    });
+    goalRuleElements().forEach((item) => {
+      const state = item.querySelector(".goal-rule-state");
       if (!state.dataset.state) {
         state.textContent = "补全失败，请重试";
         state.dataset.state = "error";
@@ -5994,6 +6150,18 @@ function openPrimarySession(init, url) {
 function sendPrimaryEventEnvelope(envelope) {
   if (!ws || ws.readyState !== WebSocket.OPEN) return false;
   ws.send(pack({ ...envelope, trace_id: currentTrace?.traceId }));
+  const eventId = Number(envelope.event_id || 0);
+  if (eventId > 0 && ["camera_actions", "prompt", "scene_cut"].includes(envelope.kind)) {
+    primaryControlSentEpochByEvent.set(
+      eventId,
+      Number(envelope.client_sent_epoch_ms || Date.now()),
+    );
+    while (primaryControlSentEpochByEvent.size > 64) {
+      primaryControlSentEpochByEvent.delete(
+        primaryControlSentEpochByEvent.keys().next().value,
+      );
+    }
+  }
   return true;
 }
 
@@ -6006,43 +6174,6 @@ function handleReceiveError(error, epoch) {
     expectedClose: false,
     resetControls: false,
   });
-}
-
-function handlePrimaryControlAck(message) {
-  if (message.stage !== "worker") return;
-  const clientSentEpochMs = Number(message.client_sent_epoch_ms || 0);
-  const serverReceivedEpochMs = Number(message.server_received_epoch_ms || 0);
-  const serverSentEpochMs = Number(message.server_sent_epoch_ms || 0);
-  const clientReceivedEpochMs = Date.now();
-  if (!clientSentEpochMs || !serverReceivedEpochMs || !serverSentEpochMs) return;
-  const serverProcessingMs = Math.max(0, serverSentEpochMs - serverReceivedEpochMs);
-  const roundTripMs = Math.max(0, clientReceivedEpochMs - clientSentEpochMs);
-  primaryLastInputUplinkMs = Math.max(0, (roundTripMs - serverProcessingMs) / 2);
-  markClientTrace("client.control_ack_received", {
-    event_id: Number(message.event_id || 0),
-    kind: message.kind || "",
-    input_uplink_ms: primaryLastInputUplinkMs,
-  });
-  updateStats();
-}
-
-function observePrimaryFrameTransport(header, payloadBytes) {
-  const serverSentEpochMs = Number(header.server_sent_epoch_ms || 0);
-  if (serverSentEpochMs > 0) {
-    primaryLastDownlinkMs = Math.max(0, Date.now() - serverSentEpochMs);
-  }
-  const now = performance.now();
-  primaryReceivedBytes += Math.max(0, Number(payloadBytes || 0));
-  if (primaryLastNetworkSample && now > primaryLastNetworkSample.at) {
-    const elapsedSeconds = (now - primaryLastNetworkSample.at) / 1000;
-    primaryReceiveMbps = Math.max(
-      0,
-      (primaryReceivedBytes - primaryLastNetworkSample.bytes) * 8
-        / elapsedSeconds
-        / 1_000_000,
-    );
-  }
-  primaryLastNetworkSample = { at: now, bytes: primaryReceivedBytes };
 }
 
 function receive(data, epoch) {
@@ -6076,6 +6207,38 @@ function receive(data, epoch) {
       if (!renderedPreviewFrames) setPreviewState("idle");
       return;
     }
+    if (message.type === "control_ack") {
+      if (message.stage === "worker") {
+        const clientSentEpochMs = Number(message.client_sent_epoch_ms || 0);
+        const serverReceivedEpochMs = Number(message.server_received_epoch_ms || 0);
+        const serverSentEpochMs = Number(message.server_sent_epoch_ms || 0);
+        const clientReceivedEpochMs = Date.now();
+        if (clientSentEpochMs && serverReceivedEpochMs && serverSentEpochMs) {
+          const serverProcessingMs = Math.max(0, serverSentEpochMs - serverReceivedEpochMs);
+          const controlRoundTripMs = Math.max(0, clientReceivedEpochMs - clientSentEpochMs);
+          primaryProtocolStats = {
+            ...primaryProtocolStats,
+            controlRoundTripMs,
+            lastInputUplinkMs: Math.max(0, (controlRoundTripMs - serverProcessingMs) / 2),
+            serverClockOffsetMs: (
+              (serverReceivedEpochMs - clientSentEpochMs)
+              + (serverSentEpochMs - clientReceivedEpochMs)
+            ) / 2,
+          };
+          updateStats();
+        }
+      }
+      return;
+    }
+    if (message.type === "chunk_telemetry") {
+      primaryProtocolStats = {
+        ...primaryProtocolStats,
+        chunkTelemetry: { ...message },
+      };
+      updateStats();
+      return;
+    }
+    if (message.type === "session_ready" || message.type === "heartbeat") return;
     if (message.type === "frame_batch") {
       const payload = message.payload;
       delete message.payload;
@@ -6092,28 +6255,10 @@ function receive(data, epoch) {
         payload_bytes: payload?.byteLength || payload?.size || payload?.length || 0,
         frame_batch_gap_count: observeFrameBatchGap(message),
       });
-      observePrimaryFrameTransport(
-        message,
-        payload?.byteLength || payload?.size || payload?.length || 0,
-      );
       recordFrameBatchReceived(message, payload?.byteLength || payload?.size || payload?.length || 0);
       enqueueDecodeBatch(message, payload, epoch);
       schedulePrimaryPlaybackAck();
       if (!renderedPreviewFrames) setStatus("Receiving", "live");
-      return;
-    }
-    if (message.type === "frame_batch_header") {
-      pendingHeader = message;
-      if (!renderedPreviewFrames) setStatus("Receiving", "live");
-      return;
-    }
-    if (message.type === "control_ack") {
-      handlePrimaryControlAck(message);
-      return;
-    }
-    if (message.type === "chunk_telemetry") {
-      primaryChunkTelemetry = { ...message };
-      updateStats();
       return;
     }
     if (message.type === "media_chunk_complete") {
@@ -6124,8 +6269,19 @@ function receive(data, epoch) {
       });
       return;
     }
-    if (message.type === "session_ready" || message.type === "heartbeat") return;
-    console.debug("ignored realtime control message", message.type || "unknown");
+    if (message.type === "frame_batch_header") {
+      pendingHeader = message;
+      if (!renderedPreviewFrames) setStatus("Receiving", "live");
+      return;
+    }
+    if (!message.type && message.content_type) {
+      pendingHeader = message;
+      if (!renderedPreviewFrames) setStatus("Receiving", "live");
+      return;
+    }
+    recordTrajectoryEvent("server_control_ignored", {
+      type: String(message.type || "unknown"),
+    });
     return;
   }
   const header = pendingHeader;
@@ -6139,10 +6295,6 @@ function receive(data, epoch) {
     payload_bytes: data.byteLength || data.size || data.length || 0,
     frame_batch_gap_count: observeFrameBatchGap(header),
   });
-  observePrimaryFrameTransport(
-    header,
-    data.byteLength || data.size || data.length || 0,
-  );
   recordFrameBatchReceived(header, data?.byteLength || data?.size || data?.length || 0);
   enqueueDecodeBatch(header, data, epoch);
   schedulePrimaryPlaybackAck();
@@ -6190,12 +6342,36 @@ async function decodeAndEnqueueFrameBatch(header, data, epoch) {
   updateControlDebugText();
   frames += chunkFrameCount;
   bytes += payloadBytes;
+  const networkNow = performance.now();
+  if (primaryNetworkSample && networkNow > primaryNetworkSample.at) {
+    const elapsedSeconds = (networkNow - primaryNetworkSample.at) / 1000;
+    primaryProtocolStats = {
+      ...primaryProtocolStats,
+      receiveMbps: Math.max(
+        0,
+        (bytes - primaryNetworkSample.bytes) * 8 / elapsedSeconds / 1_000_000,
+      ),
+    };
+  }
+  primaryNetworkSample = { at: networkNow, bytes };
   updateOutputSizeFromHeader(header);
   setStatus("Live", "live");
   updateStats();
 }
 
 function recordFrameBatchReceived(header, payloadBytes) {
+  const serverSentEpochMs = Number(header.server_sent_epoch_ms || 0);
+  if (serverSentEpochMs > 0) {
+    primaryProtocolStats = {
+      ...primaryProtocolStats,
+      lastDownlinkMs: Math.max(
+        0,
+        Date.now()
+          - serverSentEpochMs
+          + Number(primaryProtocolStats.serverClockOffsetMs || 0),
+      ),
+    };
+  }
   recordTrajectoryEvent("frame_batch_received", {
     chunk_index: header.chunk_index,
     event_id: header.event_id,
@@ -6409,8 +6585,7 @@ async function applyPreset(preset, options = {}) {
   syncPlaybackTargetFps();
   await setPresetReference(preset);
   updateWorldDraftState();
-  const presetRuleCount = normalizedWorldRulesForStorage(preset.rules || {}).skills.length
-    + (normalizedWorldRulesForStorage(preset.rules || {}).goal ? 1 : 0);
+  const presetRuleCount = worldRulesRuleCount(normalizedWorldRulesForStorage(preset.rules || {}));
   setWorldDraftStatus(
     `已填充「${preset.name}」的首帧、世界描述${presetRuleCount ? `和 ${presetRuleCount} 条规则` : ""}`,
     "ready",
@@ -6771,7 +6946,7 @@ function renderPresets() {
     })[preset.name] || preset.name;
     const meta = document.createElement("span");
     const presetRules = normalizedWorldRulesForStorage(preset.rules || {});
-    const ruleCount = presetRules.skills.length + (presetRules.goal ? 1 : 0);
+    const ruleCount = worldRulesRuleCount(presetRules);
     meta.textContent = preset.isCustom
       ? `已保存的自定义世界${ruleCount ? ` · ${ruleCount} 条规则` : ""}`
       : `填充首帧 + 世界描述${ruleCount ? ` + ${ruleCount} 条规则` : ""}`;
@@ -7037,10 +7212,11 @@ $("addSkillRuleBtn").onclick = () => {
   addSkillRule();
   handleWorldRulesDraftInput();
 };
-$("goalMinPlaySeconds").max = String(MAX_GOAL_MIN_PLAY_SECONDS);
-for (const id of ["goalMinPlaySeconds", "goalProbability", "goalRuleInput"]) {
-  $(id).addEventListener("input", handleWorldRulesDraftInput);
-}
+$("addGoalRuleBtn").onclick = () => {
+  $("worldRulesPanel").open = true;
+  addGoalRule();
+  handleWorldRulesDraftInput();
+};
 $("stopBtn").onclick = () => {
   closeSession();
   setModelConnectionState("minwm", "closed");

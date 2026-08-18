@@ -35,6 +35,14 @@ from sglang.multimodal_gen.runtime.realtime.coordinator import (
     SessionAssignment,
     WorkerSlot,
 )
+from sglang.multimodal_gen.runtime.realtime.critical_path_metrics import (
+    infer_model_label,
+    observe_client_metric_event,
+    observe_stage_seconds,
+    prometheus_content_type,
+    prometheus_latest,
+    result_from_exception,
+)
 from sglang.multimodal_gen.runtime.realtime.gateway import (
     AdmissionQueueFull,
     BoundedAdmissionWaiterGate,
@@ -46,14 +54,6 @@ from sglang.multimodal_gen.runtime.realtime.gateway import (
     build_denoiser_url,
     worker_message_allowed,
     worker_message_type,
-)
-from sglang.multimodal_gen.runtime.realtime.critical_path_metrics import (
-    infer_model_label,
-    observe_client_metric_event,
-    observe_stage_seconds,
-    prometheus_content_type,
-    prometheus_latest,
-    result_from_exception,
 )
 from sglang.multimodal_gen.runtime.utils.realtime_trace import (
     compact_client_trace_event,
@@ -177,9 +177,7 @@ def _observe_gateway_client_metric(
     model: str,
 ) -> int:
     if message.get("type") == "client_metric":
-        return int(
-            observe_client_metric_event(message, service="gateway", model=model)
-        )
+        return int(observe_client_metric_event(message, service="gateway", model=model))
     if message.get("type") != "client_metric_batch":
         return 0
     events = message.get("events")
@@ -623,17 +621,13 @@ def create_app(
                                 control = decode_message(payload)
                             except ProtocolViolation:
                                 pass
-                        if (
-                            isinstance(control, dict)
-                            and control.get("type")
-                            in {"client_metric", "client_metric_batch"}
-                        ):
+                        if isinstance(control, dict) and control.get("type") in {
+                            "client_metric",
+                            "client_metric_batch",
+                        }:
                             _observe_gateway_client_metric(control, model=metric_model)
                             continue
-                        if (
-                            isinstance(control, dict)
-                            and expected_last_chunk is None
-                        ):
+                        if isinstance(control, dict) and expected_last_chunk is None:
                             if (
                                 isinstance(control, dict)
                                 and control.get("type") == "init"
