@@ -86,6 +86,10 @@ spec:
               value: minwm-720p-attn-ffn-h200-20260818-01
             - name: MINWM_GPU_FAMILY
               value: hopper
+            # Reserve the full p5e node for clean measurements while exposing
+            # only one GPU to the single-card SGLang process.
+            - name: CUDA_VISIBLE_DEVICES
+              value: "0"
             - name: MINWM_IMAGE_DIGEST
               value: sha256:bedc07ea3ba55059a8c1c569c3b177c4d00d41f37d4fa9105375531534ef5f2a
             - name: MINWM_INSTALL_SAGE
@@ -150,11 +154,11 @@ spec:
             requests:
               cpu: "32"
               memory: 200Gi
-              nvidia.com/gpu: "1"
+              nvidia.com/gpu: "8"
             limits:
               cpu: "64"
               memory: 400Gi
-              nvidia.com/gpu: "1"
+              nvidia.com/gpu: "8"
           volumeMounts:
             - name: s3
               mountPath: /s3
