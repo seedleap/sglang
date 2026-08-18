@@ -661,6 +661,7 @@ let queuedDecodeFrames = 0;
 let queuedDecodeBytes = 0;
 let decodeInProgress = false;
 let pendingDecodeBatches = 0;
+let decodePumpGeneration = 0;
 let droppedDecodeFrames = 0;
 let lastDecodeDropAt = 0;
 let lastDecodeDropCount = 0;
@@ -679,10 +680,14 @@ let primaryProtocolStats = {};
 let primaryNetworkSample = null;
 const primaryControlSentEpochByEvent = new Map();
 let encodedDecodeErrors = 0;
+let encodedDecodeErrorTotal = 0;
 let socketHadError = false;
 let socketCloseExpected = false;
 let socketServerError = "";
 let currentFiniteSession = false;
+let lastPrimarySocketCloseCode = null;
+let lastPrimarySocketCloseReason = "";
+let primaryRenderActivity = 0;
 let renderedPreviewFrames = 0;
 let previewScaleFrame = 0;
 let recordingActive = false;
@@ -783,6 +788,13 @@ const playbackController = new RealtimePlaybackController({
   maxResumeLeadMs: 650,
   maxDeliveryLeadBoostMs: 0,
   deliveryStallExpectedMultiplier: 1.8,
+});
+const finiteWebpDrainApi = window.SGLangFiniteWebpDrain;
+if (!finiteWebpDrainApi?.FiniteWebpDrainController) {
+  throw new Error("finite WebP drain controller is unavailable");
+}
+const primaryWebpDrainController = new finiteWebpDrainApi.FiniteWebpDrainController({
+  onComplete: (context) => finalizePrimaryWebpDrain(context),
 });
 let lingbot2ReconnectTimer = 0;
 let lingbot2ReconnectAttempt = 0;
@@ -922,7 +934,7 @@ function createH264ModelSession(key) {
           `${modelLabel(key)} H.264 tail autoplay rejected · ${details.playbackError}`,
         );
       }
-      if (key === "minwm" && state === "closed") {
+      if (key === "minwm" && state === "closed" && !primaryWebpDrainActive()) {
         // H264WebSocketSession emits `closed` only after MSE has presented its
         // buffered tail. Re-enable entry and finish recording at that point,
         // not when the transport first starts draining.
@@ -1413,7 +1425,7 @@ function markWorldExperienceReady(modelKey) {
   startSessionCountdown();
   startRecording({ source: "first_visible_frame" });
   worldRulesController?.startSession();
-  setStatus("Live", "live");
+  setPrimaryWebpStreamingStatus();
   $("sessionNotice").hidden = true;
   renderRuntimeSkillBar();
   addHistory(`world ready · ${modelLabel(modelKey)} visible · timer and dual recordings started`);
@@ -1998,6 +2010,7 @@ function drawIdle() {
 }
 
 function resetStreamStats() {
+  primaryWebpDrainController.cancel();
   pendingHeader = null;
   requestedMediaProfile = NATIVE_MEDIA_PROFILE;
   effectiveMediaProfile = NATIVE_MEDIA_PROFILE;
@@ -2021,6 +2034,8 @@ function resetStreamStats() {
   bytes = 0;
   fpsSamples = [];
   clearQueueOnClose = false;
+  decodePumpGeneration += 1;
+  rejectPendingDecodes("stream reset");
   decodeQueue = [];
   queuedDecodeFrames = 0;
   queuedDecodeBytes = 0;
@@ -2036,7 +2051,10 @@ function resetStreamStats() {
   primaryNetworkSample = null;
   primaryControlSentEpochByEvent.clear();
   encodedDecodeErrors = 0;
+  encodedDecodeErrorTotal = 0;
   currentFiniteSession = false;
+  lastPrimarySocketCloseCode = null;
+  lastPrimarySocketCloseReason = "";
   renderedPreviewFrames = 0;
   lastSentEventId = 0;
   lastRenderedEventId = 0;
@@ -3290,7 +3308,12 @@ async function stopRecording({ reason = "manual" } = {}) {
     addHistory(
       `${ZING_ONLY ? "Zing gameplay recording" : "both gameplay recordings"} ready · ${recordingFrameIndex} synchronized frames · ${extension}`,
     );
-    if (["session_timeout", "session_closed", "primary_disconnected"].includes(reason)) {
+    if ([
+      "session_timeout",
+      "session_closed",
+      "primary_disconnected",
+      "generation_complete",
+    ].includes(reason)) {
       showSessionNotice(
         ZING_ONLY
           ? "Zing 游玩录像已生成，可点击右上角下载"
@@ -4671,6 +4694,121 @@ function hasPendingPlaybackInput() {
   );
 }
 
+function primaryWebpDrainActivity() {
+  return {
+    pendingHeader: Boolean(pendingHeader),
+    decodeInProgress,
+    pendingDecodeBatches,
+    decodeQueueLength: decodeQueue.length,
+    queuedDecodeFrames,
+    queuedDecodeBytes,
+    playbackQueueFrames: playbackController.snapshot().queueFrames,
+    renderActivity: primaryRenderActivity,
+  };
+}
+
+function primaryWebpDrainActive(epoch = undefined) {
+  return primaryWebpDrainController.isActive(epoch);
+}
+
+function setPrimaryWebpStreamingStatus(text = "Live") {
+  if (primaryWebpDrainActive(streamEpoch)) {
+    setStatus("Finishing playback");
+    return false;
+  }
+  setStatus(text, "live");
+  return true;
+}
+
+function beginPrimaryWebpDrain(context) {
+  primaryWebpDrainController.begin(context);
+  controlStateController?.reset({ sendRelease: false });
+  $("connectBtn").disabled = true;
+  setModelConnectionState("minwm", "draining");
+  setStatus("Finishing playback");
+  const activity = primaryWebpDrainActivity();
+  recordTrajectoryEvent("finite_webp_drain_started", {
+    code: context.closeCode,
+    pending_decode_batches: activity.pendingDecodeBatches,
+    playback_queue_frames: activity.playbackQueueFrames,
+  });
+  addHistory(
+    `${context.closeText} · finishing ${activity.pendingDecodeBatches} decode batches and ${activity.playbackQueueFrames} queued frames`,
+  );
+  maybeFinalizePrimaryWebpDrain(context.epoch);
+}
+
+function maybeFinalizePrimaryWebpDrain(epoch = streamEpoch) {
+  return primaryWebpDrainController.completeIfDrained(
+    epoch,
+    primaryWebpDrainActivity(),
+  );
+}
+
+function failPrimaryWebpDrain(context, message, details = {}) {
+  if (!context || context.epoch !== streamEpoch) return false;
+  if (recordingActive) captureRecordingFrame();
+  const hadReadyWorld = Boolean(context.hadReadyWorld || worldExperienceReady);
+  recordTrajectoryEvent("finite_webp_drain_failed", {
+    code: context.closeCode,
+    message,
+    decoded_frames: frames,
+    rendered_preview_frames: renderedPreviewFrames,
+    encoded_decode_errors: encodedDecodeErrorTotal,
+    ...details,
+  });
+  discardPrimaryWebpPlayback(message, { clearFrames: true });
+  promptRewriteController.endSession();
+  stopWorldExperienceTiming({ recordingReason: "primary_disconnected" });
+  if (!ZING_ONLY) lingbot2Session.close("Zing finite playback incomplete");
+  setModelConnectionState("minwm", "error");
+  setStatus("Incomplete playback", "error");
+  $("connectBtn").disabled = false;
+  addHistory(`Zing finite playback incomplete · ${message}`);
+  if (hadReadyWorld) {
+    showSessionNotice("Zing 尾帧未完整播放，请重新进入世界");
+  }
+  if (!renderedPreviewFrames) setPreviewState("idle");
+  void traceHttpClient?.flushClientEvents().catch(() => {});
+  return true;
+}
+
+function finalizePrimaryWebpDrain(context) {
+  if (context.epoch !== streamEpoch) return;
+  const integrity = finiteWebpDrainApi.finitePlaybackIntegrity({
+    decodeErrors: encodedDecodeErrorTotal,
+    decodedFrames: frames,
+    renderedFrames: renderedPreviewFrames,
+  });
+  if (!integrity.complete) {
+    failPrimaryWebpDrain(context, integrity.reason);
+    return;
+  }
+  // The wall-clock recorder may not have sampled the last canvas update yet.
+  // Capture it synchronously before ending the experience and encoder pump.
+  if (recordingActive) captureRecordingFrame();
+  const hadReadyWorld = Boolean(context.hadReadyWorld || worldExperienceReady);
+  promptRewriteController.endSession();
+  stopWorldExperienceTiming({ recordingReason: "generation_complete" });
+  if (!ZING_ONLY) lingbot2Session.close("Zing finite generation complete");
+  recordTrajectoryEvent("finite_webp_drain_complete", {
+    code: context.closeCode,
+    rendered_preview_frames: renderedPreviewFrames,
+    last_rendered_chunk: lastRenderedChunk,
+  });
+  setModelConnectionState("minwm", "closed");
+  setStatus("Closed");
+  $("connectBtn").disabled = false;
+  addHistory(
+    `Zing finite playback complete · ${renderedPreviewFrames} frames rendered before close`,
+  );
+  if (hadReadyWorld) {
+    showSessionNotice("Zing 本轮生成和尾帧播放已完成，游玩录像正在生成");
+  }
+  if (!renderedPreviewFrames) setPreviewState("idle");
+  void traceHttpClient?.flushClientEvents().catch(() => {});
+}
+
 function enqueueDecodeBatch(header, data, epoch) {
   const frameCount = Number(header.num_frames || 1);
   const payloadBytes = payloadByteLength(data);
@@ -4770,6 +4908,7 @@ async function pumpDecodeQueue() {
   if (decodeInProgress) return;
   const item = decodeQueue.shift();
   if (!item) return;
+  const pumpGeneration = decodePumpGeneration;
   queuedDecodeFrames = Math.max(0, queuedDecodeFrames - item.frameCount);
   queuedDecodeBytes = Math.max(0, queuedDecodeBytes - item.payloadBytes);
   decodeInProgress = true;
@@ -4778,10 +4917,12 @@ async function pumpDecodeQueue() {
   } catch (error) {
     handleReceiveError(error, item.epoch);
   } finally {
+    if (pumpGeneration !== decodePumpGeneration) return;
     pendingDecodeBatches = Math.max(0, pendingDecodeBatches - 1);
     decodeInProgress = false;
     updateStats();
     if (decodeQueue.length) pumpDecodeQueue();
+    else maybeFinalizePrimaryWebpDrain(item.epoch);
   }
 }
 
@@ -4969,6 +5110,7 @@ function loadImageElement(url, createBitmapError) {
 
 function handleEncodedPreviewDecodeError(error, header, data, payloadBytes) {
   encodedDecodeErrors += 1;
+  encodedDecodeErrorTotal += 1;
   const signature = payloadSignature(data);
   const mode = shortPayloadMode(header.content_type);
   const message = error?.message || "encoded preview decode failed";
@@ -5029,6 +5171,7 @@ function drawFrame(image, { close = true, markRendered = true } = {}) {
 }
 
 function renderLoop(now) {
+  primaryRenderActivity += 1;
   renderLoopSamples.push(now);
   renderLoopSamples = renderLoopSamples.filter((t) => now - t < 1000);
   const decision = playbackController.render(now, {
@@ -5064,6 +5207,8 @@ function renderLoop(now) {
   } else if (decision.action === "hold") {
     updateStats();
   }
+  primaryRenderActivity = Math.max(0, primaryRenderActivity - 1);
+  maybeFinalizePrimaryWebpDrain(streamEpoch);
   scheduleRenderLoop();
 }
 
@@ -5618,7 +5763,7 @@ function updateWorldDraftState() {
   document.querySelector(".reference-upload").classList.toggle("has-image", hasImage);
   $("referenceUploadTitle").textContent = hasImage ? "更换首帧" : "上传首帧";
   const complete = hasImage && hasDescription;
-  $("connectBtn").disabled = worldCompletionPending;
+  $("connectBtn").disabled = worldCompletionPending || primaryWebpDrainActive();
   $("connectBtn").title = complete
     ? "进入当前世界"
     : "需要首帧图片和世界描述；点击后会提示缺少项";
@@ -5855,6 +6000,22 @@ function showError(error) {
   addHistory(error.message || "reference load failed");
 }
 
+function discardPrimaryWebpPlayback(reason, { clearFrames = true } = {}) {
+  primaryWebpDrainController.cancel();
+  streamEpoch += 1;
+  pendingHeader = null;
+  decodePumpGeneration += 1;
+  decodeQueue = [];
+  queuedDecodeFrames = 0;
+  queuedDecodeBytes = 0;
+  decodeInProgress = false;
+  pendingDecodeBatches = 0;
+  rejectPendingDecodes(reason);
+  resetDecoderState();
+  if (clearFrames) clearFrameQueue();
+  updateStats();
+}
+
 function abortCurrentSession(reason = "session closed by client", {
   clearFrames = true,
   expectedClose = true,
@@ -5868,17 +6029,10 @@ function abortCurrentSession(reason = "session closed by client", {
   });
   const socket = ws;
   ws = null;
-  streamEpoch++;
+  discardPrimaryWebpPlayback(reason, { clearFrames });
   clearQueueOnClose = clearFrames;
   socketCloseExpected = expectedClose;
   if (resetControls) controlStateController?.reset({ sendRelease: false });
-  pendingHeader = null;
-  rejectPendingDecodes("session aborted");
-  resetDecoderState();
-  if (clearFrames) {
-    clearFrameQueue();
-    updateStats();
-  }
   if (!socket) {
     clearQueueOnClose = false;
     if (!keepConnectDisabled) $("connectBtn").disabled = false;
@@ -5920,6 +6074,11 @@ function waitForSocketClose(socket, timeoutMs = RECONNECT_CLOSE_TIMEOUT_MS) {
 }
 
 async function connect() {
+  if (primaryWebpDrainActive()) {
+    $("connectBtn").disabled = true;
+    setStatus("Finishing playback");
+    return;
+  }
   if (recordingActive) {
     await stopRecording({ reason: "session_replaced" });
   }
@@ -6106,43 +6265,85 @@ function openPrimarySession(init, url) {
     socket.onclose = (event) => {
       if (epoch !== streamEpoch) return;
       if (ws === socket) ws = null;
+      lastPrimarySocketCloseCode = event.code;
+      lastPrimarySocketCloseReason = event.reason || "";
       markClientTrace("client.ws_close", {
         code: event.code,
         reason: event.reason || "",
       });
-      $("connectBtn").disabled = false;
-      if (clearQueueOnClose) {
-        clearFrameQueue();
-        updateStats();
-      }
-      clearQueueOnClose = false;
       const reason = event.reason ? ` · ${event.reason}` : "";
       const closeText = `Zing socket closed code=${event.code}${reason}`;
       const normalClose = event.code === 1000 || event.code === 1001;
-      setModelConnectionState("minwm", normalClose ? "closed" : "error");
-      if (socketServerError) {
-        setStatus("Server closed", "error");
-        addHistory(`${closeText} · ${socketServerError}`);
-      } else if (socketHadError && !socketCloseExpected && !normalClose) {
-        setStatus("Socket closed", "error");
-        addHistory(`${closeText} · transport error`);
-      } else {
-        setStatus("Closed");
-        addHistory(closeText);
-      }
+      const expectedClose = socketCloseExpected;
+      const shouldClearQueue = clearQueueOnClose;
+      const sessionLifetimeClose = isSessionLifetimeReason(event.reason);
       recordTrajectoryEvent("socket_close", {
         backend: "minwm",
         code: event.code,
         reason: event.reason || "",
         normal_close: normalClose,
-        expected_close: socketCloseExpected,
+        expected_close: expectedClose,
       });
-      if (isSessionLifetimeReason(event.reason)) {
+
+      const shouldDrain = finiteWebpDrainApi.shouldDrainFiniteWebpClose({
+        closeCode: event.code,
+        finiteSession: currentFiniteSession,
+        opened,
+        expectedClose,
+        clearQueueOnClose: shouldClearQueue,
+        serverError: socketServerError,
+        transportError: socketHadError,
+        decodeErrors: encodedDecodeErrorTotal,
+        sessionLifetimeClose,
+        pendingHeader,
+      });
+      clearQueueOnClose = false;
+      socketCloseExpected = false;
+      if (shouldDrain) {
+        beginPrimaryWebpDrain({
+          epoch,
+          closeCode: event.code,
+          closeReason: event.reason || "",
+          closeText,
+          hadReadyWorld: worldExperienceReady,
+        });
+        return;
+      }
+
+      const hadReadyWorld = worldExperienceReady;
+      const incompleteFiniteClose = normalClose && currentFiniteSession && Boolean(pendingHeader);
+      const finiteDecodeFailure = normalClose && currentFiniteSession && encodedDecodeErrorTotal > 0;
+      discardPrimaryWebpPlayback(closeText, { clearFrames: true });
+      $("connectBtn").disabled = false;
+      if (sessionLifetimeClose) {
         expireSessionLifetime({ closeSessions: true });
-      } else if (!socketCloseExpected) {
-        const hadReadyWorld = worldExperienceReady;
+      } else {
         stopWorldExperienceTiming({ recordingReason: "primary_disconnected" });
         if (!ZING_ONLY) lingbot2Session.close("Zing primary session closed");
+        const closeIsError = Boolean(
+          socketServerError ||
+          incompleteFiniteClose ||
+          finiteDecodeFailure ||
+          (!normalClose && !expectedClose) ||
+          (socketHadError && !expectedClose)
+        );
+        setModelConnectionState("minwm", closeIsError ? "error" : "closed");
+        if (socketServerError) {
+          setStatus("Server closed", "error");
+          addHistory(`${closeText} · ${socketServerError}`);
+        } else if (incompleteFiniteClose) {
+          setStatus("Incomplete stream", "error");
+          addHistory(`${closeText} · frame payload missing after header`);
+        } else if (finiteDecodeFailure) {
+          setStatus("Incomplete playback", "error");
+          addHistory(`${closeText} · ${encodedDecodeErrorTotal} frame decode errors`);
+        } else if (closeIsError) {
+          setStatus("Socket closed", "error");
+          addHistory(`${closeText} · transport error`);
+        } else {
+          setStatus("Closed");
+          addHistory(closeText);
+        }
         if (hadReadyWorld) {
           showSessionNotice("Zing 连接已中断，已结束计时并生成当前录像");
         }
@@ -6150,7 +6351,6 @@ function openPrimarySession(init, url) {
       void traceHttpClient?.flushClientEvents().catch(() => {});
       if (!renderedPreviewFrames) setPreviewState("idle");
       if (!opened) reject(new Error(`Zing closed before startup (${event.code})`));
-      socketCloseExpected = false;
     };
     socket.onerror = () => {
       if (epoch !== streamEpoch) return;
@@ -6352,8 +6552,16 @@ async function decodeAndEnqueueFrameBatch(header, data, epoch) {
     decodedFrames = await decodeFrameBatch(header, data);
     if (isEncodedPreviewContentType(header.content_type)) encodedDecodeErrors = 0;
   } catch (error) {
+    if (epoch !== streamEpoch) return;
     if (!isEncodedPreviewContentType(header.content_type)) throw error;
     handleEncodedPreviewDecodeError(error, header, data, payloadBytes);
+    if (primaryWebpDrainActive(epoch)) {
+      failPrimaryWebpDrain(
+        primaryWebpDrainController.snapshot(),
+        `tail frame decode failed: ${error?.message || error}`,
+        { chunk_index: Number(header.chunk_index || 0) },
+      );
+    }
     return;
   }
   if (epoch !== streamEpoch) {
@@ -6399,7 +6607,7 @@ async function decodeAndEnqueueFrameBatch(header, data, epoch) {
   }
   primaryNetworkSample = { at: networkNow, bytes };
   updateOutputSizeFromHeader(header);
-  setStatus("Live", "live");
+  setPrimaryWebpStreamingStatus();
   updateStats();
 }
 
@@ -6478,6 +6686,14 @@ function recordChunkFirstRendered(chunkIndex, details = {}) {
 }
 
 function sendEvent(kind, payload, historyText = null) {
+  if (primaryWebpDrainActive()) {
+    addHistory(`${historyText || `${kind} event`} · finite playback is finishing`);
+    recordTrajectoryEvent(`${kind}_event_dropped`, {
+      reason: "finite playback draining",
+      payload,
+    });
+    return null;
+  }
   const delivery = dualModelController.sendEvent(kind, payload);
   const deliveredModels = Object.entries(delivery.sent)
     .filter(([, sent]) => sent)
@@ -6526,7 +6742,7 @@ function sendEvent(kind, payload, historyText = null) {
       });
       updateStats();
     }
-    setStatus("Updating", "live");
+    setPrimaryWebpStreamingStatus("Updating");
   }
   trackPendingModelEvent(delivery, kind);
   addHistory(
@@ -7766,19 +7982,32 @@ window.__sglangRealtimeDebug = () => ({
     ? Array.from(controlStateController.activeActions).sort()
     : [],
   bytes,
+  connectDisabled: $("connectBtn").disabled,
+  currentFiniteSession,
   decodeInProgress,
   queuedDecodeBytes,
   queuedDecodeFrames,
   decodeQueueLength: decodeQueue.length,
   droppedDecodeFrames,
+  encodedDecodeErrorTotal,
+  frameBatchGapCount,
   frames,
   lastDecodeMs,
   lastDisplayLagMs,
   lastSampledEventId,
   lastSentEventId,
+  lastReceivedChunk,
+  lastRenderedChunk,
   pendingDecodeBatches,
   pendingHeader: Boolean(pendingHeader),
   playback: playbackController.snapshot(),
+  playbackRenderedFrames: playbackController.renderedFrames,
+  finiteWebpDrain: primaryWebpDrainController.snapshot(),
+  lastPrimarySocketCloseCode,
+  lastPrimarySocketCloseReason,
+  primaryRenderActivity,
+  recordingActive,
+  recordingSaving,
   renderedFps: fpsSamples.length,
   renderedPreviewFrames,
   renderLoopFps: renderLoopSamples.length,

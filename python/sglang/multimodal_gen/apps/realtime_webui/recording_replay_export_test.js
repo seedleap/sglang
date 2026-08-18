@@ -106,7 +106,7 @@ assert.match(
 );
 assert.match(
   appJs,
-  /\["session_timeout", "session_closed", "primary_disconnected"\][\s\S]{0,220}?showRecordingReadyToast\(\)/,
+  /"session_timeout",[\s\S]{0,120}?"session_closed",[\s\S]{0,120}?"primary_disconnected",[\s\S]{0,120}?"generation_complete",[\s\S]{0,260}?showRecordingReadyToast\(\)/,
   "world-ending recording paths should show the download reminder toast",
 );
 assert.match(

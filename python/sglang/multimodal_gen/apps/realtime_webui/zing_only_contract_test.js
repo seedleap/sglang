@@ -18,7 +18,7 @@ const stylesheetIndex = html.indexOf(
   "styles.css?v=world-studio-zing-only-rife3-finite-transport-v2",
 );
 const appIndex = html.indexOf(
-  "app.js?v=world-studio-zing-only-rife3-finite-transport-v2",
+  "app.js?v=world-studio-zing-only-rife3-finite-transport-v3",
 );
 assert.ok(
   runtimeConfigIndex >= 0
