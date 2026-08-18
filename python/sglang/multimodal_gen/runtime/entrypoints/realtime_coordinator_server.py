@@ -12,7 +12,7 @@ from dataclasses import asdict
 from types import SimpleNamespace
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, Response, status
+from fastapi import FastAPI, Header, HTTPException, Response, status
 
 from sglang.multimodal_gen.runtime.realtime.coordinator import (
     CoordinatorRejected,
@@ -99,8 +99,13 @@ def create_app(coordinator: RealtimeCoordinator) -> FastAPI:
         return Response(status_code=status.HTTP_204_NO_CONTENT)
 
     @app.post("/v1/sessions/admit")
-    async def admit(payload: dict):
+    async def admit(
+        payload: dict,
+        model_family: str | None = Header(default=None, alias="X-World-Model-Family"),
+    ):
         request = dict(payload)
+        if model_family:
+            request["model_family"] = model_family
         trace_id = normalize_trace_id(
             request.pop("trace_id", None), fallback=str(request.get("session_id") or "")
         )

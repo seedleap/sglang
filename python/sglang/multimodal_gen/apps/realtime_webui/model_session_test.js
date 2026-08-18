@@ -183,6 +183,30 @@ async function main() {
   assert.equal(canvas.draws.length, 1);
   assert.equal(frames[0].chunk, 3);
   assert.equal(session.snapshot().renderFps, 1);
+  scheduled.shift()(132);
+  session.flushClientMetrics();
+  const clientMetricEvents = socket.sent.flatMap((message) => (
+    message.type === "client_metric_batch"
+      ? message.events
+      : message.type === "client_metric"
+        ? [message]
+        : []
+  ));
+  for (const stage of [
+    "client_serialize_queue",
+    "client_receive_queue",
+    "client_video_decode",
+    "client_render_wait",
+  ]) {
+    assert.ok(
+      clientMetricEvents.some((event) => event.stage === stage),
+      `WebP client metric batch must include ${stage}`,
+    );
+  }
+  assert.ok(
+    clientMetricEvents.some((event) => event.codec === "webp"),
+    "WebP transport metrics must carry codec=webp",
+  );
   await new Promise((resolve) => setTimeout(resolve, 60));
   const playbackAck = socket.sent.find((message) => message.kind === "playback_ack");
   assert.equal(playbackAck.payload.last_received_chunk, 3);

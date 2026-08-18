@@ -234,7 +234,12 @@ class HTTPCoordinatorClient:
         )
 
     async def admit(self, **request: Any) -> SessionAssignment:
-        response = await self._client.post("/v1/sessions/admit", json=request)
+        payload = dict(request)
+        model_family = str(payload.pop("model_family", "") or "")
+        headers = {"X-World-Model-Family": model_family} if model_family else None
+        response = await self._client.post(
+            "/v1/sessions/admit", json=payload, headers=headers
+        )
         self._raise_rejection(response)
         return _assignment(response.json())
 
@@ -517,9 +522,13 @@ def create_app(
     async def _generate_coordinator_session(
         websocket: WebSocket,
         *,
+        selected_model_family: str,
         selected_model_revision: str,
         selected_vae_fingerprint: str,
     ) -> None:
+        metric_model = infer_model_label(selected_model_family)
+        if metric_model is None:
+            raise ValueError(f"unsupported model family: {selected_model_family}")
         await websocket.accept()
         sender = _BrowserSender(websocket)
         session_id = uuid4().hex
@@ -528,7 +537,6 @@ def create_app(
             websocket.query_params.get("trace_id"), fallback=session_id
         )
         output_token = secrets.token_urlsafe(32)
-        metric_model = infer_model_label(selected_model_revision)
         assignment = None
         route = None
         upstream = None
@@ -544,6 +552,7 @@ def create_app(
                         user_id=_user_id(websocket),
                         session_id=session_id,
                         generation_id=generation_id,
+                        model_family=selected_model_family,
                         model_revision=selected_model_revision,
                         vae_fingerprint=selected_vae_fingerprint,
                         wait_for_capacity=True,
@@ -860,6 +869,7 @@ def create_app(
     async def generate_lingbot2(websocket: WebSocket):
         await _generate_coordinator_session(
             websocket,
+            selected_model_family="lingbot2",
             selected_model_revision=lingbot2_model_revision,
             selected_vae_fingerprint=(lingbot2_vae_fingerprint or vae_fingerprint),
         )
@@ -869,6 +879,7 @@ def create_app(
     async def generate(websocket: WebSocket):
         await _generate_coordinator_session(
             websocket,
+            selected_model_family="wan",
             selected_model_revision=model_revision,
             selected_vae_fingerprint=vae_fingerprint,
         )

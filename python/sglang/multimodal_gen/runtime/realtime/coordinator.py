@@ -1510,6 +1510,7 @@ class RealtimeCoordinator:
         user_id: str,
         session_id: str,
         generation_id: str,
+        model_family: str | None = None,
         model_revision: str,
         vae_fingerprint: str,
         wait_for_capacity: bool = True,
@@ -1536,13 +1537,13 @@ class RealtimeCoordinator:
                     except BaseException as exc:
                         observe_coordinator_worker_selection_seconds(
                             time.perf_counter() - selection_started,
-                            model=model_revision,
+                            model=model_family or model_revision,
                             result=result_from_exception(exc),
                         )
                         raise
                     observe_coordinator_worker_selection_seconds(
                         time.perf_counter() - selection_started,
-                        model=model_revision,
+                        model=model_family or model_revision,
                         result="success",
                     )
                 except TimeoutError as exc:
@@ -1597,14 +1598,14 @@ class RealtimeCoordinator:
                         except BaseException as exc:
                             observe_coordinator_capacity_reservation_seconds(
                                 time.perf_counter() - reservation_started,
-                                model=model_revision,
+                                model=model_family or model_revision,
                                 result=result_from_exception(exc),
                                 worker_role=slot.role,
                             )
                             raise
                         observe_coordinator_capacity_reservation_seconds(
                             time.perf_counter() - reservation_started,
-                            model=model_revision,
+                            model=model_family or model_revision,
                             result="success",
                             worker_role=slot.role,
                         )
