@@ -10,9 +10,13 @@ if [[ -f "${marker}" ]]; then
   exit 0
 fi
 
+# The by-id directory exposes three aliases for every instance-store disk on
+# p6-b200.  Feeding those aliases to mdadm repeats the same block device and
+# makes RAID creation fail.  Select the eight canonical kernel devices by
+# their NVMe model instead.
+udevadm settle --timeout=30
 mapfile -t instance_store < <(
-  find /dev/disk/by-id -maxdepth 1 -type l \
-    -name 'nvme-Amazon_EC2_NVMe_Instance_Storage_*' -print | sort
+  lsblk -dn -o NAME,MODEL | awk '$2 == "Amazon" && $3 == "EC2" && $4 == "NVMe" && $5 == "Instance" && $6 == "Storage" { print "/dev/" $1 }' | sort -V
 )
 if (( ${#instance_store[@]} == 0 )); then
   echo "p6-b200 instance-store NVMe devices were not found" >&2
