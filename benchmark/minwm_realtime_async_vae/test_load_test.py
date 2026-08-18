@@ -86,9 +86,7 @@ def test_run_session_requires_a_normal_finite_websocket_close(
 
         async with websockets.serve(handler, "127.0.0.1", 0) as server:
             port = server.sockets[0].getsockname()[1]
-            return await run_session(
-                _single_chunk_args(f"ws://127.0.0.1:{port}"), 1, 0
-            )
+            return await run_session(_single_chunk_args(f"ws://127.0.0.1:{port}"), 1, 0)
 
     if should_pass:
         result = asyncio.run(exercise())
