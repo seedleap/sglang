@@ -13,6 +13,18 @@ def _fused_pack_peer_first_qkv_kernel(
     K_ptr,
     V_ptr,
     Out_ptr,
+    Q_STRIDE_B,
+    Q_STRIDE_S,
+    Q_STRIDE_H,
+    Q_STRIDE_D,
+    K_STRIDE_B,
+    K_STRIDE_S,
+    K_STRIDE_H,
+    K_STRIDE_D,
+    V_STRIDE_B,
+    V_STRIDE_S,
+    V_STRIDE_H,
+    V_STRIDE_D,
     NUMEL: tl.constexpr,
     B: tl.constexpr,
     S: tl.constexpr,
@@ -33,20 +45,35 @@ def _fused_pack_peer_first_qkv_kernel(
     batch = rows % B
     peer = rows // B
     global_head = peer * H_LOCAL + local_head
-    source_offsets = ((batch * S + sequence) * H_GLOBAL + global_head) * D + feature
+    q_offsets = (
+        batch * Q_STRIDE_B
+        + sequence * Q_STRIDE_S
+        + global_head * Q_STRIDE_H
+        + feature * Q_STRIDE_D
+    )
+    k_offsets = (
+        batch * K_STRIDE_B
+        + sequence * K_STRIDE_S
+        + global_head * K_STRIDE_H
+        + feature * K_STRIDE_D
+    )
+    v_offsets = (
+        batch * V_STRIDE_B
+        + sequence * V_STRIDE_S
+        + global_head * V_STRIDE_H
+        + feature * V_STRIDE_D
+    )
 
     output_offsets = (offsets // D) * (3 * D) + feature
-    tl.store(
-        Out_ptr + output_offsets, tl.load(Q_ptr + source_offsets, mask=mask), mask=mask
-    )
+    tl.store(Out_ptr + output_offsets, tl.load(Q_ptr + q_offsets, mask=mask), mask=mask)
     tl.store(
         Out_ptr + output_offsets + D,
-        tl.load(K_ptr + source_offsets, mask=mask),
+        tl.load(K_ptr + k_offsets, mask=mask),
         mask=mask,
     )
     tl.store(
         Out_ptr + output_offsets + 2 * D,
-        tl.load(V_ptr + source_offsets, mask=mask),
+        tl.load(V_ptr + v_offsets, mask=mask),
         mask=mask,
     )
 
@@ -58,7 +85,7 @@ def fused_pack_peer_first_qkv(
     world_size: int,
     output: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Pack contiguous ``[B, S, H, D]`` Q/K/V into ``[P, B, S, H/P, 3D]``."""
+    """Pack strided ``[B, S, H, D]`` Q/K/V into ``[P, B, S, H/P, 3D]``."""
     if not query.is_cuda or torch.version.hip is not None:
         raise ValueError("peer-first QKV Triton packing requires CUDA")
     if query.shape != key.shape or query.shape != value.shape or query.ndim != 4:
@@ -67,13 +94,6 @@ def fused_pack_peer_first_qkv(
         raise ValueError("Q/K/V must have identical dtypes")
     if query.device != key.device or query.device != value.device:
         raise ValueError("Q/K/V must be on the same device")
-    if (
-        not query.is_contiguous()
-        or not key.is_contiguous()
-        or not value.is_contiguous()
-    ):
-        raise ValueError("peer-first QKV Triton packing requires contiguous inputs")
-
     batch, sequence, global_heads, head_dim = query.shape
     if global_heads % world_size != 0:
         raise ValueError("global head count must be divisible by world_size")
@@ -102,6 +122,9 @@ def fused_pack_peer_first_qkv(
             key,
             value,
             output,
+            *query.stride(),
+            *key.stride(),
+            *value.stride(),
             NUMEL=query.numel(),
             B=batch,
             S=sequence,

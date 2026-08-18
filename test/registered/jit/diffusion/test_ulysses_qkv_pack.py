@@ -14,6 +14,7 @@ register_cuda_ci(est_time=10, stage="base-b-kernel-unit", runner_config="1-gpu-l
 
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("strided", [False, True])
 @pytest.mark.parametrize(
     ("shape", "world_size"),
     [
@@ -21,11 +22,16 @@ register_cuda_ci(est_time=10, stage="base-b-kernel-unit", runner_config="1-gpu-l
         ((2, 5, 8, 64), 4),
     ],
 )
-def test_fused_pack_peer_first_qkv_matches_torch(dtype, shape, world_size):
+def test_fused_pack_peer_first_qkv_matches_torch(dtype, strided, shape, world_size):
     torch.manual_seed(17)
-    query = torch.randn(shape, dtype=dtype, device="cuda")
-    key = torch.randn_like(query)
-    value = torch.randn_like(query)
+    if strided:
+        qkv = torch.randn((*shape[:-1], 3 * shape[-1]), dtype=dtype, device="cuda")
+        query, key, value = qkv.chunk(3, dim=-1)
+        assert not value.is_contiguous()
+    else:
+        query = torch.randn(shape, dtype=dtype, device="cuda")
+        key = torch.randn_like(query)
+        value = torch.randn_like(query)
     output_buffer = torch.empty(3 * query.numel(), dtype=dtype, device="cuda")
 
     output = fused_pack_peer_first_qkv(query, key, value, world_size, output_buffer)
