@@ -675,6 +675,9 @@ let lastRenderedChunk = null;
 let lastReceivedChunk = null;
 let lastReceivedFrameBatchIndex = null;
 let frameBatchGapCount = 0;
+let primaryProtocolStats = {};
+let primaryNetworkSample = null;
+const primaryControlSentEpochByEvent = new Map();
 let encodedDecodeErrors = 0;
 let socketHadError = false;
 let socketCloseExpected = false;
@@ -836,6 +839,7 @@ const lingbot2FallbackSession = new RealtimeModelSession({
   unpack,
   workerUrl: DECODER_WORKER_URL,
   startupMinChunk: 1,
+  startupTimeoutMs: configuredModelNumber("lingbot2", "startupTimeoutMs", 60000),
   onState: (state, details) => {
     setModelConnectionState("lingbot2", state);
     if (state === "error") {
@@ -851,7 +855,7 @@ const lingbot2FallbackSession = new RealtimeModelSession({
     root.dataset.chunk = stats.lastChunk ?? "";
     root.dataset.frames = String(stats.frames || 0);
     renderModelTelemetry("lingbot2", stats);
-    renderProtocolPerformance("lingbot2", stats);
+    renderProtocolPerformance("lingbot2", { ...stats, transport: "webp" });
     markModelEventApplied("lingbot2", stats.lastAppliedEventId);
   },
   onFrame: () => markSessionPlayable("lingbot2"),
@@ -961,7 +965,7 @@ function createH264ModelSession(key) {
         root.dataset.frames = String(h264ModelStats[key].frames || 0);
       }
       renderModelTelemetry(key, h264ModelStats[key]);
-      renderProtocolPerformance(key, h264ModelStats[key]);
+      renderProtocolPerformance(key, { ...h264ModelStats[key], transport: "h264" });
     },
     onError: (error) => {
       addHistory(`${modelLabel(key)} H.264 session failed · ${error.message || error}`);
@@ -2028,6 +2032,9 @@ function resetStreamStats() {
   lastReceivedChunk = null;
   lastReceivedFrameBatchIndex = null;
   frameBatchGapCount = 0;
+  primaryProtocolStats = {};
+  primaryNetworkSample = null;
+  primaryControlSentEpochByEvent.clear();
   encodedDecodeErrors = 0;
   currentFiniteSession = false;
   renderedPreviewFrames = 0;
@@ -2180,13 +2187,14 @@ function isWorkerDecodableRawContentType(contentType) {
 function updateStats() {
   if (activeH264Models.has("minwm")) {
     renderModelTelemetry("minwm", h264ModelStats.minwm);
-    renderProtocolPerformance("minwm", h264ModelStats.minwm);
+    renderProtocolPerformance("minwm", { ...h264ModelStats.minwm, transport: "h264" });
     return;
   }
   const playback = playbackController.snapshot();
   const totalDroppedFrames = playback.droppedFrames + droppedDecodeFrames;
   renderModelTelemetry("minwm", {
     ...playback,
+    ...primaryProtocolStats,
     frames,
     bytes,
     lastChunk: lastRenderedChunk,
@@ -2203,6 +2211,12 @@ function updateStats() {
       : {}),
     droppedFrames: totalDroppedFrames,
     decodeQueueLength: pendingDecodeBatches,
+  });
+  renderProtocolPerformance("minwm", {
+    ...playback,
+    ...primaryProtocolStats,
+    bytes,
+    transport: "webp",
   });
 }
 
@@ -2228,9 +2242,23 @@ function performanceMs(value) {
     : "-";
 }
 
+function protocolMetric(...values) {
+  for (const value of values) {
+    if (value === null || value === undefined || value === "") continue;
+    const number = Number(value);
+    if (Number.isFinite(number) && number >= 0) return number;
+  }
+  return null;
+}
+
+function protocolMetricText(value) {
+  return value === null ? "-" : performanceMs(value);
+}
+
 function renderProtocolPerformance(key, stats = {}) {
   const telemetry = stats.chunkTelemetry || {};
-  const receiveMbps = Number(stats.receiveMbps || 0);
+  const isH264 = stats.transport === "h264" || stats.codec === "h264";
+  const receiveMbps = protocolMetric(stats.receiveMbps);
   const bytesReceived = Number(stats.bytesReceived ?? stats.bytes ?? 0);
   const sourceFps = Number(stats.serverFps || stats.sourceFps || 0);
   const deliveryFps = Number(stats.deliveryFps || 0);
@@ -2241,65 +2269,65 @@ function renderProtocolPerformance(key, stats = {}) {
   const outputTimelineFps = Number(
     stats.outputTimelineFps || negotiatedOutputTimelineFps || 0,
   );
-  const vaeQueueMs = Number(telemetry.vae_queue_wait_ms || 0);
-  const vaeDecodeMs = Number(
-    telemetry.vae_decode_ms || telemetry.model_vae_decode_ms || 0,
+  const vaeQueueMs = protocolMetric(telemetry.vae_queue_wait_ms);
+  const vaeDecodeMs = protocolMetric(
+    telemetry.vae_decode_ms,
+    telemetry.model_vae_decode_ms,
   );
-  const h264FeedMs = Number(stats.lastBridgeEncoderFeedMs || 0);
-  const bridgeQueueMs = Number(stats.lastBridgeQueueMs || 0);
-  const webSocketDownlinkMs = Number(
-    stats.lastWebSocketDownlinkMs || stats.lastDownlinkMs || 0,
+  const h264FeedMs = protocolMetric(stats.lastBridgeEncoderFeedMs);
+  const bridgeQueueMs = protocolMetric(stats.lastBridgeQueueMs);
+  const webSocketDownlinkMs = protocolMetric(
+    stats.lastWebSocketDownlinkMs,
+    stats.lastDownlinkMs,
   );
-  const mseQueueMs = Number(stats.lastMseQueueMs || 0);
-  const mseAppendMs = Number(stats.lastMseAppendMs || 0);
-  const playbackBufferMs = Number(
-    stats.playbackBufferMs ?? stats.mseBufferMs ?? stats.bufferMs ?? 0,
+  const mseQueueMs = protocolMetric(stats.lastMseQueueMs);
+  const mseAppendMs = protocolMetric(stats.lastMseAppendMs);
+  const playbackBufferMs = protocolMetric(
+    stats.playbackBufferMs,
+    stats.mseBufferMs,
+    stats.bufferMs,
   );
-  const inputUplinkMs = Number(
-    stats.lastInputUplinkMs || telemetry.input_uplink_ms,
+  const inputUplinkMs = protocolMetric(
+    stats.lastInputUplinkMs,
+    telemetry.input_uplink_ms,
   );
-  const e2eMs = Number(
-    stats.lastPresentedControlToVideoMs || stats.lastControlToVideoMs || 0,
+  const e2eMs = protocolMetric(
+    stats.lastPresentedControlToVideoMs,
+    stats.lastControlToVideoMs,
   );
   $(`${key}PerfData`).textContent = bytesReceived > 0
-    ? `${receiveMbps.toFixed(1)} Mb/s`
+    ? `${Number(receiveMbps || 0).toFixed(1)} Mb/s`
     : "-";
   $(`${key}PerfFps`).textContent = sourceFps > 0 || deliveryFps > 0 || renderFps > 0
     ? key === "minwm" && mediaProfileNegotiated
       ? `收 ${deliveryFps.toFixed(1)} · 显 ${renderFps.toFixed(1)} · 时间轴 ${sourceTimelineFps.toFixed(1)}→${outputTimelineFps.toFixed(1)}`
       : `源 ${sourceFps.toFixed(1)} · 收 ${deliveryFps.toFixed(1)} · 显 ${renderFps.toFixed(1)}`
     : "-";
-  $(`${key}PerfUplink`).textContent = inputUplinkMs > 0
-    ? performanceMs(inputUplinkMs)
-    : "-";
+  $(`${key}PerfUplink`).textContent = protocolMetricText(inputUplinkMs);
   $(`${key}PerfScheduler`).textContent = telemetry.scheduler_forward_ms != null
     ? performanceMs(telemetry.scheduler_forward_ms)
     : "-";
   $(`${key}PerfDenoise`).textContent = telemetry.model_denoise_ms != null
     ? performanceMs(telemetry.model_denoise_ms)
     : "-";
-  $(`${key}PerfVae`).textContent = vaeQueueMs > 0 || vaeDecodeMs > 0
-    ? `q ${performanceMs(vaeQueueMs)} · dec ${performanceMs(vaeDecodeMs)}`
+  $(`${key}PerfVae`).textContent = vaeQueueMs !== null || vaeDecodeMs !== null
+    ? `q ${protocolMetricText(vaeQueueMs)} · dec ${protocolMetricText(vaeDecodeMs)}`
     : "-";
-  $(`${key}PerfH264Queue`).textContent = bridgeQueueMs > 0
-    ? performanceMs(bridgeQueueMs)
-    : "-";
-  $(`${key}PerfH264Feed`).textContent = h264FeedMs > 0
-    ? performanceMs(h264FeedMs)
-    : "-";
-  $(`${key}PerfDownlink`).textContent = webSocketDownlinkMs > 0
-    ? performanceMs(webSocketDownlinkMs)
-    : "-";
-  $(`${key}PerfMseQueue`).textContent = mseQueueMs > 0
-    ? performanceMs(mseQueueMs)
-    : "-";
-  $(`${key}PerfMseAppend`).textContent = mseAppendMs > 0
-    ? performanceMs(mseAppendMs)
-    : "-";
-  $(`${key}PerfPlaybackBuffer`).textContent = playbackBufferMs > 0
-    ? performanceMs(playbackBufferMs)
-    : "-";
-  $(`${key}PerfE2E`).textContent = e2eMs > 0 ? performanceMs(e2eMs) : "-";
+  $(`${key}PerfH264Queue`).textContent = isH264
+    ? protocolMetricText(bridgeQueueMs)
+    : "不适用";
+  $(`${key}PerfH264Feed`).textContent = isH264
+    ? protocolMetricText(h264FeedMs)
+    : "不适用";
+  $(`${key}PerfDownlink`).textContent = protocolMetricText(webSocketDownlinkMs);
+  $(`${key}PerfMseQueue`).textContent = isH264
+    ? protocolMetricText(mseQueueMs)
+    : "不适用";
+  $(`${key}PerfMseAppend`).textContent = isH264
+    ? protocolMetricText(mseAppendMs)
+    : "不适用";
+  $(`${key}PerfPlaybackBuffer`).textContent = protocolMetricText(playbackBufferMs);
+  $(`${key}PerfE2E`).textContent = protocolMetricText(e2eMs);
 }
 
 function renderModelTelemetry(key, stats = {}) {
@@ -5014,6 +5042,17 @@ function renderLoop(now) {
     fpsSamples = fpsSamples.filter((t) => now - t < 1000);
     lastRenderedChunk = item.chunk;
     lastRenderedEventId = Number(item.eventId || lastRenderedEventId || 0);
+    const appliedEventIds = Array.from(primaryControlSentEpochByEvent.keys())
+      .filter((eventId) => eventId <= lastRenderedEventId)
+      .sort((left, right) => left - right);
+    if (appliedEventIds.length) {
+      const sentEpochMs = primaryControlSentEpochByEvent.get(appliedEventIds[0]);
+      primaryProtocolStats = {
+        ...primaryProtocolStats,
+        lastControlToVideoMs: Math.max(0, Date.now() - sentEpochMs),
+      };
+      for (const eventId of appliedEventIds) primaryControlSentEpochByEvent.delete(eventId);
+    }
     lastDisplayLagMs = now - (item.receivedAt || now);
     recordChunkFirstRendered(item.chunk, {
       render_loop: true,
@@ -6138,6 +6177,18 @@ function openPrimarySession(init, url) {
 function sendPrimaryEventEnvelope(envelope) {
   if (!ws || ws.readyState !== WebSocket.OPEN) return false;
   ws.send(pack({ ...envelope, trace_id: currentTrace?.traceId }));
+  const eventId = Number(envelope.event_id || 0);
+  if (eventId > 0 && ["camera_actions", "prompt", "scene_cut"].includes(envelope.kind)) {
+    primaryControlSentEpochByEvent.set(
+      eventId,
+      Number(envelope.client_sent_epoch_ms || Date.now()),
+    );
+    while (primaryControlSentEpochByEvent.size > 64) {
+      primaryControlSentEpochByEvent.delete(
+        primaryControlSentEpochByEvent.keys().next().value,
+      );
+    }
+  }
   return true;
 }
 
@@ -6183,11 +6234,39 @@ function receive(data, epoch) {
       if (!renderedPreviewFrames) setPreviewState("idle");
       return;
     }
+    if (message.type === "control_ack") {
+      if (message.stage === "worker") {
+        const clientSentEpochMs = Number(message.client_sent_epoch_ms || 0);
+        const serverReceivedEpochMs = Number(message.server_received_epoch_ms || 0);
+        const serverSentEpochMs = Number(message.server_sent_epoch_ms || 0);
+        const clientReceivedEpochMs = Date.now();
+        if (clientSentEpochMs && serverReceivedEpochMs && serverSentEpochMs) {
+          const serverProcessingMs = Math.max(0, serverSentEpochMs - serverReceivedEpochMs);
+          const controlRoundTripMs = Math.max(0, clientReceivedEpochMs - clientSentEpochMs);
+          primaryProtocolStats = {
+            ...primaryProtocolStats,
+            controlRoundTripMs,
+            lastInputUplinkMs: Math.max(0, (controlRoundTripMs - serverProcessingMs) / 2),
+            serverClockOffsetMs: (
+              (serverReceivedEpochMs - clientSentEpochMs)
+              + (serverSentEpochMs - clientReceivedEpochMs)
+            ) / 2,
+          };
+          updateStats();
+        }
+      }
+      return;
+    }
     if (message.type === "session_ready") {
       acceptMediaProfile(message);
       return;
     }
+    if (message.type === "heartbeat") return;
     if (message.type === "chunk_telemetry") {
+      primaryProtocolStats = {
+        ...primaryProtocolStats,
+        chunkTelemetry: { ...message },
+      };
       // Smooth WebP playback follows measured output frames per chunk wall
       // second. The negotiated output timeline (for example 72 FPS) remains
       // metadata and must never become a fabricated presentation cadence.
@@ -6238,7 +6317,14 @@ function receive(data, epoch) {
       });
       return;
     }
-    pendingHeader = message;
+    if (message.type === "frame_batch_header" || (!message.type && message.content_type)) {
+      pendingHeader = message;
+    } else {
+      recordTrajectoryEvent("server_control_ignored", {
+        type: String(message.type || "unknown"),
+      });
+      return;
+    }
     if (pendingHeader && !renderedPreviewFrames) setStatus("Receiving", "live");
     return;
   }
@@ -6300,12 +6386,36 @@ async function decodeAndEnqueueFrameBatch(header, data, epoch) {
   updateControlDebugText();
   frames += chunkFrameCount;
   bytes += payloadBytes;
+  const networkNow = performance.now();
+  if (primaryNetworkSample && networkNow > primaryNetworkSample.at) {
+    const elapsedSeconds = (networkNow - primaryNetworkSample.at) / 1000;
+    primaryProtocolStats = {
+      ...primaryProtocolStats,
+      receiveMbps: Math.max(
+        0,
+        (bytes - primaryNetworkSample.bytes) * 8 / elapsedSeconds / 1_000_000,
+      ),
+    };
+  }
+  primaryNetworkSample = { at: networkNow, bytes };
   updateOutputSizeFromHeader(header);
   setStatus("Live", "live");
   updateStats();
 }
 
 function recordFrameBatchReceived(header, payloadBytes) {
+  const serverSentEpochMs = Number(header.server_sent_epoch_ms || 0);
+  if (serverSentEpochMs > 0) {
+    primaryProtocolStats = {
+      ...primaryProtocolStats,
+      lastDownlinkMs: Math.max(
+        0,
+        Date.now()
+          - serverSentEpochMs
+          + Number(primaryProtocolStats.serverClockOffsetMs || 0),
+      ),
+    };
+  }
   recordTrajectoryEvent("frame_batch_received", {
     chunk_index: header.chunk_index,
     event_id: header.event_id,

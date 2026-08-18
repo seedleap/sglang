@@ -15,10 +15,10 @@ const readme = read("README.md");
 const runtimeConfigIndex = html.indexOf('<script src="./runtime-config.js"></script>');
 const experienceModeIndex = html.indexOf("realtime_experience_mode.js?v=zing-only-v1");
 const stylesheetIndex = html.indexOf(
-  "styles.css?v=world-studio-zing-only-rife3-finite-v1",
+  "styles.css?v=world-studio-zing-only-rife3-finite-transport-v2",
 );
 const appIndex = html.indexOf(
-  "app.js?v=world-studio-zing-only-rife3-finite-v1",
+  "app.js?v=world-studio-zing-only-rife3-finite-transport-v2",
 );
 assert.ok(
   runtimeConfigIndex >= 0

@@ -45,6 +45,26 @@ assert.match(app, /const DEFAULT_LINGBOT2_SINK_SIZE\s*=\s*configuredModelNumber\
 assert.match(app, /const DEFAULT_LINGBOT2_WINDOW_FRAMES\s*=\s*configuredModelNumber\("lingbot2", "windowFrames", 18\)/);
 assert.match(
   app,
+  /startupTimeoutMs:\s*configuredModelNumber\("lingbot2", "startupTimeoutMs", 60000\)/,
+  "LingBot2 should wait for its measured cold first-frame latency instead of the generic 12s timeout",
+);
+assert.match(
+  app,
+  /if \(message\.type === "chunk_telemetry"\) \{[\s\S]*?chunkTelemetry: \{ \.\.\.message \}[\s\S]*?return;/,
+  "Zing must consume chunk telemetry as control data instead of treating it as a legacy frame header",
+);
+assert.match(
+  app,
+  /message\.type === "frame_batch_header" \|\| \(!message\.type && message\.content_type\)/,
+  "only an explicit or structurally valid legacy frame header may arm the binary payload path",
+);
+assert.doesNotMatch(
+  app,
+  /\n\s*pendingHeader = message;\n\s*if \(pendingHeader && !renderedPreviewFrames\)/,
+  "unknown control messages must not become Zing frame headers",
+);
+assert.match(
+  app,
   /this\.enqueueTransition\(\{ immediate: active \}\)/,
   "key presses should bypass the transition batching delay",
 );
@@ -97,6 +117,36 @@ assert.match(
   app,
   /if \(key === "minwm" && state === "closed"\) \{[\s\S]*?\$\("connectBtn"\)\.disabled = false;[\s\S]*?stopWorldExperienceTiming/,
   "finite Zing H.264 playback should re-enable entry and stop timing only after its buffered tail ends",
+);
+assert.match(
+  app,
+  /renderProtocolPerformance\("minwm", \{[\s\S]*?bytes,[\s\S]*?transport: "webp"/,
+  "Zing WebP telemetry should receive measured bytes and an explicit transport",
+);
+assert.match(
+  app,
+  /receiveMbps: Math\.max\([\s\S]*?bytes - primaryNetworkSample\.bytes/,
+  "Zing should calculate rolling WebP receive bandwidth",
+);
+assert.match(
+  app,
+  /server_sent_epoch_ms[\s\S]*?lastDownlinkMs: Math\.max/,
+  "Zing should derive WebSocket downlink latency from frame timestamps",
+);
+assert.match(
+  app,
+  /primaryControlSentEpochByEvent[\s\S]*?lastControlToVideoMs: Math\.max/,
+  "Zing should measure the first rendered frame after each control event",
+);
+assert.match(
+  app,
+  /const isH264 = stats\.transport === "h264"[\s\S]*?: "不适用"/,
+  "WebP sessions should mark H.264/MSE-only metrics as not applicable",
+);
+assert.match(
+  app,
+  /function protocolMetricText\(value\) \{[\s\S]*?value === null \? "-" : performanceMs\(value\)/,
+  "measured zero latency must render as 0 ms rather than missing data",
 );
 assert.match(
   app,
@@ -174,8 +224,8 @@ assert.match(
 assert.match(html, /prompt_rewrite_controller\.js\?v=prompt-rewrite-v3/);
 assert.match(html, /world_rules_controller\.js\?v=world-rules-v3/);
 assert.match(html, /realtime_experience_mode\.js\?v=zing-only-v1/);
-assert.match(html, /styles\.css\?v=world-studio-zing-only-rife3-finite-v1/);
-assert.match(html, /app\.js\?v=world-studio-zing-only-rife3-finite-v1/);
+assert.match(html, /styles\.css\?v=world-studio-zing-only-rife3-finite-transport-v2/);
+assert.match(html, /app\.js\?v=world-studio-zing-only-rife3-finite-transport-v2/);
 assert.match(html, /id="minwmH264Viewport"/);
 assert.match(html, /id="lingbot2H264Viewport"/);
 assert.match(html, /id="minwmPerfScheduler"/);
