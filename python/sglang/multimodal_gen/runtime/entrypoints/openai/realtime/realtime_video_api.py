@@ -914,10 +914,14 @@ async def _generate_loop_async_vae(ws, session: GenerateSession, server_args):
         vae_worker_url,
         session_id=session.id,
         generation_id=session.generation_id,
-        transport=server_args.realtime_vae_transport,
-        shared_memory_dir=server_args.realtime_vae_shared_memory_dir,
-        timeout_s=server_args.realtime_vae_timeout_s,
-        max_message_bytes=server_args.realtime_vae_max_message_mb * 1024 * 1024,
+        transport=getattr(server_args, "realtime_vae_transport", "auto"),
+        shared_memory_dir=getattr(
+            server_args, "realtime_vae_shared_memory_dir", None
+        ),
+        timeout_s=getattr(server_args, "realtime_vae_timeout_s", 10.0),
+        max_message_bytes=(
+            getattr(server_args, "realtime_vae_max_message_mb", 64) * 1024 * 1024
+        ),
     )
     session.vae_client = client
     deployment_backend = _resolve_realtime_vae_backend(session, server_args)
