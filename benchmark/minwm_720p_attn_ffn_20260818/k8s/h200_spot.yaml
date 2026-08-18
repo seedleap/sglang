@@ -1,0 +1,182 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: minwm-720p-attn-ffn-h200-20260818-01-results
+  namespace: default
+  labels:
+    seedleap.ai/owner: chenshengdong
+    seedleap.ai/purpose: minwm-720p-attn-ffn
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: minwm-dmd-0724-p6-gp3
+  resources:
+    requests:
+      storage: 100Gi
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: minwm-720p-attn-ffn-h200-20260818-01
+  namespace: default
+  labels:
+    app.kubernetes.io/name: minwm-720p-attn-ffn-h200-20260818-01
+    seedleap.ai/owner: chenshengdong
+    seedleap.ai/task: minwm-720p-attn-ffn
+    seedleap.ai/run-id: minwm-720p-attn-ffn-h200-20260818-01
+  annotations:
+    seedleap.ai/capacity-type: spot
+    seedleap.ai/repo: seedleap/sglang
+    seedleap.ai/branch: codex/minwm-720p-attn-ffn-spot
+    seedleap.ai/sglang-git-ref: "8ae07a622e9fe4c53f85a3b12bdd147bf51e4782"
+    seedleap.ai/minwm-git-ref: "2efc6485f65e8fcab506665efde79bc41406385e"
+    seedleap.ai/checkpoint-version-id: "9lr1pX__59kUFlsv6Q.NKFQO3EoRQY9C"
+    seedleap.ai/instance-type: p5e.48xlarge
+spec:
+  backoffLimit: 2
+  activeDeadlineSeconds: 21600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: minwm-720p-attn-ffn-h200-20260818-01
+        seedleap.ai/owner: chenshengdong
+        seedleap.ai/task: minwm-720p-attn-ffn
+        seedleap.ai/run-id: minwm-720p-attn-ffn-h200-20260818-01
+      annotations:
+        seedleap.ai/repo: seedleap/sglang
+        seedleap.ai/branch: codex/minwm-720p-attn-ffn-spot
+        seedleap.ai/sglang-git-ref: "8ae07a622e9fe4c53f85a3b12bdd147bf51e4782"
+        seedleap.ai/minwm-git-ref: "2efc6485f65e8fcab506665efde79bc41406385e"
+    spec:
+      restartPolicy: Never
+      terminationGracePeriodSeconds: 300
+      tolerations:
+        - key: seedleap.ai/capacity-pool
+          operator: Equal
+          value: minwm-test-phx2-karpenter
+          effect: NoSchedule
+      nodeSelector:
+        karpenter.sh/capacity-type: spot
+        karpenter.sh/nodepool: minwm-test-phx2-p5e-spot
+        seedleap.ai/capacity-pool: minwm-test-phx2-karpenter
+        node.kubernetes.io/instance-type: p5e.48xlarge
+        topology.kubernetes.io/zone: us-west-2-phx-2a
+      containers:
+        - name: benchmark
+          image: 829115578968.dkr.ecr.us-east-2.amazonaws.com/leap-world/minwm-training@sha256:bedc07ea3ba55059a8c1c569c3b177c4d00d41f37d4fa9105375531534ef5f2a
+          imagePullPolicy: IfNotPresent
+          workingDir: /workspace
+          securityContext:
+            runAsUser: 0
+            capabilities:
+              add:
+                - SYS_ADMIN
+          env:
+            - name: GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: github-token
+                  key: token
+            - name: SGLANG_GIT_REF
+              value: "8ae07a622e9fe4c53f85a3b12bdd147bf51e4782"
+            - name: MINWM_GIT_REF
+              value: "2efc6485f65e8fcab506665efde79bc41406385e"
+            - name: MINWM_BENCHMARK_MODE
+              value: attnffn720p
+            - name: MINWM_RUN_ID
+              value: minwm-720p-attn-ffn-h200-20260818-01
+            - name: MINWM_GPU_FAMILY
+              value: hopper
+            - name: MINWM_IMAGE_DIGEST
+              value: sha256:bedc07ea3ba55059a8c1c569c3b177c4d00d41f37d4fa9105375531534ef5f2a
+            - name: MINWM_INSTALL_SAGE
+              value: "1"
+            - name: MINWM_RUN_NSYS
+              value: "1"
+            - name: MINWM_MATRIX_WARMUP_CHUNKS
+              value: "20"
+            - name: MINWM_MATRIX_MEASURED_CHUNKS
+              value: "100"
+            - name: MINWM_MATRIX_KV_FRAMES
+              value: "45"
+            - name: MINWM_STATIC_FP8_MARGIN
+              value: "1.05"
+            - name: TORCH_CUDA_ARCH_LIST
+              value: "9.0"
+            - name: MAX_JOBS
+              value: "16"
+            - name: PYTHONUNBUFFERED
+              value: "1"
+            - name: MINWM_STAGE_FROM_MOUNT
+              value: "1"
+            - name: MINWM_CHECKPOINT_MOUNT_PATH
+              value: /s3/world-model/evals/minwm/checkpoint-staging/wan22-5B-stage3-dmd-30-0731-acfd622962df/global_step_001800/ema_student/model.pt
+            - name: MINWM_PRETRAINED_MOUNT_PATH
+              value: /s3/world-model/checkpoints/minWM/Wan2.2-TI2V-5B-from-diffusers
+            - name: MINWM_CHECKPOINT_S3_EAST
+              value: s3://leap-world-us-east-2/world-model/evals/minwm/checkpoint-staging/wan22-5B-stage3-dmd-30-0731-acfd622962df/global_step_001800/ema_student/model.pt
+            - name: MINWM_CHECKPOINT_VERSION_EAST
+              value: 9lr1pX__59kUFlsv6Q.NKFQO3EoRQY9C
+            - name: MINWM_CHECKPOINT_SOURCE_URI
+              value: s3://leap-world-us-west-2/world-model/minwm/checkpoints/run-archive/rolling/Wan21/Action2V/dmd/wan22-5B-stage3-dmd-30-0731-acfd622962df/global_step_001800/ema_student/model.pt
+            - name: MINWM_CHECKPOINT_SOURCE_VERSION
+              value: ghDNCSQtQ2OJ1LnrxtMKLXtqNWDK0CsR
+            - name: MINWM_CHECKPOINT_SOURCE_ETAG
+              value: 14038072b7fc6a9fee92388a02dc2569-191
+            - name: MINWM_CHECKPOINT_BYTES
+              value: "10007165995"
+            - name: MINWM_CHECKPOINT_CRC64
+              value: GLaCsoJZbwM=
+            - name: MINWM_PRETRAINED_S3
+              value: s3://leap-world-us-east-2/world-model/checkpoints/minWM/Wan2.2-TI2V-5B-from-diffusers
+            - name: MINWM_RESULTS_ROOT
+              value: /results
+          command:
+            - /bin/bash
+            - -lc
+            - |
+              set -euo pipefail
+              clone_at() {
+                local repository="$1" destination="$2" revision="$3"
+                git clone --filter=blob:none --no-checkout \
+                  "https://x-access-token:${GITHUB_TOKEN}@github.com/seedleap/${repository}.git" \
+                  "${destination}"
+                git -C "${destination}" checkout --detach "${revision}"
+                [[ "$(git -C "${destination}" rev-parse HEAD)" == "${revision}" ]]
+              }
+              clone_at minWM /workspace/minWM "${MINWM_GIT_REF}"
+              clone_at sglang /workspace/sglang "${SGLANG_GIT_REF}"
+              exec bash /workspace/sglang/benchmark/minwm_realtime_parity/aws_b200_entrypoint.sh
+          resources:
+            requests:
+              cpu: "32"
+              memory: 200Gi
+              nvidia.com/gpu: "1"
+            limits:
+              cpu: "64"
+              memory: 400Gi
+              nvidia.com/gpu: "1"
+          volumeMounts:
+            - name: s3
+              mountPath: /s3
+              readOnly: true
+            - name: work
+              mountPath: /work
+            - name: results
+              mountPath: /results
+            - name: shm
+              mountPath: /dev/shm
+      volumes:
+        - name: s3
+          persistentVolumeClaim:
+            claimName: s3-claim
+            readOnly: true
+        - name: work
+          emptyDir: {}
+        - name: results
+          persistentVolumeClaim:
+            claimName: minwm-720p-attn-ffn-h200-20260818-01-results
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 64Gi
