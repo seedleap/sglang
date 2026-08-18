@@ -825,6 +825,13 @@ async def _complete_remote_chunk(
 ) -> None:
     remote_result = await handle.wait()
     vae_completed = remote_result.completed_at
+    _mark_session_playable_from_server_output(
+        session,
+        source="remote_vae_complete",
+        request_id=chunk.request_id,
+        chunk_index=chunk.index,
+        event_id=getattr(batch, "realtime_event_id", None),
+    )
     session.vae_intervals[chunk.index] = (vae_started, vae_completed)
     next_denoise = session.denoise_intervals.get(chunk.index + 1)
     overlap_ms = None
