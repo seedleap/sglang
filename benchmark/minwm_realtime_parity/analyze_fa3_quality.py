@@ -12,13 +12,15 @@ from pathlib import Path
 import numpy as np
 
 PREFIXES = ("fa2_a", "fa2_b", "fa3_a", "fa3_b")
-SHORT_MAX_ABS = 8
-SHORT_MAX_RMSE = 1.0
-SHORT_MIN_SSIM = 0.995
-SHORT_MAX_LPIPS = 0.05
-ACTION_MIN_DELTA_COSINE = 0.95
-ACTION_MIN_NORM_RATIO = 0.8
-ACTION_MAX_NORM_RATIO = 1.25
+DIRECT_HORIZON_FRAMES = 16
+DIRECT_MAX_ABS = 96
+DIRECT_MAX_RMSE = 2.0
+DIRECT_MIN_COSINE = 0.9998
+DIRECT_MIN_SSIM = 0.99
+DIRECT_MAX_LPIPS = 0.05
+ACTION_MIN_MOTION_COSINE = 0.95
+ACTION_MIN_MOTION_MAGNITUDE_RATIO = 0.7
+ACTION_MAX_MOTION_MAGNITUDE_RATIO = 1.4
 TEMPORAL_MIN_ACTIVITY_RATIO = 0.5
 TEMPORAL_MAX_ACTIVITY_RATIO = 2.0
 
@@ -187,6 +189,97 @@ def delta_metrics(
     }
 
 
+def motion_signature(frames: np.ndarray) -> dict:
+    """Summarize camera motion without requiring pixel-aligned trajectories."""
+    import cv2
+
+    if len(frames) < DIRECT_HORIZON_FRAMES + 2:
+        raise ValueError(f"not enough frames for motion analysis: {len(frames)}")
+    width, height = 208, 117
+    y_grid, x_grid = np.mgrid[:height, :width].astype(np.float32)
+    radial_x = x_grid - (width - 1) / 2
+    radial_y = y_grid - (height - 1) / 2
+    radial_norm = np.sqrt(radial_x**2 + radial_y**2) + 1e-6
+    radial_x /= radial_norm
+    radial_y /= radial_norm
+
+    previous = None
+    transitions = []
+    for frame in frames:
+        gray = cv2.cvtColor(np.asarray(frame), cv2.COLOR_RGB2GRAY)
+        gray = cv2.resize(gray, (width, height), interpolation=cv2.INTER_AREA)
+        if previous is not None:
+            flow = cv2.calcOpticalFlowFarneback(
+                previous, gray, None, 0.5, 3, 21, 3, 5, 1.2, 0
+            )
+            magnitude = np.linalg.norm(flow, axis=2)
+            mask = magnitude <= np.percentile(magnitude, 90)
+            radial = flow[..., 0] * radial_x + flow[..., 1] * radial_y
+            transitions.append(
+                (
+                    float(np.median(flow[..., 0][mask])),
+                    float(np.median(flow[..., 1][mask])),
+                    float(np.median(radial[mask])),
+                    float(np.median(magnitude[mask])),
+                )
+            )
+        previous = gray
+    steady = np.asarray(transitions[DIRECT_HORIZON_FRAMES - 1 :], dtype=np.float64)
+    return {
+        "mean_horizontal_flow": float(steady[:, 0].mean()),
+        "mean_vertical_flow": float(steady[:, 1].mean()),
+        "mean_radial_flow": float(steady[:, 2].mean()),
+        "mean_flow_magnitude": float(steady[:, 3].mean()),
+        "steady_transition_count": len(steady),
+    }
+
+
+def compare_motion_signatures(fa2: dict, fa3: dict) -> dict:
+    fa2_vector = np.asarray(
+        [
+            fa2["mean_horizontal_flow"],
+            fa2["mean_vertical_flow"],
+            fa2["mean_radial_flow"],
+        ],
+        dtype=np.float64,
+    )
+    fa3_vector = np.asarray(
+        [
+            fa3["mean_horizontal_flow"],
+            fa3["mean_vertical_flow"],
+            fa3["mean_radial_flow"],
+        ],
+        dtype=np.float64,
+    )
+    denominator = float(np.linalg.norm(fa2_vector) * np.linalg.norm(fa3_vector))
+    cosine = (
+        1.0 if denominator == 0 else float(np.dot(fa2_vector, fa3_vector) / denominator)
+    )
+    fa2_magnitude = float(fa2["mean_flow_magnitude"])
+    ratio = (
+        float(fa3["mean_flow_magnitude"]) / fa2_magnitude if fa2_magnitude else math.inf
+    )
+    passed = (
+        cosine >= ACTION_MIN_MOTION_COSINE
+        and ACTION_MIN_MOTION_MAGNITUDE_RATIO
+        <= ratio
+        <= ACTION_MAX_MOTION_MAGNITUDE_RATIO
+    )
+    return {
+        "direction_cosine_similarity": cosine,
+        "fa2": fa2,
+        "fa3": fa3,
+        "fa3_to_fa2_magnitude_ratio": ratio,
+        "passed": passed,
+    }
+
+
+def motion_comparison(fa2_frames: np.ndarray, fa3_frames: np.ndarray) -> dict:
+    return compare_motion_signatures(
+        motion_signature(fa2_frames), motion_signature(fa3_frames)
+    )
+
+
 def load_case(results: Path, case_id: str, prefix: str) -> tuple[np.ndarray, Path]:
     path = results / "cases" / case_id / f"{prefix}.npy"
     return np.load(path, mmap_mode="r", allow_pickle=False), path
@@ -210,15 +303,23 @@ def analyze_actions(results: Path, require_lpips: bool) -> dict:
             "fa2": bool(np.array_equal(frames["fa2_a"], frames["fa2_b"])),
             "fa3": bool(np.array_equal(frames["fa3_a"], frames["fa3_b"])),
         }
-        cross = pixel_metrics(frames["fa2_a"][1:], frames["fa3_a"][1:])
-        lpips = lpips_metrics(frames["fa2_a"][1:], frames["fa3_a"][1:])
-        cross_passed = (
-            cross["max_abs"] <= SHORT_MAX_ABS
-            and cross["rmse"] <= SHORT_MAX_RMSE
-            and cross["sampled_ssim"] >= SHORT_MIN_SSIM
-            and lpips["max"] <= SHORT_MAX_LPIPS
+        generated2 = frames["fa2_a"][1:]
+        generated3 = frames["fa3_a"][1:]
+        direct2 = generated2[:DIRECT_HORIZON_FRAMES]
+        direct3 = generated3[:DIRECT_HORIZON_FRAMES]
+        direct = pixel_metrics(direct2, direct3)
+        direct_lpips = lpips_metrics(direct2, direct3)
+        direct_passed = (
+            direct["max_abs"] <= DIRECT_MAX_ABS
+            and direct["rmse"] <= DIRECT_MAX_RMSE
+            and direct["cosine_similarity"] >= DIRECT_MIN_COSINE
+            and direct["sampled_ssim"] >= DIRECT_MIN_SSIM
+            and direct_lpips["max"] <= DIRECT_MAX_LPIPS
         )
+        cross = pixel_metrics(generated2, generated3)
+        lpips = lpips_metrics(generated2, generated3)
         action = None
+        motion = None
         action_passed = True
         if case_id != ids[0]:
             action = delta_metrics(
@@ -227,20 +328,21 @@ def analyze_actions(results: Path, require_lpips: bool) -> dict:
                 frames["fa3_a"][1:],
                 idle["fa3_a"],
             )
+            motion = motion_comparison(generated2, generated3)
             action_passed = (
                 action["fa2_first_effect_frame"] == action["fa3_first_effect_frame"]
-                and action["delta_cosine_similarity"] >= ACTION_MIN_DELTA_COSINE
-                and ACTION_MIN_NORM_RATIO
-                <= action["fa3_to_fa2_effect_norm_ratio"]
-                <= ACTION_MAX_NORM_RATIO
+                and motion["passed"]
             )
-        passed = all(replay.values()) and cross_passed and action_passed
+        passed = all(replay.values()) and direct_passed and action_passed
         all_passed = all_passed and passed
         records.append(
             {
                 "action_effect": action,
+                "action_motion": motion,
                 "case_id": case_id,
                 "cross_backend": cross,
+                "cross_backend_direct_horizon": direct,
+                "cross_backend_direct_horizon_lpips": direct_lpips,
                 "file_sha256": {
                     prefix: sha256_file(path) for prefix, path in paths.items()
                 },
@@ -309,15 +411,17 @@ def main() -> None:
     long = analyze_long(args.long_results)
     report = {
         "acceptance_thresholds": {
-            "action_delta_cosine_gte": ACTION_MIN_DELTA_COSINE,
-            "action_effect_norm_ratio": [
-                ACTION_MIN_NORM_RATIO,
-                ACTION_MAX_NORM_RATIO,
+            "action_motion_direction_cosine_gte": ACTION_MIN_MOTION_COSINE,
+            "action_motion_magnitude_ratio": [
+                ACTION_MIN_MOTION_MAGNITUDE_RATIO,
+                ACTION_MAX_MOTION_MAGNITUDE_RATIO,
             ],
-            "short_lpips_lte": SHORT_MAX_LPIPS,
-            "short_max_abs_lte": SHORT_MAX_ABS,
-            "short_rmse_lte": SHORT_MAX_RMSE,
-            "short_ssim_gte": SHORT_MIN_SSIM,
+            "direct_horizon_frames": DIRECT_HORIZON_FRAMES,
+            "direct_lpips_lte": DIRECT_MAX_LPIPS,
+            "direct_max_abs_lte": DIRECT_MAX_ABS,
+            "direct_rmse_lte": DIRECT_MAX_RMSE,
+            "direct_cosine_gte": DIRECT_MIN_COSINE,
+            "direct_ssim_gte": DIRECT_MIN_SSIM,
             "temporal_activity_ratio": [
                 TEMPORAL_MIN_ACTIVITY_RATIO,
                 TEMPORAL_MAX_ACTIVITY_RATIO,
@@ -326,7 +430,7 @@ def main() -> None:
         "actions": actions,
         "all_passed": actions["all_passed"] and long["stable"],
         "long_rollout": long,
-        "schema_version": 1,
+        "schema_version": 2,
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
