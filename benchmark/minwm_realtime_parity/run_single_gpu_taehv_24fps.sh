@@ -3,6 +3,8 @@ set -euo pipefail
 
 : "${MINWM_RUN_ID:?set MINWM_RUN_ID}"
 : "${MINWM_PROFILE_MODE:?set MINWM_PROFILE_MODE to baseline or nsys}"
+: "${MINWM_VAE_TOPOLOGY:?set MINWM_VAE_TOPOLOGY to local or remote}"
+: "${MINWM_EXPECTED_GPU_COUNT:?set expected visible GPU count}"
 : "${MINWM_GPU_SKU:?set MINWM_GPU_SKU to B200, B300, H100, or H200}"
 : "${MINWM_HARDWARE_PROFILE:?set the experimental hardware profile}"
 : "${MINWM_EXPECTED_COMPUTE_CAP:?set expected compute capability}"
@@ -48,6 +50,14 @@ set -euo pipefail
 : "${TAEHV_CHECKPOINT_SHA256:?set the taew2_2 SHA-256}"
 
 [[ "${MINWM_PROFILE_MODE}" == "baseline" || "${MINWM_PROFILE_MODE}" == "nsys" ]]
+[[ "${MINWM_VAE_TOPOLOGY}" == "local" || "${MINWM_VAE_TOPOLOGY}" == "remote" ]]
+[[ "${MINWM_EXPECTED_GPU_COUNT}" == "1" || "${MINWM_EXPECTED_GPU_COUNT}" == "2" ]]
+if [[ "${MINWM_VAE_TOPOLOGY}" == "local" ]]; then
+  [[ "${MINWM_EXPECTED_GPU_COUNT}" == "1" ]]
+else
+  [[ "${MINWM_EXPECTED_GPU_COUNT}" == "2" ]]
+  [[ "${MINWM_PROFILE_MODE}" == "baseline" ]]
+fi
 [[ ",B200,B300,H100,H200," == *",${MINWM_GPU_SKU},"* ]]
 [[ "${MINWM_RUN_ID}" =~ ^[a-z0-9][a-z0-9.-]+$ ]]
 [[ "${MINWM_RESULTS_ROOT}" == /s3-results/world-model/evals/minwm/performance/* ]]
@@ -106,6 +116,7 @@ if find "${REMOTE_RESULTS}" -mindepth 1 -print -quit | grep -q .; then
 fi
 
 server_pid=""
+vae_pid=""
 nsys_session=""
 capture_active=0
 archive_attempted=0
@@ -124,6 +135,23 @@ stop_server() {
     fi
     wait "${server_pid}" 2>/dev/null || true
     server_pid=""
+  fi
+}
+
+stop_vae() {
+  if [[ -n "${vae_pid}" ]]; then
+    kill -TERM "${vae_pid}" 2>/dev/null || true
+    for _ in $(seq 1 20); do
+      if ! kill -0 "${vae_pid}" 2>/dev/null; then
+        break
+      fi
+      sleep 1
+    done
+    if kill -0 "${vae_pid}" 2>/dev/null; then
+      kill -KILL "${vae_pid}" 2>/dev/null || true
+    fi
+    wait "${vae_pid}" 2>/dev/null || true
+    vae_pid=""
   fi
 }
 
@@ -204,6 +232,7 @@ finish() {
       nsys stop --session="${nsys_session}" >/dev/null 2>&1
   fi
   stop_server
+  stop_vae
   if (( status != 0 )); then
     printf 'status=%d\n' "${status}" > "${LOCAL_FAILED}"
     if (( archive_attempted == 0 )); then
@@ -238,6 +267,22 @@ wait_for_server() {
       return 0
     fi
     if [[ -n "${server_pid}" ]] && ! kill -0 "${server_pid}" 2>/dev/null; then
+      tail -300 "${log_path}" >&2
+      return 1
+    fi
+    sleep 2
+  done
+  tail -300 "${log_path}" >&2
+  return 1
+}
+
+wait_for_vae() {
+  local log_path="$1"
+  for _ in $(seq 1 900); do
+    if curl --fail --silent http://127.0.0.1:31000/health >/dev/null; then
+      return 0
+    fi
+    if [[ -n "${vae_pid}" ]] && ! kill -0 "${vae_pid}" 2>/dev/null; then
       tail -300 "${log_path}" >&2
       return 1
     fi
@@ -353,6 +398,7 @@ marker = "server_args: "
 lines = [line for line in open(sys.argv[1]) if marker in line]
 assert lines, "missing structured server_args log"
 observed = json.loads(lines[0].split(marker, 1)[1])
+topology = os.environ["MINWM_VAE_TOPOLOGY"]
 expected = {
     "attention_backend": "fa",
     "enable_cfg_parallel": False,
@@ -363,12 +409,17 @@ expected = {
     "performance_mode": "speed",
     "realtime_session_idle_timeout_s": 900.0,
     "realtime_session_max_lifetime_s": 900.0,
-    "realtime_vae_backend": "local",
+    "realtime_vae_backend": "local" if topology == "local" else "taehv_remote",
     "sp_degree": 1,
     "vae_cpu_offload": False,
 }
 for key, value in expected.items():
     assert observed.get(key) == value, (key, observed.get(key), value)
+if topology == "remote":
+    assert observed["realtime_vae_transport"] == "shared_memory", observed
+    assert observed["realtime_vae_worker_url"] == (
+        "ws://127.0.0.1:31000/v1/realtime_vae/decode"
+    ), observed
 runtime_env = {
     "SGLANG_DIFFUSION_SYNC_STAGE_PROFILING": os.environ[
         "SGLANG_DIFFUSION_SYNC_STAGE_PROFILING"
@@ -445,10 +496,17 @@ for field in (
         result["server"][field],
     )
     assert result["server"][field]["missing_count"] == 0
-if os.environ["MINWM_REQUIRE_CANDIDATE_EVIDENCE"] == "true":
+if (
+    os.environ["MINWM_REQUIRE_CANDIDATE_EVIDENCE"] == "true"
+    and os.environ["MINWM_VAE_TOPOLOGY"] == "local"
+):
     async_enqueue = result["server"]["raw_frame_async_enqueue_ms"]
     assert async_enqueue["sample_count"] == expected_measured, async_enqueue
     assert async_enqueue["missing_count"] == 0, async_enqueue
+elif os.environ["MINWM_VAE_TOPOLOGY"] == "remote":
+    async_enqueue = result["server"]["raw_frame_async_enqueue_ms"]
+    assert async_enqueue["sample_count"] == 0, async_enqueue
+    assert async_enqueue["missing_count"] == expected_measured, async_enqueue
 PY
 }
 
@@ -481,10 +539,14 @@ PY
 }
 
 record_no_offload_protocol_fit() {
-  local result_path="$1" log_path="$2" marker_path="$3"
+  local result_path="$1" log_path="$2" marker_path="$3" vae_log_path="${4:-}"
   kill -0 "${server_pid}"
+  if [[ "${MINWM_VAE_TOPOLOGY}" == "remote" ]]; then
+    [[ -n "${vae_pid}" && -n "${vae_log_path}" ]]
+    kill -0 "${vae_pid}"
+  fi
   python3 - "${result_path}" "${log_path}" "${LOCAL_RESULTS}/gpu.csv" \
-    "${marker_path}" <<'PY'
+    "${marker_path}" "${vae_log_path}" <<'PY'
 import csv
 import json
 import os
@@ -492,9 +554,10 @@ import sys
 
 result = json.load(open(sys.argv[1]))
 server_log = open(sys.argv[2]).read()
+topology = os.environ["MINWM_VAE_TOPOLOGY"]
 with open(sys.argv[3], newline="") as handle:
     gpu_rows = list(csv.reader(handle))
-assert len(gpu_rows) == 1, gpu_rows
+assert len(gpu_rows) == int(os.environ["MINWM_EXPECTED_GPU_COUNT"]), gpu_rows
 gpu_name, gpu_memory_mib, gpu_compute_cap = [item.strip() for item in gpu_rows[0]]
 
 warmup_chunks = int(os.environ["MINWM_PROTOCOL_SMOKE_WARMUP_CHUNKS"])
@@ -516,8 +579,14 @@ server_args_lines = [
 assert server_args_lines, "missing structured server_args log"
 server_args = json.loads(server_args_lines[0].split(server_args_marker, 1)[1])
 assert server_args["vae_cpu_offload"] is False, server_args
-assert server_args["realtime_vae_backend"] == "local", server_args
-assert "Preloading TAEHV decoder weights" in server_log
+expected_backend = "local" if topology == "local" else "taehv_remote"
+assert server_args["realtime_vae_backend"] == expected_backend, server_args
+if topology == "local":
+    assert "Preloading TAEHV decoder weights" in server_log
+else:
+    assert sys.argv[5], "missing remote VAE log path"
+    vae_log = open(sys.argv[5]).read()
+    assert "taehv startup warmup completed" in vae_log, vae_log[-4000:]
 
 assert result["warmup_chunks"] == warmup_chunks, result
 assert result["measured_chunks"] == measured_chunks, result
@@ -539,13 +608,14 @@ evidence = {
         "memory_total_mib": memory_mib,
         "name": gpu_name,
     },
-    "local_streaming_taehv": True,
+    "local_streaming_taehv": topology == "local",
     "measured_chunks": measured_chunks,
     "no_offload_protocol_fit_pass": True,
     "processed_latent_frames": (
         (warmup_chunks + measured_chunks) * latent_frames_per_chunk
     ),
     "same_server_process_alive_after_smoke": True,
+    "taehv_topology": topology,
     "vae_cpu_offload": False,
     "warmup_chunks": warmup_chunks,
     "warmup_latent_frames": warmup_latent_frames,
@@ -562,13 +632,17 @@ assert_no_offload_protocol_fit() {
   kill -0 "${server_pid}"
   python3 - "${marker_path}" <<'PY'
 import json
+import os
 import sys
 
 evidence = json.load(open(sys.argv[1]))
 assert evidence["no_offload_protocol_fit_pass"] is True, evidence
 assert evidence["formal_same_process_eligible"] is True, evidence
 assert evidence["same_server_process_alive_after_smoke"] is True, evidence
-assert evidence["local_streaming_taehv"] is True, evidence
+assert evidence["taehv_topology"] == os.environ["MINWM_VAE_TOPOLOGY"], evidence
+assert evidence["local_streaming_taehv"] is (
+    os.environ["MINWM_VAE_TOPOLOGY"] == "local"
+), evidence
 assert evidence["vae_cpu_offload"] is False, evidence
 if evidence["full_window_required"]:
     assert evidence["warmup_latent_frames"] >= 32, evidence
@@ -592,7 +666,7 @@ readonly PRETRAINED_MOUNT_PATH="${MINWM_INPUT_ROOT%/}/${MINWM_PRETRAINED_RELATIV
 
 nvidia-smi --query-gpu=name,memory.total,compute_cap \
   --format=csv,noheader,nounits | tee "${LOCAL_RESULTS}/gpu.csv"
-[[ "$(wc -l < "${LOCAL_RESULTS}/gpu.csv")" == "1" ]]
+[[ "$(wc -l < "${LOCAL_RESULTS}/gpu.csv")" == "${MINWM_EXPECTED_GPU_COUNT}" ]]
 IFS=',' read -r gpu_name gpu_memory_mib gpu_compute_cap \
   < "${LOCAL_RESULTS}/gpu.csv"
 gpu_name="$(xargs <<< "${gpu_name}")"
@@ -606,18 +680,35 @@ if [[ -n "${MINWM_EXPECTED_MAX_MEMORY_MIB}" ]]; then
 fi
 [[ "${MINWM_VAE_CPU_OFFLOAD:-false}" == "false" ]]
 
+while IFS=',' read -r row_name row_memory_mib row_compute_cap; do
+  row_name="$(xargs <<< "${row_name}")"
+  row_memory_mib="$(xargs <<< "${row_memory_mib}")"
+  row_compute_cap="$(xargs <<< "${row_compute_cap}")"
+  [[ "${row_name}" == *"${MINWM_GPU_SKU}"* ]]
+  [[ "${row_compute_cap}" == "${MINWM_EXPECTED_COMPUTE_CAP}" ]]
+  (( row_memory_mib >= MINWM_EXPECTED_MIN_MEMORY_MIB ))
+  if [[ -n "${MINWM_EXPECTED_MAX_MEMORY_MIB}" ]]; then
+    (( row_memory_mib <= MINWM_EXPECTED_MAX_MEMORY_MIB ))
+  fi
+done < "${LOCAL_RESULTS}/gpu.csv"
+
 python3 - <<'PY' | tee "${LOCAL_RESULTS}/runtime-before-install.json"
 import json
 import os
 import torch
 
 assert torch.cuda.is_available()
-assert torch.cuda.device_count() == 1, torch.cuda.device_count()
+assert torch.cuda.device_count() == int(
+    os.environ["MINWM_EXPECTED_GPU_COUNT"]
+), torch.cuda.device_count()
 print(json.dumps({
     "cuda": torch.version.cuda,
     "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
     "device_count": torch.cuda.device_count(),
-    "gpu": torch.cuda.get_device_name(0),
+    "gpus": [
+        torch.cuda.get_device_name(index)
+        for index in range(torch.cuda.device_count())
+    ],
     "torch": torch.__version__,
 }, indent=2, sort_keys=True))
 PY
@@ -659,8 +750,8 @@ contract = {
     "execution": {
         "attention_impl": "packed",
         "cuda_graph": False,
-        "gpu_count": 1,
-        "local_streaming_taehv": True,
+        "gpu_count": int(os.environ["MINWM_EXPECTED_GPU_COUNT"]),
+        "local_streaming_taehv": os.environ["MINWM_VAE_TOPOLOGY"] == "local",
         "measured_chunks": 200 if os.environ["MINWM_PROFILE_MODE"] == "baseline" else 8,
         "nsys_capture_chunks": 0 if os.environ["MINWM_PROFILE_MODE"] == "baseline" else 16,
         "nsys_is_headline": False,
@@ -684,6 +775,7 @@ contract = {
         "segment_compile": True,
         "torch_compile": False,
         "vae_cpu_offload": False,
+        "vae_topology": os.environ["MINWM_VAE_TOPOLOGY"],
         "warmup_chunks": 20 if os.environ["MINWM_PROFILE_MODE"] == "baseline" else 8,
     },
     "environment": {
@@ -946,8 +1038,6 @@ server_command=(
   --text-encoder-cpu-offload false
   --dit-cpu-offload false
   --dit-layerwise-offload false
-  --realtime-vae-backend local
-  --vae-config.taehv-checkpoint-path "${TAEHV_CHECKPOINT}"
   --realtime-causal-sink-size 8
   --realtime-causal-kv-cache-num-frames 32
   --realtime-session-idle-timeout-s 900
@@ -957,17 +1047,57 @@ server_command=(
   --port 30000
 )
 
+if [[ "${MINWM_VAE_TOPOLOGY}" == "local" ]]; then
+  server_command+=(
+    --realtime-vae-backend local
+    --vae-config.taehv-checkpoint-path "${TAEHV_CHECKPOINT}"
+  )
+else
+  server_command+=(
+    --realtime-vae-backend taehv_remote
+    --realtime-vae-worker-url ws://127.0.0.1:31000/v1/realtime_vae/decode
+    --realtime-vae-transport shared_memory
+    --realtime-vae-shared-memory-dir /dev/shm/sglang-realtime-vae
+  )
+fi
+
+start_remote_vae() {
+  local log_path="$1"
+  [[ "${MINWM_VAE_TOPOLOGY}" == "remote" ]]
+  mkdir -p /dev/shm/sglang-realtime-vae
+  CUDA_VISIBLE_DEVICES=1 python3 -m \
+    sglang.multimodal_gen.runtime.entrypoints.realtime_vae_server \
+    --decoder-backend taehv \
+    --checkpoint-path "${TAEHV_CHECKPOINT}" \
+    --device cuda \
+    --dtype bfloat16 \
+    --max-sessions 1 \
+    --queue-depth-per-session 1 \
+    --encoded-frames-per-batch 16 \
+    --encode-workers 4 \
+    --max-message-mb 64 \
+    --shared-memory-dir /dev/shm/sglang-realtime-vae \
+    --host 127.0.0.1 \
+    --port 31000 > "${log_path}" 2>&1 &
+  vae_pid=$!
+  wait_for_vae "${log_path}"
+}
+
 if [[ "${MINWM_PROFILE_MODE}" == "baseline" ]]; then
   baseline_dir="${LOCAL_RESULTS}/baseline"
   mkdir -p "${baseline_dir}"
-  "${server_command[@]}" > "${baseline_dir}/server.log" 2>&1 &
+  if [[ "${MINWM_VAE_TOPOLOGY}" == "remote" ]]; then
+    start_remote_vae "${baseline_dir}/vae-server.log"
+  fi
+  CUDA_VISIBLE_DEVICES=0 "${server_command[@]}" \
+    > "${baseline_dir}/server.log" 2>&1 &
   server_pid=$!
   wait_for_server "${baseline_dir}/server.log"
   assert_server_contract "${baseline_dir}/server.log"
   python3 "${PROFILE_CLIENT}" \
     --cases "${CASES}" \
     --case "${CASE}" \
-    --profile-name "${MINWM_GPU_SKU,,}-local-taehv-protocol-smoke" \
+    --profile-name "${MINWM_GPU_SKU,,}-${MINWM_VAE_TOPOLOGY}-taehv-protocol-smoke" \
     --sink-size 8 \
     --kv-cache-num-frames 32 \
     --warmup-chunks "${MINWM_PROTOCOL_SMOKE_WARMUP_CHUNKS}" \
@@ -980,18 +1110,24 @@ if [[ "${MINWM_PROFILE_MODE}" == "baseline" ]]; then
     "${MINWM_PROTOCOL_SMOKE_WARMUP_CHUNKS}" \
     "${MINWM_PROTOCOL_SMOKE_MEASURED_CHUNKS}"
   assert_runtime_alignment "${baseline_dir}/server.log"
-  grep -F 'Preloading TAEHV decoder weights' "${baseline_dir}/server.log" \
-    > "${baseline_dir}/taehv-load-evidence.txt"
+  if [[ "${MINWM_VAE_TOPOLOGY}" == "local" ]]; then
+    grep -F 'Preloading TAEHV decoder weights' "${baseline_dir}/server.log" \
+      > "${baseline_dir}/taehv-load-evidence.txt"
+  else
+    grep -F 'taehv startup warmup completed' "${baseline_dir}/vae-server.log" \
+      > "${baseline_dir}/taehv-load-evidence.txt"
+  fi
   no_offload_fit_marker="${baseline_dir}/NO_OFFLOAD_PROTOCOL_FIT_PASS.json"
   record_no_offload_protocol_fit \
     "${baseline_dir}/protocol-smoke.json" \
     "${baseline_dir}/server.log" \
-    "${no_offload_fit_marker}"
+    "${no_offload_fit_marker}" \
+    "${baseline_dir}/vae-server.log"
   assert_no_offload_protocol_fit "${no_offload_fit_marker}"
   python3 "${PROFILE_CLIENT}" \
     --cases "${CASES}" \
     --case "${CASE}" \
-    --profile-name "${MINWM_GPU_SKU,,}-local-taehv-main-segment" \
+    --profile-name "${MINWM_GPU_SKU,,}-${MINWM_VAE_TOPOLOGY}-taehv-main-segment" \
     --sink-size 8 \
     --kv-cache-num-frames 32 \
     --warmup-chunks 20 \
@@ -1002,6 +1138,7 @@ if [[ "${MINWM_PROFILE_MODE}" == "baseline" ]]; then
   assert_profile_result "${baseline_dir}/throughput.json" 20 200
   record_performance_gate "${baseline_dir}/throughput.json"
   stop_server
+  stop_vae
 else
   readonly NSYS_URL="https://developer.nvidia.com/downloads/assets/tools/secure/nsight-systems/2026_4/NsightSystems-linux-cli-public-2026.4.1.191-3860507.deb"
   readonly NSYS_SHA256="b896cb2b9586ddf617c363a43bababad0a015dff4c77d8f0fbb9c26144056a69"

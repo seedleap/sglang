@@ -235,6 +235,8 @@ assert_no_offload_protocol_fit "$4"
             "MINWM_EXPECTED_MAX_MEMORY_MIB": "90000",
             "MINWM_EXPECTED_MIN_MEMORY_MIB": "80000",
             "MINWM_GPU_SKU": "H100",
+            "MINWM_EXPECTED_GPU_COUNT": "1",
+            "MINWM_VAE_TOPOLOGY": "local",
             "MINWM_PROTOCOL_SMOKE_MEASURED_CHUNKS": "2",
             "MINWM_PROTOCOL_SMOKE_WARMUP_CHUNKS": str(warmup_chunks),
             "MINWM_REQUIRE_FULL_WINDOW_NO_OFFLOAD_SMOKE": "true",
@@ -549,14 +551,16 @@ def test_render_preserves_single_gpu_hardware_and_profile_contract(
     assert 'assert evidence["formal_same_process_eligible"] is True' in runner
     assert 'assert evidence["warmup_latent_frames"] >= 32' in runner
     assert runner.index("record_no_offload_protocol_fit \\") < runner.index(
-        '--profile-name "${MINWM_GPU_SKU,,}-local-taehv-main-segment"'
+        '--profile-name "${MINWM_GPU_SKU,,}-${MINWM_VAE_TOPOLOGY}-taehv-main-segment"'
     )
     fit_assertion = 'assert_no_offload_protocol_fit "${no_offload_fit_marker}"'
     assert runner.count(fit_assertion) == 2
     if mode == "baseline":
         assert runner.index(
             fit_assertion, runner.index('if [[ "${MINWM_PROFILE_MODE}"')
-        ) < runner.index('--profile-name "${MINWM_GPU_SKU,,}-local-taehv-main-segment"')
+        ) < runner.index(
+            '--profile-name "${MINWM_GPU_SKU,,}-${MINWM_VAE_TOPOLOGY}-taehv-main-segment"'
+        )
     else:
         nsys_branch = runner.index("else\n  readonly NSYS_URL=")
         assert runner.index(fit_assertion, nsys_branch) < runner.index(
@@ -654,6 +658,47 @@ def test_storage_spec_supports_explicit_split_rw_s3_claims() -> None:
         {"name": "s3-input", "mountPath": "/s3-input", "readOnly": True},
         {"name": "s3-results", "mountPath": "/s3-results"},
     ]
+
+
+@pytest.mark.parametrize("sku", ("b200", "b300", "h100", "h200"))
+def test_render_remote_taehv_uses_two_same_sku_gpus(sku: str) -> None:
+    configmap, job = render(
+        sku,
+        "baseline",
+        topology="remote",
+        sglang_git_ref=SGLANG_GIT_REF,
+        harness_git_ref=HARNESS_GIT_REF,
+        run_tag=f"20260818-{sku}-remote",
+    )
+    container = job["spec"]["template"]["spec"]["containers"][0]
+    environment = _env(container)
+    runner = configmap["data"]["run_single_gpu_taehv_24fps.sh"]
+
+    assert job["metadata"]["labels"]["seedleap.ai/vae-topology"] == "remote"
+    assert job["metadata"]["annotations"]["seedleap.ai/result-uri"].endswith(
+        f"/{sku}/remote/baseline/{job['metadata']['name']}"
+    )
+    assert container["resources"]["requests"]["nvidia.com/gpu"] == "2"
+    assert container["resources"]["limits"]["nvidia.com/gpu"] == "2"
+    assert environment["MINWM_VAE_TOPOLOGY"] == "remote"
+    assert environment["MINWM_EXPECTED_GPU_COUNT"] == "2"
+    assert environment["MINWM_RESULTS_ROOT"].endswith(f"/{sku}/remote/baseline")
+    assert "CUDA_VISIBLE_DEVICES=1 python3 -m" in runner
+    assert "--realtime-vae-backend taehv_remote" in runner
+    assert "--realtime-vae-transport shared_memory" in runner
+    assert 'CUDA_VISIBLE_DEVICES=0 "${server_command[@]}"' in runner
+
+
+def test_render_rejects_remote_nsys() -> None:
+    with pytest.raises(ValueError, match="baseline mode only"):
+        render(
+            "b300",
+            "nsys",
+            topology="remote",
+            sglang_git_ref=SGLANG_GIT_REF,
+            harness_git_ref=HARNESS_GIT_REF,
+            run_tag="20260818-remote-nsys",
+        )
 
 
 @pytest.mark.parametrize(

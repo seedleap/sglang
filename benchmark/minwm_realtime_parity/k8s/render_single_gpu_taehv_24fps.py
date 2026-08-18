@@ -301,6 +301,7 @@ def render(
     sku: str,
     mode: str,
     *,
+    topology: str = "local",
     sglang_git_ref: str,
     harness_git_ref: str,
     harness_ref_verified: bool = True,
@@ -308,10 +309,15 @@ def render(
     candidate_evidence: bool = False,
     run_tag: str,
 ) -> tuple[dict, dict]:
+    if topology not in {"local", "remote"}:
+        raise ValueError(f"unsupported VAE topology: {topology!r}")
+    if topology == "remote" and mode != "baseline":
+        raise ValueError("remote VAE topology currently supports baseline mode only")
     hardware = HARDWARE[sku]
     storage_volumes, storage_mounts = storage_spec(hardware["storage"])
     candidate_evidence = candidate_evidence or require_24fps
-    run_id = f"minwm-taehv24-{sku}-{mode}-{run_tag}"
+    topology_suffix = "" if topology == "local" else "-remote"
+    run_id = f"minwm-taehv24-{sku}{topology_suffix}-{mode}-{run_tag}"
     configmap_name = f"{run_id}-files"
     template = yaml.safe_load(TEMPLATE.read_text())
     job = copy.deepcopy(template)
@@ -325,6 +331,7 @@ def render(
             "seedleap.ai/task": "minwm-single-gpu-taehv24",
             "seedleap.ai/hardware-profile": hardware["profile"],
             "seedleap.ai/profile-mode": mode,
+            "seedleap.ai/vae-topology": topology,
         },
         "annotations": {
             "seedleap.ai/repo": "seedleap/sglang",
@@ -358,7 +365,11 @@ def render(
             ],
             "seedleap.ai/require-24fps": str(require_24fps).lower(),
             "seedleap.ai/candidate-evidence": str(candidate_evidence).lower(),
-            "seedleap.ai/result-uri": (f"{RESULT_URI_ROOT}/{sku}/{mode}/{run_id}"),
+            "seedleap.ai/result-uri": (
+                f"{RESULT_URI_ROOT}/{sku}/{mode}/{run_id}"
+                if topology == "local"
+                else f"{RESULT_URI_ROOT}/{sku}/remote/{mode}/{run_id}"
+            ),
         },
     }
     job["spec"] = {
@@ -369,7 +380,7 @@ def render(
                 "labels": job["metadata"]["labels"],
                 "annotations": {
                     "seedleap.ai/sglang-git-ref": sglang_git_ref,
-                    "seedleap.ai/gpu-count": "1",
+                    "seedleap.ai/gpu-count": "2" if topology == "remote" else "1",
                 },
             },
             "spec": {
@@ -418,6 +429,8 @@ def render(
         "MINWM_CASES_SHA256": sha256_file(CASES),
         "MINWM_RUN_ID": run_id,
         "MINWM_PROFILE_MODE": mode,
+        "MINWM_VAE_TOPOLOGY": topology,
+        "MINWM_EXPECTED_GPU_COUNT": "2" if topology == "remote" else "1",
         "MINWM_GPU_SKU": hardware["gpu_sku"],
         "MINWM_HARDWARE_PROFILE": hardware["profile"],
         "MINWM_EXPECTED_COMPUTE_CAP": hardware["compute_cap"],
@@ -432,7 +445,11 @@ def render(
         "MINWM_INPUT_PVC": hardware["storage"]["input_pvc"],
         "MINWM_RESULTS_PVC": hardware["storage"]["results_pvc"],
         "MINWM_RESULTS_PVC_ACCESS": hardware["storage"]["verified_results_access"],
-        "MINWM_RESULTS_ROOT": f"{RESULT_MOUNT_ROOT}/{sku}/{mode}",
+        "MINWM_RESULTS_ROOT": (
+            f"{RESULT_MOUNT_ROOT}/{sku}/{mode}"
+            if topology == "local"
+            else f"{RESULT_MOUNT_ROOT}/{sku}/remote/{mode}"
+        ),
     }
     container = {
         "name": "benchmark",
@@ -459,13 +476,13 @@ def render(
                 "cpu": "64",
                 "memory": "320Gi",
                 "ephemeral-storage": "120Gi",
-                "nvidia.com/gpu": "1",
+                "nvidia.com/gpu": "2" if topology == "remote" else "1",
             },
             "limits": {
                 "cpu": "64",
                 "memory": "320Gi",
                 "ephemeral-storage": "300Gi",
-                "nvidia.com/gpu": "1",
+                "nvidia.com/gpu": "2" if topology == "remote" else "1",
             },
         },
         "volumeMounts": [
@@ -504,6 +521,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--sku", action="append", choices=sorted(HARDWARE), required=True
     )
     parser.add_argument(
+        "--topology",
+        action="append",
+        choices=("local", "remote"),
+    )
+    parser.add_argument(
         "--mode", action="append", choices=("baseline", "nsys"), required=True
     )
     parser.add_argument(
@@ -538,6 +560,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--output-dir", type=Path, default=GENERATED)
     args = parser.parse_args(argv)
+    args.topology = args.topology or ["local"]
     if not re.fullmatch(r"[0-9a-f]{40}", args.sglang_git_ref):
         parser.error("--sglang-git-ref must be a full 40-character lowercase commit")
     if not re.fullmatch(r"[0-9a-f]{40}", args.harness_git_ref):
@@ -551,11 +574,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     if not re.fullmatch(r"[a-z0-9][a-z0-9.-]+", args.run_tag):
         parser.error("--run-tag must match [a-z0-9][a-z0-9.-]+")
     for sku in args.sku:
-        for mode in args.mode:
-            if len(f"minwm-taehv24-{sku}-{mode}-{args.run_tag}") > 63:
-                parser.error(
-                    "--run-tag makes the Kubernetes Job name exceed 63 characters"
-                )
+        for topology in args.topology:
+            for mode in args.mode:
+                if topology == "remote" and mode != "baseline":
+                    parser.error(
+                        "remote VAE topology currently supports baseline mode only"
+                    )
+                topology_suffix = "" if topology == "local" else "-remote"
+                if (
+                    len(f"minwm-taehv24-{sku}{topology_suffix}-{mode}-{args.run_tag}")
+                    > 63
+                ):
+                    parser.error(
+                        "--run-tag makes the Kubernetes Job name exceed 63 characters"
+                    )
     if args.require_24fps and "nsys" in args.mode:
         parser.error("--require-24fps is only valid for baseline Jobs")
     return args
@@ -565,30 +597,33 @@ def main() -> None:
     args = parse_args()
     args.output_dir.mkdir(parents=True, exist_ok=True)
     for sku in dict.fromkeys(args.sku):
-        for mode in dict.fromkeys(args.mode):
-            documents = render(
-                sku,
-                mode,
-                sglang_git_ref=args.sglang_git_ref,
-                harness_git_ref=args.harness_git_ref,
-                harness_ref_verified=args.harness_ref_verified,
-                require_24fps=args.require_24fps,
-                candidate_evidence=args.candidate_evidence,
-                run_tag=args.run_tag,
-            )
-            output = args.output_dir / (
-                f"minwm_single_gpu_taehv24_{sku}_{mode}_{args.run_tag}.yaml"
-            )
-            output.write_text(
-                yaml.dump_all(
-                    documents,
-                    Dumper=LiteralDumper,
-                    explicit_start=True,
-                    sort_keys=False,
-                    width=1000,
+        for topology in dict.fromkeys(args.topology):
+            for mode in dict.fromkeys(args.mode):
+                documents = render(
+                    sku,
+                    mode,
+                    topology=topology,
+                    sglang_git_ref=args.sglang_git_ref,
+                    harness_git_ref=args.harness_git_ref,
+                    harness_ref_verified=args.harness_ref_verified,
+                    require_24fps=args.require_24fps,
+                    candidate_evidence=args.candidate_evidence,
+                    run_tag=args.run_tag,
                 )
-            )
-            print(output)
+                output = args.output_dir / (
+                    "minwm_single_gpu_taehv24_"
+                    f"{sku}_{topology}_{mode}_{args.run_tag}.yaml"
+                )
+                output.write_text(
+                    yaml.dump_all(
+                        documents,
+                        Dumper=LiteralDumper,
+                        explicit_start=True,
+                        sort_keys=False,
+                        width=1000,
+                    )
+                )
+                print(output)
 
 
 if __name__ == "__main__":
