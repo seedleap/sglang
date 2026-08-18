@@ -77,6 +77,23 @@ payload = {
         "sp_degree": 1,
         "whole_dit_compile": False,
     },
+    "comparison": {
+        "performance_reference_lane": "packed-fast-bf16",
+        "quality_reference_lane": "packed-det-bf16",
+        "speed_execution_profile": {
+            "performance_mode": "speed",
+            "attention_impl": "packed",
+            "packed_attention_deterministic": False,
+            "native_components": "",
+            "segment_compile": True,
+            "whole_dit_compile": False,
+            "cuda_graph": False,
+            "cache_rotated_k": True,
+            "precompute_cache_rope": True,
+            "cache_packed_metadata": True,
+            "quantization": None,
+        },
+    },
     "packages_before_optional_install": {
         name: importlib.util.find_spec(name) is not None
         for name in ("flash_attn", "flash_attn_interface", "sageattention", "sageattn3")
@@ -323,12 +340,18 @@ PY
   SGLANG_ENABLE_DETERMINISTIC_INFERENCE="${deterministic_env}" \
   MINWM_NATIVE_COMPONENTS= \
   MINWM_SEGMENT_COMPILE=true \
+  MINWM_CACHE_ROTATED_K=true \
+  MINWM_PRECOMPUTE_CACHE_ROPE=true \
+  MINWM_CACHE_PACKED_METADATA=true \
   MINWM_NVTX_BLOCK_PHASES=0 \
     sglang serve \
       --model-path "${MINWM_MODEL_DIR}" \
       --pipeline-class-name MinWMCausalDMDPipeline \
       --attention-backend "${backend}" \
       --performance-mode speed \
+      --num-gpus 1 \
+      --sp-degree 1 \
+      --enable-cfg-parallel false \
       "${quantization_args[@]}" \
       "${transformer_args[@]}" \
       --enable-torch-compile "${compile}" \
@@ -408,6 +431,8 @@ if [[ "${MINWM_RUN_COMPILE_LANES:-0}" == "1" ]]; then
 fi
 
 python3 "${SCRIPT_DIR}/summarize_matrix.py" "${RESULT_ROOT}" \
+  --performance-reference packed-fast-bf16 \
+  --quality-reference packed-det-bf16 \
   | tee "${RESULT_ROOT}/summary.log"
 
 if [[ "${MINWM_RUN_NSYS:-1}" != "1" ]]; then
@@ -493,6 +518,9 @@ PY
   SGLANG_ENABLE_DETERMINISTIC_INFERENCE="${deterministic_env}" \
   MINWM_NATIVE_COMPONENTS= \
   MINWM_SEGMENT_COMPILE=true \
+  MINWM_CACHE_ROTATED_K=true \
+  MINWM_PRECOMPUTE_CACHE_ROPE=true \
+  MINWM_CACHE_PACKED_METADATA=true \
   MINWM_NVTX_BLOCK_PHASES=1 \
     nsys launch \
       --session-new="${session}" \
@@ -505,6 +533,9 @@ PY
         --pipeline-class-name MinWMCausalDMDPipeline \
         --attention-backend "${backend}" \
         --performance-mode speed \
+        --num-gpus 1 \
+        --sp-degree 1 \
+        --enable-cfg-parallel false \
         "${quantization_args[@]}" \
         "${transformer_args[@]}" \
         --enable-torch-compile false \
@@ -591,6 +622,7 @@ PY
 install_nsys
 nsys --version | tee "${RESULT_ROOT}/nsys-version.txt"
 nsys status -e | tee "${RESULT_ROOT}/nsys-status.txt" || true
+run_nsys_profile packed-fast-bf16
 run_nsys_profile dense-fa-bf16
 mapfile -t profile_winners < <(
   python3 - "${RESULT_ROOT}/summary.json" <<'PY'

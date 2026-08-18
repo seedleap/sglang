@@ -107,7 +107,16 @@ def scheduler_fps_from_log(path: Path, throughput: dict) -> tuple[float | None, 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("root", type=Path)
-    parser.add_argument("--reference", default="packed-det-bf16")
+    parser.add_argument(
+        "--performance-reference",
+        default="packed-fast-bf16",
+        help="Lane used as the speedup denominator.",
+    )
+    parser.add_argument(
+        "--quality-reference",
+        default="packed-det-bf16",
+        help="Lane used only for the sampled byte-level corruption screen.",
+    )
     parser.add_argument(
         "--min-sampled-psnr-db",
         type=float,
@@ -149,22 +158,35 @@ def main() -> None:
         lane["backend_evidence"] = backend_evidence(lane_path / "server.log")
         lanes[lane_path.name] = lane
 
-    if args.reference not in lanes or "throughput" not in lanes[args.reference]:
-        raise SystemExit(f"missing successful reference lane {args.reference!r}")
+    if (
+        args.performance_reference not in lanes
+        or "throughput" not in lanes[args.performance_reference]
+    ):
+        raise SystemExit(
+            "missing successful performance reference lane "
+            f"{args.performance_reference!r}"
+        )
+    if (
+        args.quality_reference not in lanes
+        or "throughput" not in lanes[args.quality_reference]
+    ):
+        raise SystemExit(
+            f"missing successful quality reference lane {args.quality_reference!r}"
+        )
     successful = [lane for lane in lanes.values() if "throughput" in lane]
     use_scheduler = all(lane.get("scheduler_fps") is not None for lane in successful)
     ranking_metric = "scheduler_fps" if use_scheduler else "client_fps"
-    reference = lanes[args.reference]["throughput"]
-    reference_fps = lanes[args.reference][ranking_metric]
+    quality_reference = lanes[args.quality_reference]["throughput"]
+    reference_fps = lanes[args.performance_reference][ranking_metric]
     for name, lane in lanes.items():
         if "throughput" not in lane:
             continue
-        lane["sampled_error_vs_reference"] = sampled_error(
-            reference, lane["throughput"]
+        lane["sampled_error_vs_quality_reference"] = sampled_error(
+            quality_reference, lane["throughput"]
         )
         lane["ranking_fps"] = lane[ranking_metric]
         if reference_fps and lane["ranking_fps"]:
-            lane["ranking_speedup_vs_reference_pct"] = 100 * (
+            lane["ranking_speedup_vs_performance_reference_pct"] = 100 * (
                 lane["ranking_fps"] / reference_fps - 1
             )
 
@@ -175,11 +197,13 @@ def main() -> None:
                 "ranking_fps": lane.get("ranking_fps"),
                 "scheduler_fps": lane.get("scheduler_fps"),
                 "client_fps": lane.get("client_fps"),
-                "ranking_speedup_vs_reference_pct": lane.get(
-                    "ranking_speedup_vs_reference_pct"
+                "ranking_speedup_vs_performance_reference_pct": lane.get(
+                    "ranking_speedup_vs_performance_reference_pct"
                 ),
                 "peak_gpu_memory_mib": lane.get("peak_gpu_memory_mib"),
-                "sampled_error_vs_reference": lane.get("sampled_error_vs_reference"),
+                "sampled_error_vs_quality_reference": lane.get(
+                    "sampled_error_vs_quality_reference"
+                ),
             }
             for name, lane in lanes.items()
             if lane.get("ranking_fps") is not None
@@ -188,7 +212,7 @@ def main() -> None:
         reverse=True,
     )
     for item in ranked:
-        error = item["sampled_error_vs_reference"]
+        error = item["sampled_error_vs_quality_reference"]
         item["passes_sampled_quality_screen"] = bool(
             error
             and (
@@ -211,8 +235,9 @@ def main() -> None:
         item for item in eager_ranked if item["passes_sampled_quality_screen"]
     ]
     result = {
-        "schema_version": "minwm-720p-attn-ffn-matrix/v1",
-        "reference_lane": args.reference,
+        "schema_version": "minwm-720p-attn-ffn-matrix/v2",
+        "performance_reference_lane": args.performance_reference,
+        "quality_reference_lane": args.quality_reference,
         "ranking_metric": ranking_metric,
         "contract": (
             json.loads((args.root / "contract.json").read_text())
@@ -222,7 +247,9 @@ def main() -> None:
         "ranking": ranked,
         "raw_speed_ranking": ranked,
         "quality_screen": {
-            "metric": "sampled output-frame byte PSNR versus packed deterministic BF16",
+            "metric": (
+                f"sampled output-frame byte PSNR versus {args.quality_reference}"
+            ),
             "minimum_psnr_db": args.min_sampled_psnr_db,
             "warning": "This is a corruption screen, not a perceptual or production quality guarantee.",
         },
@@ -239,7 +266,9 @@ def main() -> None:
     lines = [
         "# MinWM 720p attention / FFN Spot matrix",
         "",
-        f"Reference: `{args.reference}`",
+        f"Performance reference: `{args.performance_reference}`",
+        "",
+        f"Quality byte reference: `{args.quality_reference}`",
         "",
         "Raw-speed ranking (the quality column is only a sampled corruption screen):",
         "",
@@ -249,7 +278,7 @@ def main() -> None:
         "|---:|---|---:|---:|---:|---:|---:|:---:|",
     ]
     for index, item in enumerate(ranked, start=1):
-        error = item["sampled_error_vs_reference"] or {}
+        error = item["sampled_error_vs_quality_reference"] or {}
         psnr = error.get("psnr_db")
         lines.append(
             "| {rank} | `{lane}` | {scheduler} | {client} | {speedup:+.2f}% | {memory} | {psnr} | {screen} |".format(
@@ -265,7 +294,7 @@ def main() -> None:
                     if item["client_fps"] is not None
                     else "n/a"
                 ),
-                speedup=item["ranking_speedup_vs_reference_pct"] or 0.0,
+                speedup=item["ranking_speedup_vs_performance_reference_pct"] or 0.0,
                 memory=(
                     f"{item['peak_gpu_memory_mib']:.0f}"
                     if item["peak_gpu_memory_mib"] is not None
@@ -274,7 +303,9 @@ def main() -> None:
                 psnr=(
                     "lossless"
                     if error.get("lossless")
-                    else f"{psnr:.2f}" if psnr is not None else "n/a"
+                    else f"{psnr:.2f}"
+                    if psnr is not None
+                    else "n/a"
                 ),
                 screen="yes" if item["passes_sampled_quality_screen"] else "no",
             )
