@@ -672,6 +672,11 @@ def test_render_fa3_quality_is_same_gpu_deterministic_hopper_ab(sku: str) -> Non
         assert len(environment[name]) == 64
     runner = configmap["data"]["run_single_gpu_taehv_24fps.sh"]
     assert 'git -C "${fa2_repo}" apply --check' in runner
+    assert (
+        'git -C "${REPO_ROOT}" diff --quiet -- \\\n'
+        "    python/sglang/multimodal_gen/runtime/models/dits/minwm.py" in runner
+    )
+    assert 'git -C "${REPO_ROOT}" diff --quiet\n' not in runner
     assert "MINWM_PACKED_ATTENTION_DETERMINISTIC=true" in runner
     assert "MINWM_PARITY_DETERMINISTIC=1" in runner
     assert "SGLANG_ENABLE_DETERMINISTIC_INFERENCE=1" in runner

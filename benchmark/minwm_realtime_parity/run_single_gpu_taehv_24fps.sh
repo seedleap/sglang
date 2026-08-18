@@ -1069,7 +1069,8 @@ elif [[ "${MINWM_PROFILE_MODE}" == "fa3-quality" ]]; then
     python/sglang/multimodal_gen/runtime/models/dits/minwm.py \
     > "${quality_dir}/fa2-reference-applied.diff"
   cp "${FA2_REFERENCE_PATCH}" "${quality_dir}/fa2-reference-source.patch"
-  git -C "${REPO_ROOT}" diff --quiet
+  git -C "${REPO_ROOT}" diff --quiet -- \
+    python/sglang/multimodal_gen/runtime/models/dits/minwm.py
   python3 -m pip install --no-cache-dir --no-deps \
     lpips==0.1.4 scikit-image==0.24.0 \
     --root-user-action=ignore
