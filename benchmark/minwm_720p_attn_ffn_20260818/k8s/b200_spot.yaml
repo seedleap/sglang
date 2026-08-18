@@ -1,15 +1,15 @@
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: minwm-720p-attn-ffn-b200-20260818-01-results
-  namespace: default
+  name: minwm-720p-attn-ffn-b200-use2-20260818-01-results
+  namespace: ray
   labels:
     seedleap.ai/owner: chenshengdong
     seedleap.ai/purpose: minwm-720p-attn-ffn
 spec:
   accessModes:
     - ReadWriteOnce
-  storageClassName: minwm-dmd-0724-p6-gp3
+  storageClassName: gp2
   resources:
     requests:
       storage: 100Gi
@@ -17,13 +17,13 @@ spec:
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: minwm-720p-attn-ffn-b200-20260818-01
-  namespace: default
+  name: minwm-720p-attn-ffn-b200-use2-20260818-01
+  namespace: ray
   labels:
-    app.kubernetes.io/name: minwm-720p-attn-ffn-b200-20260818-01
+    app.kubernetes.io/name: minwm-720p-attn-ffn-b200-use2-20260818-01
     seedleap.ai/owner: chenshengdong
     seedleap.ai/task: minwm-720p-attn-ffn
-    seedleap.ai/run-id: minwm-720p-attn-ffn-b200-20260818-01
+    seedleap.ai/run-id: minwm-720p-attn-ffn-b200-use2-20260818-01
   annotations:
     seedleap.ai/capacity-type: spot
     seedleap.ai/repo: seedleap/sglang
@@ -38,10 +38,10 @@ spec:
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: minwm-720p-attn-ffn-b200-20260818-01
+        app.kubernetes.io/name: minwm-720p-attn-ffn-b200-use2-20260818-01
         seedleap.ai/owner: chenshengdong
         seedleap.ai/task: minwm-720p-attn-ffn
-        seedleap.ai/run-id: minwm-720p-attn-ffn-b200-20260818-01
+        seedleap.ai/run-id: minwm-720p-attn-ffn-b200-use2-20260818-01
       annotations:
         seedleap.ai/repo: seedleap/sglang
         seedleap.ai/branch: codex/minwm-720p-attn-ffn-spot
@@ -51,15 +51,14 @@ spec:
       restartPolicy: Never
       terminationGracePeriodSeconds: 300
       tolerations:
-        - key: seedleap.ai/capacity-pool
+        - key: seedleap.ai/workload
           operator: Equal
-          value: minwm-sp12-usw2d-karpenter
+          value: wan22-ti2v
           effect: NoSchedule
       nodeSelector:
         karpenter.sh/capacity-type: spot
-        karpenter.sh/nodepool: minwm-sp12-usw2d-p6-spot
+        karpenter.sh/nodepool: minwm-test-b200-spot
         node.kubernetes.io/instance-type: p6-b200.48xlarge
-        topology.kubernetes.io/zone: us-west-2d
       containers:
         - name: benchmark
           image: 829115578968.dkr.ecr.us-east-2.amazonaws.com/leap-world/minwm-training@sha256:bedc07ea3ba55059a8c1c569c3b177c4d00d41f37d4fa9105375531534ef5f2a
@@ -83,7 +82,7 @@ spec:
             - name: MINWM_BENCHMARK_MODE
               value: attnffn720p
             - name: MINWM_RUN_ID
-              value: minwm-720p-attn-ffn-b200-20260818-01
+              value: minwm-720p-attn-ffn-b200-use2-20260818-01
             - name: MINWM_GPU_FAMILY
               value: blackwell
             - name: MINWM_IMAGE_DIGEST
@@ -174,7 +173,7 @@ spec:
           emptyDir: {}
         - name: results
           persistentVolumeClaim:
-            claimName: minwm-720p-attn-ffn-b200-20260818-01-results
+            claimName: minwm-720p-attn-ffn-b200-use2-20260818-01-results
         - name: shm
           emptyDir:
             medium: Memory
