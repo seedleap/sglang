@@ -8,6 +8,7 @@ import argparse
 import asyncio
 import json
 import logging
+import hashlib
 import os
 import secrets
 import time
@@ -42,6 +43,13 @@ from sglang.multimodal_gen.runtime.realtime.critical_path_metrics import (
     prometheus_content_type,
     prometheus_latest,
     result_from_exception,
+)
+from sglang.multimodal_gen.runtime.realtime.world_platform import (
+    Principal,
+    TokenError,
+    WorldCallbacks,
+    WorldPlatformConfig,
+    verify_session_token,
 )
 from sglang.multimodal_gen.runtime.realtime.gateway import (
     AdmissionQueueFull,
@@ -307,6 +315,10 @@ async def _receive_browser(websocket: WebSocket) -> bytes | str:
     raise WebSocketDisconnect(1002)
 
 
+class _WorldInitMismatch(Exception):
+    """鉴权会话的 init 字节与凭证哈希不一致（1008 关闭）。"""
+
+
 async def _cancel_tasks(tasks: set[asyncio.Task]) -> None:
     for task in tasks:
         if not task.done():
@@ -336,9 +348,15 @@ def create_app(
     connect_factory=connect,
     ui_config: dict[str, Any] | None = None,
     trace_query=None,
+    world_platform: WorldPlatformConfig | None = None,
+    browser_send_timeout_s: float = 15.0,
 ) -> FastAPI:
     if release_grace_s < 0:
         raise ValueError("release_grace_s must be non-negative")
+    if browser_send_timeout_s <= 0:
+        raise ValueError("browser_send_timeout_s must be positive")
+    # world 平台回调客户端（未配置则整条 authorized 链路不启用）
+    world_callbacks = WorldCallbacks(world_platform) if world_platform else None
     if output_drain_timeout_s <= 0:
         raise ValueError("output_drain_timeout_s must be positive")
     if readiness_coordinator_timeout_s <= 0:
@@ -519,7 +537,10 @@ def create_app(
         *,
         selected_model_revision: str,
         selected_vae_fingerprint: str,
+        principal: Principal | None = None,
     ) -> None:
+        # principal 非空 = world 平台的鉴权会话（D1~D4 只作用于这条分支）；
+        # 为空 = 旧 showcase 路由，行为与改造前逐字节一致。
         await websocket.accept()
         sender = _BrowserSender(websocket)
         session_id = uuid4().hex
@@ -535,13 +556,20 @@ def create_app(
         tasks: set[asyncio.Task] = set()
         expected_last_chunk: int | None = None
         playback_ack_window = BrowserPlaybackAckWindow()
+        # world 会话的分支状态（init 校验 / deadline / 拒绝原因）
+        world_session: dict[str, Any] = {"init_verified": False}
         try:
             admitted_at = time.perf_counter()
             _log_gateway_trace(trace_id, "gateway.ws_accepted", session_id=session_id)
             try:
                 async with admission_gate.waiter():
                     assignment = await coordinator.admit(
-                        user_id=_user_id(websocket),
+                        # D1：鉴权会话用凭证里的内部用户 ID（wsvc: 前缀与 showcase 隔离）
+                        user_id=(
+                            f"wsvc:{principal.user_id}"
+                            if principal is not None
+                            else _user_id(websocket)
+                        ),
                         session_id=session_id,
                         generation_id=generation_id,
                         model_revision=selected_model_revision,
@@ -621,6 +649,28 @@ def create_app(
                                 control = decode_message(payload)
                             except ProtocolViolation:
                                 pass
+                        if principal is not None and isinstance(payload, bytes):
+                            if not world_session["init_verified"]:
+                                # D3（改进版）：首条消息必须与凭证哈希逐字节一致。
+                                # 一次校验锁死 prompt/时长/时间轴/一切字段。
+                                digest = hashlib.sha256(payload).hexdigest()
+                                if digest != principal.init_sha256:
+                                    raise _WorldInitMismatch()
+                                world_session["init_verified"] = True
+                            elif (
+                                not principal.allow_free_prompt
+                                and isinstance(control, dict)
+                                and control.get("type") == "event"
+                                and control.get("kind") in {"prompt", "scene_cut"}
+                            ):
+                                # allowFreePrompt=false：静默丢弃自由提示词事件。
+                                # 不丢会话 —— 恶意注入只应失效，不应帮攻击者结束会话
+                                _log_gateway_trace(
+                                    trace_id,
+                                    "gateway.free_prompt_dropped",
+                                    session_id=session_id,
+                                )
+                                continue
                         if isinstance(control, dict) and control.get("type") in {
                             "client_metric",
                             "client_metric_batch",
@@ -715,7 +765,12 @@ def create_app(
                     )
                     return
                 try:
-                    await sender.send(wire)
+                    # D5（幽灵回收）：死端的 TCP 写缓冲永不排空，这个 await 会永久
+                    # 停住（keepalive 的 close 在缓冲非空时是空操作）。加界让超时
+                    # 变成一次普通任务完成，走既有 finally 拆解 —— 不新增代码路径。
+                    await asyncio.wait_for(
+                        sender.send(wire), timeout=browser_send_timeout_s
+                    )
                 except Exception as exc:
                     browser_send_ms = round(
                         (time.perf_counter() - send_started) * 1000, 3
@@ -788,6 +843,25 @@ def create_app(
                 output_task,
                 lease_task,
             }
+            if principal is not None:
+                # D2：服务端权威会话时长。到点任务完成 → FIRST_COMPLETED 唤醒
+                # → 走既有 finally 拆解（取消续租、释放席位）。close reason 与
+                # 前端 SessionLifetimeGuard 的既有契约逐字一致。
+                async def _session_deadline() -> None:
+                    await asyncio.sleep(principal.max_lifetime_s)
+                    world_session["deadline_hit"] = True
+                    logger.info(
+                        "world session deadline reached run_id=%s", principal.run_id
+                    )
+
+                tasks.add(
+                    asyncio.create_task(_session_deadline(), name="gateway-deadline")
+                )
+                # D4：admit 成功 + 上游就绪，通知业务后端会话已建立
+                if world_callbacks is not None:
+                    world_callbacks.started(
+                        principal.run_id, trace_id, principal.max_lifetime_s
+                    )
             done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
             for task in done:
                 exception = task.exception()
@@ -811,7 +885,12 @@ def create_app(
                         "Gateway media drain timed out for session_id=%s",
                         session_id,
                     )
+        except _WorldInitMismatch:
+            world_session["init_rejected"] = True
+            await sender.error("init payload mismatch")
+            await websocket.close(code=1008, reason="init payload mismatch")
         except CoordinatorRejected as exc:
+            world_session["admit_rejected"] = exc.reason
             await sender.error(
                 f"realtime admission rejected: {exc.reason}",
                 reason=exc.reason,
@@ -851,8 +930,33 @@ def create_app(
             _log_gateway_trace(
                 trace_id, "gateway.session_closed", session_id=session_id
             )
+            # D4：会话终局回调（fire-and-forget；丢失由业务后端 deadline 兜底）
+            if principal is not None and world_callbacks is not None:
+                if world_session.get("admit_rejected"):
+                    world_callbacks.aborted(
+                        principal.run_id, trace_id,
+                        fault="ours", reason=str(world_session["admit_rejected"]),
+                    )
+                elif world_session.get("init_rejected"):
+                    world_callbacks.aborted(
+                        principal.run_id, trace_id,
+                        fault="client", reason="init payload mismatch",
+                    )
+                elif assignment is None:
+                    world_callbacks.aborted(
+                        principal.run_id, trace_id, fault="ours", reason="not admitted"
+                    )
+                elif world_session.get("deadline_hit"):
+                    world_callbacks.ended(principal.run_id, trace_id, "completed")
+                else:
+                    world_callbacks.ended(principal.run_id, trace_id, "user_left")
+            close_reason = (
+                "maximum session lifetime reached"
+                if world_session.get("deadline_hit")
+                else ""
+            )
             try:
-                await websocket.close(code=1000)
+                await websocket.close(code=1000, reason=close_reason)
             except Exception:
                 pass
 
@@ -872,6 +976,28 @@ def create_app(
             selected_model_revision=model_revision,
             selected_vae_fingerprint=vae_fingerprint,
         )
+
+    if world_platform is not None:
+
+        @app.websocket("/backends/minwm/v1/realtime_video/authorized_generate")
+        async def authorized_generate(websocket: WebSocket):
+            """world 平台的鉴权路由：凭证验签 → 复用共享会话逻辑。
+
+            老路由（无鉴权）保持原样服务 showcase；本路由是新平台的唯一入口。
+            """
+            token = websocket.query_params.get("token") or ""
+            try:
+                principal = verify_session_token(token, world_platform.public_key)
+            except TokenError as exc:
+                await websocket.accept()
+                await websocket.close(code=1008, reason=f"invalid token: {exc}")
+                return
+            await _generate_coordinator_session(
+                websocket,
+                selected_model_revision=model_revision,
+                selected_vae_fingerprint=vae_fingerprint,
+                principal=principal,
+            )
 
     @app.get("/")
     async def index():
@@ -916,11 +1042,35 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--readiness-coordinator-timeout-s", type=float, default=1.0)
     parser.add_argument("--readiness-coordinator-grace-s", type=float, default=30.0)
     parser.add_argument("--trace-log-group")
+    # ---- world 平台接入（全部提供才启用 authorized_generate 路由） ----
+    parser.add_argument("--world-token-ed25519-pub", default=os.environ.get("WORLD_TOKEN_ED25519_PUB", ""))
+    parser.add_argument("--world-callback-url", default=os.environ.get("WORLD_CALLBACK_URL", ""))
+    parser.add_argument("--world-callback-hmac-secret", default=os.environ.get("WORLD_CALLBACK_HMAC_SECRET", ""))
+    parser.add_argument("--browser-send-timeout-s", type=float, default=15.0)
     parser.add_argument(
         "--ui-config-json",
         default=os.environ.get("REALTIME_UI_CONFIG_JSON", "{}"),
     )
     return parser.parse_args()
+
+
+def _build_world_platform(args) -> WorldPlatformConfig | None:
+    """三项配置齐全才启用 world 平台路由；配置错误在启动期立即暴露。"""
+    if not (
+        args.world_token_ed25519_pub
+        and args.world_callback_url
+        and args.world_callback_hmac_secret
+    ):
+        return None
+    from sglang.multimodal_gen.runtime.realtime.world_platform import load_public_key
+
+    return WorldPlatformConfig(
+        public_key=load_public_key(args.world_token_ed25519_pub),
+        callback_url=args.world_callback_url,
+        callback_app_id="zing-gateway",
+        callback_key_id="k1",
+        callback_secret=args.world_callback_hmac_secret,
+    )
 
 
 def main() -> None:
@@ -963,8 +1113,19 @@ def main() -> None:
         readiness_coordinator_grace_s=args.readiness_coordinator_grace_s,
         ui_config=ui_config,
         trace_query=trace_query,
+        world_platform=_build_world_platform(args),
+        browser_send_timeout_s=args.browser_send_timeout_s,
     )
-    uvicorn.run(app, host=args.host, port=args.port, log_level="info")
+    uvicorn.run(
+        app,
+        host=args.host,
+        port=args.port,
+        log_level="info",
+        # 显式钉死 keepalive：默认值一直是 20/20，但 pyproject 未锁 uvicorn 版本，
+        # 依赖漂移不该改变传输层契约（幽灵回收依赖它）
+        ws_ping_interval=20.0,
+        ws_ping_timeout=20.0,
+    )
 
 
 if __name__ == "__main__":
