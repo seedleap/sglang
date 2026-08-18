@@ -113,6 +113,36 @@ assert.match(app, /\$\(`\$\{key\}PerfPlaybackBuffer`\)\.textContent/);
 assert.match(app, /activeH264Models\.has\("minwm"\)/, "H.264 stats should not be overwritten by WebP playback stats");
 assert.match(
   app,
+  /renderProtocolPerformance\("minwm", \{[\s\S]*?bytes,[\s\S]*?transport: "webp"/,
+  "Zing WebP telemetry should receive measured bytes and an explicit transport",
+);
+assert.match(
+  app,
+  /receiveMbps: Math\.max\([\s\S]*?bytes - primaryNetworkSample\.bytes/,
+  "Zing should calculate rolling WebP receive bandwidth",
+);
+assert.match(
+  app,
+  /server_sent_epoch_ms[\s\S]*?lastDownlinkMs: Math\.max/,
+  "Zing should derive WebSocket downlink latency from frame timestamps",
+);
+assert.match(
+  app,
+  /primaryControlSentEpochByEvent[\s\S]*?lastControlToVideoMs: Math\.max/,
+  "Zing should measure the first rendered frame after each control event",
+);
+assert.match(
+  app,
+  /const isH264 = stats\.transport === "h264"[\s\S]*?: "不适用"/,
+  "WebP sessions should mark H.264/MSE-only metrics as not applicable",
+);
+assert.match(
+  app,
+  /function protocolMetricText\(value\) \{[\s\S]*?value === null \? "-" : performanceMs\(value\)/,
+  "measured zero latency must render as 0 ms rather than missing data",
+);
+assert.match(
+  app,
   /"h264StartupDropFrames",[\s\S]*?key === "lingbot2" \? 8 : 0/,
   "LingBot2 should hide eight startup transition frames without changing Zing",
 );
@@ -177,7 +207,7 @@ assert.match(html, /h264_websocket_session\.js\?v=h264-stage-timing-v1/);
 assert.match(html, /prompt_rewrite_controller\.js\?v=prompt-rewrite-v3/);
 assert.match(html, /world_rules_controller\.js\?v=world-rules-v3/);
 assert.match(html, /styles\.css\?v=world-studio-h264-rules-v5/);
-assert.match(html, /app\.js\?v=world-studio-control-telemetry-v1/);
+assert.match(html, /app\.js\?v=world-studio-transport-telemetry-v2/);
 assert.match(html, /id="minwmH264Viewport"/);
 assert.match(html, /id="lingbot2H264Viewport"/);
 assert.match(html, /id="minwmPerfScheduler"/);
