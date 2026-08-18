@@ -490,7 +490,7 @@ def create_app(
 
 
 def _add_worker_cli_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--decoder-backend", choices=("exact", "taehv"), required=True)
+    parser.add_argument("--decoder-backend", choices=("exact", "taehv"))
     parser.add_argument("--checkpoint-path")
     parser.add_argument("--vae-path")
     parser.add_argument("--host", default="0.0.0.0")
@@ -510,6 +510,16 @@ def _parse_worker_args(argv: list[str] | None):
     pre_parser = argparse.ArgumentParser(add_help=False)
     _add_worker_cli_args(pre_parser)
     known, remaining = pre_parser.parse_known_args(argv)
+    if known.decoder_backend is None:
+        if known.checkpoint_path and not known.vae_path:
+            known.decoder_backend = "taehv"
+        elif known.vae_path and not known.checkpoint_path:
+            known.decoder_backend = "exact"
+        else:
+            pre_parser.error(
+                "--decoder-backend is required unless exactly one of "
+                "--checkpoint-path or --vae-path is provided"
+            )
     if known.decoder_backend == "taehv":
         if remaining:
             pre_parser.error("unrecognized arguments: " + " ".join(remaining))
