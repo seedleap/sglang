@@ -175,6 +175,12 @@ stop_old_containers() {
   for gpu in 1 2 3 4 5; do
     names+=("zing-denoiser-${gpu}" "zing-denoiser-${gpu}-heartbeat")
   done
+  # Remove only legacy Zing workers from the GPUs reserved for the other team.
+  # No new worker is started on GPU 6 or 7 below.
+  names+=(
+    zing-denoiser-6 zing-denoiser-6-heartbeat
+    zing-denoiser-7 zing-denoiser-7-heartbeat
+  )
   docker rm -f "${names[@]}" >/dev/null 2>&1 || true
   docker network inspect "${DOCKER_NETWORK}" >/dev/null 2>&1 || \
     docker network create "${DOCKER_NETWORK}" >/dev/null
