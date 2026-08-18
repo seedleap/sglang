@@ -2,9 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import numpy as np
-
 import analyze_fa3_quality as quality
+import numpy as np
 
 
 def _write_case(
