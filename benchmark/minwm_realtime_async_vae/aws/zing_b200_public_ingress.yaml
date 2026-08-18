@@ -1,0 +1,144 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Isolated public TLS ingress for the Zing B200 SP=1 World Studio. The NLB
+  forwards only to the existing Istio ingress NodePort and does not widen the
+  shared open-world ingress security group.
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+  PublicSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+  SystemNodeSecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+  SystemNodeInstanceIdA:
+    Type: AWS::EC2::Instance::Id
+  SystemNodeInstanceIdB:
+    Type: AWS::EC2::Instance::Id
+  SystemNodeInstanceIdC:
+    Type: AWS::EC2::Instance::Id
+  CertificateArn:
+    Type: String
+  HostedZoneId:
+    Type: String
+  HostName:
+    Type: String
+    Default: zing-b200-world-studio.loopit.me
+  IstioHttpNodePort:
+    Type: Number
+    Default: 31080
+
+Resources:
+  PublicIngressSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Public TLS ingress for isolated Zing B200 World Studio
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+          Description: Public HTTPS for the isolated test hostname
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: !Ref IstioHttpNodePort
+          ToPort: !Ref IstioHttpNodePort
+          DestinationSecurityGroupId: !Ref SystemNodeSecurityGroupId
+          Description: Forward only to the Istio ingress NodePort
+      Tags:
+        - Key: Name
+          Value: world-model-zing-b200-public-ingress
+        - Key: loopit.me/business-line
+          Value: world-model
+        - Key: world-model.loopit.me/application-group
+          Value: world-studio-b200-sp1
+
+  AllowIngressToSystemNodes:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref SystemNodeSecurityGroupId
+      IpProtocol: tcp
+      FromPort: !Ref IstioHttpNodePort
+      ToPort: !Ref IstioHttpNodePort
+      SourceSecurityGroupId: !Ref PublicIngressSecurityGroup
+      Description: Isolated Zing B200 NLB to Istio ingress NodePort
+
+  IstioIngressTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: zing-b200-istio-http
+      VpcId: !Ref VpcId
+      Protocol: TCP
+      Port: !Ref IstioHttpNodePort
+      TargetType: instance
+      HealthCheckEnabled: true
+      HealthCheckProtocol: TCP
+      HealthCheckPort: traffic-port
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 2
+      Targets:
+        - Id: !Ref SystemNodeInstanceIdA
+          Port: !Ref IstioHttpNodePort
+        - Id: !Ref SystemNodeInstanceIdB
+          Port: !Ref IstioHttpNodePort
+        - Id: !Ref SystemNodeInstanceIdC
+          Port: !Ref IstioHttpNodePort
+      Tags:
+        - Key: loopit.me/business-line
+          Value: world-model
+        - Key: world-model.loopit.me/application-group
+          Value: world-studio-b200-sp1
+
+  PublicIngressLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: world-model-zing-b200
+      Type: network
+      Scheme: internet-facing
+      IpAddressType: ipv4
+      Subnets: !Ref PublicSubnetIds
+      SecurityGroups:
+        - !Ref PublicIngressSecurityGroup
+      LoadBalancerAttributes:
+        - Key: load_balancing.cross_zone.enabled
+          Value: "true"
+        - Key: deletion_protection.enabled
+          Value: "false"
+      Tags:
+        - Key: loopit.me/business-line
+          Value: world-model
+        - Key: world-model.loopit.me/application-group
+          Value: world-studio-b200-sp1
+
+  HttpsListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref PublicIngressLoadBalancer
+      Port: 443
+      Protocol: TLS
+      SslPolicy: ELBSecurityPolicy-TLS13-1-2-2021-06
+      Certificates:
+        - CertificateArn: !Ref CertificateArn
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref IstioIngressTargetGroup
+
+  PublicDnsRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Ref HostName
+      Type: A
+      AliasTarget:
+        DNSName: !GetAtt PublicIngressLoadBalancer.DNSName
+        HostedZoneId: !GetAtt PublicIngressLoadBalancer.CanonicalHostedZoneID
+        EvaluateTargetHealth: true
+
+Outputs:
+  Url:
+    Value: !Sub "https://${HostName}/"
+  LoadBalancerDnsName:
+    Value: !GetAtt PublicIngressLoadBalancer.DNSName
+  LoadBalancerArn:
+    Value: !Ref PublicIngressLoadBalancer
