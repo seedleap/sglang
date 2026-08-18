@@ -23,7 +23,12 @@ if (( ${#instance_store[@]} == 0 )); then
   exit 1
 fi
 
-dnf install -y mdadm xfsprogs rsync
+for required_command in mdadm mkfs.xfs; do
+  command -v "${required_command}" >/dev/null || {
+    echo "required NVMe bootstrap command is missing: ${required_command}" >&2
+    exit 1
+  }
+done
 systemctl stop kubelet containerd 2>/dev/null || true
 
 raid=/dev/md/0
@@ -50,7 +55,7 @@ for runtime_dir in containerd kubelet; do
   target_dir="${mount_root}/${runtime_dir}"
   mkdir -p "${source_dir}" "${target_dir}"
   if [[ -n "$(find "${source_dir}" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
-    rsync -aHAX "${source_dir}/" "${target_dir}/"
+    cp -a "${source_dir}/." "${target_dir}/"
   fi
   mountpoint -q "${source_dir}" || mount --bind "${target_dir}" "${source_dir}"
   grep -qF "${target_dir} ${source_dir} none bind 0 0" /etc/fstab || \
