@@ -2502,7 +2502,7 @@ def test_minwm_causal_attention_packs_one_ulysses_collective(monkeypatch, seq_sp
     ("capability", "available", "expected"),
     [
         (10, {"flash_attn.cute", "flash_attn"}, "fa4"),
-        (9, {"flash_attn_interface", "flash_attn"}, "fa3"),
+        (9, {"sglang.jit_kernel.flash_attention_v3", "flash_attn"}, "fa3"),
         (9, {"flash_attn"}, "fa2"),
     ],
 )
@@ -2522,6 +2522,43 @@ def test_minwm_attention_backend_matches_source_device_fallback(
         lambda name: object() if name in available else None,
     )
     assert _minwm_packed_attention_backend(torch.device("cuda")) == expected
+
+
+def test_minwm_hopper_attention_uses_sglang_fa3_api(monkeypatch):
+    import sglang.jit_kernel.flash_attention_v3 as fa3_module
+    import sglang.multimodal_gen.runtime.models.dits.minwm as minwm_module
+
+    class FakeCudaTensor:
+        def __init__(self, shape):
+            self.shape = shape
+            self.device = torch.device("cuda")
+
+        def reshape(self, *shape):
+            return FakeCudaTensor(shape)
+
+    calls = []
+
+    def fake_fa3(**kwargs):
+        calls.append(kwargs)
+        return kwargs["q"]
+
+    monkeypatch.setattr(
+        minwm_module, "_minwm_packed_attention_backend", lambda _: "fa3"
+    )
+    monkeypatch.setattr(minwm_module, "_minwm_uniform_cu_seqlens", lambda *_: object())
+    monkeypatch.setattr(fa3_module, "flash_attn_varlen_func", fake_fa3)
+
+    output = minwm_module._minwm_packed_varlen_attention(
+        FakeCudaTensor((1, 3, 2, 4)),
+        FakeCudaTensor((1, 5, 2, 4)),
+        FakeCudaTensor((1, 5, 2, 4)),
+    )
+
+    assert output.shape == (1, 3, 2, 4)
+    assert len(calls) == 1
+    assert calls[0]["window_size"] == (-1, -1)
+    assert calls[0]["return_softmax_lse"] is False
+    assert "deterministic" not in calls[0]
 
 
 def test_minwm_allows_benchmark_component_ablation(monkeypatch):
