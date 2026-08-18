@@ -1,0 +1,51 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Dedicated on-demand L4 EKS managed node group for the isolated Zing B200
+  World Studio VAE. Zing remains on the separate B200 Spot node group.
+
+Parameters:
+  ClusterName:
+    Type: String
+    Default: world-model
+  NodeRoleArn:
+    Type: String
+  SubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+
+Resources:
+  VaeNodeGroup:
+    Type: AWS::EKS::Nodegroup
+    Properties:
+      ClusterName: !Ref ClusterName
+      NodegroupName: world-model-zing-b200-l4
+      NodeRole: !Ref NodeRoleArn
+      Subnets: !Ref SubnetIds
+      AmiType: AL2023_x86_64_NVIDIA
+      CapacityType: ON_DEMAND
+      DiskSize: 200
+      InstanceTypes:
+        - g6.2xlarge
+      ScalingConfig:
+        MinSize: 1
+        DesiredSize: 1
+        MaxSize: 1
+      UpdateConfig:
+        MaxUnavailable: 1
+      Labels:
+        loopit.me/business-line: world-model
+        loopit.me/gpu-pool: zing-b200-l4
+        loopit.me/workload-class: gpu
+        nvidia.com/gpu.present: "true"
+        world-model.loopit.me/capacity: zing-b200-vae
+      Taints:
+        - Key: nvidia.com/gpu
+          Value: "true"
+          Effect: NO_SCHEDULE
+      Tags:
+        loopit.me/business-line: world-model
+        world-model.loopit.me/application-group: world-studio-b200-sp1
+        world-model.loopit.me/service: zing-b200-sp1-vae
+
+Outputs:
+  NodeGroupName:
+    Value: !Ref VaeNodeGroup
