@@ -11,6 +11,14 @@ const H264_MSE_MIME_TYPE = 'video/mp4; codecs="avc1.4D401F"';
 const H264_WEBSOCKET_REQUESTED = UI_CONFIG.h264WebSocketEnabled === true;
 const H264_WEBSOCKET_ENABLED = H264_WEBSOCKET_REQUESTED
   && Boolean(globalThis.MediaSource?.isTypeSupported?.(H264_MSE_MIME_TYPE));
+const H264_CONNECT_MAX_ATTEMPTS = Math.max(
+  1,
+  Math.min(10, Math.trunc(Number(UI_CONFIG.h264WebSocketConnectAttempts) || 3)),
+);
+const H264_CONNECT_RETRY_BASE_MS = Math.max(
+  0,
+  Math.min(10000, Math.trunc(Number(UI_CONFIG.h264WebSocketRetryBaseMs) || 350)),
+);
 const DEFAULT_LINGBOT2_MODEL = "robbyant/lingbot-world-v2-14b-causal-fast-diffusers";
 const SESSION_ARTIFACT_SCHEMA_VERSION = 1;
 const SESSION_ARTIFACT_EVENT_LIMIT = 20000;
@@ -92,6 +100,44 @@ function h264WebSocketEndpoint(key) {
   } catch {
     return defaultEndpoint;
   }
+}
+
+function waitForH264Retry(delayMs) {
+  return new Promise((resolve) => {
+    globalThis.setTimeout(resolve, delayMs);
+  });
+}
+
+async function connectH264SessionWithRetry(key, h264Session, init) {
+  if (!h264Session) {
+    const message = H264_WEBSOCKET_REQUESTED
+      ? `H.264 WebSocket 已启用，但当前浏览器不支持 ${H264_MSE_MIME_TYPE}`
+      : "H.264 WebSocket 未启用";
+    setModelConnectionState(key, "error");
+    throw new Error(message);
+  }
+
+  let lastError = null;
+  for (let attempt = 1; attempt <= H264_CONNECT_MAX_ATTEMPTS; attempt += 1) {
+    try {
+      if (attempt > 1) {
+        addHistory(`${modelLabel(key)} H.264 reconnect ${attempt}/${H264_CONNECT_MAX_ATTEMPTS}`);
+      }
+      await h264Session.connect(h264CompressionInit(init, key));
+      return;
+    } catch (error) {
+      lastError = error;
+      await h264Session.close("H.264 startup retry", { emitState: false });
+      if (attempt >= H264_CONNECT_MAX_ATTEMPTS) break;
+      const delayMs = H264_CONNECT_RETRY_BASE_MS * attempt;
+      addHistory(`${modelLabel(key)} H.264 启动失败，${delayMs}ms 后重试 · ${error.message || error}`);
+      await waitForH264Retry(delayMs);
+    }
+  }
+
+  const message = `${modelLabel(key)} H.264 启动失败，已重试 ${H264_CONNECT_MAX_ATTEMPTS} 次：${lastError?.message || lastError || "unknown"}`;
+  setModelConnectionState(key, "error");
+  throw new Error(message);
 }
 
 function configuredGenerationModes() {
@@ -255,7 +301,7 @@ function applyRuntimeUiConfig() {
       if (chip) chip.textContent = `H.264 · WS · ${(bitrateKbps / 1000).toFixed(1)} Mbps`;
     }
   } else if (H264_WEBSOCKET_REQUESTED) {
-    addHistory("当前浏览器不支持 H.264 MSE，已自动回退 WebP WebSocket");
+    addHistory("当前浏览器不支持 H.264 MSE，WebP fallback 已禁用");
   }
   configureGenerationModeSelect();
 }
@@ -879,22 +925,13 @@ const lingbot2H264Session = H264_WEBSOCKET_ENABLED
   : null;
 
 function preferredRealtimeSession(key, h264Session, fallbackSession) {
-  let selected = fallbackSession;
+  let selected = H264_WEBSOCKET_REQUESTED ? h264Session : fallbackSession;
   return {
     async connect(init, url) {
-      if (h264Session) {
-        try {
-          await h264Session.connect(h264CompressionInit(init, key));
-          selected = h264Session;
-          return;
-        } catch (error) {
-          await h264Session.close("H.264 startup failed", { emitState: false });
-          addHistory(`${modelLabel(key)} H.264 启动失败，自动回退 WebP · ${error.message || error}`);
-          const video = key === "lingbot2" ? lingbot2H264Video : minwmH264Video;
-          const fallbackCanvas = key === "lingbot2" ? lingbot2Canvas : canvas;
-          video.hidden = true;
-          fallbackCanvas.hidden = false;
-        }
+      if (H264_WEBSOCKET_REQUESTED) {
+        await connectH264SessionWithRetry(key, h264Session, init);
+        selected = h264Session;
+        return;
       }
       selected = fallbackSession;
       return fallbackSession.connect(init, url);
@@ -966,17 +1003,10 @@ function buildHappyOysterInit(init) {
 let primaryUsesH264 = false;
 const primarySessionAdapter = {
   async connect(init, url) {
-    if (minwmH264Session) {
-      try {
-        await minwmH264Session.connect(h264CompressionInit(init, "minwm"));
-        primaryUsesH264 = true;
-        return;
-      } catch (error) {
-        await minwmH264Session.close("H.264 startup failed", { emitState: false });
-        addHistory(`Zing H.264 启动失败，自动回退 WebP · ${error.message || error}`);
-        minwmH264Video.hidden = true;
-        canvas.hidden = false;
-      }
+    if (H264_WEBSOCKET_REQUESTED) {
+      await connectH264SessionWithRetry("minwm", minwmH264Session, init);
+      primaryUsesH264 = true;
+      return;
     }
     primaryUsesH264 = false;
     return openPrimarySession(init, url);

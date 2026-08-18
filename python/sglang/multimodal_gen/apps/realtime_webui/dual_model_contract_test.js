@@ -326,6 +326,19 @@ assert.match(app, /secureBaseUrl/);
 assert.match(app, /function h264WebSocketEndpoint\(key\)/);
 assert.match(app, /UI_CONFIG\.h264WebSocketBaseUrl/);
 assert.match(app, /endpoint: h264WebSocketEndpoint\(key\)/);
+assert.match(app, /async function connectH264SessionWithRetry\(key, h264Session, init\)/);
+assert.match(app, /H264_CONNECT_MAX_ATTEMPTS/);
+assert.doesNotMatch(app, /自动回退 WebP/);
+assert.match(
+  app,
+  /if \(H264_WEBSOCKET_REQUESTED\) \{[\s\S]*?await connectH264SessionWithRetry\("minwm", minwmH264Session, init\);[\s\S]*?return;[\s\S]*?\}[\s\S]*?return openPrimarySession\(init, url\);/,
+  "Zing should retry H.264 and only use WebP when H.264 is explicitly disabled",
+);
+assert.match(
+  app,
+  /if \(H264_WEBSOCKET_REQUESTED\) \{[\s\S]*?await connectH264SessionWithRetry\(key, h264Session, init\);[\s\S]*?return;[\s\S]*?\}[\s\S]*?return fallbackSession\.connect\(init, url\);/,
+  "secondary models should retry H.264 and must not automatically fall back to WebP",
+);
 assert.match(app, /"not-allowed": "麦克风未授权"/);
 assert.match(app, /status\.textContent = next \? "正在聆听" : idleStatus/);
 assert.match(
