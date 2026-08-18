@@ -19,10 +19,10 @@ case "${MINWM_GPU_FAMILY}" in
     EXPECTED_GPU_NAME="NVIDIA H200"
     EXPECTED_CAPABILITY="9.0"
     EXPECTED_PACKED_BACKEND="fa3"
-    BASELINE_SCHEDULER_FPS="7.89698680794534"
-    MIN_SCHEDULER_FPS="7.6600772037069795"
-    BASELINE_CLIENT_FPS="7.890654071296376"
-    MIN_CLIENT_FPS="7.653934449157485"
+    BASELINE_SCHEDULER_FPS="9.501709057561763"
+    MIN_SCHEDULER_FPS="9.21665778583491"
+    BASELINE_CLIENT_FPS="9.4902119457508"
+    MIN_CLIENT_FPS="9.205505587378276"
     EXPECTED_FA3_PROVIDER_EVIDENCE="Loaded locked FlashAttention v3 kernels provider=kernels-community repo=kernels-community/sgl-flash-attn3 revision=15c17db0bf9ce6599db795fa02a8f27467c92860"
     ;;
   blackwell)
@@ -41,9 +41,11 @@ case "${MINWM_GPU_FAMILY}" in
     ;;
 esac
 
-# Accepted profiler-off packed-fast BF16 measurements are recorded in
-# benchmark/minwm_720p_attn_ffn_20260818/RESULTS.zh-CN.md. The release gate is
-# a one-sided regression check: both scheduler and loopback-client FPS must
+# The Blackwell baseline is the accepted profiler-off packed-fast BF16 result
+# in benchmark/minwm_720p_attn_ffn_20260818/RESULTS.zh-CN.md.  Hopper was
+# promoted to the first locked-FA3 unified-image result recorded in
+# benchmark/minwm_unified_image/RELEASES.zh-CN.md.  The release gate is a
+# one-sided regression check: both scheduler and loopback-client FPS must
 # retain at least 97% of the device baseline; improvements remain valid.
 
 SOURCE_ROOT="/sgl-workspace/sglang"
