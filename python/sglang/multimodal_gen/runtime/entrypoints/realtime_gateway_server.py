@@ -47,6 +47,7 @@ from sglang.multimodal_gen.runtime.realtime.critical_path_metrics import (
 from sglang.multimodal_gen.runtime.realtime.world_platform import (
     Principal,
     TokenError,
+    TokenReplayGuard,
     WorldCallbacks,
     WorldPlatformConfig,
     verify_session_token,
@@ -1024,6 +1025,7 @@ def create_app(
         )
 
     if world_platform is not None:
+        token_replay_guard = TokenReplayGuard()
 
         @app.websocket("/backends/minwm/v1/realtime_video/authorized_generate")
         async def authorized_generate(websocket: WebSocket):
@@ -1037,6 +1039,11 @@ def create_app(
             except TokenError as exc:
                 await websocket.accept()
                 await websocket.close(code=1008, reason=f"invalid token: {exc}")
+                return
+            if not token_replay_guard.consume(principal):
+                # 凭证一次性（jti）：同一凭证第二次建会话直接拒绝
+                await websocket.accept()
+                await websocket.close(code=1008, reason="token already used")
                 return
             await _generate_coordinator_session(
                 websocket,

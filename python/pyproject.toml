@@ -82,7 +82,7 @@ dependencies = [
   "torchvision",
   "tqdm",
   "transformers==5.12.1",
-  "uvicorn",
+  "uvicorn>=0.30.0,<0.40",  # 实时网关依赖 ws ping 行为，升大版本需回归
   "uvloop",
   "watchfiles",
   "xgrammar==0.2.1",
@@ -115,7 +115,7 @@ diffusion = [
   "st_attn==0.0.7 ; platform_machine != 'aarch64' and platform_machine != 'arm64'",
   "trimesh>=4.0.0",
   "vsa==0.0.4 ; platform_machine != 'aarch64' and platform_machine != 'arm64'",
-  "websockets",
+  "websockets>=12.0,<16",  # 实时网关的 ws 协议栈，升大版本需回归
   "xatlas",
 ]
 

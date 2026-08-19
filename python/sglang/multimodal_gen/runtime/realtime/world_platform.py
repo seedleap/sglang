@@ -45,6 +45,8 @@ class Principal:
     init_sha256: str
     model: str
     allow_free_prompt: bool
+    jti: str = ""  # 一次性随机串（防同一凭证建两个会话）
+    exp: int = 0   # 过期时刻（秒），重放缓存据此清理
 
 
 def _b64url_decode(segment: str) -> bytes:
@@ -96,7 +98,35 @@ def verify_session_token(token: str, public_key: Ed25519PublicKey) -> Principal:
         init_sha256=init_sha,
         model=str(zing.get("model") or "minwm"),
         allow_free_prompt=bool(zing.get("allow_free_prompt", False)),
+        jti=str(claims.get("jti") or ""),
+        exp=int(claims.get("exp") or 0),
     )
+
+
+class TokenReplayGuard:
+    """凭证一次性保证（《实现规格》5.2 的 jti）。
+
+    进程内缓存：网关单实例部署，凭证 exp 只有 90 秒，缓存自然有界。
+    consume 返回 False 表示该凭证已建立过会话，必须拒绝。
+    """
+
+    def __init__(self) -> None:
+        self._seen: dict[str, float] = {}  # jti -> 可清理时刻
+
+    def consume(self, principal: Principal, now: float | None = None) -> bool:
+        if not principal.jti:
+            return True  # 旧签发方无 jti：放行（世界服务始终签 jti，此路径只为兼容）
+        now = time.time() if now is None else now
+        # 惰性清理：exp+偏移之后的记录不可能再被验签通过，安全移除
+        expired = [j for j, until in self._seen.items() if until <= now]
+        for j in expired:
+            del self._seen[j]
+        if principal.jti in self._seen:
+            return False
+        # 保留到 exp+60s 且至少 5 分钟：验签的 30s 时钟容差之外再留余量，
+        # 时钟偏移也不会让「保留期 < 凭证可用期」
+        self._seen[principal.jti] = max(float(principal.exp) + 60.0, now + 300.0)
+        return True
 
 
 @dataclass
@@ -159,8 +189,13 @@ class WorldCallbacks:
             await asyncio.sleep(0.5 * (attempt + 1))
 
     def fire(self, path: str, payload: dict) -> None:
-        """异步派发，不阻塞会话主流程。"""
-        asyncio.get_running_loop().create_task(self._post(path, payload))
+        """异步派发，不阻塞会话主流程。
+
+        按 asyncio 文档要求保留任务强引用（事件循环只持弱引用），完成后自动移出。
+        """
+        task = asyncio.get_running_loop().create_task(self._post(path, payload))
+        self._pending.add(task)
+        task.add_done_callback(self._pending.discard)
 
     def started(self, run_id: str, trace_id: str, max_lifetime_s: int) -> None:
         self.fire(
