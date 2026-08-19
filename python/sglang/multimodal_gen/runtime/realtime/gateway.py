@@ -187,6 +187,13 @@ _WORKER_CONTROL_MESSAGES = {
     "chunk_telemetry",
 }
 
+_H264_MEDIA_MESSAGES = {
+    "media_init",
+    "media_batch",
+    "media_encode_timing",
+    "media_payload",
+}
+
 
 @dataclass(frozen=True, slots=True)
 class _QueuedOutput:
@@ -262,6 +269,7 @@ class GatewayOutputRoute:
     _queued_bytes: int = field(default=0, init=False)
     _last_chunk_index: int = field(default=-1, init=False)
     _last_frame_batch_index: int = field(default=-1, init=False)
+    _last_media_payload_sequence: int = field(default=-1, init=False)
     _seen_chunks: set[int] = field(default_factory=set, init=False)
     _output_closed: asyncio.Event = field(init=False)
     _chunk_completed: dict[int, asyncio.Event] = field(default_factory=dict, init=False)
@@ -303,19 +311,64 @@ class GatewayOutputRoute:
             raise OutputRouteClosed("output route is closed")
         message = decode_message(wire)
         message_type = message.get("type")
-        if message_type not in {"frame_batch", "media_chunk_complete"}:
-            raise OutputProtocolError(
-                "Gateway output accepts frame_batch or media_chunk_complete only"
-            )
+        if message_type not in {
+            "frame_batch",
+            "media_chunk_complete",
+            *_H264_MEDIA_MESSAGES,
+        }:
+            raise OutputProtocolError("Gateway output message type is not allowed")
         if message.get("session_id") != self.session_id:
             raise OutputProtocolError("wrong session")
         if message.get("generation_id") != self.generation_id:
             raise OutputProtocolError("stale generation")
+        if message_type == "media_init":
+            self._append_output(
+                _QueuedOutput(
+                    wire=wire,
+                    message_type=message_type,
+                    frame_count=0,
+                    enqueued_at=time.monotonic(),
+                )
+            )
+            return
+        if message_type == "media_payload":
+            sequence = int(message.get("sequence", -1))
+            if sequence != self._last_media_payload_sequence + 1:
+                raise OutputProtocolError("out-of-order H.264 media payload")
+            payload = message.get("payload")
+            if not isinstance(payload, bytes) or not payload:
+                raise OutputProtocolError("H.264 media payload is required")
+            self._last_media_payload_sequence = sequence
+            # H.264/fMP4 bytes are not independently droppable after muxing.
+            # The VAE sheds stale RGB frames before encoding instead.
+            self._append_output(
+                _QueuedOutput(
+                    wire=wire,
+                    message_type=message_type,
+                    frame_count=0,
+                    enqueued_at=time.monotonic(),
+                )
+            )
+            return
+        if message_type == "media_encode_timing":
+            self._append_output(
+                _QueuedOutput(
+                    wire=wire,
+                    message_type=message_type,
+                    frame_count=0,
+                    enqueued_at=time.monotonic(),
+                )
+            )
+            return
+
         chunk_index = int(message.get("chunk_index", -1))
         if chunk_index < 0:
             raise OutputProtocolError("invalid chunk sequence")
         if message_type == "media_chunk_complete":
-            if chunk_index not in self._seen_chunks:
+            if (
+                chunk_index not in self._seen_chunks
+                and message.get("media_transport") != "h264"
+            ):
                 raise OutputProtocolError("completion before frame batch")
             completed = self._chunk_completed.setdefault(chunk_index, asyncio.Event())
             if completed.is_set():
@@ -332,6 +385,21 @@ class GatewayOutputRoute:
                 )
             )
             completed.set()
+            return
+
+        if message_type == "media_batch":
+            if chunk_index < self._last_chunk_index:
+                raise OutputProtocolError("stale chunk")
+            self._last_chunk_index = max(self._last_chunk_index, chunk_index)
+            self._seen_chunks.add(chunk_index)
+            self._append_output(
+                _QueuedOutput(
+                    wire=wire,
+                    message_type=message_type,
+                    frame_count=0,
+                    enqueued_at=time.monotonic(),
+                )
+            )
             return
 
         frame_batch_index = int(message.get("frame_batch_index", -1))
@@ -402,7 +470,8 @@ class GatewayOutputRoute:
             (
                 output.enqueued_at
                 for output in self._queue
-                if output is not None and output.message_type == "frame_batch"
+                if output is not None
+                and output.message_type in {"frame_batch", "media_payload"}
             ),
             None,
         )

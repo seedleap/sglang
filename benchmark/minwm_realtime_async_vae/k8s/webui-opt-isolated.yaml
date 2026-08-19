@@ -98,7 +98,7 @@ spec:
             - name: H264_WS_RAW_CHANNEL_ORDER
               value: rgb
             - name: REALTIME_UI_CONFIG_JSON
-              value: '{"generationModes":["i2v","t2v"],"defaultGenerationMode":"i2v","t2vFrameStep":4,"t2vDefaultNumFrames":121,"sessionMaxLifetimeSeconds":70,"playbackAckEnabled":false,"h264WebSocketEnabled":true,"h264CompressedBitrateKbps":3000,"h264CompressedCrf":20,"h264CompressedPreset":"fast","h264CompressedGopSeconds":2,"h264CompressedVbvBufferMs":250,"h264WebSocketLiveEdgeTargetMs":80,"h264WebSocketSeekThresholdMs":260,"secureBaseUrl":"https://zing-world-studio.loopit.me","singleExperience":false,"smoothCatchupRateMax":1.1,"dualModels":{"minwm":{"label":"Zing","sinkSize":8,"windowFrames":32,"h264StartupDropFrames":0},"lingbot2":{"label":"LingBot2","targetFps":16,"sinkSize":9,"windowFrames":18,"h264StartupDropFrames":8}}}'
+              value: '{"generationModes":["i2v","t2v"],"defaultGenerationMode":"i2v","t2vFrameStep":4,"t2vDefaultNumFrames":121,"sessionMaxLifetimeSeconds":70,"playbackAckEnabled":false,"h264WebSocketEnabled":true,"h264DirectGatewayEnabled":true,"h264CompressedBitrateKbps":3000,"h264CompressedCrf":20,"h264CompressedPreset":"fast","h264CompressedGopSeconds":2,"h264CompressedVbvBufferMs":250,"h264WebSocketLiveEdgeTargetMs":80,"h264WebSocketSeekThresholdMs":260,"secureBaseUrl":"https://zing-world-studio.loopit.me","singleExperience":false,"smoothCatchupRateMax":1.1,"dualModels":{"minwm":{"label":"Zing","sinkSize":8,"windowFrames":32,"h264StartupDropFrames":0},"lingbot2":{"label":"LingBot2","targetFps":16,"sinkSize":9,"windowFrames":18,"h264StartupDropFrames":8}}}'
             - name: VIDEO_PROMPT_REWRITE_CREDENTIALS
               value: /run/secrets/realtime-webui/prompt-rewriter-vertex.json
             - name: CREATE_WORLD_IMAGE_CONFIG
@@ -129,8 +129,8 @@ spec:
             timeoutSeconds: 2
           resources:
             requests:
-              cpu: "2"
-              memory: 4Gi
+              cpu: "1"
+              memory: 2Gi
             limits:
               cpu: "8"
               memory: 8Gi

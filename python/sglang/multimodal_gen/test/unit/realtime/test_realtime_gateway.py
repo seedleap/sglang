@@ -64,6 +64,15 @@ def _media_complete(chunk: int, *, generation: str = "g") -> bytes:
     )
 
 
+def _h264_message(message_type: str, **fields) -> bytes:
+    return encode_message(
+        message_type,
+        session_id="s",
+        generation_id="g",
+        **fields,
+    )
+
+
 def test_gateway_playback_ack_window_bounds_chunk_lead_and_sheds_stale_media():
     async def run():
         window = BrowserPlaybackAckWindow(
@@ -229,6 +238,49 @@ def test_gateway_output_route_bounds_actual_frames_and_reports_queue_metrics():
         assert await route.get() == _frame(0, 1, num_frames=3)
         route.task_done()
         await route.join()
+
+    asyncio.run(run())
+
+
+def test_gateway_output_route_passes_h264_without_dropping_muxed_payloads():
+    async def run():
+        registry = GatewayOutputRegistry(queue_depth=1)
+        route = await registry.register("s", "g", token="secret")
+        init = _h264_message("media_init", codec="h264", width=8, height=8)
+        batch = _h264_message(
+            "media_batch",
+            request_id="r0",
+            chunk_index=0,
+            event_id=0,
+            first_frame_index=0,
+            num_frames=1,
+        )
+        payload0 = _h264_message(
+            "media_payload", sequence=0, codec="h264", payload=b"first"
+        )
+        payload1 = _h264_message(
+            "media_payload", sequence=1, codec="h264", payload=b"second"
+        )
+        completion = _h264_message(
+            "media_chunk_complete",
+            request_id="r0",
+            chunk_index=0,
+            num_frames=1,
+            media_transport="h264",
+        )
+        for wire in (init, batch, payload0, payload1, completion):
+            await route.put(wire)
+
+        assert route.dropped_messages == 0
+        for expected in (init, batch, payload0, payload1, completion):
+            assert await route.get() == expected
+            route.task_done()
+        await route.join()
+
+        with pytest.raises(OutputProtocolError, match="out-of-order"):
+            await route.put(
+                _h264_message("media_payload", sequence=3, codec="h264", payload=b"gap")
+            )
 
     asyncio.run(run())
 

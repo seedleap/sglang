@@ -11,6 +11,7 @@ const H264_MSE_MIME_TYPE = 'video/mp4; codecs="avc1.4D401F"';
 const H264_WEBSOCKET_REQUESTED = UI_CONFIG.h264WebSocketEnabled === true;
 const H264_WEBSOCKET_ENABLED = H264_WEBSOCKET_REQUESTED
   && Boolean(globalThis.MediaSource?.isTypeSupported?.(H264_MSE_MIME_TYPE));
+const H264_DIRECT_GATEWAY = UI_CONFIG.h264DirectGatewayEnabled === true;
 const H264_CONNECT_MAX_ATTEMPTS = Math.max(
   1,
   Math.min(10, Math.trunc(Number(UI_CONFIG.h264WebSocketConnectAttempts) || 3)),
@@ -89,7 +90,9 @@ function h264CompressionInit(init, key) {
 }
 
 function h264WebSocketEndpoint(key) {
-  const defaultEndpoint = `/api/h264ws/${key}`;
+  const defaultEndpoint = H264_DIRECT_GATEWAY
+    ? `/backends/${key}/v1/realtime_video/generate`
+    : `/api/h264ws/${key}`;
   const configuredEndpoint = String(
     DUAL_MODEL_CONFIG[key]?.h264WsUrl || UI_CONFIG.h264WebSocketBaseUrl || "",
   ).trim();
@@ -113,7 +116,7 @@ function waitForH264Retry(delayMs) {
   });
 }
 
-async function connectH264SessionWithRetry(key, h264Session, init) {
+async function connectH264SessionWithRetry(key, h264Session, init, url = "") {
   if (!h264Session) {
     const message = H264_WEBSOCKET_REQUESTED
       ? `H.264 WebSocket 已启用，但当前浏览器不支持 ${H264_MSE_MIME_TYPE}`
@@ -128,7 +131,7 @@ async function connectH264SessionWithRetry(key, h264Session, init) {
       if (attempt > 1) {
         addHistory(`${modelLabel(key)} H.264 reconnect ${attempt}/${H264_CONNECT_MAX_ATTEMPTS}`);
       }
-      await h264Session.connect(h264CompressionInit(init, key));
+      await h264Session.connect(h264CompressionInit(init, key), url);
       resetH264RuntimeReconnect(key);
       return;
     } catch (error) {
@@ -952,6 +955,9 @@ function createH264ModelSession(key) {
     overlay: $(`${key}PreviewOverlay`),
     root: document.querySelector(`[data-model-key="${key}"]`),
     endpoint: h264WebSocketEndpoint(key),
+    directGateway: H264_DIRECT_GATEWAY,
+    packMessage: pack,
+    unpackMessage: unpack,
     liveEdgeTargetMs: configuredNumber("h264WebSocketLiveEdgeTargetMs", 80),
     liveEdgeSeekThresholdMs: configuredNumber("h264WebSocketSeekThresholdMs", 420),
     onState: (state, details = {}) => {
@@ -1015,7 +1021,7 @@ function preferredRealtimeSession(key, h264Session, fallbackSession) {
   return {
     async connect(init, url) {
       if (H264_WEBSOCKET_REQUESTED) {
-        await connectH264SessionWithRetry(key, h264Session, init);
+        await connectH264SessionWithRetry(key, h264Session, init, url);
         selected = h264Session;
         return;
       }
@@ -1091,7 +1097,7 @@ let primaryUsesH264 = false;
 const primarySessionAdapter = {
   async connect(init, url) {
     if (H264_WEBSOCKET_REQUESTED) {
-      await connectH264SessionWithRetry("minwm", minwmH264Session, init);
+      await connectH264SessionWithRetry("minwm", minwmH264Session, init, url);
       primaryUsesH264 = true;
       return;
     }

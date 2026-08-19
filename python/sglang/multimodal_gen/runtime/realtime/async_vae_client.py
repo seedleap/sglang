@@ -139,11 +139,13 @@ class GatewayOutputClient:
         message = decode_message(wire, max_message_bytes=self.max_message_bytes)
         if message.get("type") not in {
             "frame_batch",
+            "media_init",
+            "media_batch",
+            "media_encode_timing",
+            "media_payload",
             "media_chunk_complete",
         }:
-            raise ProtocolViolation(
-                "Gateway output accepts frame_batch or media_chunk_complete only"
-            )
+            raise ProtocolViolation("Gateway output message type is not allowed")
         if (
             message.get("session_id") != self.session_id
             or message.get("generation_id") != self.generation_id

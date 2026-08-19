@@ -134,5 +134,50 @@ assert.equal(recoverableCloseErrors.length, 1);
 assert.match(recoverableCloseErrors[0].message, /H\.264 WebSocket closed/);
 assert.equal(H264WebSocketSession.isTerminalCloseReason("generation complete"), true);
 assert.equal(H264WebSocketSession.isTerminalCloseReason("upstream unavailable"), false);
+assert.equal(
+  H264WebSocketSession.resolveEndpoint(
+    "https://zing-world-studio.loopit.me/backends/lingbot2/v1/realtime_video/generate?user_id=browser%3Alingbot2",
+    { protocol: "https:", host: "zing-world-studio.loopit.me" },
+  ),
+  "wss://zing-world-studio.loopit.me/backends/lingbot2/v1/realtime_video/generate?user_id=browser%3Alingbot2",
+);
+assert.equal(
+  H264WebSocketSession.resolveEndpoint(
+    "/backends/minwm/v1/realtime_video/generate?user_id=browser%3Aminwm",
+    { protocol: "https:", host: "zing-world-studio.loopit.me" },
+  ),
+  "wss://zing-world-studio.loopit.me/backends/minwm/v1/realtime_video/generate?user_id=browser%3Aminwm",
+);
+
+const directSent = [];
+const directSession = new H264WebSocketSession({
+  video,
+  WebSocketImpl: FakeWebSocket,
+  MediaSourceImpl: FakeMediaSource,
+  directGateway: true,
+  packMessage: (value) => value,
+  unpackMessage: (value) => value,
+});
+directSession.socket = {
+  readyState: 1,
+  send: (value) => directSent.push(value),
+};
+assert.equal(directSession.sendEvent({
+  type: "event",
+  kind: "prompt",
+  event_id: 12,
+  payload: { text: "turn left" },
+}), true);
+assert.equal(directSent[0].type, "event");
+assert.equal(directSent[0].event_id, 12);
+directSession._handleMetadata({
+  type: "media_batch",
+  first_frame_index: 1,
+  num_frames: 1,
+  h264_queue_ms: 4.5,
+  h264_encoder_feed_ms: 2.5,
+});
+assert.equal(directSession.lastStats.lastBridgeQueueMs, 4.5);
+assert.equal(directSession.lastStats.lastBridgeEncoderFeedMs, 2.5);
 
 console.log("h264_websocket_session_test: ok");

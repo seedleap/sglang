@@ -156,7 +156,7 @@ def _codec_from_message(message: dict[str, Any]) -> str:
 
 def _metric_scope_for_message(message: dict[str, Any]) -> str:
     message_type = message.get("type")
-    if message_type == "frame_batch":
+    if message_type in {"frame_batch", "media_batch", "media_payload"}:
         return "frame"
     if message_type in {"chunk_telemetry", "media_chunk_complete"}:
         return "chunk"

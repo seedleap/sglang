@@ -73,8 +73,8 @@ assert.match(
 );
 assert.match(
   indexHtml,
-  /<script src="\.\/runtime-config\.js"><\/script>/,
-  "webui should load the deployment profile before app.js",
+  /<script data-cfasync="false" src="\.\/runtime-config\.js"><\/script>/,
+  "webui should synchronously load the deployment profile before app.js, including behind Cloudflare Rocket Loader",
 );
 assert.match(
   indexHtml,
