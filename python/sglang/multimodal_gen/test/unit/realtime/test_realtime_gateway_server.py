@@ -165,6 +165,57 @@ def test_gateway_coordinator_release_treats_lost_lease_as_idempotent():
     asyncio.run(run())
 
 
+def test_gateway_sends_model_family_as_backward_compatible_header():
+    captured = {}
+
+    class Response:
+        is_success = True
+
+        @staticmethod
+        def json():
+            slot = {
+                "worker_id": "worker-a",
+                "role": "denoiser",
+                "endpoint": "ws://worker-a/generate",
+                "az": "us-east-2a",
+                "slot_index": 0,
+                "model_revision": "opaque-revision",
+                "vae_fingerprint": "vae-a",
+            }
+            return {
+                "user_id": "user-a",
+                "session_id": "session-a",
+                "generation_id": "generation-a",
+                "token": "token-a",
+                "expires_at": 1,
+                "denoiser": slot,
+                "vae": {**slot, "role": "vae"},
+            }
+
+    class Client:
+        async def post(self, path, *, json, headers):
+            captured.update(path=path, json=json, headers=headers)
+            return Response()
+
+    async def run():
+        client = HTTPCoordinatorClient.__new__(HTTPCoordinatorClient)
+        client._client = Client()
+        await client.admit(
+            user_id="user-a",
+            session_id="session-a",
+            generation_id="generation-a",
+            model_family="wan",
+            model_revision="opaque-revision",
+            vae_fingerprint="vae-a",
+        )
+
+    asyncio.run(run())
+    assert captured["path"] == "/v1/sessions/admit"
+    assert captured["headers"] == {"X-World-Model-Family": "wan"}
+    assert "model_family" not in captured["json"]
+    assert captured["json"]["model_revision"] == "opaque-revision"
+
+
 def test_gateway_serves_trace_query_and_accepts_sanitized_client_metrics():
     query = _TraceQuery()
     app = create_app(

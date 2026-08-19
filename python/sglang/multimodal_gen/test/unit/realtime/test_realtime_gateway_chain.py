@@ -261,6 +261,7 @@ def test_gateway_routes_control_and_direct_vae_media_and_queries_trace_over_http
 
         assert len(coordinator.admitted) == 1
         assert coordinator.admitted[0]["wait_for_capacity"] is True
+        assert coordinator.admitted[0]["model_family"] == "wan"
         assert len(coordinator.released) == 1
         assert denoiser_close_started_at is not None
         assert coordinator.released_at - denoiser_close_started_at >= 0.045
@@ -315,6 +316,7 @@ def test_gateway_routes_named_lingbot2_websocket_through_coordinator():
                     await browser.send(payload)
                     await browser.wait_closed()
                 assert coordinator.admitted[0]["model_revision"] == "lingbot2-r1"
+                assert coordinator.admitted[0]["model_family"] == "lingbot2"
                 assert coordinator.admitted[0]["vae_fingerprint"] == "taew2_1"
                 assert received[0]["query"]["trace_id"] == ["trace-a"]
                 assert received[0]["query"]["realtime_vae_worker_url"] == [
