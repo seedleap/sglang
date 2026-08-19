@@ -361,17 +361,24 @@ def create_app(
     trace_query=None,
     world_platform: WorldPlatformConfig | None = None,
     browser_send_timeout_s: float = 15.0,
-    # 无鉴权 showcase 路由与静态页。None = 按 world 平台是否启用自动决定：
-    # 启用鉴权就关掉它们（否则约束可被整体绕过）。
-    enable_legacy_routes: bool | None = None,
+    # 无鉴权 showcase 路由、静态页与 trace 查询。默认注册。
+    #
+    # 这些路由不该被公网访问 —— 走它们能拿到不限时、不排队、不鉴权的会话，
+    # 等于绕过 authorized_generate 的全部约束。但**边界在网络层，不在这里**：
+    # 同一个进程同时服务两拨人 —— 公网浏览器经 ingress 只该看到
+    # authorized_generate，内网 webui 经集群 Service 需要这些 legacy 路由。
+    # 应用层的开关分不清这两者，一刀切会连内网调用一起打死。
+    #
+    # 正确做法：公网 ingress 只暴露 authorized_generate 这一条 path。
+    # 本开关留给「这台网关专供平台、根本没有 showcase 流量」的部署形态。
+    disable_legacy_routes: bool = False,
 ) -> FastAPI:
     if release_grace_s < 0:
         raise ValueError("release_grace_s must be non-negative")
     if browser_send_timeout_s <= 0:
         raise ValueError("browser_send_timeout_s must be positive")
     # world 平台回调客户端（未配置则整条 authorized 链路不启用）
-    if enable_legacy_routes is None:
-        enable_legacy_routes = world_platform is None
+    enable_legacy_routes = not disable_legacy_routes
     world_callbacks = WorldCallbacks(world_platform) if world_platform else None
     # 会话载荷解封器：与回调 HMAC 同一个共享密钥，HKDF 分流出独立子密钥
     payload_sealer = (
@@ -444,8 +451,7 @@ def create_app(
         return {"object": "list", "data": [{"id": lingbot2_model_revision}]}
 
     # 内部排障接口：返回 worker id、引擎主机名、adapter 类名等实现细节。
-    # 浏览器直连的应用上不该有它 —— 与 showcase 路由同一个开关，
-    # 启用 world 鉴权时默认不注册（排障请从运维入口或日志系统查）。
+    # 与 showcase 路由同一个开关；公网必须靠 ingress 挡住（连同 /metrics、/v1/models）。
     if enable_legacy_routes:
 
         @app.get("/v1/realtime_video/traces/{trace_id}")
@@ -1109,9 +1115,8 @@ def create_app(
             except Exception:
                 pass
 
-    # 无鉴权的 showcase 路由。启用 world 平台后默认不再注册 ——
-    # 否则 authorized_generate 的全部约束（时长、载荷密封、事件白名单）
-    # 换一条路径就整体绕过了，等于没做。本地开发与压测可显式打开。
+    # 无鉴权的 showcase 路由（内网 webui 在用）。公网侧的隔离靠 ingress 只
+    # 暴露 authorized_generate 一条 path；见 create_app 的 disable_legacy_routes 注释。
     if enable_legacy_routes:
 
         @app.websocket("/backends/lingbot2/v1/realtime_video/generate")
@@ -1165,8 +1170,7 @@ def create_app(
                 principal=principal,
             )
 
-    # showcase 静态前端与老路由同一个开关：启用 world 鉴权后，
-    # 浏览器直连的这台网关上不该再挂一个能绕过鉴权的自助前端。
+    # showcase 静态前端与老路由同一个开关。
     if enable_legacy_routes:
 
         @app.get("/")
@@ -1217,11 +1221,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--world-callback-url", default=os.environ.get("WORLD_CALLBACK_URL", ""))
     parser.add_argument("--world-callback-hmac-secret", default=os.environ.get("WORLD_CALLBACK_HMAC_SECRET", ""))
     parser.add_argument(
-        "--enable-legacy-routes",
+        "--disable-legacy-routes",
         action="store_true",
         help=(
-            "强制注册无鉴权的 showcase 路由/静态页/trace 查询。"
-            "默认：未配置 world 平台时自动开启，配置后自动关闭。"
+            "不注册无鉴权的 showcase 路由/静态页/trace 查询。"
+            "默认注册 —— 内网 webui 依赖它们；"
+            "公网侧请在 ingress 上只暴露 authorized_generate 这一条 path。"
         ),
     )
     parser.add_argument("--browser-send-timeout-s", type=float, default=15.0)
@@ -1293,7 +1298,7 @@ def main() -> None:
         trace_query=trace_query,
         world_platform=_build_world_platform(args),
         browser_send_timeout_s=args.browser_send_timeout_s,
-        enable_legacy_routes=True if args.enable_legacy_routes else None,
+        disable_legacy_routes=args.disable_legacy_routes,
     )
     uvicorn.run(
         app,
