@@ -1,0 +1,16 @@
+ARG BASE_IMAGE=loopit-registry-bj-registry.cn-beijing.cr.aliyuncs.com/minwm/sglang-minwm-realtime:gpu-c7ae70a65a2d
+FROM ${BASE_IMAGE}
+
+# Cloud Desktop's vGPU driver exposes CUDA 12.8. Direct H.264 also requires a
+# system FFmpeg build with libx264; validate that at image-build time.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/* \
+    && ffmpeg -hide_banner -encoders 2>/dev/null | grep -q libx264 \
+    && python3 -m pip install --no-cache-dir \
+      --index-url https://download.pytorch.org/whl/cu128 \
+      torch==2.11.0 \
+      torchvision==0.26.0 \
+    && python3 -m pip install --no-cache-dir cuda-python==12.9.0 \
+    && python3 -m pip uninstall -y flash-attn \
+    && rm -rf /root/.cache/pip /tmp/pip-*

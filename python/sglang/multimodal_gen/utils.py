@@ -528,6 +528,15 @@ def shallow_asdict(obj) -> dict[str, Any]:
 
 
 def kill_itself_when_parent_died() -> None:
+    # Python spawn can briefly re-parent workers in some container runtimes.
+    # Let externally supervised containers opt out to avoid a false SIGKILL.
+    if os.environ.get("SGLANG_DISABLE_PDEATHSIG", "").lower() in {
+        "1",
+        "true",
+        "yes",
+    }:
+        return
+
     if sys.platform != "linux":
         return
 

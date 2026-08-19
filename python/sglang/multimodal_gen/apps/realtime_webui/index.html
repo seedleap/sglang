@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>World Studio · 实时模型对比</title>
+    <title id="documentTitle">World Studio · 实时模型对比</title>
     <link rel="stylesheet" href="./styles.css?v=world-studio-h264-rules-v6" />
   </head>
   <body class="world-studio">
@@ -140,9 +140,9 @@
           <section class="stage" aria-label="实时模型对比">
             <div class="comparison-heading">
               <div>
-                <span>LIVE COMPARISON</span>
-                <h2>实时模型对比</h2>
-                <p>同一世界 · 同一指令 · 同步生成</p>
+                <span id="stageKicker">LIVE COMPARISON</span>
+                <h2 id="stageTitle">实时模型对比</h2>
+                <p id="stageSubtitle">同一世界 · 同一指令 · 同步生成</p>
               </div>
               <button id="fullscreenBtn" class="fullscreen-button" type="button" aria-label="Enter fullscreen comparison" aria-pressed="false" title="全屏对比">
                 <span class="fullscreen-icon" aria-hidden="true"></span>
@@ -298,7 +298,7 @@
                   <span>LIVE DIRECTION</span>
                   <h3>世界过程中的新指令</h3>
                 </div>
-                <small>AI 改写后同时发送至 Zing 与 LingBot2</small>
+                <small id="promptTargetHint">AI 改写后同时发送至 Zing 与 LingBot2</small>
               </div>
               <div class="prompt-composer">
                 <textarea id="runtimePrompt" rows="2" placeholder="例如：向左转，靠近山谷中的城堡……"></textarea>
@@ -404,6 +404,6 @@
     <script src="./fullscreen_controller.js?v=fullscreen-focus-v1"></script>
     <script src="./trace_topology.js?v=realtime-trace-topology-v6"></script>
     <script src="./trace_transport.js?v=realtime-trace-http-v2"></script>
-    <script src="./app.js?v=world-studio-transport-h264-userid-v5"></script>
+    <script src="./app.js?v=world-studio-single-h264-v7"></script>
   </body>
 </html>

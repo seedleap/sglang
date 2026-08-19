@@ -582,7 +582,24 @@ let customWorldPresets = [];
 let customWorldDbPromise = null;
 let customWorldLoadPromise = null;
 const MODEL_SLOT_DEFAULTS = ["minwm", "lingbot2", "happyoyster"];
-let activeModelSlotCount = 2;
+const CONFIGURED_MODEL_SLOTS = Array.isArray(UI_CONFIG.modelSlots)
+  ? UI_CONFIG.modelSlots
+    .map((key) => String(key).toLowerCase())
+    .filter((key, index, keys) => (
+      MODEL_SLOT_DEFAULTS.includes(key) && keys.indexOf(key) === index
+    ))
+    .slice(0, MODEL_SLOT_DEFAULTS.length)
+  : [];
+let activeModelSlotCount = CONFIGURED_MODEL_SLOTS.length || 2;
+
+function applyConfiguredModelSlots() {
+  CONFIGURED_MODEL_SLOTS.forEach((key, index) => {
+    const select = $(`modelSlot${index}`);
+    if (select) select.value = key;
+  });
+  const config = document.querySelector(".model-slot-config");
+  if (config && UI_CONFIG.lockModelSlots === true) config.hidden = true;
+}
 
 function selectedModelKeys() {
   const keys = [];
@@ -608,10 +625,36 @@ function syncModelSlotUi() {
     const player = document.querySelector(`[data-model-key="${key}"]`);
     if (player && grid) grid.appendChild(player);
   }
+  grid?.classList.toggle("is-single", selected.length === 1);
   grid?.classList.toggle("is-three-up", selected.length === 3);
   $("modelSlot2Wrap").hidden = activeModelSlotCount < 3;
   $("addModelSlotBtn").hidden = activeModelSlotCount >= 3;
   $("removeModelSlotBtn").hidden = activeModelSlotCount < 3;
+  syncModelPresentation(selected);
+}
+
+function syncModelPresentation(selected) {
+  const labels = selected.map((key) => modelLabel(key));
+  const isSingle = labels.length === 1;
+  document.title = isSingle
+    ? `World Studio · ${labels[0]}`
+    : "World Studio · 实时模型对比";
+  const kicker = $("stageKicker");
+  const title = $("stageTitle");
+  const subtitle = $("stageSubtitle");
+  const promptHint = $("promptTargetHint");
+  if (kicker) kicker.textContent = isSingle ? "LIVE WORLD" : "LIVE COMPARISON";
+  if (title) title.textContent = isSingle ? labels[0] : "实时模型对比";
+  if (subtitle) {
+    subtitle.textContent = isSingle
+      ? "实时生成 · 实时交互"
+      : "同一世界 · 同一指令 · 同步生成";
+  }
+  if (promptHint) {
+    promptHint.textContent = isSingle
+      ? `AI 改写后发送至 ${labels[0]}`
+      : `AI 改写后同时发送至 ${labels.join(" 与 ")}`;
+  }
 }
 
 function ensureUniqueModelSlot(changedIndex) {
@@ -7338,6 +7381,7 @@ function unpack(buf) {
 }
 
 applyRuntimeUiConfig();
+applyConfiguredModelSlots();
 syncModelSlotUi();
 renderPresets();
 void ensureCustomWorldPresetsLoaded();
