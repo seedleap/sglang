@@ -46,6 +46,7 @@ from sglang.multimodal_gen.runtime.realtime.critical_path_metrics import (
 )
 from sglang.multimodal_gen.runtime.realtime.world_platform import (
     Principal,
+    SessionPayloadSealer,
     TokenError,
     TokenReplayGuard,
     WorldCallbacks,
@@ -316,8 +317,17 @@ async def _receive_browser(websocket: WebSocket) -> bytes | str:
     raise WebSocketDisconnect(1002)
 
 
-class _WorldInitMismatch(Exception):
-    """鉴权会话的 init 字节与凭证哈希不一致（1008 关闭）。"""
+# 鉴权会话的入站白名单。白名单而非黑名单：将来引擎新增控制字段，
+# 不会因为「没被拉黑」而自动获得可注入性。
+_WORLD_PASSTHROUGH_TYPES = frozenset({"client_metric", "client_metric_batch", "ack"})
+_WORLD_ALLOWED_EVENT_KINDS = frozenset(
+    {"camera", "camera_actions", "move", "action", "playback_ack", "heartbeat"}
+)
+# 自由输入类事件：仅当凭证 allow_free_prompt=true 时放行
+_WORLD_FREE_PROMPT_KINDS = frozenset({"prompt", "scene_cut"})
+
+# init 消息里「只给网关看」的扩展块键名（与 world-service zingproto.WorldExtKey 一致）
+WORLD_EXT_KEY = "_world"
 
 
 async def _cancel_tasks(tasks: set[asyncio.Task]) -> None:
@@ -351,13 +361,22 @@ def create_app(
     trace_query=None,
     world_platform: WorldPlatformConfig | None = None,
     browser_send_timeout_s: float = 15.0,
+    # 无鉴权 showcase 路由与静态页。None = 按 world 平台是否启用自动决定：
+    # 启用鉴权就关掉它们（否则约束可被整体绕过）。
+    enable_legacy_routes: bool | None = None,
 ) -> FastAPI:
     if release_grace_s < 0:
         raise ValueError("release_grace_s must be non-negative")
     if browser_send_timeout_s <= 0:
         raise ValueError("browser_send_timeout_s must be positive")
     # world 平台回调客户端（未配置则整条 authorized 链路不启用）
+    if enable_legacy_routes is None:
+        enable_legacy_routes = world_platform is None
     world_callbacks = WorldCallbacks(world_platform) if world_platform else None
+    # 会话载荷解封器：与回调 HMAC 同一个共享密钥，HKDF 分流出独立子密钥
+    payload_sealer = (
+        SessionPayloadSealer(world_platform.callback_secret) if world_platform else None
+    )
     if output_drain_timeout_s <= 0:
         raise ValueError("output_drain_timeout_s must be positive")
     if readiness_coordinator_timeout_s <= 0:
@@ -424,19 +443,26 @@ def create_app(
     async def lingbot2_models():
         return {"object": "list", "data": [{"id": lingbot2_model_revision}]}
 
-    @app.get("/v1/realtime_video/traces/{trace_id}")
-    async def get_trace(trace_id: str, after: int = 0, limit: int = 220):
-        if trace_query is None:
-            raise HTTPException(status_code=503, detail="Trace query is not configured")
-        try:
-            return await trace_query.query(trace_id, after=after, limit=limit)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        except Exception as exc:
-            logger.exception("Trace query failed for trace_id=%s", trace_id)
-            raise HTTPException(
-                status_code=503, detail="trace query unavailable"
-            ) from exc
+    # 内部排障接口：返回 worker id、引擎主机名、adapter 类名等实现细节。
+    # 浏览器直连的应用上不该有它 —— 与 showcase 路由同一个开关，
+    # 启用 world 鉴权时默认不注册（排障请从运维入口或日志系统查）。
+    if enable_legacy_routes:
+
+        @app.get("/v1/realtime_video/traces/{trace_id}")
+        async def get_trace(trace_id: str, after: int = 0, limit: int = 220):
+            if trace_query is None:
+                raise HTTPException(
+                    status_code=503, detail="Trace query is not configured"
+                )
+            try:
+                return await trace_query.query(trace_id, after=after, limit=limit)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            except Exception as exc:
+                logger.exception("Trace query failed for trace_id=%s", trace_id)
+                raise HTTPException(
+                    status_code=503, detail="trace query unavailable"
+                ) from exc
 
     @app.post("/v1/realtime_video/traces/{trace_id}/client-events")
     async def post_client_trace(trace_id: str, payload: dict):
@@ -644,43 +670,17 @@ def create_app(
                 try:
                     while True:
                         payload = await _receive_browser(websocket)
-                        if principal is not None and not isinstance(payload, bytes):
-                            # 鉴权会话只接受二进制帧：哈希校验与事件过滤都定义在
-                            # 二进制上，文本帧一律丢弃（纵深防御，引擎侧也只读二进制）
-                            _log_gateway_trace(
-                                trace_id,
-                                "gateway.world_text_frame_dropped",
-                                session_id=session_id,
-                            )
-                            continue
+                        if principal is not None:
+                            forwarded = await _world_browser_frame(payload)
+                            if forwarded is None:
+                                continue
+                            payload = forwarded
                         control = None
                         if isinstance(payload, bytes):
                             try:
                                 control = decode_message(payload)
                             except ProtocolViolation:
                                 pass
-                        if principal is not None and isinstance(payload, bytes):
-                            if not world_session["init_verified"]:
-                                # D3（改进版）：首条消息必须与凭证哈希逐字节一致。
-                                # 一次校验锁死 prompt/时长/时间轴/一切字段。
-                                digest = hashlib.sha256(payload).hexdigest()
-                                if digest != principal.init_sha256:
-                                    raise _WorldInitMismatch()
-                                world_session["init_verified"] = True
-                            elif (
-                                not principal.allow_free_prompt
-                                and isinstance(control, dict)
-                                and control.get("type") == "event"
-                                and control.get("kind") in {"prompt", "scene_cut"}
-                            ):
-                                # allowFreePrompt=false：静默丢弃自由提示词事件。
-                                # 不丢会话 —— 恶意注入只应失效，不应帮攻击者结束会话
-                                _log_gateway_trace(
-                                    trace_id,
-                                    "gateway.free_prompt_dropped",
-                                    session_id=session_id,
-                                )
-                                continue
                         if isinstance(control, dict) and control.get("type") in {
                             "client_metric",
                             "client_metric_batch",
@@ -700,6 +700,101 @@ def create_app(
                         await upstream.send(payload)
                 except ConnectionClosedOK:
                     return
+
+            async def _world_browser_frame(payload):
+                """鉴权会话的入站帧处理。返回要转发给引擎的字节，None 表示丢弃。
+
+                浏览器在鉴权会话里只被允许做三件事：转发密封的会话载荷（第一帧）、
+                释放技能（发技能 id）、发送白名单内的交互事件。其余一律丢弃 ——
+                白名单而非黑名单，新增引擎参数不会自动获得可注入性。
+                """
+                if not isinstance(payload, bytes):
+                    # 文本帧一律丢弃：所有约束都定义在二进制帧上
+                    _log_gateway_trace(
+                        trace_id,
+                        "gateway.world_frame_rejected",
+                        session_id=session_id,
+                        reason="text_frame",
+                    )
+                    return None
+
+                if not world_session["init_verified"]:
+                    # 第一帧必须是密封载荷。解封失败（含篡改、挪用他局）即断开。
+                    init_message = payload_sealer.open(payload, principal.run_id)
+                    skills = {}
+                    ext = init_message.pop(WORLD_EXT_KEY, None)
+                    if isinstance(ext, dict):
+                        for item in ext.get("skills") or []:
+                            if isinstance(item, dict) and item.get("id"):
+                                skills[str(item["id"])] = item
+                    world_session["skills"] = skills
+                    world_session["init_verified"] = True
+                    # 剥掉只给网关看的扩展块后再交给引擎
+                    return encode_message(**init_message)
+
+                try:
+                    control = decode_message(payload)
+                except ProtocolViolation:
+                    # 解不出来就丢弃 —— 绝不因为「看不懂」而放行
+                    _log_gateway_trace(
+                        trace_id,
+                        "gateway.world_frame_rejected",
+                        session_id=session_id,
+                        reason="undecodable",
+                    )
+                    return None
+                if not isinstance(control, dict):
+                    return None
+
+                msg_type = control.get("type")
+                if msg_type in _WORLD_PASSTHROUGH_TYPES:
+                    return payload
+                if msg_type != "event":
+                    _log_gateway_trace(
+                        trace_id,
+                        "gateway.world_frame_rejected",
+                        session_id=session_id,
+                        reason=f"type:{msg_type}",
+                    )
+                    return None
+
+                kind = control.get("kind")
+                if kind == "skill":
+                    # 技能：浏览器只发 id，提示词由网关查表补上（全程不经过浏览器）
+                    skill = (world_session.get("skills") or {}).get(
+                        str(control.get("id") or "")
+                    )
+                    if skill is None:
+                        _log_gateway_trace(
+                            trace_id,
+                            "gateway.world_frame_rejected",
+                            session_id=session_id,
+                            reason="unknown_skill",
+                        )
+                        return None
+                    return encode_message(
+                        "event", kind="prompt", prompt=str(skill.get("prompt") or "")
+                    )
+                if kind in _WORLD_ALLOWED_EVENT_KINDS:
+                    return payload
+                if kind in _WORLD_FREE_PROMPT_KINDS:
+                    if principal.allow_free_prompt:
+                        return payload
+                    # 关闭自由输入的世界：静默丢弃而不是断开 ——
+                    # 恶意注入只应失效，不应帮攻击者结束别人的会话
+                    _log_gateway_trace(
+                        trace_id,
+                        "gateway.free_prompt_dropped",
+                        session_id=session_id,
+                    )
+                    return None
+                _log_gateway_trace(
+                    trace_id,
+                    "gateway.world_frame_rejected",
+                    session_id=session_id,
+                    reason=f"kind:{kind}",
+                )
+                return None
 
             async def worker_to_browser():
                 try:
@@ -897,14 +992,21 @@ def create_app(
                         "Gateway media drain timed out for session_id=%s",
                         session_id,
                     )
-        except _WorldInitMismatch:
+        except TokenError:
+            # 会话载荷解封失败（篡改、挪用他局、非 init）。对外只给固定业务码，
+            # 具体原因只进服务端日志 —— 不给攻击者任何试探反馈。
             world_session["init_rejected"] = True
+            logger.warning(
+                "world session payload rejected run_id=%s",
+                principal.run_id if principal else "-",
+                exc_info=True,
+            )
             try:
                 await asyncio.wait_for(
-                    sender.error("init payload mismatch"),
+                    sender.error("SESSION_INVALID", code="SESSION_INVALID"),
                     timeout=browser_send_timeout_s,
                 )
-                await websocket.close(code=1008, reason="init payload mismatch")
+                await websocket.close(code=1008, reason="SESSION_INVALID")
             except Exception:
                 pass
         except CoordinatorRejected as exc:
@@ -1007,22 +1109,29 @@ def create_app(
             except Exception:
                 pass
 
-    @app.websocket("/backends/lingbot2/v1/realtime_video/generate")
-    async def generate_lingbot2(websocket: WebSocket):
-        await _generate_coordinator_session(
-            websocket,
-            selected_model_revision=lingbot2_model_revision,
-            selected_vae_fingerprint=(lingbot2_vae_fingerprint or vae_fingerprint),
-        )
+    # 无鉴权的 showcase 路由。启用 world 平台后默认不再注册 ——
+    # 否则 authorized_generate 的全部约束（时长、载荷密封、事件白名单）
+    # 换一条路径就整体绕过了，等于没做。本地开发与压测可显式打开。
+    if enable_legacy_routes:
 
-    @app.websocket("/backends/minwm/v1/realtime_video/generate")
-    @app.websocket("/v1/realtime_video/generate")
-    async def generate(websocket: WebSocket):
-        await _generate_coordinator_session(
-            websocket,
-            selected_model_revision=model_revision,
-            selected_vae_fingerprint=vae_fingerprint,
-        )
+        @app.websocket("/backends/lingbot2/v1/realtime_video/generate")
+        async def generate_lingbot2(websocket: WebSocket):
+            await _generate_coordinator_session(
+                websocket,
+                selected_model_revision=lingbot2_model_revision,
+                selected_vae_fingerprint=(
+                    lingbot2_vae_fingerprint or vae_fingerprint
+                ),
+            )
+
+        @app.websocket("/backends/minwm/v1/realtime_video/generate")
+        @app.websocket("/v1/realtime_video/generate")
+        async def generate(websocket: WebSocket):
+            await _generate_coordinator_session(
+                websocket,
+                selected_model_revision=model_revision,
+                selected_vae_fingerprint=vae_fingerprint,
+            )
 
     if world_platform is not None:
         token_replay_guard = TokenReplayGuard()
@@ -1037,13 +1146,17 @@ def create_app(
             try:
                 principal = verify_session_token(token, world_platform.public_key)
             except TokenError as exc:
+                # 对外只给固定业务码：区分「签名错」「过期」「aud 不符」等于给
+                # 伪造者一个逐字段试探的预言机。具体原因只进服务端日志。
+                logger.warning("world token rejected: %s", exc)
                 await websocket.accept()
-                await websocket.close(code=1008, reason=f"invalid token: {exc}")
+                await websocket.close(code=1008, reason="UNAUTHORIZED")
                 return
             if not token_replay_guard.consume(principal):
                 # 凭证一次性（jti）：同一凭证第二次建会话直接拒绝
+                logger.warning("world token replayed run_id=%s", principal.run_id)
                 await websocket.accept()
-                await websocket.close(code=1008, reason="token already used")
+                await websocket.close(code=1008, reason="UNAUTHORIZED")
                 return
             await _generate_coordinator_session(
                 websocket,
@@ -1052,11 +1165,15 @@ def create_app(
                 principal=principal,
             )
 
-    @app.get("/")
-    async def index():
-        return FileResponse(WEBUI_ROOT / "index.html")
+    # showcase 静态前端与老路由同一个开关：启用 world 鉴权后，
+    # 浏览器直连的这台网关上不该再挂一个能绕过鉴权的自助前端。
+    if enable_legacy_routes:
 
-    app.mount("/", StaticFiles(directory=WEBUI_ROOT), name="realtime-webui")
+        @app.get("/")
+        async def index():
+            return FileResponse(WEBUI_ROOT / "index.html")
+
+        app.mount("/", StaticFiles(directory=WEBUI_ROOT), name="realtime-webui")
     return app
 
 
@@ -1099,6 +1216,14 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--world-token-ed25519-pub", default=os.environ.get("WORLD_TOKEN_ED25519_PUB", ""))
     parser.add_argument("--world-callback-url", default=os.environ.get("WORLD_CALLBACK_URL", ""))
     parser.add_argument("--world-callback-hmac-secret", default=os.environ.get("WORLD_CALLBACK_HMAC_SECRET", ""))
+    parser.add_argument(
+        "--enable-legacy-routes",
+        action="store_true",
+        help=(
+            "强制注册无鉴权的 showcase 路由/静态页/trace 查询。"
+            "默认：未配置 world 平台时自动开启，配置后自动关闭。"
+        ),
+    )
     parser.add_argument("--browser-send-timeout-s", type=float, default=15.0)
     parser.add_argument(
         "--ui-config-json",
@@ -1168,6 +1293,7 @@ def main() -> None:
         trace_query=trace_query,
         world_platform=_build_world_platform(args),
         browser_send_timeout_s=args.browser_send_timeout_s,
+        enable_legacy_routes=True if args.enable_legacy_routes else None,
     )
     uvicorn.run(
         app,
