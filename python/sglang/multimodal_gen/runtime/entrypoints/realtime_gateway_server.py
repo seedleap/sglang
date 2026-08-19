@@ -8,6 +8,7 @@ import argparse
 import asyncio
 import json
 import logging
+import hashlib
 import os
 import secrets
 import time
@@ -42,6 +43,15 @@ from sglang.multimodal_gen.runtime.realtime.critical_path_metrics import (
     prometheus_content_type,
     prometheus_latest,
     result_from_exception,
+)
+from sglang.multimodal_gen.runtime.realtime.world_platform import (
+    Principal,
+    SessionPayloadSealer,
+    TokenError,
+    TokenReplayGuard,
+    WorldCallbacks,
+    WorldPlatformConfig,
+    verify_session_token,
 )
 from sglang.multimodal_gen.runtime.realtime.gateway import (
     AdmissionQueueFull,
@@ -307,6 +317,19 @@ async def _receive_browser(websocket: WebSocket) -> bytes | str:
     raise WebSocketDisconnect(1002)
 
 
+# 鉴权会话的入站白名单。白名单而非黑名单：将来引擎新增控制字段，
+# 不会因为「没被拉黑」而自动获得可注入性。
+_WORLD_PASSTHROUGH_TYPES = frozenset({"client_metric", "client_metric_batch", "ack"})
+_WORLD_ALLOWED_EVENT_KINDS = frozenset(
+    {"camera", "camera_actions", "move", "action", "playback_ack", "heartbeat"}
+)
+# 自由输入类事件：仅当凭证 allow_free_prompt=true 时放行
+_WORLD_FREE_PROMPT_KINDS = frozenset({"prompt", "scene_cut"})
+
+# init 消息里「只给网关看」的扩展块键名（与 world-service zingproto.WorldExtKey 一致）
+WORLD_EXT_KEY = "_world"
+
+
 async def _cancel_tasks(tasks: set[asyncio.Task]) -> None:
     for task in tasks:
         if not task.done():
@@ -336,9 +359,24 @@ def create_app(
     connect_factory=connect,
     ui_config: dict[str, Any] | None = None,
     trace_query=None,
+    world_platform: WorldPlatformConfig | None = None,
+    browser_send_timeout_s: float = 15.0,
+    # 无鉴权 showcase 路由与静态页。None = 按 world 平台是否启用自动决定：
+    # 启用鉴权就关掉它们（否则约束可被整体绕过）。
+    enable_legacy_routes: bool | None = None,
 ) -> FastAPI:
     if release_grace_s < 0:
         raise ValueError("release_grace_s must be non-negative")
+    if browser_send_timeout_s <= 0:
+        raise ValueError("browser_send_timeout_s must be positive")
+    # world 平台回调客户端（未配置则整条 authorized 链路不启用）
+    if enable_legacy_routes is None:
+        enable_legacy_routes = world_platform is None
+    world_callbacks = WorldCallbacks(world_platform) if world_platform else None
+    # 会话载荷解封器：与回调 HMAC 同一个共享密钥，HKDF 分流出独立子密钥
+    payload_sealer = (
+        SessionPayloadSealer(world_platform.callback_secret) if world_platform else None
+    )
     if output_drain_timeout_s <= 0:
         raise ValueError("output_drain_timeout_s must be positive")
     if readiness_coordinator_timeout_s <= 0:
@@ -405,19 +443,26 @@ def create_app(
     async def lingbot2_models():
         return {"object": "list", "data": [{"id": lingbot2_model_revision}]}
 
-    @app.get("/v1/realtime_video/traces/{trace_id}")
-    async def get_trace(trace_id: str, after: int = 0, limit: int = 220):
-        if trace_query is None:
-            raise HTTPException(status_code=503, detail="Trace query is not configured")
-        try:
-            return await trace_query.query(trace_id, after=after, limit=limit)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        except Exception as exc:
-            logger.exception("Trace query failed for trace_id=%s", trace_id)
-            raise HTTPException(
-                status_code=503, detail="trace query unavailable"
-            ) from exc
+    # 内部排障接口：返回 worker id、引擎主机名、adapter 类名等实现细节。
+    # 浏览器直连的应用上不该有它 —— 与 showcase 路由同一个开关，
+    # 启用 world 鉴权时默认不注册（排障请从运维入口或日志系统查）。
+    if enable_legacy_routes:
+
+        @app.get("/v1/realtime_video/traces/{trace_id}")
+        async def get_trace(trace_id: str, after: int = 0, limit: int = 220):
+            if trace_query is None:
+                raise HTTPException(
+                    status_code=503, detail="Trace query is not configured"
+                )
+            try:
+                return await trace_query.query(trace_id, after=after, limit=limit)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            except Exception as exc:
+                logger.exception("Trace query failed for trace_id=%s", trace_id)
+                raise HTTPException(
+                    status_code=503, detail="trace query unavailable"
+                ) from exc
 
     @app.post("/v1/realtime_video/traces/{trace_id}/client-events")
     async def post_client_trace(trace_id: str, payload: dict):
@@ -519,7 +564,10 @@ def create_app(
         *,
         selected_model_revision: str,
         selected_vae_fingerprint: str,
+        principal: Principal | None = None,
     ) -> None:
+        # principal 非空 = world 平台的鉴权会话（D1~D4 只作用于这条分支）；
+        # 为空 = 旧 showcase 路由，行为与改造前逐字节一致。
         await websocket.accept()
         sender = _BrowserSender(websocket)
         session_id = uuid4().hex
@@ -535,13 +583,20 @@ def create_app(
         tasks: set[asyncio.Task] = set()
         expected_last_chunk: int | None = None
         playback_ack_window = BrowserPlaybackAckWindow()
+        # world 会话的分支状态（init 校验 / deadline / 拒绝原因）
+        world_session: dict[str, Any] = {"init_verified": False}
         try:
             admitted_at = time.perf_counter()
             _log_gateway_trace(trace_id, "gateway.ws_accepted", session_id=session_id)
             try:
                 async with admission_gate.waiter():
                     assignment = await coordinator.admit(
-                        user_id=_user_id(websocket),
+                        # D1：鉴权会话用凭证里的内部用户 ID（wsvc: 前缀与 showcase 隔离）
+                        user_id=(
+                            f"wsvc:{principal.user_id}"
+                            if principal is not None
+                            else _user_id(websocket)
+                        ),
                         session_id=session_id,
                         generation_id=generation_id,
                         model_revision=selected_model_revision,
@@ -615,6 +670,11 @@ def create_app(
                 try:
                     while True:
                         payload = await _receive_browser(websocket)
+                        if principal is not None:
+                            forwarded = await _world_browser_frame(payload)
+                            if forwarded is None:
+                                continue
+                            payload = forwarded
                         control = None
                         if isinstance(payload, bytes):
                             try:
@@ -640,6 +700,101 @@ def create_app(
                         await upstream.send(payload)
                 except ConnectionClosedOK:
                     return
+
+            async def _world_browser_frame(payload):
+                """鉴权会话的入站帧处理。返回要转发给引擎的字节，None 表示丢弃。
+
+                浏览器在鉴权会话里只被允许做三件事：转发密封的会话载荷（第一帧）、
+                释放技能（发技能 id）、发送白名单内的交互事件。其余一律丢弃 ——
+                白名单而非黑名单，新增引擎参数不会自动获得可注入性。
+                """
+                if not isinstance(payload, bytes):
+                    # 文本帧一律丢弃：所有约束都定义在二进制帧上
+                    _log_gateway_trace(
+                        trace_id,
+                        "gateway.world_frame_rejected",
+                        session_id=session_id,
+                        reason="text_frame",
+                    )
+                    return None
+
+                if not world_session["init_verified"]:
+                    # 第一帧必须是密封载荷。解封失败（含篡改、挪用他局）即断开。
+                    init_message = payload_sealer.open(payload, principal.run_id)
+                    skills = {}
+                    ext = init_message.pop(WORLD_EXT_KEY, None)
+                    if isinstance(ext, dict):
+                        for item in ext.get("skills") or []:
+                            if isinstance(item, dict) and item.get("id"):
+                                skills[str(item["id"])] = item
+                    world_session["skills"] = skills
+                    world_session["init_verified"] = True
+                    # 剥掉只给网关看的扩展块后再交给引擎
+                    return encode_message(**init_message)
+
+                try:
+                    control = decode_message(payload)
+                except ProtocolViolation:
+                    # 解不出来就丢弃 —— 绝不因为「看不懂」而放行
+                    _log_gateway_trace(
+                        trace_id,
+                        "gateway.world_frame_rejected",
+                        session_id=session_id,
+                        reason="undecodable",
+                    )
+                    return None
+                if not isinstance(control, dict):
+                    return None
+
+                msg_type = control.get("type")
+                if msg_type in _WORLD_PASSTHROUGH_TYPES:
+                    return payload
+                if msg_type != "event":
+                    _log_gateway_trace(
+                        trace_id,
+                        "gateway.world_frame_rejected",
+                        session_id=session_id,
+                        reason=f"type:{msg_type}",
+                    )
+                    return None
+
+                kind = control.get("kind")
+                if kind == "skill":
+                    # 技能：浏览器只发 id，提示词由网关查表补上（全程不经过浏览器）
+                    skill = (world_session.get("skills") or {}).get(
+                        str(control.get("id") or "")
+                    )
+                    if skill is None:
+                        _log_gateway_trace(
+                            trace_id,
+                            "gateway.world_frame_rejected",
+                            session_id=session_id,
+                            reason="unknown_skill",
+                        )
+                        return None
+                    return encode_message(
+                        "event", kind="prompt", prompt=str(skill.get("prompt") or "")
+                    )
+                if kind in _WORLD_ALLOWED_EVENT_KINDS:
+                    return payload
+                if kind in _WORLD_FREE_PROMPT_KINDS:
+                    if principal.allow_free_prompt:
+                        return payload
+                    # 关闭自由输入的世界：静默丢弃而不是断开 ——
+                    # 恶意注入只应失效，不应帮攻击者结束别人的会话
+                    _log_gateway_trace(
+                        trace_id,
+                        "gateway.free_prompt_dropped",
+                        session_id=session_id,
+                    )
+                    return None
+                _log_gateway_trace(
+                    trace_id,
+                    "gateway.world_frame_rejected",
+                    session_id=session_id,
+                    reason=f"kind:{kind}",
+                )
+                return None
 
             async def worker_to_browser():
                 try:
@@ -715,7 +870,12 @@ def create_app(
                     )
                     return
                 try:
-                    await sender.send(wire)
+                    # D5（幽灵回收）：死端的 TCP 写缓冲永不排空，这个 await 会永久
+                    # 停住（keepalive 的 close 在缓冲非空时是空操作）。加界让超时
+                    # 变成一次普通任务完成，走既有 finally 拆解 —— 不新增代码路径。
+                    await asyncio.wait_for(
+                        sender.send(wire), timeout=browser_send_timeout_s
+                    )
                 except Exception as exc:
                     browser_send_ms = round(
                         (time.perf_counter() - send_started) * 1000, 3
@@ -788,12 +948,33 @@ def create_app(
                 output_task,
                 lease_task,
             }
+            if principal is not None:
+                # D2：服务端权威会话时长。到点任务完成 → FIRST_COMPLETED 唤醒
+                # → 走既有 finally 拆解（取消续租、释放席位）。close reason 与
+                # 前端 SessionLifetimeGuard 的既有契约逐字一致。
+                async def _session_deadline() -> None:
+                    await asyncio.sleep(principal.max_lifetime_s)
+                    world_session["deadline_hit"] = True
+                    logger.info(
+                        "world session deadline reached run_id=%s", principal.run_id
+                    )
+
+                tasks.add(
+                    asyncio.create_task(_session_deadline(), name="gateway-deadline")
+                )
+                # D4：admit 成功 + 上游就绪，通知业务后端会话已建立
+                if world_callbacks is not None:
+                    world_callbacks.started(
+                        principal.run_id, trace_id, principal.max_lifetime_s
+                    )
             done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
             for task in done:
                 exception = task.exception()
                 if exception is not None:
                     raise exception
             if route is not None and worker_control_task in done:
+                # 引擎正常收尾（跑满 max_chunks）：终局归类为 completed 而非 user_left
+                world_session["worker_finished"] = True
                 try:
                     if expected_last_chunk is not None:
                         await asyncio.wait_for(
@@ -811,23 +992,62 @@ def create_app(
                         "Gateway media drain timed out for session_id=%s",
                         session_id,
                     )
-        except CoordinatorRejected as exc:
-            await sender.error(
-                f"realtime admission rejected: {exc.reason}",
-                reason=exc.reason,
-                retry_after_s=exc.retry_after_s,
+        except TokenError:
+            # 会话载荷解封失败（篡改、挪用他局、非 init）。对外只给固定业务码，
+            # 具体原因只进服务端日志 —— 不给攻击者任何试探反馈。
+            world_session["init_rejected"] = True
+            logger.warning(
+                "world session payload rejected run_id=%s",
+                principal.run_id if principal else "-",
+                exc_info=True,
             )
-            close_code = 1013 if exc.reason == "CAPACITY_EXHAUSTED" else 1008
-            await websocket.close(code=close_code, reason=exc.reason)
-        except AdmissionQueueFull as exc:
-            await sender.error(f"realtime admission rejected: {exc.reason}")
-            await websocket.close(code=1013, reason=exc.reason)
-        except (WebSocketDisconnect, OutputRouteClosed):
-            pass
-        except Exception as exc:
             try:
-                await sender.error(
-                    f"realtime gateway error: {str(exc).splitlines()[0]}"
+                await asyncio.wait_for(
+                    sender.error("SESSION_INVALID", code="SESSION_INVALID"),
+                    timeout=browser_send_timeout_s,
+                )
+                await websocket.close(code=1008, reason="SESSION_INVALID")
+            except Exception:
+                pass
+        except CoordinatorRejected as exc:
+            world_session["admit_rejected"] = exc.reason
+            try:
+                await asyncio.wait_for(
+                    sender.error(
+                        f"realtime admission rejected: {exc.reason}",
+                        reason=exc.reason,
+                        retry_after_s=exc.retry_after_s,
+                    ),
+                    timeout=browser_send_timeout_s,
+                )
+                close_code = 1013 if exc.reason == "CAPACITY_EXHAUSTED" else 1008
+                await websocket.close(code=close_code, reason=exc.reason)
+            except Exception:
+                pass
+        except AdmissionQueueFull as exc:
+            try:
+                await asyncio.wait_for(
+                    sender.error(f"realtime admission rejected: {exc.reason}"),
+                    timeout=browser_send_timeout_s,
+                )
+                await websocket.close(code=1013, reason=exc.reason)
+            except Exception:
+                pass
+        except WebSocketDisconnect:
+            pass  # 浏览器断开：真正的 user_left
+        except OutputRouteClosed:
+            # 输出通道被系统侧关闭（VAE/路由异常）——不是用户行为
+            world_session["system_error"] = "output route closed"
+        except Exception as exc:
+            # str() 可能为空（如裸 TimeoutError），splitlines()[0] 会 IndexError
+            detail = (str(exc).splitlines() or [type(exc).__name__])[0]
+            world_session["system_error"] = detail
+            try:
+                # 出错时浏览器可能正是那个不读数据的对端 —— 通知必须限时，
+                # 否则会卡死在 finally 之前，席位永不释放（幽灵会话回魂）
+                await asyncio.wait_for(
+                    sender.error(f"realtime gateway error: {detail}"),
+                    timeout=browser_send_timeout_s,
                 )
                 await websocket.close(code=1011, reason="gateway session failed")
             except Exception:
@@ -851,33 +1071,109 @@ def create_app(
             _log_gateway_trace(
                 trace_id, "gateway.session_closed", session_id=session_id
             )
+            # D4：会话终局回调（fire-and-forget；丢失由业务后端 deadline 兜底）
+            if principal is not None and world_callbacks is not None:
+                if world_session.get("admit_rejected"):
+                    world_callbacks.aborted(
+                        principal.run_id, trace_id,
+                        fault="ours", reason=str(world_session["admit_rejected"]),
+                    )
+                elif world_session.get("init_rejected"):
+                    world_callbacks.aborted(
+                        principal.run_id, trace_id,
+                        fault="client", reason="init payload mismatch",
+                    )
+                elif assignment is None:
+                    world_callbacks.aborted(
+                        principal.run_id, trace_id, fault="ours", reason="not admitted"
+                    )
+                elif world_session.get("deadline_hit"):
+                    world_callbacks.ended(principal.run_id, trace_id, "completed")
+                elif world_session.get("system_error"):
+                    # 网关/引擎侧故障：fault=ours —— 业务侧免责处理，不消耗玩家局数
+                    world_callbacks.aborted(
+                        principal.run_id, trace_id,
+                        fault="ours", reason=str(world_session["system_error"])[:200],
+                    )
+                elif world_session.get("worker_finished"):
+                    world_callbacks.ended(principal.run_id, trace_id, "completed")
+                else:
+                    world_callbacks.ended(principal.run_id, trace_id, "user_left")
+            close_reason = (
+                "maximum session lifetime reached"
+                if world_session.get("deadline_hit")
+                else ""
+            )
             try:
-                await websocket.close(code=1000)
+                await websocket.close(code=1000, reason=close_reason)
             except Exception:
                 pass
 
-    @app.websocket("/backends/lingbot2/v1/realtime_video/generate")
-    async def generate_lingbot2(websocket: WebSocket):
-        await _generate_coordinator_session(
-            websocket,
-            selected_model_revision=lingbot2_model_revision,
-            selected_vae_fingerprint=(lingbot2_vae_fingerprint or vae_fingerprint),
-        )
+    # 无鉴权的 showcase 路由。启用 world 平台后默认不再注册 ——
+    # 否则 authorized_generate 的全部约束（时长、载荷密封、事件白名单）
+    # 换一条路径就整体绕过了，等于没做。本地开发与压测可显式打开。
+    if enable_legacy_routes:
 
-    @app.websocket("/backends/minwm/v1/realtime_video/generate")
-    @app.websocket("/v1/realtime_video/generate")
-    async def generate(websocket: WebSocket):
-        await _generate_coordinator_session(
-            websocket,
-            selected_model_revision=model_revision,
-            selected_vae_fingerprint=vae_fingerprint,
-        )
+        @app.websocket("/backends/lingbot2/v1/realtime_video/generate")
+        async def generate_lingbot2(websocket: WebSocket):
+            await _generate_coordinator_session(
+                websocket,
+                selected_model_revision=lingbot2_model_revision,
+                selected_vae_fingerprint=(
+                    lingbot2_vae_fingerprint or vae_fingerprint
+                ),
+            )
 
-    @app.get("/")
-    async def index():
-        return FileResponse(WEBUI_ROOT / "index.html")
+        @app.websocket("/backends/minwm/v1/realtime_video/generate")
+        @app.websocket("/v1/realtime_video/generate")
+        async def generate(websocket: WebSocket):
+            await _generate_coordinator_session(
+                websocket,
+                selected_model_revision=model_revision,
+                selected_vae_fingerprint=vae_fingerprint,
+            )
 
-    app.mount("/", StaticFiles(directory=WEBUI_ROOT), name="realtime-webui")
+    if world_platform is not None:
+        token_replay_guard = TokenReplayGuard()
+
+        @app.websocket("/backends/minwm/v1/realtime_video/authorized_generate")
+        async def authorized_generate(websocket: WebSocket):
+            """world 平台的鉴权路由：凭证验签 → 复用共享会话逻辑。
+
+            老路由（无鉴权）保持原样服务 showcase；本路由是新平台的唯一入口。
+            """
+            token = websocket.query_params.get("token") or ""
+            try:
+                principal = verify_session_token(token, world_platform.public_key)
+            except TokenError as exc:
+                # 对外只给固定业务码：区分「签名错」「过期」「aud 不符」等于给
+                # 伪造者一个逐字段试探的预言机。具体原因只进服务端日志。
+                logger.warning("world token rejected: %s", exc)
+                await websocket.accept()
+                await websocket.close(code=1008, reason="UNAUTHORIZED")
+                return
+            if not token_replay_guard.consume(principal):
+                # 凭证一次性（jti）：同一凭证第二次建会话直接拒绝
+                logger.warning("world token replayed run_id=%s", principal.run_id)
+                await websocket.accept()
+                await websocket.close(code=1008, reason="UNAUTHORIZED")
+                return
+            await _generate_coordinator_session(
+                websocket,
+                selected_model_revision=model_revision,
+                selected_vae_fingerprint=vae_fingerprint,
+                principal=principal,
+            )
+
+    # showcase 静态前端与老路由同一个开关：启用 world 鉴权后，
+    # 浏览器直连的这台网关上不该再挂一个能绕过鉴权的自助前端。
+    if enable_legacy_routes:
+
+        @app.get("/")
+        async def index():
+            return FileResponse(WEBUI_ROOT / "index.html")
+
+        app.mount("/", StaticFiles(directory=WEBUI_ROOT), name="realtime-webui")
     return app
 
 
@@ -916,11 +1212,43 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--readiness-coordinator-timeout-s", type=float, default=1.0)
     parser.add_argument("--readiness-coordinator-grace-s", type=float, default=30.0)
     parser.add_argument("--trace-log-group")
+    # ---- world 平台接入（全部提供才启用 authorized_generate 路由） ----
+    parser.add_argument("--world-token-ed25519-pub", default=os.environ.get("WORLD_TOKEN_ED25519_PUB", ""))
+    parser.add_argument("--world-callback-url", default=os.environ.get("WORLD_CALLBACK_URL", ""))
+    parser.add_argument("--world-callback-hmac-secret", default=os.environ.get("WORLD_CALLBACK_HMAC_SECRET", ""))
+    parser.add_argument(
+        "--enable-legacy-routes",
+        action="store_true",
+        help=(
+            "强制注册无鉴权的 showcase 路由/静态页/trace 查询。"
+            "默认：未配置 world 平台时自动开启，配置后自动关闭。"
+        ),
+    )
+    parser.add_argument("--browser-send-timeout-s", type=float, default=15.0)
     parser.add_argument(
         "--ui-config-json",
         default=os.environ.get("REALTIME_UI_CONFIG_JSON", "{}"),
     )
     return parser.parse_args()
+
+
+def _build_world_platform(args) -> WorldPlatformConfig | None:
+    """三项配置齐全才启用 world 平台路由；配置错误在启动期立即暴露。"""
+    if not (
+        args.world_token_ed25519_pub
+        and args.world_callback_url
+        and args.world_callback_hmac_secret
+    ):
+        return None
+    from sglang.multimodal_gen.runtime.realtime.world_platform import load_public_key
+
+    return WorldPlatformConfig(
+        public_key=load_public_key(args.world_token_ed25519_pub),
+        callback_url=args.world_callback_url,
+        callback_app_id="zing-gateway",
+        callback_key_id="k1",
+        callback_secret=args.world_callback_hmac_secret,
+    )
 
 
 def main() -> None:
@@ -963,8 +1291,20 @@ def main() -> None:
         readiness_coordinator_grace_s=args.readiness_coordinator_grace_s,
         ui_config=ui_config,
         trace_query=trace_query,
+        world_platform=_build_world_platform(args),
+        browser_send_timeout_s=args.browser_send_timeout_s,
+        enable_legacy_routes=True if args.enable_legacy_routes else None,
     )
-    uvicorn.run(app, host=args.host, port=args.port, log_level="info")
+    uvicorn.run(
+        app,
+        host=args.host,
+        port=args.port,
+        log_level="info",
+        # 显式钉死 keepalive：默认值一直是 20/20，但 pyproject 未锁 uvicorn 版本，
+        # 依赖漂移不该改变传输层契约（幽灵回收依赖它）
+        ws_ping_interval=20.0,
+        ws_ping_timeout=20.0,
+    )
 
 
 if __name__ == "__main__":
