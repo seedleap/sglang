@@ -23,6 +23,7 @@ dependencies = [
   "blobfile==3.0.0",
   "build",
   "compressed-tensors",
+  "cryptography>=42.0",  # realtime 网关 world 凭证验签（Ed25519）；主文件顶层 import，必须显式声明
   "cuda-python>=13.0",
   "datasets",
   "decord2 ; sys_platform == 'linux' and (platform_machine == 'aarch64' or platform_machine == 'arm64' or platform_machine == 'armv7l')",
