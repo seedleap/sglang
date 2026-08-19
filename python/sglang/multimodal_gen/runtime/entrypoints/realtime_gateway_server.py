@@ -737,8 +737,13 @@ def create_app(
                                 skills[str(item["id"])] = item
                     world_session["skills"] = skills
                     world_session["init_verified"] = True
-                    # 剥掉只给网关看的扩展块后再交给引擎
-                    return encode_message(**init_message)
+                    # 剥掉只给网关看的扩展块后再交给引擎。
+                    # encode_message 的签名是 (message_type, *, **fields)，
+                    # 且它自己会补 version —— 这两个键要从 fields 里摘掉，
+                    # 否则分别报 missing positional argument / duplicate keyword。
+                    init_message.pop("version", None)
+                    message_type = init_message.pop("type", "init")
+                    return encode_message(message_type, **init_message)
 
                 try:
                     control = decode_message(payload)
