@@ -11,7 +11,6 @@ from uuid import uuid4
 
 import msgspec.msgpack
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
-
 from sglang.multimodal_gen.runtime.entrypoints.openai.protocol import (
     RealtimeEvent,
     RealtimeVideoGenerationsRequest,
@@ -87,6 +86,7 @@ _REALTIME_RESULT_STAGE_MARKERS = ("vae", "denois")
 _RAW_FRAME_ASYNC_ENQUEUE_STAGE = "GPUWorker.raw_frame_async_enqueue"
 _ADMISSION_CONTROLLER: RealtimeAdmissionController | None = None
 _ADMISSION_CONFIG: tuple | None = None
+_GATEWAY_REMOTE_VAE_FALLBACK_BACKEND = "taehv_remote"
 
 
 class _OrderedDecodeCoordinator:
@@ -351,8 +351,8 @@ def _user_id_fingerprint(user_id: str) -> str:
 
 async def _session_watchdog(
     session: GenerateSession,
-    controller: RealtimeAdmissionController,
-    lease: SessionLease,
+    controller: RealtimeAdmissionController | None,
+    lease: SessionLease | None,
     *,
     idle_timeout_s: float,
     max_lifetime_s: float,
@@ -378,9 +378,40 @@ async def _session_watchdog(
         ):
             return "session idle timeout"
         try:
-            await controller.renew(lease)
+            if controller is not None and lease is not None:
+                await controller.renew(lease)
         except AdmissionRejected:
             return "session lease lost"
+
+
+def _mark_session_playable_from_server_output(
+    session: GenerateSession,
+    *,
+    source: str,
+    request_id: str | None = None,
+    chunk_index: int | None = None,
+    event_id: int | None = None,
+) -> None:
+    """Start the hard server-side lifetime once the server has emitted media.
+
+    Playback ACKs are useful telemetry, but they are client-controlled.  The
+    server-side max lifetime must not depend solely on ACKs, otherwise a
+    modified frontend can keep the GPU lease alive by sending heartbeats while
+    withholding the first "playable" ACK.
+    """
+
+    was_playable = session.playable_at is not None
+    session.mark_playable()
+    if not was_playable:
+        log_realtime_trace(
+            logger,
+            session,
+            "server.session_playable_marked",
+            source=source,
+            request_id=request_id,
+            chunk_index=chunk_index,
+            event_id=event_id,
+        )
 
 
 def _coerce_metric_ms(value: Any) -> float | None:
@@ -661,7 +692,7 @@ def _log_realtime_chunk_timing(
 
 async def _generate_loop(ws: WebSocket, session: GenerateSession):
     server_args = get_global_server_args()
-    deployment_backend = getattr(server_args, "realtime_vae_backend", "local")
+    deployment_backend = _resolve_realtime_vae_backend(session, server_args)
     if uses_remote_vae(deployment_backend):
         return await _generate_loop_async_vae(ws, session, server_args)
     if session.vae_worker_url:
@@ -669,6 +700,21 @@ async def _generate_loop(ws: WebSocket, session: GenerateSession):
             "Gateway supplied a remote VAE worker while realtime_vae_backend=local"
         )
     return await _generate_loop_local(ws, session)
+
+
+def _resolve_realtime_vae_backend(
+    session: GenerateSession,
+    server_args: Any,
+) -> str:
+    deployment_backend = getattr(server_args, "realtime_vae_backend", "local")
+    # Legacy production manifests enable remote VAE with
+    # --realtime-remote-vae-enabled and pass the concrete worker through
+    # Gateway, while newer code paths use --realtime-vae-backend.  Trust the
+    # assigned Gateway worker over the local default so older manifests do not
+    # accidentally force the local path.
+    if session.vae_worker_url and not uses_remote_vae(deployment_backend):
+        return _GATEWAY_REMOTE_VAE_FALLBACK_BACKEND
+    return deployment_backend
 
 
 def _merge_send_stats(
@@ -741,6 +787,7 @@ def _make_remote_frame_batch_handler(
 
     async def on_frame_batch(frame_batch: RemoteFrameBatch) -> None:
         nonlocal first_remote_batch
+        is_first_remote_batch = first_remote_batch
         if first_remote_batch:
             first_remote_batch = False
             log_realtime_trace(
@@ -759,6 +806,14 @@ def _make_remote_frame_batch_handler(
             frame_batch,
             send_stats,
         )
+        if is_first_remote_batch:
+            _mark_session_playable_from_server_output(
+                session,
+                source="remote_frame_batch_sent",
+                request_id=chunk.request_id,
+                chunk_index=chunk.index,
+                event_id=getattr(batch, "realtime_event_id", None),
+            )
 
     return on_frame_batch
 
@@ -778,6 +833,13 @@ async def _complete_remote_chunk(
 ) -> None:
     remote_result = await handle.wait()
     vae_completed = remote_result.completed_at
+    _mark_session_playable_from_server_output(
+        session,
+        source="remote_vae_complete",
+        request_id=chunk.request_id,
+        chunk_index=chunk.index,
+        event_id=getattr(batch, "realtime_event_id", None),
+    )
     session.vae_intervals[chunk.index] = (vae_started, vae_completed)
     next_denoise = session.denoise_intervals.get(chunk.index + 1)
     overlap_ms = None
@@ -906,20 +968,31 @@ async def _generate_loop_async_vae(ws, session: GenerateSession, server_args):
         vae_worker_url,
         session_id=session.id,
         generation_id=session.generation_id,
-        transport=server_args.realtime_vae_transport,
-        shared_memory_dir=server_args.realtime_vae_shared_memory_dir,
-        timeout_s=server_args.realtime_vae_timeout_s,
-        max_message_bytes=server_args.realtime_vae_max_message_mb * 1024 * 1024,
+        transport=getattr(server_args, "realtime_vae_transport", "auto"),
+        shared_memory_dir=getattr(server_args, "realtime_vae_shared_memory_dir", None),
+        timeout_s=getattr(server_args, "realtime_vae_timeout_s", 10.0),
+        max_message_bytes=(
+            getattr(server_args, "realtime_vae_max_message_mb", 64) * 1024 * 1024
+        ),
     )
     session.vae_client = client
-    session.vae_decoder_backend = worker_decoder_backend(
-        server_args.realtime_vae_backend
-    )
+    deployment_backend = _resolve_realtime_vae_backend(session, server_args)
+    session.vae_decoder_backend = worker_decoder_backend(deployment_backend)
     output_format = session.request.realtime_output_format or "webp"
     quality = int(session.request.output_compression or 90)
     coordinator = _OrderedDecodeCoordinator()
 
     try:
+        log_realtime_trace(
+            logger,
+            session,
+            "server.async_vae_open_start",
+            vae_worker_url=vae_worker_url,
+            output_url=getattr(session, "gateway_output_url", None),
+            output_format=output_format,
+            deployment_backend=deployment_backend,
+            decoder_backend=session.vae_decoder_backend,
+        )
         await client.open(
             decoder_backend=session.vae_decoder_backend,
             output_format=output_format,
@@ -931,6 +1004,7 @@ async def _generate_loop_async_vae(ws, session: GenerateSession, server_args):
             coordinator_token=getattr(session, "coordinator_token", None),
             worker_epoch=getattr(session, "vae_worker_epoch", None),
         )
+        log_realtime_trace(logger, session, "server.async_vae_open_done")
         while session.can_schedule_chunk():
             if coordinator.pending is not None and coordinator.pending.done():
                 await coordinator.finish()
@@ -1064,6 +1138,13 @@ async def _generate_loop_async_vae(ws, session: GenerateSession, server_args):
                 )
             )
         await coordinator.finish()
+        log_realtime_trace(
+            logger,
+            session,
+            "server.async_vae_loop_exit",
+            next_chunk_index=session.next_chunk_index,
+            max_chunks=session.request.max_chunks,
+        )
     except asyncio.CancelledError:
         await coordinator.cancel()
         raise
@@ -1073,6 +1154,13 @@ async def _generate_loop_async_vae(ws, session: GenerateSession, server_args):
     except Exception as exc:
         await coordinator.cancel()
         err_msg = str(exc).splitlines()[0]
+        log_realtime_trace(
+            logger,
+            session,
+            "server.async_vae_loop_error",
+            exception_type=type(exc).__name__,
+            exception_message=err_msg,
+        )
         logger.error("error during async VAE generate loop: %s", err_msg)
         try:
             await write_error_msg(f"error during generate loop: {err_msg}", ws)
@@ -1289,11 +1377,13 @@ async def _send_output_and_log(
             result,
             batch,
         )
-        # ACK-aware clients start their lifetime only after a frame is
-        # actually rendered. Legacy clients keep the historical first-send
-        # fallback so this protocol extension is backwards compatible.
-        if not session.playback_ack_enabled:
-            session.mark_playable()
+        _mark_session_playable_from_server_output(
+            session,
+            source="output_batch_sent",
+            request_id=chunk.request_id,
+            chunk_index=batch.block_idx,
+            event_id=getattr(batch, "realtime_event_id", None),
+        )
         send_stats["pace_wait_ms"] = pace_wait_ms
         chunk_total_ms = (time.perf_counter() - chunk_started) * 1000
         _log_realtime_chunk_timing(
@@ -1390,6 +1480,29 @@ async def _await_realtime_task(task: asyncio.Task | None) -> None:
         pass
     except Exception as e:
         logger.debug("realtime task exited with error: %s", e)
+
+
+def _realtime_task_trace_fields(task: asyncio.Task) -> dict[str, Any]:
+    fields: dict[str, Any] = {
+        "task_name": task.get_name(),
+        "task_cancelled": task.cancelled(),
+    }
+    if task.cancelled():
+        return fields
+    try:
+        exception = task.exception()
+    except asyncio.InvalidStateError:
+        fields["task_done"] = False
+        return fields
+    if exception is None:
+        fields["task_result"] = "completed"
+        return fields
+    fields.update(
+        task_result="error",
+        exception_type=type(exception).__name__,
+        exception_message=str(exception).splitlines()[0],
+    )
+    return fields
 
 
 async def _refresh_latest_queued_controls(
@@ -1836,6 +1949,11 @@ async def generate(websocket: WebSocket):
                     reason=exc.reason,
                 )
                 return
+        if (
+            controller is not None
+            or server_args.realtime_session_idle_timeout_s > 0
+            or server_args.realtime_session_max_lifetime_s > 0
+        ):
             watchdog_task = asyncio.create_task(
                 _session_watchdog(
                     session,
@@ -1847,7 +1965,8 @@ async def generate(websocket: WebSocket):
                     enforce_max_lifetime=not session.trace_id.startswith(
                         "startup-warmup-"
                     ),
-                )
+                ),
+                name="realtime-session-watchdog",
             )
         log_realtime_trace(
             logger,
@@ -1870,7 +1989,9 @@ async def generate(websocket: WebSocket):
                 )
             await _listen_generate_request(ws, session)
 
-        initialization_task = asyncio.create_task(initialize_session())
+        initialization_task = asyncio.create_task(
+            initialize_session(), name="realtime-initialize-session"
+        )
         if watchdog_task is None:
             await initialization_task
             init_close_reason = None
@@ -1891,19 +2012,52 @@ async def generate(websocket: WebSocket):
             return
 
         if worker_reservations is not None and worker_reservation_owner is not None:
-            await worker_reservations.mark_runnable(
-                gateway_config.coordinator_token,
-                owner_id=worker_reservation_owner,
+            log_realtime_trace(
+                logger,
+                session,
+                "server.gateway_reservation_mark_runnable_start",
+            )
+            try:
+                await worker_reservations.mark_runnable(
+                    gateway_config.coordinator_token,
+                    owner_id=worker_reservation_owner,
+                )
+            except WorkerReservationRejected as exc:
+                log_realtime_trace(
+                    logger,
+                    session,
+                    "server.gateway_reservation_mark_runnable_failed",
+                    reason=exc.reason,
+                )
+                raise AdmissionRejected(exc.reason) from exc
+            log_realtime_trace(
+                logger,
+                session,
+                "server.gateway_reservation_mark_runnable_done",
             )
 
         # continuously generate video chunk
-        generate_task = asyncio.create_task(_generate_loop(ws, session))
+        generate_task = asyncio.create_task(
+            _generate_loop(ws, session), name="realtime-generate-loop"
+        )
         # continuously listen for user events
-        listen_task = asyncio.create_task(_listen_events(ws, session))
+        listen_task = asyncio.create_task(
+            _listen_events(ws, session), name="realtime-listen-events"
+        )
         wait_tasks = [generate_task, listen_task]
         if watchdog_task is not None:
             wait_tasks.append(watchdog_task)
-        await asyncio.wait(wait_tasks, return_when=asyncio.FIRST_COMPLETED)
+        done, pending = await asyncio.wait(
+            wait_tasks, return_when=asyncio.FIRST_COMPLETED
+        )
+        for task in done:
+            log_realtime_trace(
+                logger,
+                session,
+                "server.realtime_task_completed",
+                pending_task_count=len(pending),
+                **_realtime_task_trace_fields(task),
+            )
         if generate_task.done() and session.reached_max_chunks():
             close_after_cleanup = (1000, "generation complete")
         elif watchdog_task is not None and watchdog_task.done():

@@ -28,13 +28,22 @@ import msgspec
 from aiohttp import WSMsgType, web
 from PIL import Image
 
-from sglang.multimodal_gen.runtime.realtime.critical_path_metrics import (
-    observe_client_metric_event,
-    observe_stage_seconds,
-    prometheus_content_type,
-    prometheus_latest,
-    result_from_exception,
-)
+try:
+    from sglang.multimodal_gen.runtime.realtime.critical_path_metrics import (
+        observe_client_metric_event,
+        observe_stage_seconds,
+        prometheus_content_type,
+        prometheus_latest,
+        result_from_exception,
+    )
+except ModuleNotFoundError:
+    from critical_path_metrics import (
+        observe_client_metric_event,
+        observe_stage_seconds,
+        prometheus_content_type,
+        prometheus_latest,
+        result_from_exception,
+    )
 
 LOGGER = logging.getLogger(__name__)
 H264_WS_MANAGER = web.AppKey("h264_websocket_bridge_manager", object)
@@ -55,6 +64,22 @@ def _bounded_int(value: Any, *, default: int, minimum: int, maximum: int) -> int
     except (TypeError, ValueError):
         parsed = default
     return max(minimum, min(maximum, parsed))
+
+
+def _safe_websocket_close_code(value: Any, *, default: int = 1000) -> int:
+    try:
+        code = int(value)
+    except (TypeError, ValueError):
+        code = default
+    if code in {1005, 1006, 1015}:
+        return 1011
+    if 1000 <= code < 5000:
+        return code
+    return default
+
+
+def _websocket_close_message(reason: Any) -> bytes:
+    return str(reason or "").encode("utf-8")[:120]
 
 
 def _decode_first_frame(value: Any) -> Any:
@@ -301,6 +326,11 @@ class H264WebSocketSession:
             elif message.type == WSMsgType.TEXT:
                 await self._send_json({"type": "upstream", "data": message.data})
             elif message.type in {WSMsgType.CLOSE, WSMsgType.CLOSED, WSMsgType.ERROR}:
+                if not self.websocket.closed:
+                    await self.websocket.close(
+                        code=_safe_websocket_close_code(message.data),
+                        message=_websocket_close_message(message.extra),
+                    )
                 break
 
     async def _receive_controls(self) -> None:

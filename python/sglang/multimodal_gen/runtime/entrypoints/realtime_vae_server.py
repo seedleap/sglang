@@ -8,6 +8,7 @@ import logging
 import os
 import time
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
@@ -37,6 +38,10 @@ from sglang.multimodal_gen.runtime.realtime.async_vae_worker import (
     AsyncVAEWorker,
     SessionOpen,
     TAEHVEngine,
+)
+from sglang.multimodal_gen.runtime.realtime.h264_media_pipeline import (
+    H264MediaPipeline,
+    H264PipelineConfig,
 )
 from sglang.multimodal_gen.runtime.realtime.worker_reservation import (
     WorkerReservationRegistry,
@@ -77,6 +82,7 @@ def create_app(
     max_message_bytes: int,
     reservation_registry: WorkerReservationRegistry | None = None,
     shared_memory_dir: str | Path | None = None,
+    h264_config: H264PipelineConfig | None = None,
 ) -> FastAPI:
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -103,6 +109,12 @@ def create_app(
                 "decode_parallel_size": getattr(
                     worker.engine, "decode_parallel_size", 1
                 ),
+                "direct_h264_output": bool(h264_config and h264_config.enabled),
+                "direct_h264_trigger_output_format": (
+                    h264_config.trigger_output_format
+                    if h264_config is not None and h264_config.enabled
+                    else None
+                ),
             }
         )
 
@@ -116,6 +128,7 @@ def create_app(
         identity = None
         trace_session = None
         output_client = None
+        h264_pipeline = None
         reservation_token = None
         reservation_owner = uuid4().hex
         reservation_consumed = False
@@ -189,6 +202,25 @@ def create_app(
                             max_message_bytes=max_message_bytes,
                         )
                         await output_client.open()
+                        h264_requested = bool(
+                            h264_config is not None
+                            and h264_config.enabled
+                            and opened.output_format.lower()
+                            == h264_config.trigger_output_format
+                        )
+                        if h264_requested:
+                            h264_pipeline = H264MediaPipeline(
+                                session_id=opened.session_id,
+                                generation_id=opened.generation_id,
+                                send=output_client.send,
+                                config=h264_config,
+                            )
+                            # The legacy denoiser knows only raw/webp/jpeg.  A
+                            # direct browser opts into VAE-side H.264 with the
+                            # configured compressed-format sentinel.  Rewrite
+                            # it before opening the worker so RGB is handed to
+                            # the local encoder instead of being JPEG encoded.
+                            opened = replace(opened, output_format="raw")
                     identity = await _bind_socket_session(worker, identity, opened)
                     trace_session = SimpleNamespace(
                         id=opened.session_id,
@@ -258,6 +290,9 @@ def create_app(
                 )
 
                 async def on_frame_batch(frame_batch, *, header=header):
+                    if h264_pipeline is not None:
+                        h264_pipeline.enqueue(header, frame_batch)
+                        return
                     payload_lengths = [len(value) for value in frame_batch.payloads]
                     source_width = getattr(
                         frame_batch, "source_width", frame_batch.width
@@ -393,7 +428,12 @@ def create_app(
                             duration_ms=round(result.encode_ms, 3),
                             **common_trace,
                         )
-                        if output_client is not None:
+                        if h264_pipeline is not None:
+                            h264_pipeline.enqueue_completion(
+                                header,
+                                num_frames=result.num_frames,
+                            )
+                        elif output_client is not None:
                             completion_started = time.perf_counter()
                             await output_client.send(
                                 encode_message(
@@ -483,6 +523,8 @@ def create_app(
                 await asyncio.gather(*finish_tasks, return_exceptions=True)
             if identity is not None:
                 await worker.close(*identity)
+            if h264_pipeline is not None:
+                await h264_pipeline.close()
             if output_client is not None:
                 await output_client.close()
 
@@ -490,7 +532,7 @@ def create_app(
 
 
 def _add_worker_cli_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--decoder-backend", choices=("exact", "taehv"), required=True)
+    parser.add_argument("--decoder-backend", choices=("exact", "taehv"))
     parser.add_argument("--checkpoint-path")
     parser.add_argument("--vae-path")
     parser.add_argument("--host", default="0.0.0.0")
@@ -504,12 +546,44 @@ def _add_worker_cli_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--max-message-mb", type=int, default=64)
     parser.add_argument("--shared-memory-dir")
     parser.add_argument("--worker-epoch")
+    parser.add_argument("--direct-h264-output", action="store_true")
+    parser.add_argument(
+        "--direct-h264-trigger-output-format",
+        choices=("jpeg", "webp"),
+        default="jpeg",
+    )
+    parser.add_argument("--h264-ffmpeg-bin", default="ffmpeg")
+    parser.add_argument("--h264-fps", type=int, default=24)
+    parser.add_argument("--h264-threads", type=int, default=2)
+    parser.add_argument("--h264-preset", default="fast")
+    parser.add_argument("--h264-profile", default="main")
+    parser.add_argument("--h264-crf", type=int, default=20)
+    parser.add_argument("--h264-bitrate-kbps", type=int, default=3000)
+    parser.add_argument("--h264-vbv-buffer-ms", type=int, default=250)
+    parser.add_argument("--h264-gop-seconds", type=int, default=2)
+    parser.add_argument("--h264-max-queued-frames", type=int, default=24)
+    parser.add_argument("--h264-max-frame-age-ms", type=int, default=250)
+    parser.add_argument("--h264-live-edge-frames", type=int, default=6)
+    parser.add_argument("--h264-startup-drop-frames", type=int, default=0)
+    parser.add_argument(
+        "--h264-raw-channel-order", choices=("rgb", "gbr"), default="rgb"
+    )
 
 
 def _parse_worker_args(argv: list[str] | None):
     pre_parser = argparse.ArgumentParser(add_help=False)
     _add_worker_cli_args(pre_parser)
     known, remaining = pre_parser.parse_known_args(argv)
+    if known.decoder_backend is None:
+        if known.checkpoint_path and not known.vae_path:
+            known.decoder_backend = "taehv"
+        elif known.vae_path and not known.checkpoint_path:
+            known.decoder_backend = "exact"
+        else:
+            pre_parser.error(
+                "--decoder-backend is required unless exactly one of "
+                "--checkpoint-path or --vae-path is provided"
+            )
     if known.decoder_backend == "taehv":
         if remaining:
             pre_parser.error("unrecognized arguments: " + " ".join(remaining))
@@ -686,6 +760,26 @@ def _run_worker(args, exact_server_args) -> None:
         max_message_bytes=args.max_message_mb * 1024 * 1024,
         reservation_registry=reservations,
         shared_memory_dir=args.shared_memory_dir,
+        h264_config=H264PipelineConfig(
+            enabled=args.direct_h264_output,
+            trigger_output_format=args.direct_h264_trigger_output_format,
+            ffmpeg_bin=args.h264_ffmpeg_bin,
+            fps=args.h264_fps,
+            threads=args.h264_threads,
+            preset=args.h264_preset,
+            profile=args.h264_profile,
+            crf=args.h264_crf,
+            bitrate_kbps=args.h264_bitrate_kbps,
+            vbv_buffer_ms=args.h264_vbv_buffer_ms,
+            gop_seconds=args.h264_gop_seconds,
+            max_queued_frames=args.h264_max_queued_frames,
+            max_frame_age_ms=args.h264_max_frame_age_ms,
+            live_edge_frames=args.h264_live_edge_frames,
+            startup_drop_frames=args.h264_startup_drop_frames,
+            raw_channel_order=args.h264_raw_channel_order,
+            service=os.environ.get("WORLD_MODEL_METRIC_SERVICE", "vae"),
+            model=os.environ.get("WORLD_MODEL_METRIC_MODEL", "unknown"),
+        ),
     )
     try:
         uvicorn.run(app, host=args.host, port=args.port, log_level="info")

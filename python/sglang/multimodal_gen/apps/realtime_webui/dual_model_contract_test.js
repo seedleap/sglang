@@ -146,6 +146,16 @@ assert.match(
   /"h264StartupDropFrames",[\s\S]*?key === "lingbot2" \? 8 : 0/,
   "LingBot2 should hide eight startup transition frames without changing Zing",
 );
+assert.match(
+  app,
+  /const openEndedRequest = generationMode === "i2v" \|\| continuousT2V;[\s\S]*?num_frames: openEndedRequest \? undefined : numFrames,[\s\S]*?max_chunks: generationMode === "t2v" \|\| openEndedRequest \? undefined : 1,/,
+  "shared i2v realtime snapshots must be open-ended and rely on the server lifetime watchdog",
+);
+assert.match(
+  app,
+  /const openEndedRequest = generationMode === "i2v" \|\| continuous;[\s\S]*?num_frames: openEndedRequest \? undefined : requestedFrames,[\s\S]*?max_chunks: generationMode === "t2v" \|\| openEndedRequest \? undefined : 1,/,
+  "per-model i2v realtime init must not inherit preset num_frames/max_chunks",
+);
 for (const id of [
   "size", "fps", "numFrames", "seed", "steps", "guidance", "sinkSize",
   "windowFrames", "transportFormat", "transportQuality", "playbackMode",
@@ -203,11 +213,11 @@ for (const selector of ["model-slot-config", "stage-controls", "prompt-update-he
 assert.match(html, /playback_controller\.js\?v=realtime-playback-v34/);
 assert.match(html, /model_session\.js\?v=dual-h264-telemetry-v1/);
 assert.match(html, /dual_model_controller\.js\?v=dual-model-v6/);
-assert.match(html, /h264_websocket_session\.js\?v=h264-stage-timing-v1/);
+assert.match(html, /h264_websocket_session\.js\?v=h264-direct-gateway-userid-v2/);
 assert.match(html, /prompt_rewrite_controller\.js\?v=prompt-rewrite-v3/);
 assert.match(html, /world_rules_controller\.js\?v=world-rules-v4/);
 assert.match(html, /styles\.css\?v=world-studio-h264-rules-v6/);
-assert.match(html, /app\.js\?v=world-studio-transport-telemetry-v4/);
+assert.match(html, /app\.js\?v=world-studio-transport-h264-userid-v5/);
 assert.match(html, /id="minwmH264Viewport"/);
 assert.match(html, /id="lingbot2H264Viewport"/);
 assert.match(html, /id="minwmPerfScheduler"/);
@@ -326,6 +336,21 @@ assert.match(app, /secureBaseUrl/);
 assert.match(app, /function h264WebSocketEndpoint\(key\)/);
 assert.match(app, /UI_CONFIG\.h264WebSocketBaseUrl/);
 assert.match(app, /endpoint: h264WebSocketEndpoint\(key\)/);
+assert.match(app, /async function connectH264SessionWithRetry\(key, h264Session, init, url = ""\)/);
+assert.match(app, /H264_CONNECT_MAX_ATTEMPTS/);
+assert.match(app, /H264_RUNTIME_RECONNECT_MAX_ATTEMPTS/);
+assert.match(app, /recovering: "重连中"/);
+assert.doesNotMatch(app, /自动回退 WebP/);
+assert.match(
+  app,
+  /if \(H264_WEBSOCKET_REQUESTED\) \{[\s\S]*?await connectH264SessionWithRetry\("minwm", minwmH264Session, init, url\);[\s\S]*?return;[\s\S]*?\}[\s\S]*?return openPrimarySession\(init, url\);/,
+  "Zing should retry H.264 and only use WebP when H.264 is explicitly disabled",
+);
+assert.match(
+  app,
+  /if \(H264_WEBSOCKET_REQUESTED\) \{[\s\S]*?await connectH264SessionWithRetry\(key, h264Session, init, url\);[\s\S]*?return;[\s\S]*?\}[\s\S]*?return fallbackSession\.connect\(init, url\);/,
+  "secondary models should retry H.264 and must not automatically fall back to WebP",
+);
 assert.match(app, /"not-allowed": "麦克风未授权"/);
 assert.match(app, /status\.textContent = next \? "正在聆听" : idleStatus/);
 assert.match(

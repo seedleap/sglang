@@ -185,6 +185,22 @@ spec:
             # browser playback can smooth jitter without waiting on a mini-batch.
             - --encoded-frames-per-batch=1
             - --encode-workers=4
+            # Production H.264 is encoded beside the VAE. Raw RGB never
+            # crosses the VAE -> Gateway Pod boundary.
+            - --direct-h264-output
+            - --direct-h264-trigger-output-format=jpeg
+            - --h264-fps=24
+            - --h264-threads=2
+            - --h264-preset=fast
+            - --h264-profile=main
+            - --h264-crf=20
+            - --h264-bitrate-kbps=3000
+            - --h264-vbv-buffer-ms=250
+            - --h264-gop-seconds=2
+            - --h264-max-queued-frames=24
+            - --h264-max-frame-age-ms=250
+            - --h264-live-edge-frames=6
+            - --h264-startup-drop-frames=0
             - --max-message-mb=64
             - --host=0.0.0.0
             - --port=18081
@@ -338,6 +354,20 @@ spec:
             - --max-sessions=16
             - --queue-depth-per-session=1
             - --encoded-frames-per-batch=1
+            - --direct-h264-output
+            - --direct-h264-trigger-output-format=jpeg
+            - --h264-fps=16
+            - --h264-threads=2
+            - --h264-preset=fast
+            - --h264-profile=main
+            - --h264-crf=20
+            - --h264-bitrate-kbps=3000
+            - --h264-vbv-buffer-ms=250
+            - --h264-gop-seconds=2
+            - --h264-max-queued-frames=24
+            - --h264-max-frame-age-ms=250
+            - --h264-live-edge-frames=6
+            - --h264-startup-drop-frames=8
             - --max-message-mb=64
             - --host=0.0.0.0
             - --port=18081

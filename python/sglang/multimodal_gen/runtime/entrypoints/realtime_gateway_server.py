@@ -8,7 +8,6 @@ import argparse
 import asyncio
 import json
 import logging
-import hashlib
 import os
 import secrets
 import time
@@ -23,9 +22,6 @@ import uvicorn
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
-from websockets.asyncio.client import connect
-from websockets.exceptions import ConnectionClosedOK
-
 from sglang.multimodal_gen.runtime.realtime.async_vae_protocol import (
     ProtocolViolation,
     decode_message,
@@ -44,15 +40,6 @@ from sglang.multimodal_gen.runtime.realtime.critical_path_metrics import (
     prometheus_latest,
     result_from_exception,
 )
-from sglang.multimodal_gen.runtime.realtime.world_platform import (
-    Principal,
-    SessionPayloadSealer,
-    TokenError,
-    TokenReplayGuard,
-    WorldCallbacks,
-    WorldPlatformConfig,
-    verify_session_token,
-)
 from sglang.multimodal_gen.runtime.realtime.gateway import (
     AdmissionQueueFull,
     BoundedAdmissionWaiterGate,
@@ -65,11 +52,22 @@ from sglang.multimodal_gen.runtime.realtime.gateway import (
     worker_message_allowed,
     worker_message_type,
 )
+from sglang.multimodal_gen.runtime.realtime.world_platform import (
+    Principal,
+    SessionPayloadSealer,
+    TokenError,
+    TokenReplayGuard,
+    WorldCallbacks,
+    WorldPlatformConfig,
+    verify_session_token,
+)
 from sglang.multimodal_gen.runtime.utils.realtime_trace import (
     compact_client_trace_event,
     emit_realtime_trace_payload,
     normalize_trace_id,
 )
+from websockets.asyncio.client import connect
+from websockets.exceptions import ConnectionClosedOK
 
 WEBUI_ROOT = Path(__file__).resolve().parents[2] / "apps" / "realtime_webui"
 logger = logging.getLogger(__name__)
@@ -166,7 +164,7 @@ def _codec_from_message(message: dict[str, Any]) -> str:
 
 def _metric_scope_for_message(message: dict[str, Any]) -> str:
     message_type = message.get("type")
-    if message_type == "frame_batch":
+    if message_type in {"frame_batch", "media_batch", "media_payload"}:
         return "frame"
     if message_type in {"chunk_telemetry", "media_chunk_complete"}:
         return "chunk"
@@ -349,6 +347,8 @@ def create_app(
     lingbot2_vae_fingerprint: str | None = None,
     output_queue_depth: int = 64,
     output_enqueue_timeout_s: float = 0.0,
+    output_queue_max_bytes: int = 16 * 1024 * 1024,
+    output_queue_max_messages: int = 256,
     output_drain_timeout_s: float = 5.0,
     lease_renew_interval_s: float = 10.0,
     release_grace_s: float = 0.5,
@@ -393,6 +393,8 @@ def create_app(
     registry = GatewayOutputRegistry(
         queue_depth=output_queue_depth,
         enqueue_timeout_s=output_enqueue_timeout_s,
+        max_queue_bytes=output_queue_max_bytes,
+        max_queue_messages=output_queue_max_messages,
     )
     admission_gate = BoundedAdmissionWaiterGate(max_waiters=max_admission_waiters)
 
@@ -1081,13 +1083,17 @@ def create_app(
             if principal is not None and world_callbacks is not None:
                 if world_session.get("admit_rejected"):
                     world_callbacks.aborted(
-                        principal.run_id, trace_id,
-                        fault="ours", reason=str(world_session["admit_rejected"]),
+                        principal.run_id,
+                        trace_id,
+                        fault="ours",
+                        reason=str(world_session["admit_rejected"]),
                     )
                 elif world_session.get("init_rejected"):
                     world_callbacks.aborted(
-                        principal.run_id, trace_id,
-                        fault="client", reason="init payload mismatch",
+                        principal.run_id,
+                        trace_id,
+                        fault="client",
+                        reason="init payload mismatch",
                     )
                 elif assignment is None:
                     world_callbacks.aborted(
@@ -1098,8 +1104,10 @@ def create_app(
                 elif world_session.get("system_error"):
                     # 网关/引擎侧故障：fault=ours —— 业务侧免责处理，不消耗玩家局数
                     world_callbacks.aborted(
-                        principal.run_id, trace_id,
-                        fault="ours", reason=str(world_session["system_error"])[:200],
+                        principal.run_id,
+                        trace_id,
+                        fault="ours",
+                        reason=str(world_session["system_error"])[:200],
                     )
                 elif world_session.get("worker_finished"):
                     world_callbacks.ended(principal.run_id, trace_id, "completed")
@@ -1124,9 +1132,7 @@ def create_app(
             await _generate_coordinator_session(
                 websocket,
                 selected_model_revision=lingbot2_model_revision,
-                selected_vae_fingerprint=(
-                    lingbot2_vae_fingerprint or vae_fingerprint
-                ),
+                selected_vae_fingerprint=(lingbot2_vae_fingerprint or vae_fingerprint),
             )
 
         @app.websocket("/backends/minwm/v1/realtime_video/generate")
@@ -1209,6 +1215,8 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--output-queue-depth", type=int, default=64)
     parser.add_argument("--output-enqueue-timeout-s", type=float, default=0.0)
+    parser.add_argument("--output-queue-max-bytes", type=int, default=16 * 1024 * 1024)
+    parser.add_argument("--output-queue-max-messages", type=int, default=256)
     parser.add_argument("--output-drain-timeout-s", type=float, default=5.0)
     parser.add_argument("--lease-renew-interval-s", type=float, default=10.0)
     parser.add_argument("--release-grace-s", type=float, default=0.5)
@@ -1217,9 +1225,17 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--readiness-coordinator-grace-s", type=float, default=30.0)
     parser.add_argument("--trace-log-group")
     # ---- world 平台接入（全部提供才启用 authorized_generate 路由） ----
-    parser.add_argument("--world-token-ed25519-pub", default=os.environ.get("WORLD_TOKEN_ED25519_PUB", ""))
-    parser.add_argument("--world-callback-url", default=os.environ.get("WORLD_CALLBACK_URL", ""))
-    parser.add_argument("--world-callback-hmac-secret", default=os.environ.get("WORLD_CALLBACK_HMAC_SECRET", ""))
+    parser.add_argument(
+        "--world-token-ed25519-pub",
+        default=os.environ.get("WORLD_TOKEN_ED25519_PUB", ""),
+    )
+    parser.add_argument(
+        "--world-callback-url", default=os.environ.get("WORLD_CALLBACK_URL", "")
+    )
+    parser.add_argument(
+        "--world-callback-hmac-secret",
+        default=os.environ.get("WORLD_CALLBACK_HMAC_SECRET", ""),
+    )
     parser.add_argument(
         "--disable-legacy-routes",
         action="store_true",
@@ -1288,6 +1304,8 @@ def main() -> None:
         lingbot2_vae_fingerprint=args.lingbot2_vae_fingerprint,
         output_queue_depth=args.output_queue_depth,
         output_enqueue_timeout_s=args.output_enqueue_timeout_s,
+        output_queue_max_bytes=args.output_queue_max_bytes,
+        output_queue_max_messages=args.output_queue_max_messages,
         output_drain_timeout_s=args.output_drain_timeout_s,
         lease_renew_interval_s=args.lease_renew_interval_s,
         release_grace_s=args.release_grace_s,

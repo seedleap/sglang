@@ -9,7 +9,9 @@ from h264_websocket_bridge import (
     H264WebSocketBridgeManager,
     H264WebSocketSession,
     _raw_channel_filter,
+    _safe_websocket_close_code,
     _split_payload,
+    _websocket_close_message,
 )
 
 
@@ -21,6 +23,16 @@ def test_split_raw_rgb_payload_into_frames():
         "channels": 3,
     }
     assert _split_payload(header, b"abcdefABCDEF") == [b"abcdef", b"ABCDEF"]
+
+
+def test_upstream_close_details_are_safe_for_browser_websocket():
+    assert _safe_websocket_close_code(1000) == 1000
+    assert _safe_websocket_close_code(1006) == 1011
+    assert _safe_websocket_close_code("bad") == 1000
+    assert _websocket_close_message("maximum session lifetime reached") == (
+        b"maximum session lifetime reached"
+    )
+    assert len(_websocket_close_message("x" * 200)) == 120
 
 
 def test_backend_resolver_and_channel_order(monkeypatch):

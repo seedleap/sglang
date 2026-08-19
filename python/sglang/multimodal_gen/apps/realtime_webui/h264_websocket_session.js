@@ -44,6 +44,45 @@
     return "error";
   }
 
+  function closeDetails(event) {
+    const code = Number(event?.code || 0);
+    const reason = String(event?.reason || "");
+    return {
+      code,
+      reason,
+      wasClean: Boolean(event?.wasClean),
+      message: `H.264 WebSocket closed (${code || "unknown"}): ${reason || "unknown"}`,
+    };
+  }
+
+  function isTerminalCloseReason(reason) {
+    const value = String(reason || "").toLowerCase();
+    return [
+      "maximum session lifetime reached",
+      "generation complete",
+      "session idle timeout",
+      "session closed",
+      "session closed by client",
+      "disabled for request",
+    ].some((token) => value.includes(token));
+  }
+
+  function resolveEndpoint(configuredEndpoint, location = global.location) {
+    const endpoint = String(configuredEndpoint || "").trim();
+    const protocol = location?.protocol === "https:" ? "wss:" : "ws:";
+    const host = location?.host || "localhost";
+    if (endpoint.startsWith("ws")) return endpoint;
+    try {
+      const url = new URL(endpoint || "/", `${protocol}//${host}/`);
+      if (url.protocol === "https:") url.protocol = "wss:";
+      if (url.protocol === "http:") url.protocol = "ws:";
+      if (url.protocol === "ws:" || url.protocol === "wss:") return url.toString();
+    } catch {
+      // Fall through to the simple path join below.
+    }
+    return `${protocol}//${host}${endpoint.startsWith("/") ? "" : "/"}${endpoint}`;
+  }
+
   class H264WebSocketSession {
     constructor({
       video,
@@ -62,6 +101,9 @@
       MediaSourceImpl = global.MediaSource,
       metricFlushMs = 250,
       maxMetricBatch = 32,
+      directGateway = false,
+      packMessage = null,
+      unpackMessage = null,
     }) {
       if (!video) throw new Error("H264WebSocketSession requires a video element");
       this.video = video;
@@ -83,6 +125,12 @@
       this.MediaSourceImpl = MediaSourceImpl;
       this.metricFlushMs = Math.max(0, Number(metricFlushMs) || 0);
       this.maxMetricBatch = Math.max(1, Number(maxMetricBatch) || 32);
+      this.directGateway = directGateway === true;
+      this.packMessage = packMessage;
+      this.unpackMessage = unpackMessage;
+      if (this.directGateway && (!this.packMessage || !this.unpackMessage)) {
+        throw new Error("Direct H.264 Gateway mode requires MessagePack codecs");
+      }
       this.socket = null;
       this.mediaSource = null;
       this.sourceBuffer = null;
@@ -90,6 +138,7 @@
       this.generation = 0;
       this.state = "idle";
       this.playable = false;
+      this.startupConnected = false;
       this.expectedClose = false;
       this.appendQueue = [];
       this.appendQueueBytes = 0;
@@ -137,7 +186,7 @@
       return { ...this.lastStats, state: this.state, connected: this.connected };
     }
 
-    async connect(init) {
+    async connect(init, endpointOverride = "") {
       await this.close("replace H.264 WebSocket session", { emitState: false });
       if (!this.WebSocketImpl || !this.MediaSourceImpl) {
         throw new Error("This browser does not support WebSocket MSE playback");
@@ -148,6 +197,7 @@
       const generation = ++this.generation;
       this.expectedClose = false;
       this.playable = false;
+      this.startupConnected = false;
       this.traceId = String(init.trace_id || "");
       this.mediaFps = Math.max(1, Number(init.fps || 24));
       this.playbackAckEnabled = init.playback_ack_enabled === true;
@@ -192,13 +242,13 @@
         this._fail(new Error("H.264 MSE SourceBuffer error"));
       });
 
-      const firstFrame = await bytesToDataUrl(init.first_frame);
+      const firstFrame = this.directGateway
+        ? (init.first_frame instanceof ArrayBuffer
+          ? new Uint8Array(init.first_frame)
+          : init.first_frame)
+        : await bytesToDataUrl(init.first_frame);
       return new Promise((resolve, reject) => {
-        const protocol = global.location?.protocol === "https:" ? "wss:" : "ws:";
-        const host = global.location?.host || "localhost";
-        const endpoint = this.endpoint.startsWith("ws")
-          ? this.endpoint
-          : `${protocol}//${host}${this.endpoint.startsWith("/") ? "" : "/"}${this.endpoint}`;
+        const endpoint = resolveEndpoint(endpointOverride || this.endpoint);
         const socket = new this.WebSocketImpl(endpoint);
         this.socket = socket;
         socket.binaryType = "arraybuffer";
@@ -212,7 +262,15 @@
         socket.onopen = () => {
           if (generation !== this.generation) return;
           const serializeStartedAt = performance.now();
-          const payload = JSON.stringify({ ...init, first_frame: firstFrame });
+          const directInit = this.directGateway
+            // JPEG is an opt-in sentinel understood by the dedicated VAE
+            // deployment. The VAE rewrites it to raw locally, then emits
+            // H.264/fMP4; no JPEG or RGB crosses the network.
+            ? { ...init, first_frame: firstFrame, realtime_output_format: "jpeg" }
+            : { ...init, first_frame: firstFrame };
+          const payload = this.directGateway
+            ? this.packMessage(directInit)
+            : JSON.stringify(directInit);
           socket.send(payload);
           this._queueMetric(
             "client_serialize_queue",
@@ -222,13 +280,20 @@
         };
         socket.onmessage = (message) => {
           if (generation !== this.generation) return;
-          if (typeof message.data !== "string") {
+          if (!this.directGateway && typeof message.data !== "string") {
             this._queueMedia(message.data);
             return;
           }
           try {
-            const event = JSON.parse(message.data);
-            if (event.type === "status" && event.state === "connected") {
+            const event = this.directGateway
+              ? this.unpackMessage(new Uint8Array(message.data))
+              : JSON.parse(message.data);
+            if (
+              (event.type === "status" && event.state === "connected")
+              || event.type === "session_ready"
+              || (this.directGateway && event.type === "media_init")
+            ) {
+              this.startupConnected = true;
               if (!settled) {
                 settled = true;
                 global.clearTimeout(timer);
@@ -236,38 +301,46 @@
               }
               return;
             }
-            if (event.type === "error") throw new Error(event.message || "H.264 WebSocket error");
+            if (event.type === "error") {
+              throw new Error(
+                event.message || event.content || event.reason || "H.264 WebSocket error",
+              );
+            }
+            if (event.type === "media_payload" && event.payload) {
+              this._handleMetadata(event);
+              this._queueMedia(event.payload);
+              return;
+            }
             this._handleMetadata(event);
           } catch (error) {
+            const phase = settled ? "runtime" : "startup";
             if (!settled) {
               settled = true;
               global.clearTimeout(timer);
               reject(error);
             }
-            this._fail(error);
+            error.h264Phase = phase;
+            this._fail(error, {
+              phase,
+              recoverable: phase === "runtime",
+            });
           }
         };
         socket.onerror = () => {
           if (generation !== this.generation) return;
           const error = new Error("H.264 WebSocket transport error");
+          error.h264Phase = settled ? "runtime" : "startup";
           if (!settled) {
             settled = true;
             global.clearTimeout(timer);
             reject(error);
           }
-          this._fail(error);
+          this._fail(error, { phase: error.h264Phase, recoverable: error.h264Phase === "runtime" });
         };
         socket.onclose = (event) => {
           if (generation !== this.generation) return;
           global.clearTimeout(timer);
-          this.socket = null;
-          if (!this.expectedClose) {
-            const error = new Error(
-              `H.264 WebSocket closed (${event.code}): ${event.reason || "unknown"}`,
-            );
-            if (!settled) reject(error);
-            this._fail(error);
-          }
+          settled = this._handleSocketClose(event, { settled, reject });
         };
       });
     }
@@ -285,7 +358,10 @@
         }
       }
       const serializeStartedAt = performance.now();
-      const payload = JSON.stringify({ ...envelope, trace_id: this.traceId });
+      const outgoing = { ...envelope, trace_id: this.traceId };
+      const payload = this.directGateway
+        ? this.packMessage(outgoing)
+        : JSON.stringify(outgoing);
       this.socket.send(payload);
       this._queueMetric(
         "client_serialize_queue",
@@ -329,7 +405,9 @@
         ? { type: "client_metric", ...events[0] }
         : { type: "client_metric_batch", events };
       try {
-        this.socket.send(JSON.stringify(payload));
+        this.socket.send(
+          this.directGateway ? this.packMessage(payload) : JSON.stringify(payload),
+        );
       } catch {
         this.metricBuffer.unshift(...events);
       }
@@ -339,6 +417,40 @@
       if (!this.metricFlushTimer) return;
       global.clearTimeout(this.metricFlushTimer);
       this.metricFlushTimer = 0;
+    }
+
+    _stopTimersAndFlushMetrics() {
+      if (this.statsTimer) global.clearInterval(this.statsTimer);
+      this.statsTimer = 0;
+      this._flushClientMetrics();
+      this._clearMetricFlushTimer();
+    }
+
+    _handleSocketClose(event, { settled = true, reject = () => {} } = {}) {
+      const details = closeDetails(event);
+      this.socket = null;
+      if (this.expectedClose) return settled;
+
+      if (settled && isTerminalCloseReason(details.reason)) {
+        this._stopTimersAndFlushMetrics();
+        this._setState("closed", details);
+        return true;
+      }
+
+      const error = new Error(details.message);
+      error.h264CloseCode = details.code;
+      error.h264CloseReason = details.reason;
+      error.h264WasClean = details.wasClean;
+      error.h264Phase = settled ? "runtime" : "startup";
+      if (!settled) {
+        reject(error);
+      }
+      this._fail(error, {
+        phase: error.h264Phase,
+        recoverable: error.h264Phase === "runtime",
+        ...details,
+      });
+      return true;
     }
 
     async close(reason = "H.264 WebSocket session closed", { emitState = true } = {}) {
@@ -377,6 +489,7 @@
       this.mediaBatches = [];
       this.controlSentEpochByEvent.clear();
       this.playable = false;
+      this.startupConnected = false;
       if (emitState && hadSession) this._setState("closed", { reason });
     }
 
@@ -513,19 +626,27 @@
           eventId: Number(event.event_id || 0),
           frameBatchIndex: Number(event.frame_batch_index || 0),
           isFinalFrameBatch: Boolean(event.is_final_frame_batch),
-          bridgeEncodedEpochMs: Number(event.bridge_encoded_epoch_ms || 0),
-          bridgeEncodeStartedEpochMs: Number(
-            event.bridge_encode_started_epoch_ms || 0,
+          bridgeEncodedEpochMs: Number(
+            event.h264_encoded_epoch_ms || event.bridge_encoded_epoch_ms || 0,
           ),
-          bridgeQueueMs: Number(event.bridge_queue_ms || 0),
-          bridgeEncoderFeedMs: Number(event.bridge_encoder_feed_ms || 0),
+          bridgeEncodeStartedEpochMs: Number(
+            event.h264_encode_started_epoch_ms
+              || event.bridge_encode_started_epoch_ms
+              || 0,
+          ),
+          bridgeQueueMs: Number(event.h264_queue_ms || event.bridge_queue_ms || 0),
+          bridgeEncoderFeedMs: Number(
+            event.h264_encoder_feed_ms || event.bridge_encoder_feed_ms || 0,
+          ),
           metadataReceivedAtMs: performance.now(),
           appendCompletedAtMs: 0,
         });
         if (this.mediaBatches.length > 1024) this.mediaBatches.shift();
         this._emitStats({
-          lastBridgeQueueMs: Number(event.bridge_queue_ms || 0),
-          lastBridgeEncoderFeedMs: Number(event.bridge_encoder_feed_ms || 0),
+          lastBridgeQueueMs: Number(event.h264_queue_ms || event.bridge_queue_ms || 0),
+          lastBridgeEncoderFeedMs: Number(
+            event.h264_encoder_feed_ms || event.bridge_encoder_feed_ms || 0,
+          ),
           droppedFrames: Number(event.dropped_frames || 0),
           startupDroppedFrames: Number(event.startup_dropped_frames || 0),
           serverFps: this.sourceSamples.length,
@@ -539,14 +660,19 @@
         );
         if (metadata) {
           metadata.bridgeEncodedEpochMs = Number(
-            event.bridge_encoded_epoch_ms || metadata.bridgeEncodedEpochMs || 0,
+            event.h264_encoded_epoch_ms
+              || event.bridge_encoded_epoch_ms
+              || metadata.bridgeEncodedEpochMs
+              || 0,
           );
           metadata.bridgeEncoderFeedMs = Number(
-            event.bridge_encoder_feed_ms || 0,
+            event.h264_encoder_feed_ms || event.bridge_encoder_feed_ms || 0,
           );
         }
         this._emitStats({
-          lastBridgeEncoderFeedMs: Number(event.bridge_encoder_feed_ms || 0),
+          lastBridgeEncoderFeedMs: Number(
+            event.h264_encoder_feed_ms || event.bridge_encoder_feed_ms || 0,
+          ),
         });
       } else if (event.type === "media_payload") {
         this.pendingPayloadTimings.push({
@@ -683,7 +809,7 @@
       const now = performance.now();
       if (now - Number(this.lastPlaybackAckAt || 0) < 50) return;
       this.lastPlaybackAckAt = now;
-      this.socket.send(JSON.stringify({
+      const acknowledgement = {
         type: "event",
         kind: "playback_ack",
         trace_id: this.traceId,
@@ -693,7 +819,12 @@
           last_rendered_event_id: this.lastPresentedEventId,
           playable: this.playable,
         },
-      }));
+      };
+      this.socket.send(
+        this.directGateway
+          ? this.packMessage(acknowledgement)
+          : JSON.stringify(acknowledgement),
+      );
     }
 
     _startStats() {
@@ -769,19 +900,29 @@
       this.state = state;
       if (this.root) this.root.dataset.sessionState = state;
       if (this.overlay?.style) {
-        this.overlay.style.display = state === "connecting" && !this.playable ? "grid" : "none";
+        this.overlay.style.display = ["connecting", "recovering"].includes(state) && !this.playable
+          ? "grid"
+          : "none";
       }
       this.onState(state, details);
     }
 
-    _fail(error) {
+    _fail(error, details = {}) {
       if (this.expectedClose) return;
-      this._flushClientMetrics();
-      this._clearMetricFlushTimer();
-      this._setState("error", { message: error.message || String(error) });
-      this.onError(error);
+      this._stopTimersAndFlushMetrics();
+      const phase = details.phase || (this.startupConnected ? "runtime" : "startup");
+      const recoverable = details.recoverable === true || phase === "runtime";
+      this._setState(recoverable ? "recovering" : "error", {
+        ...details,
+        phase,
+        message: error.message || String(error),
+      });
+      this.onError(error, { ...details, phase, recoverable });
     }
   }
+
+  H264WebSocketSession.isTerminalCloseReason = isTerminalCloseReason;
+  H264WebSocketSession.resolveEndpoint = resolveEndpoint;
 
   global.H264WebSocketSession = H264WebSocketSession;
   if (typeof module !== "undefined" && module.exports) {

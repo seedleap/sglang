@@ -4,14 +4,15 @@ import asyncio
 
 import msgspec.msgpack
 import pytest
-
 from sglang.multimodal_gen.runtime.realtime.async_vae_protocol import encode_message
 from sglang.multimodal_gen.runtime.realtime.gateway import (
     AdmissionQueueFull,
     BoundedAdmissionWaiterGate,
     BrowserPlaybackAckWindow,
     GatewayOutputRegistry,
+    OutputBackpressureError,
     OutputProtocolError,
+    OutputRouteClosed,
     build_denoiser_url,
     worker_message_allowed,
 )
@@ -61,6 +62,15 @@ def _media_complete(chunk: int, *, generation: str = "g") -> bytes:
         request_id=f"r{chunk}",
         chunk_index=chunk,
         num_frames=1,
+    )
+
+
+def _h264_message(message_type: str, **fields) -> bytes:
+    return encode_message(
+        message_type,
+        session_id="s",
+        generation_id="g",
+        **fields,
     )
 
 
@@ -229,6 +239,115 @@ def test_gateway_output_route_bounds_actual_frames_and_reports_queue_metrics():
         assert await route.get() == _frame(0, 1, num_frames=3)
         route.task_done()
         await route.join()
+
+    asyncio.run(run())
+
+
+def test_gateway_output_route_passes_h264_without_dropping_muxed_payloads():
+    async def run():
+        registry = GatewayOutputRegistry(queue_depth=1)
+        route = await registry.register("s", "g", token="secret")
+        init = _h264_message("media_init", codec="h264", width=8, height=8)
+        batch = _h264_message(
+            "media_batch",
+            request_id="r0",
+            chunk_index=0,
+            event_id=0,
+            first_frame_index=0,
+            num_frames=1,
+        )
+        payload0 = _h264_message(
+            "media_payload", sequence=0, codec="h264", payload=b"first"
+        )
+        payload1 = _h264_message(
+            "media_payload", sequence=1, codec="h264", payload=b"second"
+        )
+        completion = _h264_message(
+            "media_chunk_complete",
+            request_id="r0",
+            chunk_index=0,
+            num_frames=1,
+            media_transport="h264",
+        )
+        for wire in (init, batch, payload0, payload1, completion):
+            await route.put(wire)
+
+        assert route.dropped_messages == 0
+        for expected in (init, batch, payload0, payload1, completion):
+            assert await route.get() == expected
+            route.task_done()
+        await route.join()
+
+        with pytest.raises(OutputProtocolError, match="out-of-order"):
+            await route.put(
+                _h264_message("media_payload", sequence=3, codec="h264", payload=b"gap")
+            )
+
+    asyncio.run(run())
+
+
+def test_gateway_output_route_closes_h264_slow_consumer_before_unbounded_growth():
+    async def run():
+        init = _h264_message("media_init", codec="h264", width=8, height=8)
+        batch = _h264_message(
+            "media_batch",
+            request_id="r0",
+            chunk_index=0,
+            event_id=0,
+            first_frame_index=0,
+            num_frames=1,
+        )
+        payload0 = _h264_message(
+            "media_payload", sequence=0, codec="h264", payload=b"x" * 128
+        )
+        payload1 = _h264_message(
+            "media_payload", sequence=1, codec="h264", payload=b"y" * 128
+        )
+        registry = GatewayOutputRegistry(
+            queue_depth=64,
+            max_queue_bytes=len(init) + len(batch) + len(payload0) + 1,
+            max_queue_messages=64,
+        )
+        route = await registry.register("s", "g", token="secret")
+
+        for wire in (init, batch, payload0):
+            await route.put(wire)
+        metrics = route.queue_metrics()
+        assert metrics["gateway_queue_messages"] == 3
+        assert metrics["gateway_queue_bytes"] <= metrics["gateway_queue_capacity_bytes"]
+
+        with pytest.raises(OutputBackpressureError, match="byte limit"):
+            await route.put(payload1)
+        assert route.closed
+        assert route.queue_metrics()["gateway_queue_messages"] == 0
+        with pytest.raises(OutputRouteClosed):
+            await route.get()
+
+    asyncio.run(run())
+
+
+def test_gateway_output_route_closes_h264_small_payload_flood_by_message_count():
+    async def run():
+        registry = GatewayOutputRegistry(
+            queue_depth=64,
+            max_queue_bytes=1024 * 1024,
+            max_queue_messages=2,
+        )
+        route = await registry.register("s", "g", token="secret")
+        init = _h264_message("media_init", codec="h264", width=8, height=8)
+        payload0 = _h264_message(
+            "media_payload", sequence=0, codec="h264", payload=b"x"
+        )
+        payload1 = _h264_message(
+            "media_payload", sequence=1, codec="h264", payload=b"y"
+        )
+
+        await route.put(init)
+        await route.put(payload0)
+        with pytest.raises(OutputBackpressureError, match="message limit"):
+            await route.put(payload1)
+        assert route.closed
+        assert route.queue_metrics()["gateway_queue_messages"] == 0
 
     asyncio.run(run())
 

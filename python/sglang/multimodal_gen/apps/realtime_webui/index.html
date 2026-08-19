@@ -389,11 +389,13 @@
         </section>
       </section>
     </main>
-    <script src="./runtime-config.js"></script>
+    <!-- Runtime config must execute before app.js. Cloudflare Rocket Loader may
+         otherwise reorder this external script and silently disable direct H.264. -->
+    <script data-cfasync="false" src="./runtime-config.js"></script>
     <script src="./playback_controller.js?v=realtime-playback-v34"></script>
     <script src="./model_session.js?v=dual-h264-telemetry-v1"></script>
     <script src="./dual_model_controller.js?v=dual-model-v6"></script>
-    <script src="./h264_websocket_session.js?v=h264-stage-timing-v1"></script>
+    <script src="./h264_websocket_session.js?v=h264-direct-gateway-userid-v2"></script>
     <script src="./happy_oyster_sdk.js?v=happyoyster-sdk-0.1.0-ticket-only"></script>
     <script src="./happy_oyster_session.js?v=happyoyster-session-v5"></script>
     <script src="./session_lifetime.js?v=session-lifetime-v1"></script>
@@ -402,6 +404,6 @@
     <script src="./fullscreen_controller.js?v=fullscreen-focus-v1"></script>
     <script src="./trace_topology.js?v=realtime-trace-topology-v6"></script>
     <script src="./trace_transport.js?v=realtime-trace-http-v2"></script>
-    <script src="./app.js?v=world-studio-transport-telemetry-v4"></script>
+    <script src="./app.js?v=world-studio-transport-h264-userid-v5"></script>
   </body>
 </html>

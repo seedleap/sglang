@@ -11,6 +11,20 @@ const H264_MSE_MIME_TYPE = 'video/mp4; codecs="avc1.4D401F"';
 const H264_WEBSOCKET_REQUESTED = UI_CONFIG.h264WebSocketEnabled === true;
 const H264_WEBSOCKET_ENABLED = H264_WEBSOCKET_REQUESTED
   && Boolean(globalThis.MediaSource?.isTypeSupported?.(H264_MSE_MIME_TYPE));
+const H264_DIRECT_GATEWAY = UI_CONFIG.h264DirectGatewayEnabled === true;
+const H264_CONNECT_MAX_ATTEMPTS = Math.max(
+  1,
+  Math.min(10, Math.trunc(Number(UI_CONFIG.h264WebSocketConnectAttempts) || 3)),
+);
+const H264_CONNECT_RETRY_BASE_MS = Math.max(
+  0,
+  Math.min(10000, Math.trunc(Number(UI_CONFIG.h264WebSocketRetryBaseMs) || 350)),
+);
+const H264_RUNTIME_RECONNECT_MAX_ATTEMPTS = Math.max(
+  1,
+  Math.min(10, Math.trunc(Number(UI_CONFIG.h264WebSocketRuntimeReconnectAttempts) || 4)),
+);
+const H264_RUNTIME_RECONNECT_DELAYS_MS = [250, 1000, 2500, 4000];
 const REALTIME_PROTOCOL_VERSION = 2;
 const DEFAULT_LINGBOT2_MODEL = "robbyant/lingbot-world-v2-14b-causal-fast-diffusers";
 const SESSION_ARTIFACT_SCHEMA_VERSION = 1;
@@ -77,7 +91,9 @@ function h264CompressionInit(init, key) {
 }
 
 function h264WebSocketEndpoint(key) {
-  const defaultEndpoint = `/api/h264ws/${key}`;
+  const defaultEndpoint = H264_DIRECT_GATEWAY
+    ? `/backends/${key}/v1/realtime_video/generate`
+    : `/api/h264ws/${key}`;
   const configuredEndpoint = String(
     DUAL_MODEL_CONFIG[key]?.h264WsUrl || UI_CONFIG.h264WebSocketBaseUrl || "",
   ).trim();
@@ -93,6 +109,45 @@ function h264WebSocketEndpoint(key) {
   } catch {
     return defaultEndpoint;
   }
+}
+
+function waitForH264Retry(delayMs) {
+  return new Promise((resolve) => {
+    globalThis.setTimeout(resolve, delayMs);
+  });
+}
+
+async function connectH264SessionWithRetry(key, h264Session, init, url = "") {
+  if (!h264Session) {
+    const message = H264_WEBSOCKET_REQUESTED
+      ? `H.264 WebSocket 已启用，但当前浏览器不支持 ${H264_MSE_MIME_TYPE}`
+      : "H.264 WebSocket 未启用";
+    setModelConnectionState(key, "error");
+    throw new Error(message);
+  }
+
+  let lastError = null;
+  for (let attempt = 1; attempt <= H264_CONNECT_MAX_ATTEMPTS; attempt += 1) {
+    try {
+      if (attempt > 1) {
+        addHistory(`${modelLabel(key)} H.264 reconnect ${attempt}/${H264_CONNECT_MAX_ATTEMPTS}`);
+      }
+      await h264Session.connect(h264CompressionInit(init, key), url);
+      resetH264RuntimeReconnect(key);
+      return;
+    } catch (error) {
+      lastError = error;
+      await h264Session.close("H.264 startup retry", { emitState: false });
+      if (attempt >= H264_CONNECT_MAX_ATTEMPTS) break;
+      const delayMs = H264_CONNECT_RETRY_BASE_MS * attempt;
+      addHistory(`${modelLabel(key)} H.264 启动失败，${delayMs}ms 后重试 · ${error.message || error}`);
+      await waitForH264Retry(delayMs);
+    }
+  }
+
+  const message = `${modelLabel(key)} H.264 启动失败，已重试 ${H264_CONNECT_MAX_ATTEMPTS} 次：${lastError?.message || lastError || "unknown"}`;
+  setModelConnectionState(key, "error");
+  throw new Error(message);
 }
 
 function configuredGenerationModes() {
@@ -272,7 +327,7 @@ function applyRuntimeUiConfig() {
       if (chip) chip.textContent = `H.264 · WS · ${(bitrateKbps / 1000).toFixed(1)} Mbps`;
     }
   } else if (H264_WEBSOCKET_REQUESTED) {
-    addHistory("当前浏览器不支持 H.264 MSE，已自动回退 WebP WebSocket");
+    addHistory("当前浏览器不支持 H.264 MSE，WebP fallback 已禁用");
   }
   configureGenerationModeSelect();
 }
@@ -742,9 +797,82 @@ const playbackController = new RealtimePlaybackController({
   maxDeliveryLeadBoostMs: 0,
   deliveryStallExpectedMultiplier: 1.8,
 });
+const h264RuntimeReconnectState = {
+  minwm: { timer: 0, attempt: 0, inFlight: false },
+  lingbot2: { timer: 0, attempt: 0, inFlight: false },
+};
 let lingbot2ReconnectTimer = 0;
 let lingbot2ReconnectAttempt = 0;
 let lingbot2ReconnectInFlight = false;
+
+function resetH264RuntimeReconnect(key) {
+  const state = h264RuntimeReconnectState[key];
+  if (!state) return;
+  if (state.timer) window.clearTimeout(state.timer);
+  state.timer = 0;
+  state.attempt = 0;
+  state.inFlight = false;
+}
+
+function cancelAllH264RuntimeReconnects() {
+  for (const key of Object.keys(h264RuntimeReconnectState)) {
+    resetH264RuntimeReconnect(key);
+  }
+}
+
+function canReconnectH264Model(key) {
+  return Boolean(
+    H264_WEBSOCKET_REQUESTED &&
+    !sessionLifetimeExpired &&
+    modelSelected(key) &&
+    dualModelController?.baseInit
+  );
+}
+
+function scheduleH264RuntimeReconnect(key, reason = "H.264 stream closed") {
+  if (isSessionLifetimeReason(reason)) return;
+  const state = h264RuntimeReconnectState[key];
+  if (!state) return;
+  if (!canReconnectH264Model(key)) {
+    setModelConnectionState(key, "error");
+    return;
+  }
+  if (state.timer || state.inFlight) return;
+  if (state.attempt >= H264_RUNTIME_RECONNECT_MAX_ATTEMPTS) {
+    setModelConnectionState(key, "error");
+    addHistory(`${modelLabel(key)} H.264 reconnect exhausted · ${reason}`);
+    return;
+  }
+  const delayMs = H264_RUNTIME_RECONNECT_DELAYS_MS[
+    Math.min(state.attempt, H264_RUNTIME_RECONNECT_DELAYS_MS.length - 1)
+  ];
+  state.attempt += 1;
+  setModelConnectionState(key, "recovering");
+  addHistory(`${modelLabel(key)} H.264 recovering in ${delayMs}ms · ${reason}`);
+  state.timer = window.setTimeout(async () => {
+    state.timer = 0;
+    if (!canReconnectH264Model(key)) return;
+    state.inFlight = true;
+    setModelConnectionState(key, "recovering");
+    try {
+      const restored = await dualModelController.reconnect(key);
+      if (!restored || !canReconnectH264Model(key)) return;
+      state.attempt = 0;
+      addHistory(`${modelLabel(key)} H.264 connection restored`);
+    } catch (error) {
+      const message = error?.message || String(error || "retry failed");
+      state.inFlight = false;
+      if (isSessionLifetimeReason(message)) {
+        expireSessionLifetime({ closeSessions: true });
+        return;
+      }
+      addHistory(`${modelLabel(key)} H.264 recovery failed · ${message}`);
+      scheduleH264RuntimeReconnect(key, message);
+    } finally {
+      state.inFlight = false;
+    }
+  }, delayMs);
+}
 
 function cancelLingbot2Reconnect() {
   if (lingbot2ReconnectTimer) window.clearTimeout(lingbot2ReconnectTimer);
@@ -852,10 +980,14 @@ function createH264ModelSession(key) {
     overlay: $(`${key}PreviewOverlay`),
     root: document.querySelector(`[data-model-key="${key}"]`),
     endpoint: h264WebSocketEndpoint(key),
+    directGateway: H264_DIRECT_GATEWAY,
+    packMessage: pack,
+    unpackMessage: unpack,
     liveEdgeTargetMs: configuredNumber("h264WebSocketLiveEdgeTargetMs", 80),
     liveEdgeSeekThresholdMs: configuredNumber("h264WebSocketSeekThresholdMs", 420),
     onState: (state, details = {}) => {
       setModelConnectionState(key, state);
+      if (state === "live") resetH264RuntimeReconnect(key);
       if (state === "connecting") {
         video.hidden = true;
         fallbackCanvas.hidden = false;
@@ -864,6 +996,9 @@ function createH264ModelSession(key) {
         activeH264Models.delete(key);
         video.hidden = true;
         fallbackCanvas.hidden = false;
+      }
+      if (state === "closed" && isSessionLifetimeReason(details.reason || details.message)) {
+        expireSessionLifetime({ closeSessions: true });
       }
       if (state === "error") {
         addHistory(`${modelLabel(key)} H.264 error · ${details.message || "unknown"}`);
@@ -891,8 +1026,11 @@ function createH264ModelSession(key) {
       renderModelTelemetry(key, h264ModelStats[key]);
       renderProtocolPerformance(key, { ...h264ModelStats[key], transport: "h264" });
     },
-    onError: (error) => {
-      addHistory(`${modelLabel(key)} H.264 session failed · ${error.message || error}`);
+    onError: (error, details = {}) => {
+      const message = details.message || error?.message || String(error || "unknown");
+      addHistory(`${modelLabel(key)} H.264 session failed · ${message}`);
+      if (details.phase === "startup" || error?.h264Phase === "startup") return;
+      scheduleH264RuntimeReconnect(key, message);
     },
   });
 }
@@ -905,28 +1043,20 @@ const lingbot2H264Session = H264_WEBSOCKET_ENABLED
   : null;
 
 function preferredRealtimeSession(key, h264Session, fallbackSession) {
-  let selected = fallbackSession;
+  let selected = H264_WEBSOCKET_REQUESTED ? h264Session : fallbackSession;
   return {
     async connect(init, url) {
-      if (h264Session) {
-        try {
-          await h264Session.connect(h264CompressionInit(init, key));
-          selected = h264Session;
-          return;
-        } catch (error) {
-          await h264Session.close("H.264 startup failed", { emitState: false });
-          addHistory(`${modelLabel(key)} H.264 启动失败，自动回退 WebP · ${error.message || error}`);
-          const video = key === "lingbot2" ? lingbot2H264Video : minwmH264Video;
-          const fallbackCanvas = key === "lingbot2" ? lingbot2Canvas : canvas;
-          video.hidden = true;
-          fallbackCanvas.hidden = false;
-        }
+      if (H264_WEBSOCKET_REQUESTED) {
+        await connectH264SessionWithRetry(key, h264Session, init, url);
+        selected = h264Session;
+        return;
       }
       selected = fallbackSession;
       return fallbackSession.connect(init, url);
     },
     sendEvent(envelope) { return selected?.sendEvent(envelope) || false; },
     close(reason) {
+      resetH264RuntimeReconnect(key);
       void h264Session?.close(reason);
       fallbackSession?.close?.(reason);
     },
@@ -992,17 +1122,10 @@ function buildHappyOysterInit(init) {
 let primaryUsesH264 = false;
 const primarySessionAdapter = {
   async connect(init, url) {
-    if (minwmH264Session) {
-      try {
-        await minwmH264Session.connect(h264CompressionInit(init, "minwm"));
-        primaryUsesH264 = true;
-        return;
-      } catch (error) {
-        await minwmH264Session.close("H.264 startup failed", { emitState: false });
-        addHistory(`Zing H.264 启动失败，自动回退 WebP · ${error.message || error}`);
-        minwmH264Video.hidden = true;
-        canvas.hidden = false;
-      }
+    if (H264_WEBSOCKET_REQUESTED) {
+      await connectH264SessionWithRetry("minwm", minwmH264Session, init, url);
+      primaryUsesH264 = true;
+      return;
     }
     primaryUsesH264 = false;
     return openPrimarySession(init, url);
@@ -1013,6 +1136,7 @@ const primarySessionAdapter = {
       : sendPrimaryEventEnvelope(envelope);
   },
   close(reason) {
+    resetH264RuntimeReconnect("minwm");
     if (primaryUsesH264) {
       streamEpoch += 1;
       primaryUsesH264 = false;
@@ -1286,6 +1410,7 @@ function isSessionLifetimeReason(reason) {
 }
 
 function resetSessionLifetimeUi() {
+  cancelAllH264RuntimeReconnects();
   sessionLifetimeGuard.cancel();
   stopSessionCountdown();
   hideRecordingReadyToast({ immediate: true });
@@ -1503,6 +1628,7 @@ function setModelConnectionState(key, state) {
     preparing: "构建中",
     ready: "准备完成",
     connecting: "连接中",
+    recovering: "重连中",
     live: "已连接",
     unavailable: "不可用",
     error: "连接异常",
@@ -2563,6 +2689,7 @@ function artifactClientMs(artifact = currentSessionArtifact) {
 function currentRequestSnapshot() {
   const generationMode = selectedGenerationMode();
   const continuousT2V = generationMode === "t2v" && $("continuous").checked;
+  const openEndedRequest = generationMode === "i2v" || continuousT2V;
   const numFrames = generationMode === "t2v"
     ? (continuousT2V ? undefined : readT2VNumFrames())
     : Number($("numFrames").value);
@@ -2573,13 +2700,13 @@ function currentRequestSnapshot() {
     prompt: $("prompt").value,
     size: $("size").value,
     fps: Number($("fps").value || DEFAULT_TARGET_FPS),
-    num_frames: continuousT2V ? undefined : numFrames,
+    num_frames: openEndedRequest ? undefined : numFrames,
     seed: Number($("seed").value),
     num_inference_steps: Number($("steps").value),
     guidance_scale: Number($("guidance").value),
     realtime_causal_sink_size: readOptionalInteger("sinkSize"),
     realtime_causal_kv_cache_num_frames: readOptionalInteger("windowFrames"),
-    max_chunks: generationMode === "t2v" || $("continuous").checked ? undefined : 1,
+    max_chunks: generationMode === "t2v" || openEndedRequest ? undefined : 1,
     ...readPreviewTransportParams(),
     ...readFrameInterpolationParams(),
     ...readSuperResolutionParams(),
@@ -6848,19 +6975,20 @@ function readSuperResolutionParams(key = "minwm") {
 
 function readModelRequestParams(key, { generationMode, firstFrame, numFrames } = {}) {
   const continuous = modelControl(key, "continuous").checked;
+  const openEndedRequest = generationMode === "i2v" || continuous;
   const requestedFrames = numFrames ?? Number(modelControl(key, "numFrames").value);
   return compact({
     generation_mode: generationMode,
     prompt: $("prompt").value,
     size: modelControl(key, "size").value,
     fps: requestedInputFps(key),
-    num_frames: generationMode === "t2v" && continuous ? undefined : requestedFrames,
+    num_frames: openEndedRequest ? undefined : requestedFrames,
     seed: Number(modelControl(key, "seed").value),
     num_inference_steps: Number(modelControl(key, "steps").value),
     guidance_scale: Number(modelControl(key, "guidance").value),
     realtime_causal_sink_size: readOptionalInteger(modelControlId(key, "sinkSize")),
     realtime_causal_kv_cache_num_frames: readOptionalInteger(modelControlId(key, "windowFrames")),
-    max_chunks: generationMode === "t2v" || continuous ? undefined : 1,
+    max_chunks: generationMode === "t2v" || openEndedRequest ? undefined : 1,
     first_frame: firstFrame,
     ...readPreviewTransportParams(key),
     ...readFrameInterpolationParams(key),

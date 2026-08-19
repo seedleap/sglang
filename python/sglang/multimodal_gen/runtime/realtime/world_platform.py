@@ -45,7 +45,7 @@ class Principal:
     max_lifetime_s: int
     allow_free_prompt: bool
     jti: str = ""  # 一次性随机串（防同一凭证建两个会话）
-    exp: int = 0   # 过期时刻（秒），重放缓存据此清理
+    exp: int = 0  # 过期时刻（秒），重放缓存据此清理
 
 
 def _b64url_decode(segment: str) -> bytes:
@@ -216,11 +216,11 @@ class WorldCallbacks:
                 )
                 if resp.status_code < 300:
                     return
-                logger.warning(
-                    "world 回调返回 %s (%s)", resp.status_code, path
-                )
+                logger.warning("world 回调返回 %s (%s)", resp.status_code, path)
             except Exception as exc:  # noqa: BLE001 —— 回调失败只记日志
-                logger.warning("world 回调失败(%s) 第 %d 次: %s", path, attempt + 1, exc)
+                logger.warning(
+                    "world 回调失败(%s) 第 %d 次: %s", path, attempt + 1, exc
+                )
             await asyncio.sleep(0.5 * (attempt + 1))
 
     def fire(self, path: str, payload: dict) -> None:

@@ -22,6 +22,16 @@ assert.match(
 );
 assert.match(
   appJs,
+  /connectH264SessionWithRetry\(key, h264Session, init, url\)/,
+  "H.264 secondary sessions must use the per-backend URL with user_id",
+);
+assert.match(
+  appJs,
+  /connectH264SessionWithRetry\("minwm", minwmH264Session, init, url\)/,
+  "H.264 primary session must use the per-backend URL with user_id",
+);
+assert.match(
+  appJs,
   /当前正有人体验，请等待\$\{SESSION_MAX_LIFETIME_SECONDS\}s/,
   "the product-facing busy message should follow the configured session lifetime",
 );

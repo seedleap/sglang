@@ -3,6 +3,12 @@ ARG GPU_RUNTIME_IMAGE
 FROM ${GPU_RUNTIME_IMAGE}
 ARG GIT_SHA
 
+USER root
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ffmpeg \
+    && ffmpeg -hide_banner -encoders 2>/dev/null | grep -q libx264 \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY python/sglang /opt/sglang/python/sglang
 LABEL org.opencontainers.image.revision=${GIT_SHA} \
       seedleap.minwm.image.layer="gpu-code-overlay"
