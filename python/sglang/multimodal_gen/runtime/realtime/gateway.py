@@ -13,7 +13,6 @@ from dataclasses import dataclass, field
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import msgspec.msgpack
-
 from sglang.multimodal_gen.runtime.realtime.async_vae_protocol import (
     ProtocolViolation,
     decode_message,
@@ -260,12 +259,15 @@ class GatewayOutputRoute:
     generation_id: str
     token: str
     queue_depth: int
+    max_queue_bytes: int
+    max_queue_messages: int
     trace_id: str = ""
     _queue: deque[_QueuedOutput | None] = field(init=False)
     _queue_ready: asyncio.Event = field(init=False)
     _queue_drained: asyncio.Event = field(init=False)
     _unfinished_tasks: int = field(default=0, init=False)
     _queued_media_frames: int = field(default=0, init=False)
+    _queued_messages: int = field(default=0, init=False)
     _queued_bytes: int = field(default=0, init=False)
     _last_chunk_index: int = field(default=-1, init=False)
     _last_frame_batch_index: int = field(default=-1, init=False)
@@ -445,11 +447,40 @@ class GatewayOutputRoute:
     def _append_output(self, output: _QueuedOutput) -> None:
         if self.closed:
             raise OutputRouteClosed("output route is closed")
+        self._raise_if_queue_limit_exceeded(output)
         self._queue.append(output)
+        self._queued_messages += 1
         self._unfinished_tasks += 1
         self._queue_drained.clear()
         self._queued_media_frames += output.frame_count
         self._queued_bytes += len(output.wire)
+        self._queue_ready.set()
+
+    def _raise_if_queue_limit_exceeded(self, output: _QueuedOutput) -> None:
+        projected_messages = self._queued_messages + 1
+        projected_bytes = self._queued_bytes + len(output.wire)
+        if self.max_queue_messages > 0 and projected_messages > self.max_queue_messages:
+            self._close_now()
+            raise OutputBackpressureError("Gateway output queue message limit exceeded")
+        if self.max_queue_bytes > 0 and projected_bytes > self.max_queue_bytes:
+            self._close_now()
+            raise OutputBackpressureError("Gateway output queue byte limit exceeded")
+
+    def _close_now(self) -> None:
+        if self.closed:
+            return
+        self.closed = True
+        self.unbind_output()
+        for event in self._chunk_completed.values():
+            event.set()
+        while self._queue:
+            output = self._queue.popleft()
+            if output is not None:
+                self._queued_messages -= 1
+                self._queued_media_frames -= output.frame_count
+                self._queued_bytes -= len(output.wire)
+                self._finish_task()
+        self._queue.append(None)
         self._queue_ready.set()
 
     def _drop_oldest_media(self) -> bool:
@@ -457,6 +488,7 @@ class GatewayOutputRoute:
             if output is None or output.message_type != "frame_batch":
                 continue
             del self._queue[index]
+            self._queued_messages -= 1
             self._queued_media_frames -= output.frame_count
             self._queued_bytes -= len(output.wire)
             self._finish_task()
@@ -482,14 +514,14 @@ class GatewayOutputRoute:
         )
         return {
             "gateway_queue_depth": self._queued_media_frames,
-            "gateway_queue_messages": sum(
-                1 for output in self._queue if output is not None
-            ),
+            "gateway_queue_messages": self._queued_messages,
             "gateway_queue_bytes": self._queued_bytes,
             "gateway_oldest_frame_age_ms": round(oldest_frame_age_ms, 3),
             "gateway_dropped_frames": self.dropped_frames,
             "gateway_dropped_messages": self.dropped_messages,
             "gateway_queue_capacity_frames": self.queue_depth,
+            "gateway_queue_capacity_messages": self.max_queue_messages,
+            "gateway_queue_capacity_bytes": self.max_queue_bytes,
         }
 
     async def get_output(self) -> _QueuedOutput:
@@ -500,6 +532,7 @@ class GatewayOutputRoute:
                     self._queue_ready.clear()
                 if output is None:
                     raise OutputRouteClosed("output route is closed")
+                self._queued_messages -= 1
                 self._queued_media_frames -= output.frame_count
                 self._queued_bytes -= len(output.wire)
                 return output
@@ -529,30 +562,30 @@ class GatewayOutputRoute:
     async def close(self) -> None:
         if self.closed:
             return
-        self.closed = True
-        self.unbind_output()
-        for event in self._chunk_completed.values():
-            event.set()
-        while self._queue:
-            output = self._queue.popleft()
-            if output is not None:
-                self._queued_media_frames -= output.frame_count
-                self._queued_bytes -= len(output.wire)
-                self._finish_task()
-        self._queue.append(None)
-        self._queue_ready.set()
+        self._close_now()
 
 
 class GatewayOutputRegistry:
     def __init__(
-        self, *, queue_depth: int = 64, enqueue_timeout_s: float = 0.0
+        self,
+        *,
+        queue_depth: int = 64,
+        enqueue_timeout_s: float = 0.0,
+        max_queue_bytes: int = 16 * 1024 * 1024,
+        max_queue_messages: int = 256,
     ) -> None:
         if queue_depth < 1:
             raise ValueError("queue_depth must be positive")
         if enqueue_timeout_s < 0:
             raise ValueError("enqueue_timeout_s must be non-negative")
+        if max_queue_bytes < 1:
+            raise ValueError("max_queue_bytes must be positive")
+        if max_queue_messages < 1:
+            raise ValueError("max_queue_messages must be positive")
         self.queue_depth = queue_depth
         self.enqueue_timeout_s = enqueue_timeout_s
+        self.max_queue_bytes = max_queue_bytes
+        self.max_queue_messages = max_queue_messages
         self._routes: dict[str, GatewayOutputRoute] = {}
         self._lock = asyncio.Lock()
 
@@ -575,6 +608,8 @@ class GatewayOutputRegistry:
                 generation_id=generation_id,
                 token=token,
                 queue_depth=self.queue_depth,
+                max_queue_bytes=self.max_queue_bytes,
+                max_queue_messages=self.max_queue_messages,
                 trace_id=trace_id,
             )
             self._routes[session_id] = route
