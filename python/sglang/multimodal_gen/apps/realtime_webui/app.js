@@ -25,6 +25,7 @@ const H264_RUNTIME_RECONNECT_MAX_ATTEMPTS = Math.max(
   Math.min(10, Math.trunc(Number(UI_CONFIG.h264WebSocketRuntimeReconnectAttempts) || 4)),
 );
 const H264_RUNTIME_RECONNECT_DELAYS_MS = [250, 1000, 2500, 4000];
+const REALTIME_PROTOCOL_VERSION = 2;
 const DEFAULT_LINGBOT2_MODEL = "robbyant/lingbot-world-v2-14b-causal-fast-diffusers";
 const SESSION_ARTIFACT_SCHEMA_VERSION = 1;
 const SESSION_ARTIFACT_EVENT_LIMIT = 20000;
@@ -230,7 +231,7 @@ const MAX_GOAL_MIN_PLAY_SECONDS = Math.max(0, SESSION_MAX_LIFETIME_SECONDS - 1);
 const EXPERIENCE_BUSY_MESSAGE = `当前正有人体验，请等待${SESSION_MAX_LIFETIME_SECONDS}s`;
 const GAMEPLAY_RECORDING_FPS = Math.max(
   8,
-  Math.min(24, Math.trunc(configuredNumber("gameplayRecordingFps", 15))),
+  Math.min(30, Math.trunc(configuredNumber("gameplayRecordingFps", DEFAULT_TARGET_FPS))),
 );
 const BROWSER_USER_ID_STORAGE_KEY = "sglang-realtime-user-id";
 const MIN_RENDER_TIMER_FPS = 30;
@@ -265,13 +266,29 @@ const CONTROL_ACTION_META = {
   k: { label: "Pitch -", type: "rotation", axis: "-pitch", amount: "4deg/frame" },
   l: { label: "Yaw +", type: "rotation", axis: "+yaw", amount: "6deg/frame" },
 };
-const RECORDING_STAGE_WIDTH = 1280;
-const RECORDING_STAGE_HEIGHT = 720;
+const RECORDING_STAGE_WIDTH = Math.max(
+  1280,
+  Math.min(1920, Math.trunc(configuredNumber("gameplayRecordingWidth", 1920))),
+) & ~1;
+const RECORDING_STAGE_HEIGHT = Math.max(
+  720,
+  Math.min(
+    1080,
+    Math.trunc(configuredNumber(
+      "gameplayRecordingHeight",
+      Math.round(RECORDING_STAGE_WIDTH * 9 / 16),
+    )),
+  ),
+) & ~1;
 const RECORDING_STAGE_TOPBAR_HEIGHT = 48;
 const RECORDING_STAGE_PREVIEW_HEIGHT = RECORDING_STAGE_HEIGHT - RECORDING_STAGE_TOPBAR_HEIGHT;
 const RECORDING_STAGE_PADDING = 18;
 const RECORDING_PROMPT_STATUS_HOLD_MS = 1600;
 const RECORDING_READY_TOAST_MS = 5000;
+const RECORDING_HEARTBEAT_MS = 250;
+const RECORDING_IDLE_CAPTURE_TIMEOUT_MS = 80;
+const RECORDING_MAX_ENCODER_QUEUE_SIZE = 2;
+const RECORDING_KEYFRAME_INTERVAL_FRAMES = 120;
 
 function applyRuntimeUiConfig() {
   for (const key of ["minwm", "lingbot2"]) {
@@ -682,8 +699,13 @@ let recordingFrameIndex = 0;
 let recordingFps = DEFAULT_TARGET_FPS;
 let recordingTimer = 0;
 let recordingFrameTimer = 0;
+let recordingCaptureHandle = 0;
+let recordingCaptureUsesIdle = false;
+let recordingCapturePending = false;
 let recordingStartedPerfMs = 0;
 let recordingElapsedMs = 0;
+let recordingLastCaptureMs = 0;
+let recordingLastPresentedMs = 0;
 let recordingDroppedFrames = 0;
 let recordingSaving = false;
 let recordingMode = "";
@@ -921,7 +943,10 @@ const lingbot2FallbackSession = new RealtimeModelSession({
     renderProtocolPerformance("lingbot2", { ...stats, transport: "webp" });
     markModelEventApplied("lingbot2", stats.lastAppliedEventId);
   },
-  onFrame: () => markSessionPlayable("lingbot2"),
+  onFrame: () => {
+    markSessionPlayable("lingbot2");
+    notifyRecordingPresentedFrame("lingbot2");
+  },
   onError: (error) => {
     if (isExperienceBusyError(error)) {
       handleExperienceBusy();
@@ -986,9 +1011,10 @@ function createH264ModelSession(key) {
       addHistory(`${modelLabel(key)} H.264 WebSocket live · ${width}x${height}`);
       markSessionPlayable(key);
     },
-    onPresentedFrame: ({ eventId }) => {
+    onPresentedFrame: ({ eventId, presentedAt }) => {
       mirrorH264Video(key);
       markModelEventApplied(key, eventId);
+      notifyRecordingPresentedFrame(key, presentedAt);
     },
     onStats: (stats) => {
       h264ModelStats[key] = { ...h264ModelStats[key], ...stats };
@@ -2412,6 +2438,7 @@ function createRecordingTrack({ key, label, variant, canvas: targetCanvas, ctx: 
     encoderReady: null,
     encoderConfig: null,
     encodeChain: Promise.resolve(),
+    encodePending: false,
     mediaRecorder: null,
     mediaChunks: [],
     captureStream: null,
@@ -2422,6 +2449,24 @@ function createRecordingTrack({ key, label, variant, canvas: targetCanvas, ctx: 
     lastTimestampUs: -1,
     droppedFrames: 0,
   };
+}
+
+function desiredRecordingFps() {
+  const selected = selectedModelKeys()
+    .filter((key) => key === "minwm" || key === "lingbot2")
+    .map((key) => previewPlaybackTargetFps(key))
+    .filter((fps) => Number.isFinite(fps) && fps > 0);
+  const targetFps = selected.length
+    ? Math.max(...selected)
+    : previewPlaybackTargetFps("minwm");
+  return Math.max(1, Math.min(GAMEPLAY_RECORDING_FPS, targetFps));
+}
+
+function recordingVideoBitrate(width = RECORDING_STAGE_WIDTH, height = RECORDING_STAGE_HEIGHT, fps = recordingFps) {
+  return Math.round(Math.min(
+    20_000_000,
+    Math.max(8_000_000, width * height * Math.max(1, fps) * 0.55),
+  ));
 }
 
 function updateRecordButton() {
@@ -3077,17 +3122,8 @@ function jsonSafe(value, depth = 0) {
   return String(value);
 }
 
-function startRecording({ source = "manual" } = {}) {
-  if (recordingActive || recordingSaving) return;
-  recordingMode = selectRecordingMode();
-  if (!recordingMode) {
-    setStatus("Recording unsupported", "error");
-    addHistory("recording requires WebCodecs MP4 or MediaRecorder WebM support");
-    return;
-  }
-  recordingActive = true;
-  setRecordingDownloads([]);
-  recordingTracks = [
+function createStageRecordingTracks() {
+  return [
     createRecordingTrack({
       key: "comparison",
       label: "Zing × LingBot2",
@@ -3103,10 +3139,25 @@ function startRecording({ source = "manual" } = {}) {
       ctx: zingRecordingCtx,
     }),
   ];
+}
+
+function startRecording({ source = "manual" } = {}) {
+  if (recordingActive || recordingSaving) return false;
+  recordingMode = selectRecordingMode();
+  if (!recordingMode) {
+    setStatus("Recording unsupported", "error");
+    addHistory("recording requires WebCodecs MP4 or MediaRecorder WebM support");
+    return false;
+  }
+  recordingActive = true;
+  setRecordingDownloads([]);
+  recordingTracks = createStageRecordingTracks();
   recordingFrameIndex = 0;
-  recordingFps = Math.max(1, Math.min(GAMEPLAY_RECORDING_FPS, previewPlaybackTargetFps()));
+  recordingFps = desiredRecordingFps();
   recordingStartedPerfMs = performance.now();
   recordingElapsedMs = 0;
+  recordingLastCaptureMs = 0;
+  recordingLastPresentedMs = 0;
   recordingDroppedFrames = 0;
   recordingBaseFileName = recordingFileName().replace(/\.[^.]*$/, "");
   recordingActionPulseUntil.clear();
@@ -3123,6 +3174,12 @@ function startRecording({ source = "manual" } = {}) {
     capture_height: RECORDING_STAGE_HEIGHT,
     target_fps: recordingFps,
     timing: "wall_clock",
+    capture_driver: "presented_frame_idle",
+    video_bits_per_second: recordingVideoBitrate(
+      RECORDING_STAGE_WIDTH,
+      RECORDING_STAGE_HEIGHT,
+      recordingFps,
+    ),
     source,
     variants: recordingTracks.map((track) => track.key),
   };
@@ -3130,11 +3187,17 @@ function startRecording({ source = "manual" } = {}) {
     for (const track of recordingTracks) startWebmRecording(track);
   }
   startRecordingFramePump();
-  recordTrajectoryEvent("record_start", { target_fps: recordingFps, source });
+  recordTrajectoryEvent("record_start", {
+    target_fps: recordingFps,
+    capture_driver: "presented_frame_idle",
+    capture_scope: "stage",
+    source,
+  });
   recordingTimer = window.setInterval(updateRecordButton, 250);
   updateRecordButton();
   updateRecordFolderButton();
   addHistory("dual recording started · comparison + Zing");
+  return true;
 }
 
 async function stopRecording({ reason = "manual" } = {}) {
@@ -3220,7 +3283,22 @@ function startWebmRecording(track) {
   track.captureStream = track.canvas.captureStream(recordingFps);
   track.mediaRecorder = new MediaRecorder(
     track.captureStream,
-    track.mimeType ? { mimeType: track.mimeType } : undefined,
+    track.mimeType
+      ? {
+        mimeType: track.mimeType,
+        videoBitsPerSecond: recordingVideoBitrate(
+          RECORDING_STAGE_WIDTH,
+          RECORDING_STAGE_HEIGHT,
+          recordingFps,
+        ),
+      }
+      : {
+        videoBitsPerSecond: recordingVideoBitrate(
+          RECORDING_STAGE_WIDTH,
+          RECORDING_STAGE_HEIGHT,
+          recordingFps,
+        ),
+      },
   );
   track.mimeType = track.mediaRecorder.mimeType || track.mimeType || "video/webm";
   track.mediaRecorder.ondataavailable = (event) => {
@@ -3274,39 +3352,113 @@ function stopRecordingCaptureStream(track) {
 
 function startRecordingFramePump() {
   stopRecordingFramePump();
-  captureRecordingFrame();
-  recordingFrameTimer = window.setInterval(
-    captureRecordingFrame,
-    Math.max(32, Math.round(1000 / Math.max(1, recordingFps))),
-  );
+  captureRecordingFrame({ reason: "start", force: true });
+  recordingFrameTimer = window.setInterval(recordingHeartbeatCapture, RECORDING_HEARTBEAT_MS);
 }
 
 function stopRecordingFramePump() {
   if (recordingFrameTimer) window.clearInterval(recordingFrameTimer);
   recordingFrameTimer = 0;
+  cancelPendingRecordingCapture();
 }
 
-function captureRecordingFrame() {
+function cancelPendingRecordingCapture() {
+  if (!recordingCapturePending) return;
+  if (recordingCaptureUsesIdle && typeof window.cancelIdleCallback === "function") {
+    window.cancelIdleCallback(recordingCaptureHandle);
+  } else {
+    window.clearTimeout(recordingCaptureHandle);
+  }
+  recordingCaptureHandle = 0;
+  recordingCaptureUsesIdle = false;
+  recordingCapturePending = false;
+}
+
+function recordingHeartbeatCapture() {
   if (!recordingActive || recordingSaving) return;
-  const elapsedMs = Math.max(0, performance.now() - recordingStartedPerfMs);
+  const now = performance.now();
+  const maxGapMs = Math.max(RECORDING_HEARTBEAT_MS, Math.round(2000 / Math.max(1, recordingFps)));
+  if (!recordingLastCaptureMs || now - recordingLastCaptureMs >= maxGapMs) {
+    scheduleRecordingCapture({ reason: "heartbeat", force: true, at: now });
+  }
+}
+
+function notifyRecordingPresentedFrame(modelKey, presentedAt = performance.now()) {
+  if (!recordingActive || recordingSaving) return;
+  const at = Number.isFinite(Number(presentedAt)) ? Number(presentedAt) : performance.now();
+  recordingLastPresentedMs = at;
+  scheduleRecordingCapture({ reason: `${modelKey}_presented`, at });
+}
+
+function scheduleRecordingCapture({ reason = "presented_frame", force = false, at = performance.now() } = {}) {
+  if (!recordingActive || recordingSaving) return;
+  const minIntervalMs = 1000 / Math.max(1, recordingFps);
+  if (!force && recordingLastCaptureMs && at - recordingLastCaptureMs < minIntervalMs * 0.75) return;
+  if (recordingCapturePending) return;
+  recordingCapturePending = true;
+  const run = () => {
+    recordingCaptureHandle = 0;
+    recordingCaptureUsesIdle = false;
+    recordingCapturePending = false;
+    captureRecordingFrame({ reason, captureTimeMs: performance.now(), force });
+  };
+  if (typeof window.requestIdleCallback === "function") {
+    recordingCaptureUsesIdle = true;
+    recordingCaptureHandle = window.requestIdleCallback(run, {
+      timeout: RECORDING_IDLE_CAPTURE_TIMEOUT_MS,
+    });
+  } else {
+    recordingCaptureUsesIdle = false;
+    recordingCaptureHandle = window.setTimeout(run, 0);
+  }
+}
+
+function captureRecordingFrame({ reason = "capture", captureTimeMs = performance.now(), force = false } = {}) {
+  if (!recordingActive || recordingSaving) return;
+  const elapsedMs = Math.max(0, captureTimeMs - recordingStartedPerfMs);
   recordingElapsedMs = elapsedMs;
-  for (const track of recordingTracks) drawRecordingStageFrame(canvas, track);
-  recordingFrameIndex += 1;
-  if (recordingMode === "mediarecorder-webm") {
-    for (const track of recordingTracks) track.frameIndex += 1;
+  const minIntervalMs = 1000 / Math.max(1, recordingFps);
+  if (!force && recordingLastCaptureMs && captureTimeMs - recordingLastCaptureMs < minIntervalMs * 0.75) return;
+  if (recordingMode === "webcodecs-mp4" && recordingTracks.some(recordingTrackBackpressured)) {
+    for (const track of recordingTracks) {
+      if (recordingTrackBackpressured(track)) track.droppedFrames += 1;
+    }
+    recordingDroppedFrames = recordingTracks.reduce(
+      (sum, track) => sum + track.droppedFrames,
+      0,
+    );
     return;
   }
-  for (const track of recordingTracks) captureRecordingTrack(track, elapsedMs);
+  for (const track of recordingTracks) drawRecordingStageFrame(canvas, track);
+  let captured = false;
+  if (recordingMode === "mediarecorder-webm") {
+    for (const track of recordingTracks) track.frameIndex += 1;
+    captured = true;
+  } else {
+    for (const track of recordingTracks) {
+      captured = captureRecordingTrack(track, elapsedMs) || captured;
+    }
+  }
+  if (captured) {
+    recordingFrameIndex += 1;
+    recordingLastCaptureMs = captureTimeMs;
+  }
   recordingDroppedFrames = recordingTracks.reduce(
     (sum, track) => sum + track.droppedFrames,
     0,
   );
+  void reason;
+}
+
+function recordingTrackBackpressured(track) {
+  return Boolean(track.encodePending)
+    || Number(track.encoder?.encodeQueueSize || 0) >= RECORDING_MAX_ENCODER_QUEUE_SIZE;
 }
 
 function captureRecordingTrack(track, elapsedMs) {
-  if (track.encoder?.encodeQueueSize > 4) {
+  if (recordingTrackBackpressured(track)) {
     track.droppedFrames += 1;
-    return;
+    return false;
   }
   const frameIndex = track.frameIndex;
   const duration = Math.round(1_000_000 / Math.max(1, recordingFps));
@@ -3320,24 +3472,34 @@ function captureRecordingTrack(track, elapsedMs) {
     stopRecordingFramePump();
     addHistory(error.message || `${track.label} frame capture failed`);
     updateRecordButton();
-    return;
+    return false;
   }
-  track.frameIndex += 1;
+  track.encodePending = true;
   track.encodeChain = track.encodeChain
     .then(async () => {
       try {
         await ensureRecordingEncoder(track, frame.displayWidth, frame.displayHeight);
-        track.encoder.encode(frame, { keyFrame: frameIndex === 0 || frameIndex % 120 === 0 });
+        if (Number(track.encoder?.encodeQueueSize || 0) >= RECORDING_MAX_ENCODER_QUEUE_SIZE) {
+          track.droppedFrames += 1;
+          return;
+        }
+        track.encoder.encode(frame, {
+          keyFrame: frameIndex === 0 || frameIndex % RECORDING_KEYFRAME_INTERVAL_FRAMES === 0,
+        });
+        track.frameIndex += 1;
       } finally {
         frame.close();
+        track.encodePending = false;
       }
     })
     .catch((error) => {
+      track.encodePending = false;
       recordingActive = false;
       stopRecordingFramePump();
       addHistory(error.message || `${track.label} encode failed`);
       updateRecordButton();
     });
+  return true;
 }
 
 function drawRecordingStageFrame(image, track = recordingTracks[0] || {
@@ -3352,7 +3514,7 @@ function drawRecordingStageFrame(image, track = recordingTracks[0] || {
   recordingCtx.save();
   try {
     recordingCtx.imageSmoothingEnabled = true;
-    recordingCtx.imageSmoothingQuality = "medium";
+    recordingCtx.imageSmoothingQuality = "high";
     recordingCtx.fillStyle = "#11140f";
     recordingCtx.fillRect(0, 0, RECORDING_STAGE_WIDTH, RECORDING_STAGE_HEIGHT);
     drawRecordingTopbar(track.variant);
@@ -3693,10 +3855,7 @@ async function ensureRecordingEncoder(track, width, height) {
 
 async function createRecordingEncoder(track, width, height) {
   const fps = Math.max(1, recordingFps);
-  const bitrate = Math.round(Math.min(
-    20_000_000,
-    Math.max(6_000_000, width * height * fps * 0.45),
-  ));
+  const bitrate = recordingVideoBitrate(width, height, fps);
   const configs = [
     { codec: "avc1.640028", width, height, bitrate, framerate: fps },
     { codec: "avc1.4d4028", width, height, bitrate, framerate: fps },
@@ -4917,6 +5076,7 @@ function renderLoop(now) {
   if (decision.action === "draw") {
     const item = decision.frame;
     drawFrame(item.image);
+    notifyRecordingPresentedFrame("minwm", now);
     fpsSamples.push(now);
     fpsSamples = fpsSamples.filter((t) => now - t < 1000);
     lastRenderedChunk = item.chunk;
@@ -6372,8 +6532,8 @@ async function decodeAndEnqueueFrameBatch(header, data, epoch) {
       decode_ms: decodedFrames[0].decodeMs || lastDecodeMs,
     });
   }
-  // Gameplay recording runs from a wall-clock frame pump so control and prompt
-  // timing stays accurate even when model delivery stalls or skips frames.
+  // Gameplay recording is driven by presented-frame idle capture, not by
+  // decoded network batches.
   const enqueueResult = playbackController.enqueueDecodedFrames(header, decodedFrames, now);
   closeFrames(enqueueResult.droppedFrames);
   lastSampledEventId = Number(header.event_id || lastSampledEventId);
@@ -7063,6 +7223,16 @@ async function applyQueryParams() {
 }
 
 function pack(value) {
+  const rootValue = (
+    value
+    && typeof value === "object"
+    && !Array.isArray(value)
+    && !(value instanceof Uint8Array)
+    && typeof value.type === "string"
+    && value.version === undefined
+  )
+    ? { version: REALTIME_PROTOCOL_VERSION, ...value }
+    : value;
   const out = [];
   const bytes = (arr) => {
     for (const item of arr) out.push(item);
@@ -7099,7 +7269,7 @@ function pack(value) {
     entries.length < 16 ? bytes([0x80 | entries.length]) : bytes([0xde, ...u16(entries.length)]);
     entries.forEach(([k, val]) => { write(k); write(val); });
   };
-  write(value);
+  write(rootValue);
   return new Uint8Array(out);
 }
 

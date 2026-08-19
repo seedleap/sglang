@@ -1,0 +1,266 @@
+# SPDX-License-Identifier: Apache-2.0
+"""World 平台接入：进入凭证验签 + 会话生命周期回调。
+
+配套 world-service（业务后端）的 authorized_generate 路由使用：
+  - 凭证：Ed25519 紧凑 JWS。网关只持公钥 —— world-service 是唯一令牌权威，
+    前面接多少身份源（Clerk / biz-core），本模块一行不用改。
+  - 会话载荷：world-service 把 init 消息用 AES-GCM 密封后交给浏览器转发，
+    网关在此解封。浏览器全程看不到提示词、时间轴（等于彩蛋出现时刻）与技能指令；
+    GCM 自带完整性校验，篡改一个字节即失败，因此不再需要单独的哈希绑定。
+  - 回调：started / ended / aborted，HMAC 签名与 biz-core tracking ingest 同构。
+
+本模块不被旧 showcase 路由引用；不配置 world 平台参数时行为零变化。
+"""
+
+from __future__ import annotations
+
+import asyncio
+import base64
+import binascii
+import hashlib
+import hmac as hmac_mod
+import json
+import logging
+import secrets
+import time
+from dataclasses import dataclass
+
+import httpx
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
+logger = logging.getLogger(__name__)
+
+
+class TokenError(Exception):
+    """凭证校验失败（统一对外表现为 1008 关闭）。"""
+
+
+@dataclass(frozen=True)
+class Principal:
+    """凭证里携带的会话主体。"""
+
+    user_id: str  # 本局假名，无法回连到账号
+    run_id: str
+    max_lifetime_s: int
+    allow_free_prompt: bool
+    jti: str = ""  # 一次性随机串（防同一凭证建两个会话）
+    exp: int = 0   # 过期时刻（秒），重放缓存据此清理
+
+
+def _b64url_decode(segment: str) -> bytes:
+    padding = "=" * (-len(segment) % 4)
+    return base64.urlsafe_b64decode(segment + padding)
+
+
+def load_public_key(pub_b64: str) -> Ed25519PublicKey:
+    """从 base64 公钥字符串构造验签对象（启动期调用，配置错误立即暴露）。"""
+    raw = base64.b64decode(pub_b64)
+    if len(raw) != 32:
+        raise ValueError("Ed25519 公钥必须是 32 字节的 base64")
+    return Ed25519PublicKey.from_public_bytes(raw)
+
+
+def verify_session_token(token: str, public_key: Ed25519PublicKey) -> Principal:
+    """校验进入凭证，返回会话主体。任何异常统一归为 TokenError。"""
+    try:
+        header_b64, payload_b64, sig_b64 = token.split(".")
+        header = json.loads(_b64url_decode(header_b64))
+        if header.get("alg") != "EdDSA":
+            raise TokenError("仅支持 EdDSA")
+        public_key.verify(
+            _b64url_decode(sig_b64),
+            f"{header_b64}.{payload_b64}".encode(),
+        )
+        claims = json.loads(_b64url_decode(payload_b64))
+    except TokenError:
+        raise
+    except (ValueError, KeyError, InvalidSignature, binascii.Error) as exc:
+        raise TokenError(f"凭证非法: {exc}") from exc
+
+    if claims.get("aud") != "world-session":
+        raise TokenError("aud 不匹配")
+    exp = int(claims.get("exp") or 0)
+    if exp and time.time() > exp + 30:  # 30s 时钟容差
+        raise TokenError("凭证已过期")
+    session = claims.get("session") or {}
+    max_lifetime = int(session.get("max_lifetime_s") or 0)
+    if max_lifetime <= 0:
+        raise TokenError("缺少会话时长")
+    return Principal(
+        user_id=str(claims.get("sub") or ""),
+        run_id=str(claims.get("sid") or ""),
+        max_lifetime_s=max_lifetime,
+        allow_free_prompt=bool(session.get("allow_free_prompt", False)),
+        jti=str(claims.get("jti") or ""),
+        exp=int(claims.get("exp") or 0),
+    )
+
+
+class SessionPayloadSealer:
+    """会话载荷解封（world-service pkg/seal 的对端）。
+
+    密钥用 HKDF-SHA256 从服务间共享密钥派生，info 标签保证与 HMAC 回调签名
+    互不串用；附加认证数据是 run id —— 密文被挪用到另一局会话直接解封失败。
+    """
+
+    _HKDF_INFO = b"world-service/session-payload/v1"
+
+    def __init__(self, shared_secret: str) -> None:
+        from cryptography.hazmat.primitives import hashes
+        from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+
+        self._key = HKDF(
+            algorithm=hashes.SHA256(), length=32, salt=None, info=self._HKDF_INFO
+        ).derive(shared_secret.encode())
+
+    def open(self, sealed: bytes, run_id: str) -> dict:
+        """解封并返回 init 消息。失败一律抛 TokenError（对外统一 1008）。"""
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+        # 惰性导入：本模块保持轻量，不在导入期拉起整条 sglang 依赖链
+        from sglang.multimodal_gen.runtime.realtime.async_vae_protocol import (
+            decode_message,
+        )
+
+        nonce_size = 12  # AES-GCM 标准 nonce 长度，与 Go 侧一致
+        if len(sealed) <= nonce_size:
+            raise TokenError("会话载荷格式非法")
+        try:
+            plaintext = AESGCM(self._key).decrypt(
+                sealed[:nonce_size], sealed[nonce_size:], run_id.encode()
+            )
+        except Exception as exc:  # InvalidTag 等一律归一
+            raise TokenError("会话载荷校验失败") from exc
+        message = decode_message(plaintext)
+        if not isinstance(message, dict) or message.get("type") != "init":
+            raise TokenError("会话载荷不是 init 消息")
+        return message
+
+
+class TokenReplayGuard:
+    """凭证一次性保证（《实现规格》5.2 的 jti）。
+
+    进程内缓存：网关单实例部署，凭证 exp 只有 90 秒，缓存自然有界。
+    consume 返回 False 表示该凭证已建立过会话，必须拒绝。
+    """
+
+    def __init__(self) -> None:
+        self._seen: dict[str, float] = {}  # jti -> 可清理时刻
+
+    def consume(self, principal: Principal, now: float | None = None) -> bool:
+        if not principal.jti:
+            return True  # 旧签发方无 jti：放行（世界服务始终签 jti，此路径只为兼容）
+        now = time.time() if now is None else now
+        # 惰性清理：exp+偏移之后的记录不可能再被验签通过，安全移除
+        expired = [j for j, until in self._seen.items() if until <= now]
+        for j in expired:
+            del self._seen[j]
+        if principal.jti in self._seen:
+            return False
+        # 保留到 exp+60s 且至少 5 分钟：验签的 30s 时钟容差之外再留余量，
+        # 时钟偏移也不会让「保留期 < 凭证可用期」
+        self._seen[principal.jti] = max(float(principal.exp) + 60.0, now + 300.0)
+        return True
+
+
+@dataclass
+class WorldPlatformConfig:
+    """authorized_generate 路由的全部配置。缺任一项则路由不注册。"""
+
+    public_key: Ed25519PublicKey
+    callback_url: str  # world-service 根地址，如 http://world-service.world-model
+    callback_app_id: str
+    callback_key_id: str
+    callback_secret: str
+
+
+class WorldCallbacks:
+    """生命周期回调客户端。fire-and-forget + 有限重试：
+    回调失败绝不影响会话本身（world-service 有 deadline 兜底扫描）。"""
+
+    def __init__(self, cfg: WorldPlatformConfig) -> None:
+        self._cfg = cfg
+        self._client = httpx.AsyncClient(timeout=5.0)
+        self._pending: set[asyncio.Task] = set()  # 任务强引用（见 fire）
+
+    def _sign(self, method: str, path: str, body: bytes) -> dict[str, str]:
+        # 与 biz-core tracking ingest 同构的 canonical/签名（pkg/hmacsign 的对端）
+        ts = str(int(time.time() * 1000))
+        nonce = secrets.token_hex(16)
+        canonical = "\n".join(
+            [method.upper(), path, ts, nonce, hashlib.sha256(body).hexdigest()]
+        )
+        sig = base64.b64encode(
+            hmac_mod.new(
+                self._cfg.callback_secret.encode(), canonical.encode(), hashlib.sha256
+            ).digest()
+        ).decode()
+        return {
+            "Content-Type": "application/json",
+            "X-Track-App-Id": self._cfg.callback_app_id,
+            "X-Track-Key-Id": self._cfg.callback_key_id,
+            "X-Track-Timestamp": ts,
+            "X-Track-Nonce": nonce,
+            "X-Track-Signature": sig,
+            "X-Track-Signature-Version": "v1",
+        }
+
+    async def _post(self, path: str, payload: dict) -> None:
+        body = json.dumps(payload).encode()
+        url = self._cfg.callback_url.rstrip("/") + path
+        for attempt in range(3):
+            try:
+                resp = await self._client.post(
+                    url, content=body, headers=self._sign("POST", path, body)
+                )
+                if resp.status_code < 300:
+                    return
+                logger.warning(
+                    "world 回调返回 %s (%s)", resp.status_code, path
+                )
+            except Exception as exc:  # noqa: BLE001 —— 回调失败只记日志
+                logger.warning("world 回调失败(%s) 第 %d 次: %s", path, attempt + 1, exc)
+            await asyncio.sleep(0.5 * (attempt + 1))
+
+    def fire(self, path: str, payload: dict) -> None:
+        """异步派发，不阻塞会话主流程。
+
+        按 asyncio 文档要求保留任务强引用（事件循环只持弱引用），完成后自动移出。
+        """
+        task = asyncio.get_running_loop().create_task(self._post(path, payload))
+        self._pending.add(task)
+        task.add_done_callback(self._pending.discard)
+
+    def started(self, run_id: str, trace_id: str, max_lifetime_s: int) -> None:
+        self.fire(
+            "/internal/v1/runs/started",
+            {
+                "run_id": run_id,
+                "trace_id": trace_id,
+                "admitted_at_ms": int(time.time() * 1000),
+                "max_lifetime_s": max_lifetime_s,
+            },
+        )
+
+    def ended(self, run_id: str, trace_id: str, reason: str) -> None:
+        self.fire(
+            "/internal/v1/runs/ended",
+            {
+                "run_id": run_id,
+                "trace_id": trace_id,
+                "ended_at_ms": int(time.time() * 1000),
+                "reason": reason,
+            },
+        )
+
+    def aborted(self, run_id: str, trace_id: str, fault: str, reason: str) -> None:
+        self.fire(
+            "/internal/v1/runs/aborted",
+            {
+                "run_id": run_id,
+                "trace_id": trace_id,
+                "fault": fault,
+                "reason": reason,
+            },
+        )

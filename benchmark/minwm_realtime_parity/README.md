@@ -89,10 +89,11 @@ Native minWM KV is unbounded (`local_attn_size=-1`, `sink_size=0`). For bounded
 unbounded session grows the cache. `--kv-cache-num-frames 45` and 128 are explicit
 performance ablations, not native minWM windows.
 
-Packed attention follows minWM `main`'s hardware fallback: FA4 on Blackwell when
-available, FA3 on Hopper when available, otherwise FA2. Forcing FA4 on the H200
-while the baseline selected FA2 caused first-generated-frame drift, so backend
-identity is part of the parity contract rather than an implementation detail.
+Packed attention uses FA4 on Blackwell when available and requires FA3 on
+Hopper. Hopper startup fails fast when the bundled FA3 backend is unavailable;
+there is no FA2 fallback. Long-rollout, visual-quality, and action-response gates
+remain required before production rollout. Backend identity is part of the
+parity contract rather than an implementation detail.
 
 For a smoke run, pass `--case CASE_ID` separately to both Python runners before
 running `compare_results.py` on a full manifest. The official report always

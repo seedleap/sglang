@@ -62,9 +62,7 @@ def requirement_values(nodepool: dict, key: str) -> list[str]:
 def validate(documents: list[dict]) -> None:
     denoiser = find(documents, "NodePool", "minwm-async-denoiser-h100")
     denoiser_8x = find(documents, "NodePool", "minwm-async-denoiser-h100-8x")
-    denoiser_h200_8x = find(
-        documents, "NodePool", "minwm-async-denoiser-h200-8x"
-    )
+    denoiser_h200_8x = find(documents, "NodePool", "minwm-async-denoiser-h200-8x")
     vae = find(documents, "NodePool", "minwm-async-vae-l4")
     vae_spot = find(documents, "NodePool", "minwm-async-vae-l4-spot")
     assert requirement_values(denoiser, "karpenter.sh/capacity-type") == ["spot"]
@@ -81,9 +79,10 @@ def validate(documents: list[dict]) -> None:
     assert requirement_values(denoiser_8x, "node.kubernetes.io/instance-type") == [
         "p5.48xlarge",
     ]
-    assert requirement_values(
-        denoiser_h200_8x, "node.kubernetes.io/instance-type"
-    ) == ["p5e.48xlarge", "p6-b200.48xlarge"]
+    assert requirement_values(denoiser_h200_8x, "node.kubernetes.io/instance-type") == [
+        "p5e.48xlarge",
+        "p6-b200.48xlarge",
+    ]
     denoiser_nodeclass = find(
         documents, "EC2NodeClass", "minwm-async-denoiser-8gpu-nvme-ec2"
     )
@@ -98,9 +97,10 @@ def validate(documents: list[dict]) -> None:
         denoiser_nodeclass["spec"]["blockDeviceMappings"][0]["ebs"]["volumeSize"]
         == "100Gi"
     )
-    assert denoiser_h200_8x["spec"]["template"]["spec"]["nodeClassRef"][
-        "name"
-    ] == "minwm-async-denoiser-8gpu-nvme-ec2"
+    assert (
+        denoiser_h200_8x["spec"]["template"]["spec"]["nodeClassRef"]["name"]
+        == "minwm-async-denoiser-8gpu-nvme-ec2"
+    )
     for pool in (denoiser, denoiser_8x, denoiser_h200_8x):
         assert (
             pool["spec"]["template"]["metadata"]["labels"][

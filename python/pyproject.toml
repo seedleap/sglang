@@ -23,6 +23,7 @@ dependencies = [
   "blobfile==3.0.0",
   "build",
   "compressed-tensors",
+  "cryptography>=42.0",  # realtime 网关 world 凭证验签（Ed25519）；主文件顶层 import，必须显式声明
   "cuda-python>=13.0",
   "datasets",
   "decord2 ; sys_platform == 'linux' and (platform_machine == 'aarch64' or platform_machine == 'arm64' or platform_machine == 'armv7l')",
@@ -82,7 +83,7 @@ dependencies = [
   "torchvision",
   "tqdm",
   "transformers==5.12.1",
-  "uvicorn",
+  "uvicorn>=0.30.0,<0.40",  # 实时网关依赖 ws ping 行为，升大版本需回归
   "uvloop",
   "watchfiles",
   "xgrammar==0.2.1",
@@ -115,7 +116,7 @@ diffusion = [
   "st_attn==0.0.7 ; platform_machine != 'aarch64' and platform_machine != 'arm64'",
   "trimesh>=4.0.0",
   "vsa==0.0.4 ; platform_machine != 'aarch64' and platform_machine != 'arm64'",
-  "websockets",
+  "websockets>=12.0,<16",  # 实时网关的 ws 协议栈，升大版本需回归
   "xatlas",
 ]
 

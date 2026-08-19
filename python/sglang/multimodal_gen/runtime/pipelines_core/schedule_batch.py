@@ -416,6 +416,7 @@ class OutputBatch:
     # tensors or numpy frames
     output: Sequence[Any] | None = None
     raw_frame_batches: list[list[bytes]] | None = None
+    raw_frame_shared_memory_ref: dict[str, Any] | None = None
     raw_frame_content_type: str = "application/x-raw-rgb"
     raw_frame_metadata: dict[str, Any] | None = None
     realtime_latents: torch.Tensor | None = None
@@ -447,6 +448,7 @@ class OutputBatch:
         self.trajectory_decoded = None
         self.output_file_paths = None
         self.raw_frame_batches = None
+        self.raw_frame_shared_memory_ref = None
         self.realtime_latents = None
         self.realtime_handoff = None
         self.realtime_request_metadata = None

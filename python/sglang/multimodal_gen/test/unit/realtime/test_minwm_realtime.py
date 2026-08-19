@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import inspect
+import json
 from contextlib import contextmanager
 from types import SimpleNamespace
 
@@ -72,6 +74,7 @@ from sglang.multimodal_gen.runtime.pipelines.minwm_causal_dmd_pipeline import (
 )
 from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import OutputBatch
 from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.minwm.minwm_causal_denoising import (
+    MINWM_ACTION_RESIDUAL_PREPARE_NVTX_RANGE,
     MinWMCausalDMDDenoisingStage,
     MinWMCausalUniPCDenoisingStage,
     MinWMCausalVaeDecodingStage,
@@ -120,7 +123,67 @@ def test_minwm_denoising_declares_transformer_residency_use(monkeypatch):
     assert calls == [("transformer", "transformer", transformer)]
 
 
-def test_minwm_runtime_alignment_logs_once_after_cache_init(monkeypatch):
+def _make_minwm_runtime_alignment_fixture():
+    layer_count = 30
+    cache_tokens = 22
+    sink_tokens = 6
+    attention_heads = 4
+    arch_config = SimpleNamespace(
+        local_attn_size=11,
+        sink_size=3,
+        sliding_window_num_frames=13,
+        rope_position_mode="block_relative",
+        rope_max_frame_gap=5,
+        prompt_first_frame_pin_enabled=True,
+        scene_cut_rope_offset=0,
+        scene_cut_sink_enabled=False,
+    )
+    stage = MinWMCausalDMDDenoisingStage.__new__(MinWMCausalDMDDenoisingStage)
+    stage.transformer = SimpleNamespace(
+        num_attention_heads=attention_heads,
+        config=SimpleNamespace(arch_config=arch_config),
+    )
+    stage.num_transformer_blocks = layer_count
+    stage.local_attn_size = arch_config.local_attn_size
+    stage.sink_size = arch_config.sink_size
+    stage.sliding_window_num_frames = arch_config.sliding_window_num_frames
+    stage.num_token_per_frame = 2
+    stage._minwm_unbounded_cache = False
+    batch = SimpleNamespace(
+        enable_sequence_shard=False,
+        realtime_causal_sink_size=3,
+        realtime_causal_kv_cache_num_frames=13,
+    )
+    caches = [
+        SimpleNamespace(
+            k=torch.empty(1, cache_tokens, attention_heads, 1),
+            v=torch.empty(1, cache_tokens, attention_heads, 1),
+            rope_position_mode=arch_config.rope_position_mode,
+            rope_max_frame_gap=arch_config.rope_max_frame_gap,
+            prompt_first_frame_pin_enabled=(arch_config.prompt_first_frame_pin_enabled),
+            allow_growth=False,
+            cache_size=cache_tokens,
+            sink_tokens=sink_tokens,
+            attention_window_size=cache_tokens,
+            scene_cut_rope_offset=arch_config.scene_cut_rope_offset,
+            scene_cut_sink_enabled=arch_config.scene_cut_sink_enabled,
+        )
+        for _ in range(layer_count)
+    ]
+    return stage, batch, SimpleNamespace(kv_cache=caches)
+
+
+def _runtime_alignment_json(log_calls):
+    payloads = [
+        call[1] for call in log_calls if call[0] == "MINWM_RUNTIME_ALIGNMENT_JSON %s"
+    ]
+    assert len(payloads) == 1
+    return json.loads(payloads[0])
+
+
+def test_minwm_runtime_alignment_validates_all_30_layers_without_hardcoding_config(
+    monkeypatch,
+):
     from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.minwm import (
         minwm_causal_denoising,
     )
@@ -131,38 +194,53 @@ def test_minwm_runtime_alignment_logs_once_after_cache_init(monkeypatch):
         "logger",
         SimpleNamespace(info=lambda *args: log_calls.append(args)),
     )
-    stage = MinWMCausalDMDDenoisingStage.__new__(MinWMCausalDMDDenoisingStage)
-    stage.transformer = SimpleNamespace(
-        config=SimpleNamespace(
-            arch_config=SimpleNamespace(local_attn_size=32),
-        )
-    )
-    stage.sink_size = 8
-    stage.sliding_window_num_frames = 32
-    batch = SimpleNamespace(
-        realtime_causal_sink_size=8,
-        realtime_causal_kv_cache_num_frames=32,
-    )
-    cache_ctx = SimpleNamespace(
-        kv_cache=[
-            SimpleNamespace(
-                rope_position_mode="block_relative",
-                rope_max_frame_gap=12,
-                prompt_first_frame_pin_enabled=True,
-                allow_growth=False,
-                cache_size=32,
-                sink_tokens=8,
-                scene_cut_rope_offset=0,
-                scene_cut_sink_enabled=False,
-            )
-        ]
-    )
+    stage, batch, cache_ctx = _make_minwm_runtime_alignment_fixture()
 
     stage._log_runtime_alignment_once(batch, cache_ctx)
     stage._log_runtime_alignment_once(batch, cache_ctx)
 
-    assert len(log_calls) == 1
+    assert len(log_calls) == 2
     assert log_calls[0][0].startswith("MINWM_RUNTIME_ALIGNMENT")
+    alignment = _runtime_alignment_json(log_calls)
+    assert alignment["all_match"] is True
+    assert alignment["layer_count"] == 30
+    assert alignment["expected"]["layer_count"] == 30
+    assert alignment["expected"]["cache_tokens"] == 22
+    assert alignment["expected"]["sink_tokens"] == 6
+    assert alignment["resolved"]["local_attn_size"] == 11
+    assert alignment["resolved"]["sink_size"] == 3
+    assert alignment["resolved"]["window_size"] == 13
+    assert alignment["observed"]["cache_token_counts"] == [22]
+    assert alignment["observed"]["sink_token_counts"] == [6]
+
+
+def test_minwm_runtime_alignment_reports_layer_17_mismatch(monkeypatch):
+    from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.minwm import (
+        minwm_causal_denoising,
+    )
+
+    log_calls = []
+    monkeypatch.setattr(
+        minwm_causal_denoising,
+        "logger",
+        SimpleNamespace(info=lambda *args: log_calls.append(args)),
+    )
+    stage, batch, cache_ctx = _make_minwm_runtime_alignment_fixture()
+    cache_ctx.kv_cache[17].rope_max_frame_gap = 6
+
+    with pytest.raises(RuntimeError, match="layer 17"):
+        stage._log_runtime_alignment_once(batch, cache_ctx)
+
+    alignment = _runtime_alignment_json(log_calls)
+    assert alignment["all_match"] is False
+    assert alignment["violations"] == [
+        {
+            "actual": 6,
+            "expected": 5,
+            "field": "rope_max_frame_gap",
+            "layer": 17,
+        }
+    ]
 
 
 @pytest.mark.parametrize(
@@ -647,6 +725,34 @@ def test_minwm_cuda_graph_refreshes_block_relative_rope_after_window_roll(
         )
 
 
+def test_minwm_cuda_graph_replay_refreshes_chunk_action_residual():
+    runner = _MinWMCudaGraphRunner(key=())
+    runner.static_latent = torch.zeros(1, 2)
+    runner.static_prompt = torch.zeros(1, 3)
+    runner.static_timestep = torch.zeros(1, dtype=torch.long)
+    runner.static_action_token_residual = torch.zeros(1, 4, 3)
+    replays = []
+    runner.graph = SimpleNamespace(replay=lambda: replays.append(None))
+    runner.output = torch.ones(1)
+    runner.replay_count = 1
+    attention_plan = object()
+    runner._last_attention_plan_source = attention_plan
+
+    for value in (1.0, 2.0):
+        result = runner.run(
+            latent=torch.full((1, 2), value),
+            prompt=torch.full((1, 3), value),
+            timestep=torch.tensor([int(value)]),
+            action_token_residual=torch.full((1, 4, 3), value),
+            attention_plan=attention_plan,
+            capture_forward=None,
+        )
+        assert result is runner.output
+        assert torch.all(runner.static_action_token_residual == value)
+
+    assert len(replays) == 2
+
+
 def test_minwm_prompt_first_frame_promotes_only_when_leaving_tail():
     cache = _make_minwm_test_cache(
         cache_size=6,
@@ -700,6 +806,188 @@ def test_minwm_action_history_chunk_matches_full_sequence():
     )
     assert token_residual.is_contiguous()
     assert token_residual.stride(-1) == 1
+
+
+def test_minwm_legacy_action_condition_recomputes_for_all_five_forwards(monkeypatch):
+    torch.manual_seed(19)
+    model = MinWMCausalTransformer3DModel.__new__(MinWMCausalTransformer3DModel)
+    torch.nn.Module.__init__(model)
+    model.action_in = PrimitiveTokenResidualActionEncoder(
+        dim=24, embed_dim=8, hidden_dim=16, kernel_size=3
+    )
+    labels = torch.tensor([[0, 9, 10, 1]])
+    hidden_states = torch.randn(1, 4 * 6, 24).to(torch.bfloat16)
+
+    original = model.action_in.token_residual
+    calls = []
+
+    def counted_token_residual(*args, **kwargs):
+        calls.append(None)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(model.action_in, "token_residual", counted_token_residual)
+    outputs = [
+        model._apply_patch_token_condition(
+            hidden_states,
+            action=labels,
+            num_frames=4,
+            height=2,
+            width=3,
+        )
+        for _ in range(5)
+    ]
+
+    assert len(calls) == 5
+    for output in outputs:
+        assert output.dtype == torch.bfloat16
+        assert output.is_contiguous()
+        torch.testing.assert_close(output, outputs[0], rtol=0, atol=0)
+
+
+def test_minwm_precomputed_action_residual_is_exactly_reused_for_five_forwards(
+    monkeypatch,
+):
+    torch.manual_seed(23)
+    model = MinWMCausalTransformer3DModel.__new__(MinWMCausalTransformer3DModel)
+    torch.nn.Module.__init__(model)
+    model.action_in = PrimitiveTokenResidualActionEncoder(
+        dim=24, embed_dim=8, hidden_dim=16, kernel_size=3
+    )
+    labels = torch.tensor([[0, 9, 10, 1]])
+    hidden_states = torch.randn(1, 4 * 6, 24).to(torch.bfloat16)
+    legacy = model._apply_patch_token_condition(
+        hidden_states,
+        action=labels,
+        num_frames=4,
+        height=2,
+        width=3,
+    )
+
+    original = model.action_in.token_residual
+    calls = []
+
+    def counted_token_residual(*args, **kwargs):
+        calls.append(None)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(model.action_in, "token_residual", counted_token_residual)
+    residual = model.prepare_action_token_residual(
+        labels,
+        num_frames=4,
+        height=2,
+        width=3,
+        dtype=torch.bfloat16,
+    )
+    outputs = [
+        model._apply_patch_token_condition(
+            hidden_states,
+            action=None,
+            action_token_residual=residual,
+            num_frames=4,
+            height=2,
+            width=3,
+        )
+        for _ in range(5)
+    ]
+
+    assert len(calls) == 1
+    assert residual.dtype == torch.bfloat16
+    assert residual.is_contiguous()
+    for output in outputs:
+        assert output.is_contiguous()
+        torch.testing.assert_close(output, legacy, rtol=0, atol=0)
+
+
+def test_minwm_action_residual_is_recomputed_for_each_chunk():
+    calls = []
+
+    class Transformer:
+        patch_size = (1, 2, 2)
+
+        def prepare_action_token_residual(self, action, **kwargs):
+            calls.append((action.clone(), kwargs))
+            return torch.full(
+                (1, kwargs["num_frames"] * kwargs["height"] * kwargs["width"], 3),
+                len(calls),
+                dtype=kwargs["dtype"],
+            )
+
+    stage = MinWMCausalDMDDenoisingStage.__new__(MinWMCausalDMDDenoisingStage)
+    stage.transformer = Transformer()
+
+    def context(action):
+        return SimpleNamespace(
+            target_dtype=torch.bfloat16,
+            autocast_enabled=False,
+            num_frames=4,
+            height=6,
+            width=8,
+            pos_cond_kwargs={"action": action},
+        )
+
+    first = stage._prepare_chunk_action_token_residual(
+        context(torch.tensor([[0, 9, 10, 1]]))
+    )
+    second = stage._prepare_chunk_action_token_residual(
+        context(torch.tensor([[36, 4, 80, 0]]))
+    )
+
+    assert len(calls) == 2
+    assert calls[0][1] == {
+        "num_frames": 4,
+        "height": 3,
+        "width": 4,
+        "dtype": torch.bfloat16,
+    }
+    assert not torch.equal(calls[0][0], calls[1][0])
+    assert first.data_ptr() != second.data_ptr()
+    assert torch.all(first == 1)
+    assert torch.all(second == 2)
+
+
+def test_minwm_action_residual_prepare_nvtx_range_is_gated_and_unique(monkeypatch):
+    from sglang.multimodal_gen.runtime.utils import nvtx_pytorch_hooks
+
+    pushes = []
+    pops = []
+    monkeypatch.setattr(nvtx_pytorch_hooks.nvtx, "range_push", pushes.append)
+    monkeypatch.setattr(nvtx_pytorch_hooks.nvtx, "range_pop", lambda: pops.append(None))
+
+    class Transformer:
+        patch_size = (1, 2, 2)
+
+        @staticmethod
+        def prepare_action_token_residual(_action, **_kwargs):
+            return torch.zeros(1)
+
+    stage = MinWMCausalDMDDenoisingStage.__new__(MinWMCausalDMDDenoisingStage)
+    stage.transformer = Transformer()
+    context = SimpleNamespace(
+        target_dtype=torch.bfloat16,
+        autocast_enabled=False,
+        num_frames=4,
+        height=6,
+        width=8,
+        pos_cond_kwargs={"action": torch.zeros(1, 4, dtype=torch.long)},
+    )
+
+    stage._current_use_nvtx = True
+    stage._prepare_chunk_action_token_residual(context)
+    stage._prepare_chunk_action_token_residual(context)
+    stage._current_use_nvtx = False
+    stage._prepare_chunk_action_token_residual(context)
+
+    assert pushes == [MINWM_ACTION_RESIDUAL_PREPARE_NVTX_RANGE] * 2
+    assert pops == [None] * 2
+
+
+def test_minwm_forward_impl_prepares_action_residual_once_per_chunk():
+    source = inspect.getsource(MinWMCausalDMDDenoisingStage._forward_impl)
+
+    assert source.count("self._prepare_chunk_action_token_residual(ctx)") == 1
+    assert source.index(
+        "self._prepare_chunk_action_token_residual(ctx)"
+    ) < source.index("self._denoise_realtime_causal_chunk(")
 
 
 def test_minwm_bounded_session_presamples_reference_and_full_horizon(monkeypatch):
@@ -2316,8 +2604,8 @@ def test_minwm_causal_attention_packs_one_ulysses_collective(monkeypatch, seq_sp
     ("capability", "available", "expected"),
     [
         (10, {"flash_attn.cute", "flash_attn"}, "fa4"),
-        (9, {"flash_attn_interface", "flash_attn"}, "fa3"),
-        (9, {"flash_attn"}, "fa2"),
+        (9, {"sglang.jit_kernel.flash_attention_v3", "flash_attn"}, "fa3"),
+        (8, {"flash_attn"}, "fa2"),
     ],
 )
 def test_minwm_attention_backend_matches_source_device_fallback(
@@ -2336,6 +2624,61 @@ def test_minwm_attention_backend_matches_source_device_fallback(
         lambda name: object() if name in available else None,
     )
     assert _minwm_packed_attention_backend(torch.device("cuda")) == expected
+
+
+def test_minwm_hopper_requires_fa3(monkeypatch):
+    import sglang.multimodal_gen.runtime.models.dits.minwm as minwm_module
+
+    monkeypatch.setattr(
+        minwm_module.torch.cuda,
+        "get_device_capability",
+        lambda _device: (9, 0),
+    )
+    monkeypatch.setattr(
+        minwm_module.importlib.util,
+        "find_spec",
+        lambda name: object() if name == "flash_attn" else None,
+    )
+
+    with pytest.raises(RuntimeError, match="requires.*FlashAttention-3.*Hopper"):
+        _minwm_packed_attention_backend(torch.device("cuda"))
+
+
+def test_minwm_hopper_attention_uses_sglang_fa3_api(monkeypatch):
+    import sglang.jit_kernel.flash_attention_v3 as fa3_module
+    import sglang.multimodal_gen.runtime.models.dits.minwm as minwm_module
+
+    class FakeCudaTensor:
+        def __init__(self, shape):
+            self.shape = shape
+            self.device = torch.device("cuda")
+
+        def reshape(self, *shape):
+            return FakeCudaTensor(shape)
+
+    calls = []
+
+    def fake_fa3(**kwargs):
+        calls.append(kwargs)
+        return kwargs["q"]
+
+    monkeypatch.setattr(
+        minwm_module, "_minwm_packed_attention_backend", lambda _: "fa3"
+    )
+    monkeypatch.setattr(minwm_module, "_minwm_uniform_cu_seqlens", lambda *_: object())
+    monkeypatch.setattr(fa3_module, "flash_attn_varlen_func", fake_fa3)
+
+    output = minwm_module._minwm_packed_varlen_attention(
+        FakeCudaTensor((1, 3, 2, 4)),
+        FakeCudaTensor((1, 5, 2, 4)),
+        FakeCudaTensor((1, 5, 2, 4)),
+    )
+
+    assert output.shape == (1, 3, 2, 4)
+    assert len(calls) == 1
+    assert calls[0]["window_size"] == (-1, -1)
+    assert calls[0]["return_softmax_lse"] is False
+    assert "deterministic" not in calls[0]
 
 
 def test_minwm_allows_benchmark_component_ablation(monkeypatch):

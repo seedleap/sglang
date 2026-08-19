@@ -673,6 +673,7 @@ class CausalWanTransformer3DModel(BaseDiT, LayerwiseOffloadableModuleMixin):
         cache_start: int = 0,
         start_frame: int = 0,
         action: torch.Tensor | None = None,
+        action_token_residual: torch.Tensor | None = None,
     ) -> torch.Tensor:
         r"""
         Run the diffusion model with kv caching.
@@ -715,6 +716,7 @@ class CausalWanTransformer3DModel(BaseDiT, LayerwiseOffloadableModuleMixin):
         hidden_states = self._apply_patch_token_condition(
             hidden_states,
             action=action,
+            action_token_residual=action_token_residual,
             num_frames=post_patch_num_frames,
             height=post_patch_height,
             width=post_patch_width,
@@ -813,12 +815,13 @@ class CausalWanTransformer3DModel(BaseDiT, LayerwiseOffloadableModuleMixin):
         hidden_states: torch.Tensor,
         *,
         action: torch.Tensor | None,
+        action_token_residual: torch.Tensor | None = None,
         num_frames: int,
         height: int,
         width: int,
     ) -> torch.Tensor:
         """Model-specific token condition hook after patch embedding."""
-        del action, num_frames, height, width
+        del action, action_token_residual, num_frames, height, width
         return hidden_states
 
 

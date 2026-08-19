@@ -44,6 +44,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--warmup-chunks", type=int, default=20)
     parser.add_argument("--measured-chunks", type=int, default=200)
     parser.add_argument("--kv-cache-num-frames", type=int)
+    parser.add_argument("--sink-size", type=int)
     parser.add_argument("--save-first-measured-frame", action="store_true")
     parser.add_argument("--timeout", type=float, default=1800.0)
     return parser.parse_args()
@@ -67,6 +68,33 @@ def latency_summary(values: list[float]) -> dict[str, float]:
     }
 
 
+_CHUNK_TELEMETRY_TIMING_ALIASES = {
+    "output_pace_ms": "pace_wait_ms",
+    "transport_encode_ms": "raw_payload_build_ms",
+    "transport_write_ms": "ws_write_ms",
+}
+
+
+def record_server_chunk_timing(
+    stats_by_chunk: dict[int, dict[str, Any]], message: dict[str, Any]
+) -> dict[str, Any]:
+    message_type = message.get("type")
+    if message_type not in {"chunk_stats", "chunk_telemetry"}:
+        raise ValueError(f"not a server chunk timing message: {message_type!r}")
+    normalized = dict(message)
+    if message_type == "chunk_telemetry":
+        for source, destination in _CHUNK_TELEMETRY_TIMING_ALIASES.items():
+            if source in normalized:
+                normalized[destination] = normalized[source]
+    chunk_index = int(normalized["chunk_index"])
+    if chunk_index in stats_by_chunk:
+        raise AssertionError(
+            f"chunk {chunk_index} received duplicate server timing messages"
+        )
+    stats_by_chunk[chunk_index] = normalized
+    return normalized
+
+
 def validate_contract(manifest: dict, args: argparse.Namespace) -> tuple[dict, dict]:
     contract = manifest["contract"]
     if contract.get("action_type") != "primitive_token_residual":
@@ -81,6 +109,14 @@ def validate_contract(manifest: dict, args: argparse.Namespace) -> tuple[dict, d
         raise ValueError("warmup-chunks and measured-chunks must be positive")
     if args.kv_cache_num_frames is not None and args.kv_cache_num_frames < 1:
         raise ValueError("kv-cache-num-frames must be positive")
+    if args.sink_size is not None and args.sink_size < 0:
+        raise ValueError("sink-size must be non-negative")
+    if (
+        args.sink_size is not None
+        and args.kv_cache_num_frames is not None
+        and args.sink_size >= args.kv_cache_num_frames
+    ):
+        raise ValueError("sink-size must be smaller than kv-cache-num-frames")
     cases = {case["id"]: case for case in manifest["cases"]}
     if args.case not in cases:
         raise ValueError(f"unknown case {args.case!r}; choose from {sorted(cases)}")
@@ -88,7 +124,13 @@ def validate_contract(manifest: dict, args: argparse.Namespace) -> tuple[dict, d
 
 
 def validate_frame_batch(
-    header: dict[str, Any], payload: bytes, *, chunk_index: int
+    header: dict[str, Any],
+    payload: bytes,
+    *,
+    chunk_index: int,
+    expected_width: int,
+    expected_height: int,
+    expected_channels: int = 3,
 ) -> tuple[int, int, int]:
     batch_frames = int(header["num_frames"])
     expected_bytes = (
@@ -105,6 +147,9 @@ def validate_frame_batch(
         "chunk_index": int(header["chunk_index"]) == chunk_index,
         "positive_num_frames": batch_frames > 0,
         "content_type": header["content_type"] == "application/x-raw-rgb",
+        "width": int(header["width"]) == expected_width,
+        "height": int(header["height"]) == expected_height,
+        "channels": int(header["channels"]) == expected_channels,
         "payload_bytes": len(payload) == expected_bytes,
         "bytes_per_frame": int(header["bytes_per_frame"])
         == expected_bytes // batch_frames,
@@ -186,10 +231,14 @@ async def receive_run(args: argparse.Namespace, contract: dict, case: dict) -> d
 
     total_chunks = args.warmup_chunks + args.measured_chunks
     latent_frames_per_chunk = int(contract["latent_frames_per_chunk"])
+    expected_width = int(contract["width"])
+    expected_height = int(contract["height"])
+    expected_channels = 3
     pixel_frames_per_latent = int(contract["generated_pixel_frames"]) // int(
         contract["generated_latent_frames"]
     )
     first_frame = materialize_first_frame(case, Path(args.output).parent / "inputs")
+    first_frame_sha256 = hashlib.sha256(first_frame.read_bytes()).hexdigest()
     if contract.get("action_output_format") == "primitive_float":
         action_condition = {
             "action_weights": [action_weights(case)]
@@ -203,6 +252,9 @@ async def receive_run(args: argparse.Namespace, contract: dict, case: dict) -> d
             * total_chunks
             * latent_frames_per_chunk
         }
+    canonical_condition = json.dumps(
+        action_condition, separators=(",", ":"), sort_keys=True
+    ).encode()
     request = {
         "type": "init",
         "model": args.model,
@@ -220,6 +272,8 @@ async def receive_run(args: argparse.Namespace, contract: dict, case: dict) -> d
     }
     if args.kv_cache_num_frames is not None:
         request["realtime_causal_kv_cache_num_frames"] = args.kv_cache_num_frames
+    if args.sink_size is not None:
+        request["realtime_causal_sink_size"] = args.sink_size
     stats_by_chunk: dict[int, dict[str, Any]] = {}
     payload_complete_ns: dict[int, int] = {}
     frame_batches_by_chunk: dict[int, dict[str, Any]] = {}
@@ -234,7 +288,10 @@ async def receive_run(args: argparse.Namespace, contract: dict, case: dict) -> d
     ) as websocket:
         await websocket.send(msgspec.msgpack.encode(request))
         init_completed_ns = time.perf_counter_ns()
-        while len(payload_complete_ns) < total_chunks:
+        while (
+            len(payload_complete_ns) < total_chunks
+            or len(stats_by_chunk) < total_chunks
+        ):
             packed = await asyncio.wait_for(websocket.recv(), timeout=args.timeout)
             if not isinstance(packed, bytes):
                 raise TypeError(
@@ -246,8 +303,8 @@ async def receive_run(args: argparse.Namespace, contract: dict, case: dict) -> d
                 continue
             if message_type == "error":
                 raise RuntimeError(header.get("content", "unknown realtime error"))
-            if message_type == "chunk_stats":
-                stats_by_chunk[int(header["chunk_index"])] = header
+            if message_type in {"chunk_stats", "chunk_telemetry"}:
+                record_server_chunk_timing(stats_by_chunk, header)
                 continue
             if message_type == "frame_batch":
                 payload = header.pop("payload")
@@ -265,7 +322,12 @@ async def receive_run(args: argparse.Namespace, contract: dict, case: dict) -> d
                 else pixel_frames_per_latent * latent_frames_per_chunk
             )
             batch_index, num_batches, batch_frames = validate_frame_batch(
-                header, payload, chunk_index=chunk_index
+                header,
+                payload,
+                chunk_index=chunk_index,
+                expected_width=expected_width,
+                expected_height=expected_height,
+                expected_channels=expected_channels,
             )
             state = frame_batches_by_chunk.setdefault(
                 chunk_index,
@@ -313,8 +375,8 @@ async def receive_run(args: argparse.Namespace, contract: dict, case: dict) -> d
                 payload_complete_ns[chunk_index] = time.perf_counter_ns()
 
     expected_indices = list(range(total_chunks))
-    if stats_by_chunk and sorted(stats_by_chunk) != expected_indices:
-        raise AssertionError("chunk_stats indices are not contiguous")
+    if sorted(stats_by_chunk) != expected_indices:
+        raise AssertionError("server chunk timing indices are not contiguous")
     if sorted(payload_complete_ns) != expected_indices:
         raise AssertionError("frame payload indices are not contiguous")
 
@@ -341,12 +403,21 @@ async def receive_run(args: argparse.Namespace, contract: dict, case: dict) -> d
         "pace_wait_ms",
         "ws_write_ms",
         "chunk_total_ms",
+        "model_vae_encode_ms",
+        "model_denoise_ms",
+        "model_vae_decode_ms",
+        "model_post_decode_ms",
+        "raw_frame_async_enqueue_ms",
     )
     server = {}
     for field in timing_fields:
         values = [float(stat[field]) for stat in measured_stats if field in stat]
+        server[field] = {
+            "missing_count": args.measured_chunks - len(values),
+            "sample_count": len(values),
+        }
         if values:
-            server[field] = latency_summary(values)
+            server[field].update(latency_summary(values))
             if field in {"scheduler_forward_ms", "chunk_total_ms"}:
                 server[field.replace("_ms", "_fps_ratio_of_sums")] = measured_frames / (
                     sum(values) / 1000.0
@@ -359,6 +430,12 @@ async def receive_run(args: argparse.Namespace, contract: dict, case: dict) -> d
         interarrival_ms.append((completion_ns - previous_ns) / 1e6)
         previous_ns = completion_ns
     client_window_s = sum(interarrival_ms) / 1000.0
+    client_fps = measured_frames / client_window_s
+    interarrival_summary = latency_summary(interarrival_ms)
+    target_fps = 24.0
+    target_ms_per_chunk = (
+        1000.0 * (pixel_frames_per_latent * latent_frames_per_chunk) / target_fps
+    )
     return {
         "schema_version": "minwm-realtime-throughput/v1",
         "profile_name": args.profile_name,
@@ -374,6 +451,7 @@ async def receive_run(args: argparse.Namespace, contract: dict, case: dict) -> d
             "generated_pixel_frames_per_steady_chunk": pixel_frames_per_latent
             * latent_frames_per_chunk,
             "kv_cache_num_frames": args.kv_cache_num_frames,
+            "sink_size": args.sink_size,
             "required_fixed_between_profiles": [
                 "checkpoint bytes",
                 "GPU model and count",
@@ -384,7 +462,28 @@ async def receive_run(args: argparse.Namespace, contract: dict, case: dict) -> d
         },
         "warmup_chunks": args.warmup_chunks,
         "measured_chunks": args.measured_chunks,
+        "received_payload_chunks": len(payload_complete_ns),
+        "received_server_timing_chunks": len(stats_by_chunk),
         "measured_frames": measured_frames,
+        "received_frame_contract": {
+            "bytes_per_frame": expected_width * expected_height * expected_channels,
+            "channels": expected_channels,
+            "content_type": "application/x-raw-rgb",
+            "height": expected_height,
+            "width": expected_width,
+        },
+        "request_evidence": {
+            "case_id": case["id"],
+            "condition_inputs_sha256": hashlib.sha256(canonical_condition).hexdigest(),
+            "first_frame_sha256": first_frame_sha256,
+            "first_frame_uri": case["first_frame"],
+            "prompt_sha256": hashlib.sha256(case["prompt"].encode()).hexdigest(),
+        },
+        "target_fps": target_fps,
+        "target_ms_per_chunk": target_ms_per_chunk,
+        "target_24fps_pass": client_fps >= target_fps,
+        "target_chunk_p50_pass": interarrival_summary["p50"] <= target_ms_per_chunk,
+        "target_chunk_p95_pass": interarrival_summary["p95"] <= target_ms_per_chunk,
         "measured_payload_sha256": measured_payload_sha256.hexdigest(),
         "measured_frame_sha256": measured_frame_sha256,
         "measured_frame_samples_base64": measured_frame_samples,
@@ -399,8 +498,8 @@ async def receive_run(args: argparse.Namespace, contract: dict, case: dict) -> d
                 payload_complete_ns[0] - init_completed_ns
             )
             / 1e6,
-            "steady_payload_interarrival_ms": latency_summary(interarrival_ms),
-            "steady_received_fps_ratio_of_sums": measured_frames / client_window_s,
+            "steady_payload_interarrival_ms": interarrival_summary,
+            "steady_received_fps_ratio_of_sums": client_fps,
             "steady_window_seconds": client_window_s,
         },
     }
