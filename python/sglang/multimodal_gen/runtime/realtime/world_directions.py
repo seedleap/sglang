@@ -28,6 +28,12 @@ from typing import Any, Awaitable, Callable
 CHANGE_PERSISTENT = "persistent"
 CHANGE_ONE_TIME = "one_time"
 
+# Engine event kinds for a scene change. "prompt" blends from the current
+# frame; "scene_cut" makes the engine jump its temporal anchor so the new
+# scene need not evolve out of the old one (film-style cut).
+KIND_PROMPT = "prompt"
+KIND_SCENE_CUT = "scene_cut"
+
 # Revert delay for one-time effects. This matches the production web UI
 # restoreDelayMs=10000: long enough for the effect to land, but short enough to
 # keep transient effects from becoming permanent scene state.
@@ -65,11 +71,12 @@ class DirectionCoordinator:
         self._schedule = sorted(schedule)  # [(target_chunk, prompt)] ascending
         self._pos = 0
         self._rewrite = rewrite  # async (raw_text, baseline) -> (full_prompt, type)
-        self._dispatch = dispatch  # async (full_prompt, event_id|None) -> engine
+        self._dispatch = dispatch  # async (full_prompt, event_id|None, kind) -> engine
         self._notify = notify  # async (event_id, status) -> direction_status
         self._revert_delay_s = revert_delay_s
         self._gen = 0  # generation counter: newest action supersedes old rewrites
         self._revert_task: asyncio.Task | None = None
+        self._revert_kind = KIND_PROMPT  # transition the pending revert will use
         self._closed = False
         # Single flight: one rewrite per session at a time, keeping only the
         # newest queued instruction. Only the last one can take effect anyway,
@@ -156,12 +163,27 @@ class DirectionCoordinator:
             return
         await self.apply(prompt, change_type, event_id)
 
-    async def apply(self, prompt: str, change_type: str, event_id: Any) -> None:
-        """Dispatch one full prompt and take ownership of scene state."""
+    async def apply(
+        self,
+        prompt: str,
+        change_type: str,
+        event_id: Any,
+        kind: str = KIND_PROMPT,
+    ) -> None:
+        """Dispatch one full prompt and take ownership of scene state.
+
+        ``kind`` picks the transition: a blend (default) or a hard cut. It is
+        decided server side - by the compiled world for skills, never by the
+        browser, which only ever sends an intent (a skill id or raw words).
+        """
         self._gen += 1  # newest action wins; in-flight old rewrites become stale
         self._cancel_revert()  # new content owns the scene; old one-time revert is stale
+        kind = KIND_SCENE_CUT if kind == KIND_SCENE_CUT else KIND_PROMPT
         mine: asyncio.Task | None = None
         if change_type == CHANGE_ONE_TIME:
+            # A cut goes out, so the revert cuts back: blending home from a
+            # completely different scene reads as a morph, not a return.
+            self._revert_kind = kind
             # Registration must share the await-free block with the cancel
             # above. Assigning after the dispatch means an interleaved apply
             # cancels None, and this timer becomes an orphan that nobody can
@@ -172,7 +194,7 @@ class DirectionCoordinator:
             mine = asyncio.get_running_loop().create_task(self._revert_later())
             self._revert_task = mine
         try:
-            await self._dispatch(prompt, _as_event_id(event_id))
+            await self._dispatch(prompt, _as_event_id(event_id), kind)
         except BaseException:
             # The effect frame never went out, so it must not get a revert
             # frame. Compare by task identity so an interleaved newer timer that
@@ -191,7 +213,7 @@ class DirectionCoordinator:
         # Revert frames carry no event_id: they are not the result of one player
         # input. Attaching an event_id would make the UI mark a completed input
         # as active again.
-        await self._dispatch(self._baseline, None)
+        await self._dispatch(self._baseline, None, self._revert_kind)
 
     def _cancel_revert(self) -> None:
         task, self._revert_task = self._revert_task, None

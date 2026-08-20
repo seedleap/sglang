@@ -19,6 +19,7 @@ class Harness:
         self.rewrite_error = None
         self.change_type = "persistent"
         self.rewrite_calls = 0
+        self.kinds = []  # transition used by each dispatch
         # Set to an asyncio.Lock to emulate the gateway upstream send lock: the
         # dispatch then yields for real, so two applies can interleave at the
         # dispatch point (what upstream backpressure looks like in production).
@@ -47,7 +48,8 @@ class Harness:
             raise error
         return f"rw({text}|{baseline})", self.change_type
 
-    async def _dispatch(self, prompt, event_id):
+    async def _dispatch(self, prompt, event_id, kind="prompt"):
+        self.kinds.append(kind)
         if self.dispatch_lock is not None:
             async with self.dispatch_lock:
                 await asyncio.sleep(0)
@@ -407,5 +409,48 @@ def test_dispatch_failure_does_not_leave_an_ownerless_pending():
         h.dispatch_lock = None
         await h.coord.submit(3, "c")
         assert h.dispatched == [("rw(c|base)", 3)], h.dispatched
+
+    asyncio.run(run())
+
+
+# ---- Transitions: cuts are decided server side, and a cut reverts as a cut ----
+
+
+def test_skill_scene_cut_dispatches_cut_and_reverts_with_cut():
+    """A cut skill: both the effect frame and the revert frame must cut.
+
+    Blending home from a completely different scene reads as a morph rather
+    than a return.
+    """
+
+    async def run():
+        h = Harness(revert_delay_s=0.02)
+        await h.coord.apply("blink away", "one_time", 7, "scene_cut")
+        await asyncio.sleep(0.06)
+        assert h.dispatched == [("blink away", 7), ("base", None)], h.dispatched
+        assert h.kinds == ["scene_cut", "scene_cut"], h.kinds
+
+    asyncio.run(run())
+
+
+def test_default_and_unknown_transition_fall_back_to_blend():
+    """An omitted or misspelled transition blends; it never cuts by accident."""
+
+    async def run():
+        h = Harness()
+        await h.coord.apply("a", "persistent", 1)
+        await h.coord.apply("b", "persistent", 2, "hard_cut")
+        assert h.kinds == ["prompt", "prompt"], h.kinds
+
+    asyncio.run(run())
+
+
+def test_direction_rewrite_never_cuts():
+    """Free player input always blends: a rewrite edits the current scene."""
+
+    async def run():
+        h = Harness()
+        await h.coord.submit(1, "move the shark closer")
+        assert h.kinds == ["prompt"], h.kinds
 
     asyncio.run(run())
