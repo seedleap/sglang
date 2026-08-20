@@ -69,7 +69,10 @@ class DirectionCoordinator:
         schedule 里一次性条目的合成还原也是普通条目，"最后派发的就是
         当前画面"对它们一并成立，不需要区别对待。
         """
-        while self._pos < len(self._schedule) and self._schedule[self._pos][0] <= chunk_index:
+        while (
+            self._pos < len(self._schedule)
+            and self._schedule[self._pos][0] <= chunk_index
+        ):
             self._baseline = self._schedule[self._pos][1]
             self._pos += 1
 

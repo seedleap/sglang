@@ -75,9 +75,6 @@ class WorkerSlot:
     blocked_sessions: int = 0
     queue_depth: int = 0
     service_time_ms: float = 0.0
-    oldest_consumed_age_s: float = 0.0
-    stale_consumed_reservations: int = 0
-    last_progress_age_s: float = 0.0
     reservation_endpoint: str = ""
     drain_deadline: float | None = None
     capacity: int = 1
@@ -334,11 +331,6 @@ class InMemoryCoordinatorStore:
                         blocked_sessions=heartbeat.blocked_sessions,
                         queue_depth=heartbeat.queue_depth,
                         service_time_ms=heartbeat.service_time_ms,
-                        oldest_consumed_age_s=heartbeat.oldest_consumed_age_s,
-                        stale_consumed_reservations=(
-                            heartbeat.stale_consumed_reservations
-                        ),
-                        last_progress_age_s=heartbeat.last_progress_age_s,
                         reservation_endpoint=heartbeat.reservation_endpoint,
                         drain_deadline=heartbeat.drain_deadline,
                         capacity=heartbeat.capacity,
@@ -631,15 +623,6 @@ class DynamoDBCoordinatorStore:
             blocked_sessions=int(self._read_optional_n(item, "blocked_sessions")),
             queue_depth=int(self._read_optional_n(item, "queue_depth")),
             service_time_ms=float(self._read_optional_n(item, "service_time_ms")),
-            oldest_consumed_age_s=float(
-                self._read_optional_n(item, "oldest_consumed_age_s")
-            ),
-            stale_consumed_reservations=int(
-                self._read_optional_n(item, "stale_consumed_reservations")
-            ),
-            last_progress_age_s=float(
-                self._read_optional_n(item, "last_progress_age_s")
-            ),
             reservation_endpoint=self._read_optional_s(item, "reservation_endpoint"),
             drain_deadline=(
                 float(item["drain_deadline"]["N"]) if "drain_deadline" in item else None
@@ -780,9 +763,6 @@ class DynamoDBCoordinatorStore:
                     "runnable_sessions = :runnable_sessions, "
                     "blocked_sessions = :blocked_sessions, "
                     "queue_depth = :queue_depth, service_time_ms = :service_time_ms, "
-                    "oldest_consumed_age_s = :oldest_consumed_age_s, "
-                    "stale_consumed_reservations = :stale_consumed_reservations, "
-                    "last_progress_age_s = :last_progress_age_s, "
                     "reservation_endpoint = :reservation_endpoint, "
                     "heartbeat_expires_at = :heartbeat_expires, "
                     "allocation_key = :allocation_key, "
@@ -810,13 +790,6 @@ class DynamoDBCoordinatorStore:
                     ":blocked_sessions": {"N": str(heartbeat.blocked_sessions)},
                     ":queue_depth": {"N": str(heartbeat.queue_depth)},
                     ":service_time_ms": {"N": str(heartbeat.service_time_ms)},
-                    ":oldest_consumed_age_s": {
-                        "N": str(heartbeat.oldest_consumed_age_s)
-                    },
-                    ":stale_consumed_reservations": {
-                        "N": str(heartbeat.stale_consumed_reservations)
-                    },
-                    ":last_progress_age_s": {"N": str(heartbeat.last_progress_age_s)},
                     ":reservation_endpoint": {"S": heartbeat.reservation_endpoint},
                     ":heartbeat_expires": {"N": str(heartbeat_expires)},
                     ":allocation_key": {"S": allocation_key},

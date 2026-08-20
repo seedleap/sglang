@@ -23,6 +23,9 @@ import uvicorn
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
+from websockets.asyncio.client import connect
+from websockets.exceptions import ConnectionClosedOK
+
 from sglang.multimodal_gen.runtime.realtime.async_vae_protocol import (
     ProtocolViolation,
     decode_message,
@@ -71,8 +74,6 @@ from sglang.multimodal_gen.runtime.utils.realtime_trace import (
     emit_realtime_trace_payload,
     normalize_trace_id,
 )
-from websockets.asyncio.client import connect
-from websockets.exceptions import ConnectionClosedOK
 
 WEBUI_ROOT = Path(__file__).resolve().parents[2] / "apps" / "realtime_webui"
 logger = logging.getLogger(__name__)
@@ -736,7 +737,7 @@ def create_app(
             def _spawn_direction(coro, label: str) -> None:
                 # 独立任务：改写要 1~2 秒，不能阻塞 browser_to_worker 收包循环。
                 # 强引用收编进 direction_tasks，finally 统一取消；异常只记日志
-                #（会话的生死由主任务组决定，一次改写失败不该拆会话）
+                # （会话的生死由主任务组决定，一次改写失败不该拆会话）
                 task = asyncio.create_task(coro, name=f"gateway-direction-{label}")
                 direction_tasks.add(task)
 
@@ -945,7 +946,7 @@ def create_app(
                             # 注意：worker 控制消息是裸 msgpack、没有 version 字段，
                             # 必须用与 worker_message_allowed 相同的裸解码 ——
                             # decode_message 的版本校验会把它当协议违规拆掉会话
-                            #（生产实测踩过）。上游通道只有小体积控制消息，
+                            # （生产实测踩过）。上游通道只有小体积控制消息，
                             # 多解一次码可忽略
                             telemetry = msgspec.msgpack.decode(wire)
                             if (
