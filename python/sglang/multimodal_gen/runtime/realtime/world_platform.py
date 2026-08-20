@@ -232,6 +232,30 @@ class WorldCallbacks:
         self._pending.add(task)
         task.add_done_callback(self._pending.discard)
 
+    async def rewrite(self, run_id: str, instruction: str, baseline: str) -> dict:
+        """玩家指令改写：同步等结果（交互路径，不走 fire-and-forget）。
+
+        world-service 持有改写模型的凭证与提示词资产，网关只带
+        「用户原话 + 当前基线」去换新的完整描述。超时 25s：模型本身
+        1~2s，留足重试余量；失败抛异常，调用方翻译成 direction_status。
+        """
+        path = "/internal/v1/rewrite"
+        body = json.dumps(
+            {"run_id": run_id, "instruction": instruction, "baseline": baseline}
+        ).encode()
+        url = self._cfg.callback_url.rstrip("/") + path
+        resp = await self._client.post(
+            url,
+            content=body,
+            headers=self._sign("POST", path, body),
+            timeout=25.0,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if not isinstance(data, dict) or not data.get("prompt"):
+            raise ValueError("rewrite 响应缺少 prompt")
+        return data
+
     def started(self, run_id: str, trace_id: str, max_lifetime_s: int) -> None:
         self.fire(
             "/internal/v1/runs/started",

@@ -52,6 +52,10 @@ from sglang.multimodal_gen.runtime.realtime.gateway import (
     worker_message_allowed,
     worker_message_type,
 )
+from sglang.multimodal_gen.runtime.realtime.world_directions import (
+    DirectionCoordinator,
+    parse_init_directions,
+)
 from sglang.multimodal_gen.runtime.realtime.world_platform import (
     Principal,
     SessionPayloadSealer,
@@ -321,8 +325,10 @@ _WORLD_PASSTHROUGH_TYPES = frozenset({"client_metric", "client_metric_batch", "a
 _WORLD_ALLOWED_EVENT_KINDS = frozenset(
     {"camera", "camera_actions", "move", "action", "playback_ack", "heartbeat"}
 )
-# 自由输入类事件：仅当凭证 allow_free_prompt=true 时放行
-_WORLD_FREE_PROMPT_KINDS = frozenset({"prompt", "scene_cut"})
+# 自由输入不再放行原始 prompt/scene_cut：完整画面描述属于服务端资产，
+# 浏览器只发用户原话（kind:"direction"），由网关调 world-service 改写后派发。
+# direction 的长度上限与 world-service 侧校验一致。
+_WORLD_DIRECTION_MAX_CHARS = 2000
 
 # init 消息里「只给网关看」的扩展块键名（与 world-service zingproto.WorldExtKey 一致）
 WORLD_EXT_KEY = "_world"
@@ -593,6 +599,10 @@ def create_app(
         playback_ack_window = BrowserPlaybackAckWindow()
         # world 会话的分支状态（init 校验 / deadline / 拒绝原因）
         world_session: dict[str, Any] = {"init_verified": False}
+        # 玩家指令编排：init 验证后创建；动态任务单独收编，finally 统一取消
+        directions: DirectionCoordinator | None = None
+        direction_tasks: set[asyncio.Task] = set()
+        upstream_send_lock = asyncio.Lock()
         try:
             admitted_at = time.perf_counter()
             _log_gateway_trace(trace_id, "gateway.ws_accepted", session_id=session_id)
@@ -673,6 +683,66 @@ def create_app(
                 session_id=session_id,
             )
 
+            async def _upstream_send(data) -> None:
+                # direction/技能任务与浏览器转发会并发写同一条上游连接，
+                # websockets 不允许并发 send —— 加锁串行化
+                async with upstream_send_lock:
+                    await upstream.send(data)
+
+            async def _direction_rewrite(text: str, baseline: str) -> tuple[str, str]:
+                # 改写委托给 world-service（凭证与提示词资产都在那边），
+                # 走生命周期回调同一条 HMAC 内网通道
+                try:
+                    data = await world_callbacks.rewrite(
+                        principal.run_id, text, baseline
+                    )
+                except Exception:
+                    logger.warning(
+                        "direction 改写失败 run_id=%s", principal.run_id, exc_info=True
+                    )
+                    raise
+                # change_type 缺省按 one_time：错判也会在还原后自愈，
+                # 反过来（错判 persistent）会把一次性效果永久烙进基线
+                return str(data["prompt"]), str(data.get("change_type") or "one_time")
+
+            async def _direction_dispatch(prompt: str, event_id) -> None:
+                # 引擎读的是 payload 字段（RealtimeEvent.payload）；
+                # event_id 透传，让 control_ack/frame_batch/chunk_telemetry
+                # 能对号回到玩家的这次输入
+                fields: dict[str, Any] = {"kind": "prompt", "payload": prompt}
+                if event_id is not None:
+                    fields["event_id"] = event_id
+                await _upstream_send(encode_message("event", **fields))
+
+            async def _direction_notify(event_id, status: str) -> None:
+                # rewriting/failed/superseded 直发浏览器（网关自产，不经引擎白名单）
+                await asyncio.wait_for(
+                    sender.send(
+                        encode_message(
+                            "direction_status", event_id=event_id, status=status
+                        )
+                    ),
+                    timeout=browser_send_timeout_s,
+                )
+
+            def _spawn_direction(coro, label: str) -> None:
+                # 独立任务：改写要 1~2 秒，不能阻塞 browser_to_worker 收包循环。
+                # 强引用收编进 direction_tasks，finally 统一取消；异常只记日志
+                #（会话的生死由主任务组决定，一次改写失败不该拆会话）
+                task = asyncio.create_task(coro, name=f"gateway-direction-{label}")
+                direction_tasks.add(task)
+
+                def _done(t: asyncio.Task) -> None:
+                    direction_tasks.discard(t)
+                    if not t.cancelled() and t.exception() is not None:
+                        logger.warning(
+                            "direction 任务异常 run_id=%s",
+                            principal.run_id if principal else "-",
+                            exc_info=t.exception(),
+                        )
+
+                task.add_done_callback(_done)
+
             async def browser_to_worker():
                 nonlocal expected_last_chunk
                 try:
@@ -705,7 +775,7 @@ def create_app(
                                     expected_last_chunk = max_chunks - 1
                         if isinstance(payload, bytes):
                             await playback_ack_window.observe_browser_message(payload)
-                        await upstream.send(payload)
+                        await _upstream_send(payload)
                 except ConnectionClosedOK:
                     return
 
@@ -737,6 +807,17 @@ def create_app(
                                 skills[str(item["id"])] = item
                     world_session["skills"] = skills
                     world_session["init_verified"] = True
+                    # 指令编排器：基线种子 = init 的 prompt，
+                    # 时间轴条目随 chunk_telemetry 推进滚入基线
+                    nonlocal directions
+                    baseline, schedule = parse_init_directions(init_message)
+                    directions = DirectionCoordinator(
+                        baseline=baseline,
+                        schedule=schedule,
+                        rewrite=_direction_rewrite,
+                        dispatch=_direction_dispatch,
+                        notify=_direction_notify,
+                    )
                     # 剥掉只给网关看的扩展块后再交给引擎。
                     # encode_message 的签名是 (message_type, *, **fields)，
                     # 且它自己会补 version —— 这两个键要从 fields 里摘掉，
@@ -777,7 +858,7 @@ def create_app(
                     skill = (world_session.get("skills") or {}).get(
                         str(control.get("id") or "")
                     )
-                    if skill is None:
+                    if skill is None or directions is None:
                         _log_gateway_trace(
                             trace_id,
                             "gateway.world_frame_rejected",
@@ -785,22 +866,51 @@ def create_app(
                             reason="unknown_skill",
                         )
                         return None
-                    return encode_message(
-                        "event", kind="prompt", prompt=str(skill.get("prompt") or "")
-                    )
-                if kind in _WORLD_ALLOWED_EVENT_KINDS:
-                    return payload
-                if kind in _WORLD_FREE_PROMPT_KINDS:
-                    if principal.allow_free_prompt:
-                        return payload
-                    # 关闭自由输入的世界：静默丢弃而不是断开 ——
-                    # 恶意注入只应失效，不应帮攻击者结束别人的会话
-                    _log_gateway_trace(
-                        trace_id,
-                        "gateway.free_prompt_dropped",
-                        session_id=session_id,
+                    # 技能提示词在创作期已是完整画面描述，等价于预改写好的
+                    # direction，走同一条 apply 通道。顺带修复两个既有问题：
+                    # ① 旧实现把提示词放错字段（prompt=，引擎读的是 payload），
+                    #    技能事件被引擎静默丢字段，从未真正生效；
+                    # ② one_time 技能从无还原，效果会永久挂在画面上。
+                    _spawn_direction(
+                        directions.apply(
+                            str(skill.get("prompt") or ""),
+                            str(skill.get("change_type") or "one_time"),
+                            control.get("event_id"),
+                        ),
+                        "skill",
                     )
                     return None
+                if kind == "direction":
+                    # 玩家原话。改写由独立任务完成后以 kind:"prompt" 派发，
+                    # 这里不转发任何字节
+                    if not principal.allow_free_prompt:
+                        # 关闭自由输入的世界：静默丢弃而不是断开 ——
+                        # 恶意注入只应失效，不应帮攻击者结束别人的会话
+                        _log_gateway_trace(
+                            trace_id,
+                            "gateway.free_prompt_dropped",
+                            session_id=session_id,
+                        )
+                        return None
+                    text = str(control.get("text") or "").strip()
+                    if (
+                        not text
+                        or len(text) > _WORLD_DIRECTION_MAX_CHARS
+                        or directions is None
+                    ):
+                        _log_gateway_trace(
+                            trace_id,
+                            "gateway.world_frame_rejected",
+                            session_id=session_id,
+                            reason="direction_invalid",
+                        )
+                        return None
+                    _spawn_direction(
+                        directions.submit(control.get("event_id"), text), "rewrite"
+                    )
+                    return None
+                if kind in _WORLD_ALLOWED_EVENT_KINDS:
+                    return payload
                 _log_gateway_trace(
                     trace_id,
                     "gateway.world_frame_rejected",
@@ -822,6 +932,16 @@ def create_app(
                             raise ProtocolViolation(
                                 f"Denoiser emitted forbidden message: {message_type}"
                             )
+                        if directions is not None:
+                            # 路过的遥测顺便驱动基线推进（时间轴条目滚进基线）。
+                            # 上游通道只有小体积控制消息，多解一次码可忽略
+                            telemetry = decode_message(wire)
+                            if (
+                                isinstance(telemetry, dict)
+                                and telemetry.get("type") == "chunk_telemetry"
+                                and isinstance(telemetry.get("chunk_index"), int)
+                            ):
+                                directions.observe_chunk(telemetry["chunk_index"])
                         await send_browser_with_trace(wire, send_source="denoiser")
                 except ConnectionClosedOK:
                     return
@@ -1066,6 +1186,9 @@ def create_app(
             except Exception:
                 pass
         finally:
+            if directions is not None:
+                directions.close()  # 取消还原定时器
+            await _cancel_tasks(set(direction_tasks))
             await _cancel_tasks(tasks)
             if upstream is not None:
                 await upstream.close()
