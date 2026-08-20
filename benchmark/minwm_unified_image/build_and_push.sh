@@ -56,7 +56,8 @@ fi
 for required_path in \
   benchmark/minwm_unified_image/build_and_push.sh \
   python/kernels.lock \
-  python/sglang/multimodal_gen/tools/minwm_image_runtime_probe.py; do
+  python/sglang/multimodal_gen/tools/minwm_image_runtime_probe.py \
+  python/sglang/multimodal_gen/tools/minwm_profile_launcher.py; do
   git -C "${REPO_ROOT}" cat-file -e "${GIT_SHA}:${required_path}" || {
     printf 'required release file is not tracked by %s: %s\n' \
       "${GIT_SHA}" "${required_path}" >&2

@@ -17,13 +17,15 @@ from sglang.multimodal_gen.tools.minwm_image_runtime_probe import (
         ((9, 0), "hopper", "fa3"),
         ((10, 0), "blackwell", "fa4"),
         ((10, 3), "blackwell", "fa4"),
+        ((12, 0), "sm120", "fa4"),
+        ((12, 1), "sm120", "fa4"),
     ],
 )
 def test_expected_attention_for_supported_gpu(capability, family, backend):
     assert expected_attention_for_capability(capability) == (family, backend)
 
 
-@pytest.mark.parametrize("capability", [(8, 9), (9, 1), (12, 0)])
+@pytest.mark.parametrize("capability", [(8, 9), (9, 1), (11, 0), (13, 0)])
 def test_expected_attention_rejects_unsupported_gpu(capability):
     with pytest.raises(ValueError, match="unsupported compute capability"):
         expected_attention_for_capability(capability)

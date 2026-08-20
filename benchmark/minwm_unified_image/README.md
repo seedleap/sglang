@@ -1,9 +1,9 @@
-# Unified MinWM Hopper / Blackwell image
+# Unified MinWM CUDA inference image
 
 This directory owns the release procedure for one CUDA 13 / Torch 2.11 MinWM
-runtime image that supports both Hopper and Blackwell. It deliberately uses the
-repository's full `docker/Dockerfile` build instead of layering a new Torch ABI
-over the historical `bedc07...` image.
+runtime image that supports Hopper, datacenter Blackwell, and SM120 RTX. It
+deliberately uses the repository's full `docker/Dockerfile` build instead of
+layering a new Torch ABI over the historical `bedc07...` image.
 
 The current H200/B200-validated immutable release and its exact gate results are
 recorded in [RELEASES.zh-CN.md](RELEASES.zh-CN.md).  H100 and B300 share the
@@ -18,6 +18,7 @@ The release target is:
 |---|---:|---:|---:|
 | H100 / H200 | 9.0 | FA3 | FA3 |
 | B200 / B300 | 10.x | FA4 | FA4 |
+| RTX 5090 / RTX PRO 6000 Blackwell | 12.x | FA4 | FA4 |
 
 The core versions are sourced from `python/pyproject.toml`: Torch
 `2.11.0+cu130`, `flash-attn-4==4.0.0b15`, `sglang-kernel==0.4.4`,
@@ -110,6 +111,11 @@ artifact rather than its compatible fallback. Externally record the Pod's actual
 `status.containerStatuses[].imageID`; the digest passed into the container is
 evidence metadata, not proof of the image that Kubernetes pulled.
 
+Use `--expected-family sm120` on RTX 5090/RTX PRO 6000 Blackwell. The FA4 dense
+and packed kernel smokes must pass on the actual SM120 device; availability of
+the Python module alone is not an acceptance gate. The promoted SM120 profiles
+are BF16, so the probe does not apply the SM100/Hopper FP8 FFN gate to them.
+
 Render one Job at a time from the checked-in template, client-dry-run it, then
 submit it to the matching cluster:
 
@@ -123,7 +129,37 @@ bash benchmark/minwm_unified_image/render_gpu_probe_job.sh \
   blackwell <source-sha40> sha256:<image-digest> > /tmp/minwm-image-gate-b200.yaml
 kubectl --context leap-world-use2 apply \
   --dry-run=client -f /tmp/minwm-image-gate-b200.yaml
+
+bash benchmark/minwm_unified_image/render_gpu_probe_job.sh \
+  sm120 <source-sha40> sha256:<image-digest> > /tmp/minwm-image-gate-sm120.yaml
+kubectl --context leap-world-use2 apply \
+  --dry-run=server -f /tmp/minwm-image-gate-sm120.yaml
 ```
+
+## Tianpeng 480p hardware profiles
+
+Profiles are executable runtime policy, not documentation-only presets. Start
+the server through the image-bundled launcher and leave `--profile auto`; it
+selects `sm120-32g-speed` for a 28-40 GiB SM120 GPU and
+`sm120-highmem-speed` for an SM120 GPU with at least 64 GiB. H100/H200 and
+B200/B300 use the resident speed policy. Unsupported capabilities and SM120
+memory sizes without a validated profile fail closed.
+
+```bash
+python3 -m sglang.multimodal_gen.tools.minwm_profile_launcher \
+  --profile auto \
+  --taehv-checkpoint-path /models/taehv/taew2_2.pth \
+  -- \
+  --model-path /models/minwm-tianpeng-gap12 \
+  --host 0.0.0.0 \
+  --port 30000
+```
+
+The launcher checks the TAEHV SHA-256 and the converted model's Tianpeng gap12
+fields, fixes packed-fast/segment-compile/runtime flags, and rejects conflicting
+managed arguments. The 32 GiB profile offloads only the text encoder; DiT and
+TAEHV stay resident. Promotion of that profile requires a same-digest 832x480
+gate with client FPS at least 24 and peak process memory below 32,000 MiB.
 
 The Jobs do not mount S3/PVCs or install anything at startup. Archive their raw
 logs, complete Pod JSON, requested top-level image digest, and kubelet `imageID`.
@@ -174,8 +210,10 @@ An image is releasable only after:
 2. H200 (or H100) reports dense/packed FA3 and passes attention plus FP8 FFN
    kernel smokes.
 3. B200 (or B300) reports dense/packed FA4 and passes the same kernel smokes.
-4. A short 720p speed run stays within 3% of the accepted device baseline.
-5. The immutable digest, source SHA, both GPU contracts, and throughput evidence
+4. RTX 5090 and RTX PRO 6000 report dense/packed FA4 and pass the SM120 BF16
+   attention smokes before their profiles are promoted.
+5. A short speed run stays within the accepted device/profile baseline.
+6. The immutable digest, source SHA, GPU contracts, and throughput evidence
    are archived together.
 
 Changing CUDA, Torch, FA, `sglang-kernel`, CUTLASS DSL, or the FA3 lock creates

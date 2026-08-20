@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail-fast runtime contract for the unified MinWM Hopper/Blackwell image."""
+"""Fail-fast runtime contract for the unified MinWM CUDA inference image."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ from typing import Any
 
 from packaging.specifiers import SpecifierSet
 
-CONTRACT_VERSION = "minwm-image-runtime-contract/v1"
+CONTRACT_VERSION = "minwm-image-runtime-contract/v2"
 EXPECTED_PACKAGE_SPECS = {
     "cryptography": "==50.0.0",
     "distro": "==1.9.0",
@@ -55,8 +55,10 @@ def expected_attention_for_capability(capability: tuple[int, int]) -> tuple[str,
         return "hopper", "fa3"
     if capability[0] == 10:
         return "blackwell", "fa4"
+    if capability[0] == 12:
+        return "sm120", "fa4"
     raise ValueError(
-        f"unsupported compute capability {capability}; expected SM90 or SM10x"
+        f"unsupported compute capability {capability}; expected SM90, SM10x, or SM12x"
     )
 
 
@@ -558,6 +560,8 @@ def collect_contract(
         errors.append(f"SM90 device name {name!r} is not an H100/H200")
     if family == "blackwell" and not re.search(r"\b(?:B|GB)(?:200|300)\b", name):
         errors.append(f"SM10x device name {name!r} is not a B200/B300/GB200/GB300")
+    if family == "sm120" and not re.search(r"\bRTX\b", name):
+        errors.append(f"SM12x device name {name!r} is not an RTX GPU")
 
     required_import = (
         "sglang.jit_kernel.flash_attention_v3"
@@ -648,15 +652,21 @@ def collect_contract(
     except Exception as exc:
         errors.append(f"attention kernel smoke raised {exc!r}")
 
-    try:
-        result["ffn"]["kernel_smoke"] = _run_ffn_kernel_smoke(family)
-        failed_ffn_kernels = [
-            item["name"] for item in result["ffn"]["kernel_smoke"] if not item["passed"]
-        ]
-        if failed_ffn_kernels:
-            errors.append(f"FFN FP8 kernel smoke failed: {failed_ffn_kernels}")
-    except Exception as exc:
-        errors.append(f"FFN FP8 kernel smoke raised {exc!r}")
+    if family == "sm120":
+        result["ffn"]["profile"] = "bf16"
+        result["ffn"]["kernel_smoke"] = []
+    else:
+        try:
+            result["ffn"]["kernel_smoke"] = _run_ffn_kernel_smoke(family)
+            failed_ffn_kernels = [
+                item["name"]
+                for item in result["ffn"]["kernel_smoke"]
+                if not item["passed"]
+            ]
+            if failed_ffn_kernels:
+                errors.append(f"FFN FP8 kernel smoke failed: {failed_ffn_kernels}")
+        except Exception as exc:
+            errors.append(f"FFN FP8 kernel smoke raised {exc!r}")
 
     result["status"] = "pass" if not errors else "fail"
     return result
@@ -666,7 +676,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--software-only", action="store_true")
     parser.add_argument("--expected-source-commit")
-    parser.add_argument("--expected-family", choices=("hopper", "blackwell"))
+    parser.add_argument("--expected-family", choices=("hopper", "blackwell", "sm120"))
     parser.add_argument("--expected-visible-gpus", type=int, default=1)
     parser.add_argument("--expected-image-digest")
     parser.add_argument("--output", type=Path)
