@@ -103,6 +103,7 @@ async def _runtime_config(_request):
         headers={"Cache-Control": "no-store"},
     )
 
+
 async def _rewrite_prompt(request):
     """Rewrite one Live Direction without exposing Vertex credentials."""
 
