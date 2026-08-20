@@ -1817,6 +1817,10 @@ body.world-studio {
   min-width: 0;
   background: transparent;
 }
+.world-studio .model-player-grid.is-single-up {
+  grid-template-columns: minmax(0, 1280px);
+  justify-content: center;
+}
 .world-studio .model-player-grid.is-three-up { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
 .world-studio .model-player {
   display: grid;
@@ -2167,6 +2171,9 @@ body.world-studio {
   height: 100%;
   min-height: 0;
 }
+.world-studio .stage:fullscreen .model-player-grid.is-single-up {
+  grid-template-columns: minmax(0, 1fr);
+}
 .world-studio .stage:fullscreen .model-player {
   min-height: 0;
   grid-template-rows: 38px auto minmax(0, 1fr);
@@ -2210,6 +2217,7 @@ body.world-studio {
   .world-studio .entry-actions { margin-top: 6px; }
   .world-studio .preset-list { grid-template-columns: repeat(2, minmax(0, 1fr)); max-height: none; }
   .world-studio .model-player-grid { grid-template-columns: 1fr; }
+  .world-studio .model-player-grid.is-single-up { grid-template-columns: 1fr; }
   .world-studio .model-player-grid.is-three-up { grid-template-columns: 1fr; }
   .world-studio .model-slot-config { flex-wrap: wrap; align-items: end; }
   .world-studio .stage-controls { gap: 44px; padding-inline: 4%; }

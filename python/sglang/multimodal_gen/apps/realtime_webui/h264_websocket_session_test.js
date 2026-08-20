@@ -22,6 +22,8 @@ const session = new H264WebSocketSession({
   video,
   WebSocketImpl: FakeWebSocket,
   MediaSourceImpl: FakeMediaSource,
+  packMessage: JSON.stringify,
+  unpackMessage: (value) => JSON.parse(Buffer.from(value).toString("utf8")),
   onStats: (value) => stats.push(value),
 });
 const sent = [];
@@ -61,17 +63,17 @@ session._handleMetadata({
   type: "media_batch",
   first_frame_index: 7,
   num_frames: 1,
-  bridge_encoder_feed_ms: 0,
+  h264_encoder_feed_ms: 0,
 });
 session._handleMetadata({
   type: "media_encode_timing",
   first_frame_index: 7,
-  bridge_encoded_epoch_ms: Date.now(),
-  bridge_encoder_feed_ms: 6.5,
+  h264_encoded_epoch_ms: Date.now(),
+  h264_encoder_feed_ms: 6.5,
 });
-assert.equal(stats.at(-1).lastBridgeEncoderFeedMs, 6.5);
+assert.equal(stats.at(-1).lastH264EncoderFeedMs, 6.5);
 assert.equal(
-  session.mediaBatches.find((item) => item.sourceFrameIndex === 7).bridgeEncoderFeedMs,
+  session.mediaBatches.find((item) => item.sourceFrameIndex === 7).h264EncoderFeedMs,
   6.5,
 );
 
@@ -103,6 +105,8 @@ const normalCloseSession = new H264WebSocketSession({
   video,
   WebSocketImpl: FakeWebSocket,
   MediaSourceImpl: FakeMediaSource,
+  packMessage: JSON.stringify,
+  unpackMessage: (value) => JSON.parse(Buffer.from(value).toString("utf8")),
   onState: (state, details) => normalCloseStates.push({ state, details }),
   onError: (error) => normalCloseErrors.push(error),
 });
@@ -121,6 +125,8 @@ const recoverableCloseSession = new H264WebSocketSession({
   video,
   WebSocketImpl: FakeWebSocket,
   MediaSourceImpl: FakeMediaSource,
+  packMessage: JSON.stringify,
+  unpackMessage: (value) => JSON.parse(Buffer.from(value).toString("utf8")),
   onState: (state, details) => recoverableCloseStates.push({ state, details }),
   onError: (error) => recoverableCloseErrors.push(error),
 });
@@ -154,7 +160,6 @@ const directSession = new H264WebSocketSession({
   video,
   WebSocketImpl: FakeWebSocket,
   MediaSourceImpl: FakeMediaSource,
-  directGateway: true,
   packMessage: (value) => value,
   unpackMessage: (value) => value,
 });
@@ -177,7 +182,7 @@ directSession._handleMetadata({
   h264_queue_ms: 4.5,
   h264_encoder_feed_ms: 2.5,
 });
-assert.equal(directSession.lastStats.lastBridgeQueueMs, 4.5);
-assert.equal(directSession.lastStats.lastBridgeEncoderFeedMs, 2.5);
+assert.equal(directSession.lastStats.lastH264QueueMs, 4.5);
+assert.equal(directSession.lastStats.lastH264EncoderFeedMs, 2.5);
 
 console.log("h264_websocket_session_test: ok");

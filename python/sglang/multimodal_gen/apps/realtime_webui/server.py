@@ -19,7 +19,6 @@ from aiohttp import (
     WSMsgType,
     web,
 )
-from h264_websocket_bridge import install_h264_websocket_bridge
 from prompt_rewriter import PromptRewriter
 from world_creator import WorldCreator
 
@@ -103,14 +102,6 @@ async def _runtime_config(_request):
         content_type="application/javascript",
         headers={"Cache-Control": "no-store"},
     )
-
-
-def _direct_h264_gateway_enabled():
-    try:
-        config = json.loads(os.environ.get("REALTIME_UI_CONFIG_JSON", "{}"))
-    except json.JSONDecodeError:
-        return False
-    return isinstance(config, dict) and config.get("h264DirectGatewayEnabled") is True
 
 
 async def _rewrite_prompt(request):
@@ -881,16 +872,6 @@ def create_app():
     app.router.add_route("*", "/backends/{backend}/v1/{path:.*}", _proxy_backend_http)
     app.router.add_get("/v1/realtime_video/generate", _proxy_websocket)
     app.router.add_route("*", "/v1/{path:.*}", _proxy_http)
-    if not _direct_h264_gateway_enabled():
-        install_h264_websocket_bridge(
-            app,
-            upstream_session_key=SESSION,
-            upstream_resolver=lambda backend: _backend_upstream(
-                backend,
-                "ws",
-                "/v1/realtime_video/generate",
-            ),
-        )
     app.router.add_static("/", ROOT)
     return app
 

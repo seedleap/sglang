@@ -1,0 +1,7 @@
+ARG CPU_IMAGE
+
+FROM ${CPU_IMAGE}
+
+USER 0
+RUN python -m pip install --no-cache-dir prometheus-client==0.26.0
+USER 65532:65532

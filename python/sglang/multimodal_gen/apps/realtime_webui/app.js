@@ -11,7 +11,6 @@ const H264_MSE_MIME_TYPE = 'video/mp4; codecs="avc1.4D401F"';
 const H264_WEBSOCKET_REQUESTED = UI_CONFIG.h264WebSocketEnabled === true;
 const H264_WEBSOCKET_ENABLED = H264_WEBSOCKET_REQUESTED
   && Boolean(globalThis.MediaSource?.isTypeSupported?.(H264_MSE_MIME_TYPE));
-const H264_DIRECT_GATEWAY = UI_CONFIG.h264DirectGatewayEnabled === true;
 const H264_CONNECT_MAX_ATTEMPTS = Math.max(
   1,
   Math.min(10, Math.trunc(Number(UI_CONFIG.h264WebSocketConnectAttempts) || 3)),
@@ -91,9 +90,7 @@ function h264CompressionInit(init, key) {
 }
 
 function h264WebSocketEndpoint(key) {
-  const defaultEndpoint = H264_DIRECT_GATEWAY
-    ? `/backends/${key}/v1/realtime_video/generate`
-    : `/api/h264ws/${key}`;
+  const defaultEndpoint = `/backends/${key}/v1/realtime_video/generate`;
   const configuredEndpoint = String(
     DUAL_MODEL_CONFIG[key]?.h264WsUrl || UI_CONFIG.h264WebSocketBaseUrl || "",
   ).trim();
@@ -581,15 +578,32 @@ const CUSTOM_WORLD_STORE_NAME = "worlds";
 let customWorldPresets = [];
 let customWorldDbPromise = null;
 let customWorldLoadPromise = null;
-const MODEL_SLOT_DEFAULTS = ["minwm", "lingbot2", "happyoyster"];
-let activeModelSlotCount = 2;
+const ALL_MODEL_SLOT_KEYS = ["minwm", "lingbot2", "happyoyster"];
+const configuredModelSlots = Array.isArray(UI_CONFIG.modelSlots)
+  ? UI_CONFIG.modelSlots.filter((key) => ALL_MODEL_SLOT_KEYS.includes(key))
+  : [];
+const AVAILABLE_MODEL_SLOT_KEYS = configuredModelSlots.length
+  ? configuredModelSlots
+  : ALL_MODEL_SLOT_KEYS;
+const MODEL_SLOT_DEFAULTS = configuredModelSlots.length
+  ? configuredModelSlots
+  : ["minwm", "lingbot2", "happyoyster"];
+const MODEL_SLOTS_LOCKED = UI_CONFIG.lockModelSlots === true;
+let activeModelSlotCount = Math.max(
+  1,
+  Math.min(MODEL_SLOT_DEFAULTS.length, configuredModelSlots.length || 2),
+);
 
 function selectedModelKeys() {
   const keys = [];
   for (let index = 0; index < activeModelSlotCount; index += 1) {
-    const key = $(`modelSlot${index}`)?.value || MODEL_SLOT_DEFAULTS[index];
+    const key = MODEL_SLOTS_LOCKED
+      ? MODEL_SLOT_DEFAULTS[index]
+      : ($(`modelSlot${index}`)?.value || MODEL_SLOT_DEFAULTS[index]);
+    if (!AVAILABLE_MODEL_SLOT_KEYS.includes(key)) continue;
     if (!keys.includes(key)) keys.push(key);
   }
+  if (!keys.length && AVAILABLE_MODEL_SLOT_KEYS.length) keys.push(AVAILABLE_MODEL_SLOT_KEYS[0]);
   return keys;
 }
 
@@ -597,10 +611,17 @@ function modelSelected(key) {
   return selectedModelKeys().includes(key);
 }
 
+function setModelConnectionStatesFor(selectedKeys, state, otherState = "idle") {
+  const selected = new Set(selectedKeys);
+  for (const key of ALL_MODEL_SLOT_KEYS) {
+    setModelConnectionState(key, selected.has(key) ? state : otherState);
+  }
+}
+
 function syncModelSlotUi() {
   const selected = selectedModelKeys();
   const grid = document.querySelector(".model-player-grid");
-  for (const key of MODEL_SLOT_DEFAULTS) {
+  for (const key of ALL_MODEL_SLOT_KEYS) {
     const player = document.querySelector(`[data-model-key="${key}"]`);
     if (player) player.hidden = !selected.includes(key);
   }
@@ -608,10 +629,21 @@ function syncModelSlotUi() {
     const player = document.querySelector(`[data-model-key="${key}"]`);
     if (player && grid) grid.appendChild(player);
   }
+  grid?.classList.toggle("is-single-up", selected.length === 1);
   grid?.classList.toggle("is-three-up", selected.length === 3);
-  $("modelSlot2Wrap").hidden = activeModelSlotCount < 3;
-  $("addModelSlotBtn").hidden = activeModelSlotCount >= 3;
-  $("removeModelSlotBtn").hidden = activeModelSlotCount < 3;
+  const slotConfig = document.querySelector(".model-slot-config");
+  if (slotConfig) slotConfig.hidden = MODEL_SLOTS_LOCKED;
+  for (let index = 0; index < ALL_MODEL_SLOT_KEYS.length; index += 1) {
+    const slot = $(`modelSlot${index}`);
+    if (!slot) continue;
+    const fallback = MODEL_SLOT_DEFAULTS[index] || ALL_MODEL_SLOT_KEYS[index];
+    slot.value = selected[index] || fallback;
+    const wrap = slot.closest("label");
+    if (wrap) wrap.hidden = MODEL_SLOTS_LOCKED || index >= activeModelSlotCount;
+  }
+  $("modelSlot2Wrap").hidden = MODEL_SLOTS_LOCKED || activeModelSlotCount < 3;
+  $("addModelSlotBtn").hidden = MODEL_SLOTS_LOCKED || activeModelSlotCount >= ALL_MODEL_SLOT_KEYS.length;
+  $("removeModelSlotBtn").hidden = MODEL_SLOTS_LOCKED || activeModelSlotCount < 3;
 }
 
 function ensureUniqueModelSlot(changedIndex) {
@@ -884,6 +916,7 @@ function cancelLingbot2Reconnect() {
 function canReconnectLingbot2() {
   return (
     !sessionLifetimeExpired &&
+    modelSelected("lingbot2") &&
     selectedGenerationMode() === "i2v" &&
     primarySessionConnected()
   );
@@ -980,7 +1013,6 @@ function createH264ModelSession(key) {
     overlay: $(`${key}PreviewOverlay`),
     root: document.querySelector(`[data-model-key="${key}"]`),
     endpoint: h264WebSocketEndpoint(key),
-    directGateway: H264_DIRECT_GATEWAY,
     packMessage: pack,
     unpackMessage: unpack,
     liveEdgeTargetMs: configuredNumber("h264WebSocketLiveEdgeTargetMs", 80),
@@ -2266,8 +2298,8 @@ function renderProtocolPerformance(key, stats = {}) {
     telemetry.vae_decode_ms,
     telemetry.model_vae_decode_ms,
   );
-  const h264FeedMs = protocolMetric(stats.lastBridgeEncoderFeedMs);
-  const bridgeQueueMs = protocolMetric(stats.lastBridgeQueueMs);
+  const h264FeedMs = protocolMetric(stats.lastH264EncoderFeedMs);
+  const h264QueueMs = protocolMetric(stats.lastH264QueueMs);
   const webSocketDownlinkMs = protocolMetric(
     stats.lastWebSocketDownlinkMs,
     stats.lastDownlinkMs,
@@ -2304,7 +2336,7 @@ function renderProtocolPerformance(key, stats = {}) {
     ? `q ${protocolMetricText(vaeQueueMs)} · dec ${protocolMetricText(vaeDecodeMs)}`
     : "-";
   $(`${key}PerfH264Queue`).textContent = isH264
-    ? protocolMetricText(bridgeQueueMs)
+    ? protocolMetricText(h264QueueMs)
     : "不适用";
   $(`${key}PerfH264Feed`).textContent = isH264
     ? protocolMetricText(h264FeedMs)
@@ -5820,8 +5852,19 @@ function updateWorldDraftState() {
   }
 }
 
+function hasActiveRealtimeSession() {
+  return Boolean(
+    (ws && ws.readyState !== WebSocket.CLOSED)
+    || minwmH264Session?.active
+    || lingbot2H264Session?.active
+    || happyOysterSession?.connected
+    || dualModelController.activeKeys.size > 0
+    || dualModelController.pendingKeys.size > 0
+  );
+}
+
 function clearWorldDraft() {
-  if (ws && ws.readyState === WebSocket.OPEN) closeSession("world draft cleared");
+  if (hasActiveRealtimeSession()) closeSession("world draft cleared");
   selectedPreset = null;
   selectedReferenceBytes = null;
   selectedReferenceUrl = "";
@@ -6087,6 +6130,8 @@ function closeSession(reason = "session closed by client", clearFrames = true) {
   stopWorldExperienceTiming({ recordingReason: "session_closed" });
   clearQueueOnClose = clearFrames;
   dualModelController.close(reason);
+  $("connectBtn").disabled = false;
+  if (!sessionLifetimeExpired) setStatus("Closed");
 }
 
 function waitForSocketClose(socket, timeoutMs = RECONNECT_CLOSE_TIMEOUT_MS) {
@@ -6116,9 +6161,8 @@ async function connect() {
   cancelLingbot2Reconnect();
   resetSessionLifetimeUi();
   $("connectBtn").disabled = true;
-  setModelConnectionState("minwm", "connecting");
-  setModelConnectionState("lingbot2", "connecting");
-  setModelConnectionState("happyoyster", "connecting");
+  const sessionModelKeys = selectedModelKeys();
+  setModelConnectionStatesFor(sessionModelKeys, "connecting");
   setStatus("Preparing");
   setPreviewState("waiting");
   addHistory("preparing session");
@@ -6144,9 +6188,7 @@ async function connect() {
     if (!hasWorldDescription() || !hasFirstFrame()) {
       setStatus("Complete world first", "error");
       setWorldDraftStatus("请先补齐首帧图片和世界描述", "error");
-      setModelConnectionState("minwm", "idle");
-      setModelConnectionState("lingbot2", "idle");
-      setModelConnectionState("happyoyster", "idle");
+      setModelConnectionStatesFor(sessionModelKeys, "idle");
       setPreviewState("idle");
       addHistory("world draft incomplete");
       $("connectBtn").disabled = false;
@@ -6169,9 +6211,7 @@ async function connect() {
       enteredFirstFrame = await readFirstFrame();
       firstFrame = enteredFirstFrame;
       if (!firstFrame) {
-        setModelConnectionState("minwm", "idle");
-        setModelConnectionState("lingbot2", "idle");
-        setModelConnectionState("happyoyster", "idle");
+        setModelConnectionStatesFor(sessionModelKeys, "idle");
         setStatus("Pick a reference", "error");
         setPreviewState("idle");
         addHistory("reference image required for I2V");
@@ -6227,7 +6267,7 @@ async function connect() {
           .map(({ key, error }) => `${modelLabel(key)} unavailable: ${error?.message || error}`)
           .join(" · ")}`,
       );
-      if (connectionReport.failed.some(({ key }) => key === "lingbot2")) {
+      if (modelSelected("lingbot2") && connectionReport.failed.some(({ key }) => key === "lingbot2")) {
         scheduleLingbot2Reconnect("initial connection failed");
       }
     }
@@ -6239,7 +6279,7 @@ async function connect() {
   } catch (error) {
     stopWorldExperienceTiming({ recordingReason: "startup_failed" });
     $("connectBtn").disabled = false;
-    setModelConnectionState("minwm", "error");
+    setModelConnectionStatesFor(sessionModelKeys || selectedModelKeys(), "error");
     setStatus("Init failed", "error");
     if (!renderedPreviewFrames) setPreviewState("idle");
     addHistory(error.message || "init failed");
@@ -7411,10 +7451,9 @@ $("addGoalRuleBtn").onclick = () => {
   handleWorldRulesDraftInput();
 };
 $("stopBtn").onclick = () => {
+  const sessionModelKeys = selectedModelKeys();
   closeSession();
-  setModelConnectionState("minwm", "closed");
-  setModelConnectionState("lingbot2", "closed");
-  setModelConnectionState("happyoyster", "closed");
+  setModelConnectionStatesFor(sessionModelKeys, "closed");
 };
 
 function setPromptRewriteStatus(message, state = "") {
