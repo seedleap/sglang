@@ -10,7 +10,9 @@ The current immutable releases and their exact gates are recorded in
 B200, while the 2026-08-20 r3 digest validates RTX PRO 6000 SM120 plus the
 32-GiB speed policy. H100, B300, and RTX 5090 share those family dispatch paths
 but still require a SKU-specific smoke of the intended digest before production
-use.
+use. The r3 digest predates the strict SM120 selector described below. Its short
+tag is only an alias for the same immutable digest and does not add that
+selector.
 
 ## Runtime contract
 
@@ -42,12 +44,20 @@ CUDA 13 backends. The core SGLang runtime keeps its default NIXL behavior.
 The release build also fixes `SGLANG_USE_SGL_FA3_KERNEL=0`, so Hopper selects
 that locked kernels-community artifact instead of the compatible sgl-kernel
 fallback. The runtime contract rejects an image if this selector drifts.
-The same specialized build sets `SGLANG_MINWM_REQUIRE_SM120_FA4=1`. On SM120,
-native CUDA attention then rejects an explicitly selected non-FA backend and
-refuses to fall back to Torch SDPA; MinWM packed attention likewise refuses an
-FA2 fallback. The general SGLang image leaves this setting disabled and keeps
-its existing fallback behavior. The runtime contract rejects a specialized
-image if the strict selector is missing or disabled.
+Source revisions after r3 set `SGLANG_MINWM_REQUIRE_SM120_FA4=1` in the
+specialized build. On SM120, native CUDA attention then rejects an explicitly
+selected non-FA backend and refuses to fall back to Torch SDPA; MinWM packed
+attention likewise refuses an FA2 fallback. When the setting is absent or
+false, the general SGLang policy does **not** restore an older SM120-first SDPA
+guard: eligible SM120 workloads still default to FA and select FA4, while an
+explicit alternative backend or an SDPA fallback remains possible. The runtime
+contract rejects a specialized strict candidate if the selector is missing or
+disabled.
+
+No existing tag or digest acquires this source-level contract. A strict release
+must be rebuilt under a new immutable tag/digest and must repeat the real SM120
+FA4 kernel smoke plus the applicable 832x480 throughput and memory gate before
+it is recorded as accepted.
 
 The image must not clone the repository or install Python packages when a Pod
 starts. Source, native extensions, the FA3 kernel lock, and package versions are
