@@ -1,14 +1,17 @@
-"""玩家指令（direction）编排：基线跟踪、改写调度、一次性还原。
+"""Player direction orchestration: baseline tracking, rewrite, and revert.
 
-引擎只接受「完整的当前画面状态」（kind:"prompt"），而玩家发来的是编辑指令
-（"让鲨鱼游近一点"）——直接转发会把画面里未提及的元素全部抹掉。本模块维护
-会话内的**当前基线**（当前生效的完整画面描述），把玩家原话连同基线交给
-改写服务换取新的完整描述再派发给引擎；一次性（one_time）效果到点自动
-发回基线还原。技能释放走同一条 apply 通道（技能提示词在创作期已是完整
-描述，等价于"预改写好的 direction"）。
+The engine only accepts the complete current visual state (kind:"prompt"), while
+players send edit instructions such as "move the shark closer". Forwarding those
+edits directly would erase any scene details not mentioned by the player. This
+module keeps the session's current baseline prompt, sends the user instruction
+and baseline to the rewrite service, dispatches the rewritten full prompt to the
+engine, and automatically reverts one_time effects back to the baseline. Skill
+activation uses the same apply path because skill prompts are authored as full
+scene descriptions.
 
-纯编排、只依赖 stdlib asyncio：改写、派发、通知全部由构造方注入，
-单测不需要拉起网关。所有方法都在同一事件循环内调用，不需要锁。
+This module is pure orchestration over stdlib asyncio. Rewrite, dispatch, and
+notification hooks are injected by the caller, so unit tests do not need to boot
+the gateway. All methods run in one event loop, so no lock is required.
 """
 
 from __future__ import annotations
@@ -19,23 +22,27 @@ from typing import Any, Awaitable, Callable
 CHANGE_PERSISTENT = "persistent"
 CHANGE_ONE_TIME = "one_time"
 
-# 一次性效果的还原延迟。与现网 webui 的 restoreDelayMs=10000 一致：
-# 足够引擎把效果演完一拍，又不至于让"爆发"永久挂在画面上。
+# Revert delay for one-time effects. This matches the production web UI
+# restoreDelayMs=10000: long enough for the effect to land, but short enough to
+# keep transient effects from becoming permanent scene state.
 DEFAULT_REVERT_DELAY_S = 10.0
 
 
 class DirectionCoordinator:
-    """单个会话的指令编排器。
+    """Direction orchestrator for one session.
 
-    生死同会话：init 验证通过后创建，会话 finally 里 close()。
+    The object lives and dies with the session: it is created after init
+    validation and closed in the session finally block.
 
-    基线演进的三个来源（谁最后派发谁就是基线）：
-    1. init 的 prompt（种子）；
-    2. 时间轴条目 —— 引擎按 schedule 自主派发，网关通过路过的
-       chunk_telemetry 的 chunk_index 观察推进（observe_chunk）；
-    3. persistent 改写/技能 —— apply 成功即更新。
-    one_time 不动基线，只排一个还原定时器；还原**到点才取基线**，
-    这样定时期间时间轴推进过也不会还原到过时画面。
+    The baseline evolves from three sources, where the latest dispatched prompt
+    wins:
+    1. the init prompt seed;
+    2. timeline entries dispatched by the engine according to schedule, observed
+       by the gateway through chunk_telemetry chunk_index updates;
+    3. persistent rewrites or skills, once apply succeeds.
+    one_time effects do not mutate the baseline; they only schedule a revert.
+    The revert reads the baseline when it fires, so timeline progress during the
+    timer window does not revert to stale scene state.
     """
 
     def __init__(
@@ -49,13 +56,13 @@ class DirectionCoordinator:
         revert_delay_s: float = DEFAULT_REVERT_DELAY_S,
     ) -> None:
         self._baseline = baseline
-        self._schedule = sorted(schedule)  # [(target_chunk, prompt)] 升序
+        self._schedule = sorted(schedule)  # [(target_chunk, prompt)] ascending
         self._pos = 0
-        self._rewrite = rewrite  # async (原话, 基线) -> (新完整描述, change_type)
-        self._dispatch = dispatch  # async (完整描述, event_id|None) -> 发给引擎
-        self._notify = notify  # async (event_id, status) -> direction_status 给浏览器
+        self._rewrite = rewrite  # async (raw_text, baseline) -> (full_prompt, type)
+        self._dispatch = dispatch  # async (full_prompt, event_id|None) -> engine
+        self._notify = notify  # async (event_id, status) -> direction_status
         self._revert_delay_s = revert_delay_s
-        self._gen = 0  # 代数：谁最新谁说了算（取代在途改写）
+        self._gen = 0  # generation counter: newest action supersedes old rewrites
         self._revert_task: asyncio.Task | None = None
         self._closed = False
 
@@ -64,10 +71,10 @@ class DirectionCoordinator:
         return self._baseline
 
     def observe_chunk(self, chunk_index: int) -> None:
-        """引擎已推进到 chunk_index：把时间轴上已派发的条目滚进基线。
+        """Fold dispatched timeline entries into the baseline up to chunk_index.
 
-        schedule 里一次性条目的合成还原也是普通条目，"最后派发的就是
-        当前画面"对它们一并成立，不需要区别对待。
+        Synthetic revert entries in the schedule are normal timeline entries, so
+        "latest dispatched prompt is the current scene" applies to them too.
         """
         while (
             self._pos < len(self._schedule)
@@ -77,7 +84,7 @@ class DirectionCoordinator:
             self._pos += 1
 
     async def submit(self, event_id: Any, text: str) -> None:
-        """一次玩家输入的完整旅程：rewriting → 改写 → apply。"""
+        """Run one player instruction through rewriting and apply."""
         self._gen += 1
         gen = self._gen
         await self._notify(event_id, "rewriting")
@@ -86,20 +93,21 @@ class DirectionCoordinator:
         except asyncio.CancelledError:
             raise
         except Exception:
-            # 失败不动基线、不动已排定的还原（还原会把画面拉回基线，
-            # 正是失败后该有的样子）；具体原因由 rewrite 注入方记日志
+            # A failed rewrite does not change the baseline or pending revert.
+            # The revert still returns the scene to the baseline, which is the
+            # intended fallback state. The rewrite provider logs the root cause.
             await self._notify(event_id, "failed")
             return
         if gen != self._gen or self._closed:
-            # 改写期间玩家又说了新的：旧结果作废，画面听最新的
+            # A newer player action arrived while rewriting; discard the old result.
             await self._notify(event_id, "superseded")
             return
         await self.apply(prompt, change_type, event_id)
 
     async def apply(self, prompt: str, change_type: str, event_id: Any) -> None:
-        """把一条完整描述派发给引擎并接管画面状态（direction 与技能共用）。"""
-        self._gen += 1  # 最新动作胜出：在途的旧改写完成后自动作废
-        self._cancel_revert()  # 新内容接管画面，旧的一次性还原不再有意义
+        """Dispatch one full prompt and take ownership of scene state."""
+        self._gen += 1  # newest action wins; in-flight old rewrites become stale
+        self._cancel_revert()  # new content owns the scene; old one-time revert is stale
         await self._dispatch(prompt, _as_event_id(event_id))
         if change_type == CHANGE_ONE_TIME:
             self._revert_task = asyncio.get_running_loop().create_task(
@@ -110,8 +118,9 @@ class DirectionCoordinator:
 
     async def _revert_later(self) -> None:
         await asyncio.sleep(self._revert_delay_s)
-        # 还原帧不带 event_id：它不是玩家某次输入的产物，
-        # 带上会让前端把"已完成"的输入又标成"生效中"
+        # Revert frames carry no event_id: they are not the result of one player
+        # input. Attaching an event_id would make the UI mark a completed input
+        # as active again.
         await self._dispatch(self._baseline, None)
 
     def _cancel_revert(self) -> None:
@@ -125,12 +134,12 @@ class DirectionCoordinator:
 
 
 def _as_event_id(value: Any) -> int | None:
-    # 引擎的 RealtimeEvent.event_id 是可选 int，其它类型会被 pydantic 拒掉
+    # Engine RealtimeEvent.event_id is an optional int; pydantic rejects others.
     return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
 def parse_init_directions(init_message: dict) -> tuple[str, list[tuple[int, str]]]:
-    """从（已解封的）init 消息里取基线种子与时间轴。容错：字段缺失按空处理。"""
+    """Extract baseline seed and timeline entries from the unsealed init message."""
     baseline = str(init_message.get("prompt") or "")
     schedule: list[tuple[int, str]] = []
     cond = init_message.get("condition_inputs")
