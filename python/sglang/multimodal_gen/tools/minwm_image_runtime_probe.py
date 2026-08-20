@@ -13,12 +13,14 @@ import math
 import os
 import re
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
 from packaging.specifiers import SpecifierSet
 
 CONTRACT_VERSION = "minwm-image-runtime-contract/v2"
+EXPECTED_TAEHV_REVISION = "093b918971d59001a0bad6dfd6e0409b5e1752cf"
 EXPECTED_PACKAGE_SPECS = {
     "cryptography": "==50.0.0",
     "distro": "==1.9.0",
@@ -32,6 +34,7 @@ EXPECTED_PACKAGE_SPECS = {
     "pyparsing": "==3.3.2",
     "quack-kernels": "==0.5.3",
     "sglang-kernel": "==0.4.4",
+    "taehv": "==0.1.0",
     "torch": "==2.11.0+cu130",
 }
 FA3_KERNEL_REPOSITORY = "kernels-community/sgl-flash-attn3"
@@ -50,6 +53,7 @@ REQUIRED_MODULE_SPECS = (
     "sglang.jit_kernel.flash_attention_v3",
     "sglang.multimodal_gen.runtime.layers.quantization.fp8",
     "sglang.multimodal_gen.runtime.layers.quantization.modelopt_quant",
+    "taehv",
 )
 
 
@@ -69,6 +73,19 @@ def package_version(name: str) -> str | None:
     try:
         return importlib.metadata.version(name)
     except importlib.metadata.PackageNotFoundError:
+        return None
+
+
+def package_vcs_revision(name: str) -> str | None:
+    try:
+        direct_url = importlib.metadata.distribution(name).read_text("direct_url.json")
+    except importlib.metadata.PackageNotFoundError:
+        return None
+    if not direct_url:
+        return None
+    try:
+        return json.loads(direct_url).get("vcs_info", {}).get("commit_id")
+    except json.JSONDecodeError:
         return None
 
 
@@ -140,6 +157,13 @@ def _validate_software(
             errors.append(
                 f"distribution {name!r} is {actual!r}, expected {expected_spec!r}"
             )
+
+    taehv_revision = package_vcs_revision("taehv")
+    if taehv_revision != EXPECTED_TAEHV_REVISION:
+        errors.append(
+            f"TAEHV source revision is {taehv_revision!r}, expected "
+            f"{EXPECTED_TAEHV_REVISION!r}"
+        )
 
     classic_flash_attn = package_version("flash-attn")
     if classic_flash_attn is not None:
@@ -269,6 +293,7 @@ def _validate_software(
             "sglang_use_sgl_fa3_kernel": use_sgl_fa3_kernel,
             "image_tag": os.environ.get("SGLANG_IMAGE_TAG") or None,
             "packages": packages,
+            "taehv_source_revision": taehv_revision,
             "classic_flash_attn_distribution": classic_flash_attn,
             "moviepy_distribution": moviepy,
             "nixl_distributions": nixl_distributions,
@@ -710,7 +735,11 @@ def main() -> None:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(rendered, encoding="utf-8")
     print(rendered, end="")
-    raise SystemExit(0 if contract["status"] == "pass" else 1)
+    sys.stdout.flush()
+    sys.stderr.flush()
+    # CUTLASS DSL may leave non-daemon compiler workers alive after SM120 JIT.
+    # The probe is a one-shot CLI, so terminate after the contract is durable.
+    os._exit(0 if contract["status"] == "pass" else 1)
 
 
 if __name__ == "__main__":

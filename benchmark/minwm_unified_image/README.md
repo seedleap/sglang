@@ -27,6 +27,9 @@ MinWM release overlay replaces only the SM120 attention stack with
 `quack-kernels==0.5.3`. Do not add the classic
 `flash-attn` distribution or a separate top-level `flash_attn_interface`; they
 are not needed and can create an ambiguous `flash_attn` namespace or Torch ABI.
+The same image pins `taehv==0.1.0` at source revision
+`093b918971d59001a0bad6dfd6e0409b5e1752cf`; the software gate checks both the
+distribution version and its PEP 610 source revision.
 The MinWM runtime also excludes MoviePy 2.2.1: it requires Pillow `<12`, while
 the image keeps a security-fixed Pillow `>=12.2`; MinWM video encoding uses
 PyAV/imageio-ffmpeg and has no MoviePy runtime import. This exclusion is a

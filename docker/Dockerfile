@@ -763,6 +763,8 @@ ARG GDRCOPY_VERSION=2.5.1
 ARG SGLANG_EXCLUDE_MOVIEPY=0
 ARG SGLANG_EXCLUDE_NIXL=0
 ARG SGLANG_MINWM_SM120_FA4=0
+ARG SGLANG_MINWM_TAEHV=0
+ARG TAEHV_REVISION=093b918971d59001a0bad6dfd6e0409b5e1752cf
 
 ENV DEBIAN_FRONTEND=noninteractive \
     CUDA_HOME=/usr/local/cuda \
@@ -891,6 +893,14 @@ RUN if [ "${SGLANG_MINWM_SM120_FA4}" = "1" ]; then \
             "nvidia-cutlass-dsl-libs-base==4.6.0.dev0" \
             "nvidia-cutlass-dsl-libs-cu13==4.6.0.dev0" \
             "quack-kernels==0.5.3"; \
+    fi
+
+# The MinWM speed profiles use the lightweight streaming TAEHV decoder on all
+# GPU families. Pin its source revision and install it in the image so serving
+# never clones or installs packages during Pod startup.
+RUN if [ "${SGLANG_MINWM_TAEHV}" = "1" ]; then \
+        python3 -m pip install --no-cache-dir --no-deps \
+            "taehv @ git+https://github.com/madebyollin/taehv.git@${TAEHV_REVISION}"; \
     fi
 
 # Copy sgl-model-gateway binary

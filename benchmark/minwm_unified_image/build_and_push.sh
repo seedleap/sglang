@@ -188,6 +188,7 @@ COMMON_BUILD_ARGS=(
   --build-arg "SGLANG_EXCLUDE_MOVIEPY=1"
   --build-arg "SGLANG_EXCLUDE_NIXL=1"
   --build-arg "SGLANG_MINWM_SM120_FA4=1"
+  --build-arg "SGLANG_MINWM_TAEHV=1"
   --build-arg "SGLANG_USE_SGL_FA3_KERNEL=0"
   --build-arg "SGLANG_BUILD_COMMIT=${GIT_SHA}"
   --build-arg "SGLANG_BUILD_SOURCE=${BUILD_SOURCE}"

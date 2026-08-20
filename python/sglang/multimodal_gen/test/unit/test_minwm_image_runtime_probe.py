@@ -72,10 +72,14 @@ def _patch_valid_software(monkeypatch):
         "pyparsing": "3.3.2",
         "quack-kernels": "0.5.3",
         "sglang-kernel": "0.4.4",
+        "taehv": "0.1.0",
         "torch": "2.11.0+cu130",
         "flash-attn": None,
     }
     monkeypatch.setattr(probe, "package_version", versions.get)
+    monkeypatch.setattr(
+        probe, "package_vcs_revision", lambda name: probe.EXPECTED_TAEHV_REVISION
+    )
     monkeypatch.setattr(probe, "Path", _FakeLockfile)
     monkeypatch.setattr(
         probe,
