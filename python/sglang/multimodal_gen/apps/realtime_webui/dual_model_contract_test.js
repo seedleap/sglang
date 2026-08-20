@@ -183,6 +183,7 @@ assert.match(
   "author styles must not override the hidden parameter panel",
 );
 assert.match(css, /grid-template-columns:\s*repeat\(2,/);
+assert.match(css, /\.model-player-grid\.is-single-up\s*\{[\s\S]*?grid-template-columns:\s*minmax\(0, 1280px\)/);
 assert.match(css, /@media[^}]*max-width[\s\S]*\.model-player-grid\s*\{[\s\S]*grid-template-columns:\s*1fr/);
 assert.match(css, /\.stage\s*\{[\s\S]*container-type:\s*inline-size/);
 assert.match(css, /@container[^}]*max-width:\s*1180px[\s\S]*\.topbar\s*\{[\s\S]*flex-wrap:\s*wrap/);
@@ -216,8 +217,8 @@ assert.match(html, /dual_model_controller\.js\?v=dual-model-v6/);
 assert.match(html, /h264_websocket_session\.js\?v=h264-direct-gateway-userid-v2/);
 assert.match(html, /prompt_rewrite_controller\.js\?v=prompt-rewrite-v3/);
 assert.match(html, /world_rules_controller\.js\?v=world-rules-v4/);
-assert.match(html, /styles\.css\?v=world-studio-h264-rules-v6/);
-assert.match(html, /app\.js\?v=world-studio-transport-h264-userid-v5/);
+assert.match(html, /styles\.css\?v=world-studio-single-zing-v3/);
+assert.match(html, /app\.js\?v=world-studio-single-zing-v3/);
 assert.match(html, /id="minwmH264Viewport"/);
 assert.match(html, /id="lingbot2H264Viewport"/);
 assert.match(html, /id="minwmPerfScheduler"/);

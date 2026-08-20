@@ -1,0 +1,18 @@
+ARG CPU_IMAGE
+
+FROM ${CPU_IMAGE}
+
+USER 0
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/opt/sglang/python
+
+COPY python/sglang /opt/sglang/python/sglang
+WORKDIR /opt/sglang
+
+RUN python -m compileall -q \
+      /opt/sglang/python/sglang/multimodal_gen/runtime/entrypoints/realtime_coordinator_server.py \
+      /opt/sglang/python/sglang/multimodal_gen/runtime/entrypoints/realtime_gateway_server.py \
+      /opt/sglang/python/sglang/multimodal_gen/runtime/realtime
+
+USER 65532:65532

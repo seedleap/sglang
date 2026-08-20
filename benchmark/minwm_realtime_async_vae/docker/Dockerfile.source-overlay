@@ -1,0 +1,19 @@
+ARG GPU_IMAGE
+
+FROM ${GPU_IMAGE} AS gpu-source-overlay
+
+USER 0
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/opt/sglang/python \
+    TAEHV_CHECKPOINT_PATH=/opt/taehv/taew2_2.pth
+
+COPY . /opt/sglang
+WORKDIR /opt/sglang
+
+FROM gpu-source-overlay AS denoiser
+LABEL org.opencontainers.image.title="minwm-realtime-denoiser-source-overlay"
+
+FROM gpu-source-overlay AS vae
+LABEL org.opencontainers.image.title="minwm-realtime-vae-source-overlay"
+ENTRYPOINT ["python3", "-m", "sglang.multimodal_gen.runtime.entrypoints.realtime_vae_server"]

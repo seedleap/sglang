@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>World Studio · 实时模型对比</title>
-    <link rel="stylesheet" href="./styles.css?v=world-studio-h264-rules-v6" />
+    <link rel="stylesheet" href="./styles.css?v=world-studio-single-zing-v3" />
   </head>
   <body class="world-studio">
     <header class="app-header">
@@ -151,7 +151,7 @@
 
             <div id="sessionNotice" class="session-notice" role="alert" hidden>连接已断开，请重新连接</div>
 
-            <div class="model-slot-config" aria-label="选择对比模型">
+            <div class="model-slot-config" aria-label="选择对比模型" hidden>
               <label><span>对比 1</span><select id="modelSlot0" aria-label="对比槽位 1 模型"><option value="minwm" selected>Zing</option><option value="lingbot2">LingBot2</option><option value="happyoyster">快乐生蚝</option></select></label>
               <label><span>对比 2</span><select id="modelSlot1" aria-label="对比槽位 2 模型"><option value="minwm">Zing</option><option value="lingbot2" selected>LingBot2</option><option value="happyoyster">快乐生蚝</option></select></label>
               <label id="modelSlot2Wrap" hidden><span>对比 3</span><select id="modelSlot2" aria-label="对比槽位 3 模型"><option value="minwm">Zing</option><option value="lingbot2">LingBot2</option><option value="happyoyster" selected>快乐生蚝</option></select></label>
@@ -159,7 +159,7 @@
               <button id="removeModelSlotBtn" type="button" hidden>－ 移除第三列</button>
             </div>
 
-            <div class="model-player-grid" aria-label="模型对比画面">
+            <div class="model-player-grid is-single-up" aria-label="模型对比画面">
               <article class="model-player" data-model-key="minwm" data-session-state="idle">
                 <header class="model-player-title">
                   <strong>Zing</strong>
@@ -199,7 +199,7 @@
                 </div>
               </article>
 
-              <article class="model-player" data-model-key="lingbot2" data-session-state="idle">
+              <article class="model-player" data-model-key="lingbot2" data-session-state="idle" hidden>
                 <header class="model-player-title">
                   <strong>LingBot2</strong>
                   <div class="model-player-telemetry" aria-label="LingBot2 实时状态">
@@ -404,6 +404,6 @@
     <script src="./fullscreen_controller.js?v=fullscreen-focus-v1"></script>
     <script src="./trace_topology.js?v=realtime-trace-topology-v6"></script>
     <script src="./trace_transport.js?v=realtime-trace-http-v2"></script>
-    <script src="./app.js?v=world-studio-transport-h264-userid-v5"></script>
+    <script src="./app.js?v=world-studio-single-zing-v3"></script>
   </body>
 </html>
