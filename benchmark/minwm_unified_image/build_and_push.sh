@@ -56,6 +56,7 @@ fi
 for required_path in \
   benchmark/minwm_unified_image/build_and_push.sh \
   python/kernels.lock \
+  python/sglang/multimodal_gen/tools/minwm_dependency_check.py \
   python/sglang/multimodal_gen/tools/minwm_image_runtime_probe.py \
   python/sglang/multimodal_gen/tools/minwm_profile_launcher.py; do
   git -C "${REPO_ROOT}" cat-file -e "${GIT_SHA}:${required_path}" || {
@@ -186,6 +187,7 @@ COMMON_BUILD_ARGS=(
   --build-arg "REQUIRE_KERNELS_DOWNLOAD=1"
   --build-arg "SGLANG_EXCLUDE_MOVIEPY=1"
   --build-arg "SGLANG_EXCLUDE_NIXL=1"
+  --build-arg "SGLANG_MINWM_SM120_FA4=1"
   --build-arg "SGLANG_USE_SGL_FA3_KERNEL=0"
   --build-arg "SGLANG_BUILD_COMMIT=${GIT_SHA}"
   --build-arg "SGLANG_BUILD_SOURCE=${BUILD_SOURCE}"
@@ -207,7 +209,8 @@ if [[ "${RESUMED}" == "false" ]]; then
     --load \
     "${CONTEXT_DIR}"
 
-  docker run --rm --entrypoint python3 "${LOCAL_IMAGE}" -m pip check \
+  docker run --rm --entrypoint python3 "${LOCAL_IMAGE}" \
+    -m sglang.multimodal_gen.tools.minwm_dependency_check \
     | tee "${OUTPUT_DIR}/pip-check-pre-push.txt"
   docker run --rm --entrypoint python3 "${LOCAL_IMAGE}" \
     -m sglang.multimodal_gen.tools.minwm_image_runtime_probe \
@@ -262,7 +265,8 @@ for pull_attempt in 1 2 3; do
   fi
   sleep 5
 done
-docker run --rm --entrypoint python3 "${IMMUTABLE_IMAGE}" -m pip check \
+docker run --rm --entrypoint python3 "${IMMUTABLE_IMAGE}" \
+  -m sglang.multimodal_gen.tools.minwm_dependency_check \
   | tee "${OUTPUT_DIR}/pip-check.txt"
 docker run --rm --entrypoint python3 "${IMMUTABLE_IMAGE}" \
   -m sglang.multimodal_gen.tools.minwm_image_runtime_probe \

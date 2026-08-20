@@ -22,12 +22,15 @@ CONTRACT_VERSION = "minwm-image-runtime-contract/v2"
 EXPECTED_PACKAGE_SPECS = {
     "cryptography": "==50.0.0",
     "distro": "==1.9.0",
-    "flash-attn-4": "==4.0.0b15",
+    "flash-attn-4": "==4.0.0b21",
     "kernels": "==0.14.1",
-    "nvidia-cutlass-dsl": "==4.5.2",
+    "nvidia-cutlass-dsl": "==4.6.0.dev0",
+    "nvidia-cutlass-dsl-libs-base": "==4.6.0.dev0",
+    "nvidia-cutlass-dsl-libs-cu13": "==4.6.0.dev0",
     "pillow": ">=12.2.0",
     "pyjwt": "==2.13.0",
     "pyparsing": "==3.3.2",
+    "quack-kernels": "==0.5.3",
     "sglang-kernel": "==0.4.4",
     "torch": "==2.11.0+cu130",
 }

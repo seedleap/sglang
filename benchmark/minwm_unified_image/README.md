@@ -20,10 +20,11 @@ The release target is:
 | B200 / B300 | 10.x | FA4 | FA4 |
 | RTX 5090 / RTX PRO 6000 Blackwell | 12.x | FA4 | FA4 |
 
-The core versions are sourced from `python/pyproject.toml`: Torch
-`2.11.0+cu130`, `flash-attn-4==4.0.0b15`, `sglang-kernel==0.4.4`,
-`nvidia-cutlass-dsl[cu13]==4.5.2`, and the locked
-`kernels-community/sgl-flash-attn3` kernel. Do not add the classic
+The core contract uses Torch `2.11.0+cu130`, `sglang-kernel==0.4.4`, and the
+locked `kernels-community/sgl-flash-attn3` kernel from the general build. The
+MinWM release overlay replaces only the SM120 attention stack with
+`flash-attn-4==4.0.0b21`, `nvidia-cutlass-dsl[cu13]==4.6.0.dev0`, and
+`quack-kernels==0.5.3`. Do not add the classic
 `flash-attn` distribution or a separate top-level `flash_attn_interface`; they
 are not needed and can create an ambiguous `flash_attn` namespace or Torch ABI.
 The MinWM runtime also excludes MoviePy 2.2.1: it requires Pillow `<12`, while
@@ -40,6 +41,13 @@ fallback. The runtime contract rejects an image if this selector drifts.
 The image must not clone the repository or install Python packages when a Pod
 starts. Source, native extensions, the FA3 kernel lock, and package versions are
 all fixed while building the image.
+
+The SM120 overlay intentionally keeps the general image's TVM FFI 0.1.11 and
+protobuf 7 runtime. Those versions passed the real SM120 FA4 kernel gate, but
+the upstream beta21/CUTLASS wheel metadata declares narrower ranges. The build
+runs `minwm_dependency_check`, which accepts only those five exact metadata
+lines and fails on any additional dependency conflict; it does not hide an
+unbounded `pip check` failure.
 
 Release images and build cache intentionally use separate ECR repositories.
 Release tags are immutable; the cache tag is mutable and has a lifecycle rule.
@@ -59,7 +67,8 @@ repository settings.
 
 Build on a Linux x86_64 Docker host with enough disk for the CUDA build. The
 script refuses tracked local changes, builds from `git archive HEAD`, and runs
-`pip check` plus the software contract before creating a release tag. It then
+the bounded dependency check plus the software contract before creating a
+release tag. It then
 pushes a unique immutable tag, resolves the ECR digest, repeats the checks from
 that digest, and verifies the OCI provenance and SBOM attestations. The CUDA
 13.0.1 base image is digest-pinned by the script.
@@ -160,6 +169,9 @@ fields, fixes packed-fast/segment-compile/runtime flags, and rejects conflicting
 managed arguments. The 32 GiB profile offloads only the text encoder; DiT and
 TAEHV stay resident. Promotion of that profile requires a same-digest 832x480
 gate with client FPS at least 24 and peak process memory below 32,000 MiB.
+The explicit `sm120-32g-speed` policy may be selected on a larger SM120 GPU to
+qualify the exact low-memory policy; `auto` still chooses the high-memory policy
+on RTX PRO 6000.
 
 The Jobs do not mount S3/PVCs or install anything at startup. Archive their raw
 logs, complete Pod JSON, requested top-level image digest, and kubelet `imageID`.

@@ -117,11 +117,9 @@ def resolve_profile(requested: str, gpu: GPUInfo) -> str:
         raise ValueError(
             f"{requested} requires SM120, got compute capability {gpu.capability}"
         )
-    if requested == PROFILE_SM120_32G_SPEED and not (
-        28 * 1024 <= gpu.total_memory_mib < 40 * 1024
-    ):
+    if requested == PROFILE_SM120_32G_SPEED and gpu.total_memory_mib < 28 * 1024:
         raise ValueError(
-            f"{requested} requires 28-40 GiB, got {gpu.total_memory_mib} MiB"
+            f"{requested} requires at least 28 GiB, got {gpu.total_memory_mib} MiB"
         )
     if requested == PROFILE_SM120_HIGHMEM_SPEED and gpu.total_memory_mib < 64 * 1024:
         raise ValueError(

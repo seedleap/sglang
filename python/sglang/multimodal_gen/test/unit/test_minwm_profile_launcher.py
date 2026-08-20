@@ -45,6 +45,16 @@ def test_explicit_sm120_profile_rejects_wrong_architecture():
         )
 
 
+def test_explicit_32g_profile_can_be_qualified_on_high_memory_sm120():
+    assert (
+        resolve_profile(
+            PROFILE_SM120_32G_SPEED,
+            GPUInfo("RTX PRO 6000 Blackwell Server Edition", (12, 0), 97887),
+        )
+        == PROFILE_SM120_32G_SPEED
+    )
+
+
 def test_auto_profile_rejects_ada():
     with pytest.raises(ValueError, match="unsupported MinWM inference GPU"):
         resolve_profile("auto", GPUInfo("RTX 6000 Ada", (8, 9), 49140))

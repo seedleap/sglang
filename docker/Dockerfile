@@ -762,6 +762,7 @@ ARG TARGETARCH
 ARG GDRCOPY_VERSION=2.5.1
 ARG SGLANG_EXCLUDE_MOVIEPY=0
 ARG SGLANG_EXCLUDE_NIXL=0
+ARG SGLANG_MINWM_SM120_FA4=0
 
 ENV DEBIAN_FRONTEND=noninteractive \
     CUDA_HOME=/usr/local/cuda \
@@ -877,6 +878,19 @@ RUN if [ "${SGLANG_EXCLUDE_MOVIEPY}" = "1" ]; then \
 # specialized runtime can omit that otherwise-valid but large dual-CUDA stack.
 RUN if [ "${SGLANG_EXCLUDE_NIXL}" = "1" ]; then \
         python3 -m pip uninstall -y nixl nixl-cu12 nixl-cu13; \
+    fi
+
+# The MinWM release overlay carries the first FlashAttention release with the
+# upstream SM120 compile-time and Pack-GQA fixes. Install it without resolving
+# the general SGLang dependency graph: the active TVM/protobuf versions are
+# exercised by the release's real SM120 kernel gate.
+RUN if [ "${SGLANG_MINWM_SM120_FA4}" = "1" ]; then \
+        python3 -m pip install --no-cache-dir --no-deps --force-reinstall \
+            "flash-attn-4==4.0.0b21" \
+            "nvidia-cutlass-dsl[cu13]==4.6.0.dev0" \
+            "nvidia-cutlass-dsl-libs-base==4.6.0.dev0" \
+            "nvidia-cutlass-dsl-libs-cu13==4.6.0.dev0" \
+            "quack-kernels==0.5.3"; \
     fi
 
 # Copy sgl-model-gateway binary
