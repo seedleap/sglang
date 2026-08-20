@@ -61,6 +61,7 @@ class WorkerReservationRegistry:
         *,
         worker_epoch: str,
         capacity: int,
+        max_consumed_age_s: float = 0.0,
         clock: Callable[[], float] = time.time,
         load_provider: Callable[[], Mapping[str, int | float]] | None = None,
     ) -> None:
@@ -68,8 +69,11 @@ class WorkerReservationRegistry:
             raise ValueError("worker_epoch is required")
         if capacity < 1:
             raise ValueError("capacity must be positive")
+        if max_consumed_age_s < 0:
+            raise ValueError("max_consumed_age_s must be non-negative")
         self.worker_epoch = worker_epoch
         self.capacity = capacity
+        self.max_consumed_age_s = max_consumed_age_s
         self._clock = clock
         self._load_provider = load_provider
         self._lifecycle: WorkerLifecycle = "ready"
@@ -77,6 +81,8 @@ class WorkerReservationRegistry:
         self._reservations: dict[str, WorkerReservation] = {}
         self._service_time_ms = 0.0
         self._completed_sessions = 0
+        self._last_progress_at: float | None = None
+        self._stale_consumed_reservations = 0
         self._lock = asyncio.Lock()
 
     def set_load_provider(
@@ -89,6 +95,16 @@ class WorkerReservationRegistry:
         for token, reservation in list(self._reservations.items()):
             if not reservation.consumed and reservation.expires_at <= now:
                 self._reservations.pop(token, None)
+        self._stale_consumed_reservations = 0
+        if self.max_consumed_age_s > 0:
+            for reservation in self._reservations.values():
+                if (
+                    reservation.consumed_at is not None
+                    and now - reservation.consumed_at > self.max_consumed_age_s
+                ):
+                    self._stale_consumed_reservations += 1
+            if self._stale_consumed_reservations > 0:
+                self._lifecycle = "failed"
         if (
             self._lifecycle == "draining"
             and self._drain_deadline is not None
@@ -152,6 +168,7 @@ class WorkerReservationRegistry:
                 expires_at=now + ttl_s,
             )
             self._reservations[token] = reservation
+            self._last_progress_at = now
             return reservation
 
     async def consume(
@@ -167,7 +184,8 @@ class WorkerReservationRegistry:
             raise WorkerReservationRejected("INVALID_RESERVATION_OWNER")
         self._validate_epoch(worker_epoch)
         async with self._lock:
-            self._expire_locked(self._clock())
+            now = self._clock()
+            self._expire_locked(now)
             reservation = self._reservations.get(token)
             if reservation is None:
                 raise WorkerReservationRejected("RESERVATION_NOT_FOUND")
@@ -182,10 +200,11 @@ class WorkerReservationRegistry:
                 reservation,
                 consumed=True,
                 owner_id=owner_id,
-                consumed_at=self._clock(),
+                consumed_at=now,
                 runnable=False,
             )
             self._reservations[token] = reservation
+            self._last_progress_at = reservation.consumed_at
             return reservation
 
     @staticmethod
@@ -199,47 +218,64 @@ class WorkerReservationRegistry:
 
     async def mark_runnable(self, token: str, *, owner_id: str) -> None:
         async with self._lock:
+            now = self._clock()
+            self._expire_locked(now)
             reservation = self._reservations.get(token)
             if reservation is None:
                 raise WorkerReservationRejected("RESERVATION_NOT_FOUND")
             self._validate_owner(reservation, owner_id=owner_id)
             self._reservations[token] = replace(reservation, runnable=True)
+            self._last_progress_at = now
 
     async def mark_blocked(self, token: str, *, owner_id: str) -> None:
         async with self._lock:
+            now = self._clock()
+            self._expire_locked(now)
             reservation = self._reservations.get(token)
             if reservation is None:
                 raise WorkerReservationRejected("RESERVATION_NOT_FOUND")
             self._validate_owner(reservation, owner_id=owner_id)
             self._reservations[token] = replace(reservation, runnable=False)
+            self._last_progress_at = now
 
     async def release(self, token: str, *, owner_id: str | None = None) -> None:
         async with self._lock:
+            now = self._clock()
+            self._expire_locked(now)
             reservation = self._reservations.get(token)
             if reservation is None:
                 return
             self._validate_owner(reservation, owner_id=owner_id)
             self._reservations.pop(token, None)
             if reservation.consumed_at is not None:
-                elapsed_ms = max(0.0, (self._clock() - reservation.consumed_at) * 1000)
+                elapsed_ms = max(0.0, (now - reservation.consumed_at) * 1000)
                 self._completed_sessions += 1
                 alpha = 1.0 / min(self._completed_sessions, 16)
                 self._service_time_ms += alpha * (elapsed_ms - self._service_time_ms)
+            self._last_progress_at = now
 
     async def drain(self, deadline: float) -> None:
         if deadline <= 0:
             raise ValueError("drain deadline must be positive")
         async with self._lock:
             self._drain_deadline = deadline
-            self._lifecycle = "draining" if deadline > self._clock() else "failed"
+            now = self._clock()
+            self._lifecycle = "draining" if deadline > now else "failed"
+            self._last_progress_at = now
 
     async def snapshot(self) -> dict[str, str | int | float | None]:
         async with self._lock:
-            self._expire_locked(self._clock())
+            now = self._clock()
+            self._expire_locked(now)
             active_sessions = sum(
                 reservation.consumed for reservation in self._reservations.values()
             )
             reserved_sessions = len(self._reservations) - active_sessions
+            consumed_ages = [
+                now - reservation.consumed_at
+                for reservation in self._reservations.values()
+                if reservation.consumed_at is not None
+            ]
             load = dict(self._load_provider() if self._load_provider else {})
             intrinsic_runnable = sum(
                 reservation.consumed and reservation.runnable
@@ -256,6 +292,12 @@ class WorkerReservationRegistry:
             service_time_ms = max(
                 0.0, float(load.get("service_time_ms", self._service_time_ms))
             )
+            oldest_consumed_age_s = max(consumed_ages, default=0.0)
+            last_progress_age_s = (
+                max(0.0, now - self._last_progress_at)
+                if self._last_progress_at is not None
+                else 0.0
+            )
             return {
                 "worker_epoch": self.worker_epoch,
                 "lifecycle": self._lifecycle,
@@ -267,6 +309,9 @@ class WorkerReservationRegistry:
                 "blocked_sessions": blocked_sessions,
                 "queue_depth": queue_depth,
                 "service_time_ms": service_time_ms,
+                "oldest_consumed_age_s": oldest_consumed_age_s,
+                "stale_consumed_reservations": self._stale_consumed_reservations,
+                "last_progress_age_s": last_progress_age_s,
                 "normalized_load": (active_sessions + reserved_sessions)
                 / self.capacity,
             }

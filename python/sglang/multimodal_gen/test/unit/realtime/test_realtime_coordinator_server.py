@@ -43,6 +43,9 @@ def test_coordinator_http_session_lifecycle_and_structured_rejection(caplog):
                 "blocked_sessions": 0,
                 "queue_depth": 0,
                 "service_time_ms": 0,
+                "oldest_consumed_age_s": 121.5,
+                "stale_consumed_reservations": 1,
+                "last_progress_age_s": 33.25,
             },
         )
         assert response.status_code == 204
@@ -67,6 +70,13 @@ def test_coordinator_http_session_lifecycle_and_structured_rejection(caplog):
     assert assignment["denoiser"]["worker_id"] == "denoiser-a"
     assert assignment["denoiser"]["worker_epoch"] == "denoiser-epoch"
     assert assignment["vae"]["worker_id"] == "vae-a"
+    heartbeat_only_fields = {
+        "oldest_consumed_age_s",
+        "stale_consumed_reservations",
+        "last_progress_age_s",
+    }
+    assert heartbeat_only_fields.isdisjoint(assignment["denoiser"])
+    assert heartbeat_only_fields.isdisjoint(assignment["vae"])
     assert '"event":"coordinator.admit_complete"' in caplog.text
     assert '"trace_id":"trace-a"' in caplog.text
 

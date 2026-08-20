@@ -4,6 +4,7 @@ import asyncio
 
 import msgspec.msgpack
 import pytest
+
 from sglang.multimodal_gen.runtime.realtime.async_vae_protocol import encode_message
 from sglang.multimodal_gen.runtime.realtime.gateway import (
     AdmissionQueueFull,

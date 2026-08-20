@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
 from sglang.multimodal_gen.runtime.entrypoints import realtime_vae_server
@@ -139,6 +139,49 @@ def test_worker_reservation_http_routes_expose_state_release_and_drain():
     )
     assert drained.status_code == 204
     assert client.get("/v1/realtime_worker/state").json()["lifecycle"] == "draining"
+
+
+def test_worker_reservation_stale_consumed_marks_worker_failed():
+    async def run():
+        now = [100.0]
+        registry = WorkerReservationRegistry(
+            worker_epoch="epoch-a",
+            capacity=2,
+            max_consumed_age_s=5.0,
+            clock=lambda: now[0],
+        )
+        await registry.reserve(
+            "token-a",
+            session_id="session-a",
+            generation_id="generation-a",
+            worker_epoch="epoch-a",
+            ttl_s=30,
+        )
+        await registry.consume(
+            "token-a",
+            session_id="session-a",
+            generation_id="generation-a",
+            worker_epoch="epoch-a",
+            owner_id="connection-a",
+        )
+
+        now[0] = 106.0
+        snapshot = await registry.snapshot()
+        assert snapshot["lifecycle"] == "failed"
+        assert snapshot["active_sessions"] == 1
+        assert snapshot["oldest_consumed_age_s"] == pytest.approx(6.0)
+        assert snapshot["stale_consumed_reservations"] == 1
+
+        with pytest.raises(WorkerReservationRejected, match="WORKER_FAILED"):
+            await registry.reserve(
+                "token-b",
+                session_id="session-b",
+                generation_id="generation-b",
+                worker_epoch="epoch-a",
+                ttl_s=30,
+            )
+
+    asyncio.run(run())
 
 
 def test_vae_session_open_consumes_and_close_releases_reservation():
@@ -499,6 +542,51 @@ def test_denoiser_fastapi_exposes_worker_reservation_control_plane(monkeypatch):
     assert snapshot["capacity"] == 4
 
 
+def test_denoiser_health_returns_503_when_reservation_watchdog_failed():
+    app = create_denoiser_app(
+        SimpleNamespace(
+            realtime_max_sessions_per_worker=4,
+            realtime_worker_max_consumed_age_s=0.0,
+        )
+    )
+    app.state.worker_reservations._lifecycle = "failed"
+    endpoint = next(
+        route.endpoint
+        for route in app.routes
+        if getattr(route, "path", None) == "/health"
+        and "GET" in getattr(route, "methods", set())
+    )
+    request = SimpleNamespace(app=SimpleNamespace(state=app.state))
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(endpoint(request))
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.detail["status"] == "failed"
+
+
+def test_vae_health_returns_503_when_reservation_watchdog_failed():
+    class Engine:
+        backend = "taehv"
+
+        @staticmethod
+        def create_decoder(_identity):
+            return SimpleNamespace(reset=lambda: None)
+
+    registry = WorkerReservationRegistry(worker_epoch="epoch-a", capacity=1)
+    registry._lifecycle = "failed"
+    app = create_app(
+        AsyncVAEWorker(Engine(), max_sessions=1),
+        max_message_bytes=1024 * 1024,
+        reservation_registry=registry,
+    )
+
+    with TestClient(app) as client:
+        response = client.get("/health")
+
+    assert response.status_code == 503
+    assert response.json()["status"] == "failed"
+
+
 def test_worker_reservation_consume_rejects_stale_epoch_and_identity():
     async def run():
         registry = WorkerReservationRegistry(worker_epoch="epoch-new", capacity=2)
@@ -591,6 +679,9 @@ def test_worker_reservation_drain_rejects_new_work_and_snapshot_reports_load():
             "blocked_sessions": 2,
             "queue_depth": 3,
             "service_time_ms": 12.5,
+            "oldest_consumed_age_s": 0.0,
+            "stale_consumed_reservations": 0,
+            "last_progress_age_s": 0.0,
             "normalized_load": 0.25,
         }
 

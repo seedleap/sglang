@@ -52,6 +52,9 @@ class WorkerHeartbeat:
     blocked_sessions: int = 0
     queue_depth: int = 0
     service_time_ms: float = 0.0
+    oldest_consumed_age_s: float = 0.0
+    stale_consumed_reservations: int = 0
+    last_progress_age_s: float = 0.0
     reservation_endpoint: str = ""
     drain_deadline: float | None = None
 
@@ -246,6 +249,9 @@ class InMemoryCoordinatorStore:
                 heartbeat.blocked_sessions,
                 heartbeat.queue_depth,
                 heartbeat.service_time_ms,
+                heartbeat.oldest_consumed_age_s,
+                heartbeat.stale_consumed_reservations,
+                heartbeat.last_progress_age_s,
             )
         ):
             raise CoordinatorRejected("INVALID_WORKER_LOAD")
@@ -714,6 +720,11 @@ class DynamoDBCoordinatorStore:
                 "blocked_sessions": {"N": str(heartbeat.blocked_sessions)},
                 "queue_depth": {"N": str(heartbeat.queue_depth)},
                 "service_time_ms": {"N": str(heartbeat.service_time_ms)},
+                "oldest_consumed_age_s": {"N": str(heartbeat.oldest_consumed_age_s)},
+                "stale_consumed_reservations": {
+                    "N": str(heartbeat.stale_consumed_reservations)
+                },
+                "last_progress_age_s": {"N": str(heartbeat.last_progress_age_s)},
                 "reservation_endpoint": {"S": heartbeat.reservation_endpoint},
                 "heartbeat_expires_at": {"N": str(heartbeat_expires)},
                 "allocation_key": {"S": f"CAPACITY#{heartbeat.role}"},

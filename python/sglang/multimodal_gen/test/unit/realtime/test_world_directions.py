@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""DirectionCoordinator：基线跟踪 / 改写调度 / 一次性还原 / 取代语义。"""
+"""DirectionCoordinator baseline, rewrite, one-time revert, and supersede tests."""
 
 import asyncio
 
@@ -10,7 +10,7 @@ from sglang.multimodal_gen.runtime.realtime.world_directions import (
 
 
 class Harness:
-    """注入桩：记录派发与通知，改写可编程（延迟 / 失败）。"""
+    """Injected test harness with programmable rewrite delay and failures."""
 
     def __init__(self, baseline="base", schedule=(), revert_delay_s=0.01):
         self.dispatched = []  # [(prompt, event_id)]
@@ -57,9 +57,9 @@ def test_one_time_reverts_to_baseline_without_event_id():
         h = Harness()
         h.change_type = "one_time"
         await h.coord.submit(1, "explosion")
-        assert h.coord.baseline == "base"  # 一次性不动基线
+        assert h.coord.baseline == "base"  # one-time effects keep baseline intact
         await asyncio.sleep(0.05)
-        # 还原帧：回到基线、不带 event_id
+        # Revert frame: return to baseline without an event_id.
         assert h.dispatched == [("rw(explosion|base)", 1), ("base", None)]
 
     asyncio.run(run())
@@ -74,7 +74,7 @@ def test_newer_submit_supersedes_inflight_rewrite():
         h.rewrite_delay = 0.0
         await h.coord.submit(2, "new")
         await slow
-        # 旧改写完成后作废：只有 new 被派发
+        # The old rewrite is stale when it completes; only new is dispatched.
         assert h.dispatched == [("rw(new|base)", 2)]
         assert (1, "superseded") in h.notified
 
@@ -85,12 +85,12 @@ def test_rewrite_failure_keeps_pending_revert_alive():
     async def run():
         h = Harness(revert_delay_s=0.03)
         h.change_type = "one_time"
-        await h.coord.submit(1, "flash")  # 排下还原
+        await h.coord.submit(1, "flash")  # schedule a revert
         h.rewrite_error = RuntimeError("model down")
-        await h.coord.submit(2, "broken")  # 失败：不得吃掉还原
+        await h.coord.submit(2, "broken")  # failure must not consume the revert
         assert (2, "failed") in h.notified
         await asyncio.sleep(0.06)
-        assert h.dispatched[-1] == ("base", None)  # 还原仍按时发生
+        assert h.dispatched[-1] == ("base", None)  # revert still fires on time
 
     asyncio.run(run())
 
@@ -99,12 +99,12 @@ def test_schedule_advances_baseline_and_revert_uses_latest():
     async def run():
         h = Harness(schedule=[(3, "storm"), (6, "calm")])
         h.change_type = "one_time"
-        h.coord.observe_chunk(4)  # 越过 chunk 3
+        h.coord.observe_chunk(4)  # pass chunk 3
         assert h.coord.baseline == "storm"
         await h.coord.submit(1, "lightning")
-        h.coord.observe_chunk(6)  # 还原定时期间时间轴推进
+        h.coord.observe_chunk(6)  # timeline advances while revert is pending
         await asyncio.sleep(0.05)
-        assert h.dispatched[-1] == ("calm", None)  # 到点取的是最新基线
+        assert h.dispatched[-1] == ("calm", None)  # revert reads latest baseline
 
     asyncio.run(run())
 
@@ -115,9 +115,9 @@ def test_skill_apply_supersedes_inflight_and_one_time_reverts():
         h.rewrite_delay = 0.03
         slow = asyncio.ensure_future(h.coord.submit(1, "old direction"))
         await asyncio.sleep(0.005)
-        await h.coord.apply("skill prompt", "one_time", 2)  # 玩家按了技能
+        await h.coord.apply("skill prompt", "one_time", 2)  # player used a skill
         await slow
-        assert (1, "superseded") in h.notified  # 后到的改写作废
+        assert (1, "superseded") in h.notified  # later action supersedes rewrite
         await asyncio.sleep(0.05)
         assert h.dispatched == [("skill prompt", 2), ("base", None)]
 
@@ -128,9 +128,9 @@ def test_persistent_apply_cancels_pending_revert():
     async def run():
         h = Harness(revert_delay_s=0.02)
         await h.coord.apply("burst", "one_time", 1)
-        await h.coord.apply("night mode", "persistent", 2)  # 接管画面
+        await h.coord.apply("night mode", "persistent", 2)  # take over scene state
         await asyncio.sleep(0.05)
-        assert ("base", None) not in h.dispatched  # 旧还原被取消
+        assert ("base", None) not in h.dispatched  # old revert was canceled
         assert h.coord.baseline == "night mode"
 
     asyncio.run(run())
@@ -150,8 +150,8 @@ def test_close_cancels_revert_timer():
 def test_bad_event_id_types_are_dropped_from_dispatch():
     async def run():
         h = Harness()
-        await h.coord.apply("p", "persistent", "42")  # 非 int：引擎会拒收
-        await h.coord.apply("q", "persistent", True)  # bool 也不行
+        await h.coord.apply("p", "persistent", "42")  # non-int would be rejected
+        await h.coord.apply("q", "persistent", True)  # bool is rejected too
         assert h.dispatched == [("p", None), ("q", None)]
 
     asyncio.run(run())
@@ -171,7 +171,7 @@ def test_parse_init_directions():
     }
     baseline, schedule = parse_init_directions(msg)
     assert baseline == "seed"
-    assert schedule == [(6, "b"), (3, "a")]  # 排序由编排器构造时做
+    assert schedule == [(6, "b"), (3, "a")]  # sorting happens in coordinator
     assert parse_init_directions({}) == ("", [])
 
 

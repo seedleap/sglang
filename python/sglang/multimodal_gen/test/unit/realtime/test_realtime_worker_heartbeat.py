@@ -100,6 +100,47 @@ async def _test_worker_registers_capacity_only_after_local_health_is_ready():
     ]
 
 
+def test_worker_heartbeat_includes_stale_consumed_reservation_metrics():
+    async def run():
+        client = _Client(
+            state_payload={
+                "worker_epoch": "epoch-a",
+                "lifecycle": "ready",
+                "active_sessions": 1,
+                "runnable_sessions": 0,
+                "blocked_sessions": 1,
+                "queue_depth": 0,
+                "service_time_ms": 900.0,
+                "oldest_consumed_age_s": 121.5,
+                "stale_consumed_reservations": 1,
+                "last_progress_age_s": 33.25,
+            }
+        )
+        reporter = WorkerHeartbeatReporter(
+            client,
+            coordinator_url="http://coordinator:18081",
+            health_url="http://127.0.0.1:30000/health",
+            state_url="http://127.0.0.1:30000/v1/realtime_worker/state",
+            worker_id="pod-123",
+            worker_epoch="epoch-a",
+            role="denoiser",
+            endpoint="ws://10.0.0.7:30000/v1/realtime_video/generate",
+            reservation_endpoint="http://10.0.0.7:30000/v1/realtime_worker",
+            az="us-east-2a",
+            capacity=1,
+            model_revision="model-sha",
+            vae_fingerprint="taew2_2",
+        )
+
+        assert await reporter.heartbeat_once() is True
+        payload = client.posts[-1][1]
+        assert payload["oldest_consumed_age_s"] == 121.5
+        assert payload["stale_consumed_reservations"] == 1
+        assert payload["last_progress_age_s"] == 33.25
+
+    asyncio.run(run())
+
+
 def test_worker_rejects_public_or_malformed_endpoints():
     with pytest.raises(ValueError, match="WebSocket endpoint"):
         WorkerHeartbeatReporter(
