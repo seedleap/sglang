@@ -19,7 +19,7 @@ from typing import Any
 
 from packaging.specifiers import SpecifierSet
 
-CONTRACT_VERSION = "minwm-image-runtime-contract/v2"
+CONTRACT_VERSION = "minwm-image-runtime-contract/v3"
 EXPECTED_TAEHV_REVISION = "093b918971d59001a0bad6dfd6e0409b5e1752cf"
 EXPECTED_PACKAGE_SPECS = {
     "cryptography": "==50.0.0",
@@ -45,6 +45,7 @@ EXPECTED_FA3_VARIANT_HASH = (
 )
 EXPECTED_SGLANG_CACHE_DIR = "/root/.cache/sglang"
 EXPECTED_SGLANG_USE_SGL_FA3_KERNEL = "0"
+EXPECTED_SGLANG_MINWM_REQUIRE_SM120_FA4 = "1"
 REQUIRED_MODULE_SPECS = (
     "flash_attn",
     "flash_attn.cute",
@@ -220,6 +221,14 @@ def _validate_software(
             f"{use_sgl_fa3_kernel!r}"
         )
 
+    require_sm120_fa4 = os.environ.get("SGLANG_MINWM_REQUIRE_SM120_FA4")
+    if require_sm120_fa4 != EXPECTED_SGLANG_MINWM_REQUIRE_SM120_FA4:
+        errors.append(
+            "SGLANG_MINWM_REQUIRE_SM120_FA4 must be '1' so SM120 refuses "
+            "unvalidated attention backends; got "
+            f"{require_sm120_fa4!r}"
+        )
+
     cache_dir = os.path.abspath(
         os.path.expanduser(
             os.environ.get("SGLANG_CACHE_DIR", EXPECTED_SGLANG_CACHE_DIR)
@@ -291,6 +300,7 @@ def _validate_software(
             "system_cuda_toolkit": cuda_toolkit,
             "sglang_commit": build_commit or None,
             "sglang_use_sgl_fa3_kernel": use_sgl_fa3_kernel,
+            "sglang_minwm_require_sm120_fa4": require_sm120_fa4,
             "image_tag": os.environ.get("SGLANG_IMAGE_TAG") or None,
             "packages": packages,
             "taehv_source_revision": taehv_revision,

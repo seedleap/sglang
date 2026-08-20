@@ -1,3 +1,4 @@
+import os
 import unittest
 from unittest.mock import patch
 
@@ -84,6 +85,28 @@ class TestCudaAttentionBackendSelection(unittest.TestCase):
                 "sglang.multimodal_gen.runtime.layers.attention.backends.flash_attn.FlashAttentionBackend",
             )
         set_fa_ver.assert_called_once_with(4)
+
+    def test_strict_sm120_rejects_non_fa_backend(self):
+        FakeCudaPlatform.is_sm120_device = True
+
+        with patch.dict(
+            os.environ, {"SGLANG_MINWM_REQUIRE_SM120_FA4": "1"}
+        ), self.assertRaisesRegex(RuntimeError, "requires FlashAttention-4"):
+            self.resolve(AttentionBackendEnum.TORCH_SDPA)
+
+    def test_strict_sm120_refuses_sdpa_fallback(self):
+        FakeCudaPlatform.is_sm120_device = True
+
+        with (
+            patch.dict(os.environ, {"SGLANG_MINWM_REQUIRE_SM120_FA4": "1"}),
+            patch.object(
+                FakeCudaPlatform,
+                "_prepare_flash_attention_for_blackwell",
+                return_value=False,
+            ),
+            self.assertRaisesRegex(RuntimeError, "refusing.*Torch SDPA"),
+        ):
+            self.resolve(None)
 
     def test_default_backend_falls_back_for_non_flash_attention_dtype(self):
         self.assertEqual(self.resolve(None, torch.float32), SDPA_BACKEND_CLS_STR)

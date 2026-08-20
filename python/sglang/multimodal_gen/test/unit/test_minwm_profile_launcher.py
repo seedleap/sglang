@@ -82,6 +82,7 @@ def test_32g_contract_offloads_only_text_encoder():
     assert command[command.index("--dit-layerwise-offload") + 1] == "false"
     assert contract["environment"]["MINWM_ATTENTION_IMPL"] == "packed"
     assert contract["environment"]["MINWM_PACKED_ATTENTION_DETERMINISTIC"] == "false"
+    assert contract["environment"]["SGLANG_MINWM_REQUIRE_SM120_FA4"] == "1"
 
 
 def test_profile_rejects_managed_override():

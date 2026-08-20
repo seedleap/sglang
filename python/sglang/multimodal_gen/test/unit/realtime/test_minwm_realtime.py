@@ -2644,6 +2644,25 @@ def test_minwm_hopper_requires_fa3(monkeypatch):
         _minwm_packed_attention_backend(torch.device("cuda"))
 
 
+def test_minwm_strict_sm120_requires_fa4(monkeypatch):
+    import sglang.multimodal_gen.runtime.models.dits.minwm as minwm_module
+
+    monkeypatch.setenv("SGLANG_MINWM_REQUIRE_SM120_FA4", "1")
+    monkeypatch.setattr(
+        minwm_module.torch.cuda,
+        "get_device_capability",
+        lambda _device: (12, 0),
+    )
+    monkeypatch.setattr(
+        minwm_module.importlib.util,
+        "find_spec",
+        lambda name: object() if name == "flash_attn" else None,
+    )
+
+    with pytest.raises(RuntimeError, match="requires.*FlashAttention-4.*SM120"):
+        _minwm_packed_attention_backend(torch.device("cuda"))
+
+
 def test_minwm_hopper_attention_uses_sglang_fa3_api(monkeypatch):
     import sglang.jit_kernel.flash_attention_v3 as fa3_module
     import sglang.multimodal_gen.runtime.models.dits.minwm as minwm_module

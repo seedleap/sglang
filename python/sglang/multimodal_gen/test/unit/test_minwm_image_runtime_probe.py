@@ -93,6 +93,7 @@ def _patch_valid_software(monkeypatch):
     )
     monkeypatch.setenv("SGLANG_BUILD_COMMIT", "a" * 40)
     monkeypatch.setenv("SGLANG_USE_SGL_FA3_KERNEL", "0")
+    monkeypatch.setenv("SGLANG_MINWM_REQUIRE_SM120_FA4", "1")
     return SimpleNamespace(
         __version__="2.11.0+cu130", version=SimpleNamespace(cuda="13.0")
     )
@@ -143,6 +144,15 @@ def test_software_validation_rejects_wrong_fa3_provider_selection(monkeypatch):
     _, errors = probe._validate_software(torch_module, "a" * 40)
 
     assert any("SGLANG_USE_SGL_FA3_KERNEL" in error for error in errors)
+
+
+def test_software_validation_requires_strict_sm120_fa4(monkeypatch):
+    torch_module = _patch_valid_software(monkeypatch)
+    monkeypatch.setenv("SGLANG_MINWM_REQUIRE_SM120_FA4", "0")
+
+    _, errors = probe._validate_software(torch_module, "a" * 40)
+
+    assert any("SGLANG_MINWM_REQUIRE_SM120_FA4" in error for error in errors)
 
 
 @pytest.mark.parametrize("unexpected", ["moviepy", "nixl", "nixl-cu13"])

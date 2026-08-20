@@ -768,7 +768,8 @@ ARG TAEHV_REVISION=093b918971d59001a0bad6dfd6e0409b5e1752cf
 
 ENV DEBIAN_FRONTEND=noninteractive \
     CUDA_HOME=/usr/local/cuda \
-    GDRCOPY_HOME=/usr/src/gdrdrv-${GDRCOPY_VERSION}/
+    GDRCOPY_HOME=/usr/src/gdrdrv-${GDRCOPY_VERSION}/ \
+    SGLANG_MINWM_REQUIRE_SM120_FA4=${SGLANG_MINWM_SM120_FA4}
 
 # Add GKE default lib and bin locations + CUDA compiler paths for FlashInfer JIT
 ENV PATH="${PATH}:/usr/local/nvidia/bin:/usr/local/cuda/bin:/usr/local/cuda/nvvm/bin" \

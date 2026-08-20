@@ -30,6 +30,11 @@ source revision 固定为 `093b918971d59001a0bad6dfd6e0409b5e1752cf`。
 `minwm-unified-inference-r2-20260820` 因漏装 `taehv` 在服务启动门禁失败，
 不得部署；r3 补齐依赖并将其加入 fail-closed 软件合同。
 
+注意：上述 r3 digest 已经通过 SM120 FA4 真机 kernel 门禁，但它早于
+`SGLANG_MINWM_REQUIRE_SM120_FA4=1` 的镜像级严格选择合同。短 tag 只是同一
+digest 的别名，不会改变镜像内容。严格拒绝 SDPA/FA2 回退的能力需要从包含
+该合同的后续 source commit 重建并重新完成 SM120 门禁后，才能作为新版本发布。
+
 ### 单镜像 GPU dispatch
 
 | GPU family | Compute capability | dense / packed attention |

@@ -42,6 +42,12 @@ CUDA 13 backends. The core SGLang runtime keeps its default NIXL behavior.
 The release build also fixes `SGLANG_USE_SGL_FA3_KERNEL=0`, so Hopper selects
 that locked kernels-community artifact instead of the compatible sgl-kernel
 fallback. The runtime contract rejects an image if this selector drifts.
+The same specialized build sets `SGLANG_MINWM_REQUIRE_SM120_FA4=1`. On SM120,
+native CUDA attention then rejects an explicitly selected non-FA backend and
+refuses to fall back to Torch SDPA; MinWM packed attention likewise refuses an
+FA2 fallback. The general SGLang image leaves this setting disabled and keeps
+its existing fallback behavior. The runtime contract rejects a specialized
+image if the strict selector is missing or disabled.
 
 The image must not clone the repository or install Python packages when a Pod
 starts. Source, native extensions, the FA3 kernel lock, and package versions are
