@@ -10,7 +10,7 @@ H100/H200 与 B200/B300 路径保留在同一镜像中，本次 digest 未重复
 SKU 的真机 smoke。
 
 - Source commit：`726c3bd84d958c8c88eabb2b36a3174b8d854d4b`
-- Tag：`minwm-unified-inference-r3-20260820`
+- Tags：`minwm-unified-inference-r3-20260820`、短别名 `minwm-r3-20260820`
 - Immutable image：
   `829115578968.dkr.ecr.us-east-2.amazonaws.com/leap-world/minwm-runtime@sha256:3fc2bb1e8aef10c53160c13ce00490ce48ed3be812f9c05da9d51a27da0be1b4`
 - ECR image size：`12,430,677,439` bytes
