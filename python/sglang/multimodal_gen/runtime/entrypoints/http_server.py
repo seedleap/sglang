@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 
 import httpx
 import torch
-from fastapi import APIRouter, FastAPI, Request, Response
+from fastapi import APIRouter, FastAPI, HTTPException, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 
 from sglang.multimodal_gen.configs.sample.sampling_params import SamplingParams
@@ -152,7 +152,23 @@ health_router = APIRouter()
 
 
 @health_router.get("/health")
-async def health():
+async def health(request: Request):
+    registry = getattr(request.app.state, "worker_reservations", None)
+    if isinstance(registry, WorkerReservationRegistry):
+        state = await registry.snapshot()
+        if state.get("lifecycle") == "failed":
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail={
+                    "status": "failed",
+                    "reason": "worker reservation watchdog failed",
+                    "oldest_consumed_age_s": state.get("oldest_consumed_age_s", 0.0),
+                    "stale_consumed_reservations": state.get(
+                        "stale_consumed_reservations", 0
+                    ),
+                    "last_progress_age_s": state.get("last_progress_age_s", 0.0),
+                },
+            )
     return {"status": "ok"}
 
 
@@ -428,6 +444,9 @@ def create_app(server_args: ServerArgs):
         WorkerReservationRegistry(
             worker_epoch=resolve_worker_epoch(),
             capacity=server_args.realtime_max_sessions_per_worker,
+            max_consumed_age_s=getattr(
+                server_args, "realtime_worker_max_consumed_age_s", 0.0
+            ),
         ),
     )
 

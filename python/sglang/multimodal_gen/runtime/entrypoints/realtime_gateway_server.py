@@ -12,7 +12,7 @@ import os
 import secrets
 import time
 from contextlib import asynccontextmanager
-from dataclasses import asdict
+from dataclasses import asdict, fields
 from pathlib import Path
 from typing import Any, Protocol
 from uuid import uuid4
@@ -82,6 +82,7 @@ _IDEMPOTENT_COORDINATOR_RELEASE_REASONS = frozenset(
         "WORKER_LOST",
     }
 )
+_WORKER_SLOT_FIELDS = frozenset(field.name for field in fields(WorkerSlot))
 
 
 def _parse_ui_config(raw: str) -> dict[str, Any]:
@@ -204,6 +205,12 @@ def _observe_gateway_client_metric(
     return accepted
 
 
+def _worker_slot_from_payload(payload: dict[str, Any]) -> WorkerSlot:
+    return WorkerSlot(
+        **{key: value for key, value in payload.items() if key in _WORKER_SLOT_FIELDS}
+    )
+
+
 class CoordinatorClient(Protocol):
     async def health(self) -> dict[str, Any]: ...
 
@@ -221,8 +228,8 @@ def _assignment(payload: dict[str, Any]) -> SessionAssignment:
         generation_id=payload["generation_id"],
         token=payload["token"],
         expires_at=float(payload["expires_at"]),
-        denoiser=WorkerSlot(**payload["denoiser"]),
-        vae=WorkerSlot(**payload["vae"]),
+        denoiser=_worker_slot_from_payload(payload["denoiser"]),
+        vae=_worker_slot_from_payload(payload["vae"]),
     )
 
 

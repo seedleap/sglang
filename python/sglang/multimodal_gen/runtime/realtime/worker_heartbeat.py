@@ -141,6 +141,13 @@ class WorkerHeartbeatReporter:
                 "service_time_ms",
             )
         }
+        for key in (
+            "oldest_consumed_age_s",
+            "stale_consumed_reservations",
+            "last_progress_age_s",
+        ):
+            if key in runtime_state:
+                runtime_payload[key] = runtime_state[key]
         if runtime_state.get("drain_deadline") is not None:
             runtime_payload["drain_deadline"] = runtime_state["drain_deadline"]
         response = await self.client.post(
