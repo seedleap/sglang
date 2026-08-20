@@ -332,8 +332,14 @@ async def _receive_browser(websocket: WebSocket) -> bytes | str:
 # denylist so future engine control fields do not become browser-injectable just
 # because they were not explicitly blocked.
 _WORLD_PASSTHROUGH_TYPES = frozenset({"client_metric", "client_metric_batch", "ack"})
+# Only kinds the MinWM adapter actually ingests. "camera", "move", and "action"
+# used to sit here: MinWM.ingest_event rejects all three (it accepts
+# action_labels, action_weights, camera_actions, prompt, scene_cut, seed, and
+# chunk_seeds), so forwarding them produced an engine-side "unsupported MinWM
+# event kind" error instead of doing anything. They were dead slots that made
+# the contract look wider than it is.
 _WORLD_ALLOWED_EVENT_KINDS = frozenset(
-    {"camera", "camera_actions", "move", "action", "playback_ack", "heartbeat"}
+    {"camera_actions", "playback_ack", "heartbeat"}
 )
 # Free-form input no longer passes raw prompt/scene_cut through. Full scene
 # descriptions are server-side assets; the browser sends only the user's raw
@@ -746,11 +752,14 @@ def create_app(
                 # would burn a transient effect into the baseline.
                 return str(data["prompt"]), str(data.get("change_type") or "one_time")
 
-            async def _direction_dispatch(prompt: str, event_id) -> None:
+            async def _direction_dispatch(
+                prompt: str, event_id, kind: str = "prompt"
+            ) -> None:
                 # The engine reads RealtimeEvent.payload. Passing event_id through
                 # lets control_ack, frame_batch, and chunk_telemetry correlate
-                # back to this player input.
-                fields: dict[str, Any] = {"kind": "prompt", "payload": prompt}
+                # back to this player input. kind picks the transition and is
+                # decided server side (compiled world), never by the browser.
+                fields: dict[str, Any] = {"kind": kind, "payload": prompt}
                 if event_id is not None:
                     fields["event_id"] = event_id
                 await _upstream_send(encode_message("event", **fields))
@@ -942,6 +951,7 @@ def create_app(
                             str(skill.get("prompt") or ""),
                             str(skill.get("change_type") or "one_time"),
                             control.get("event_id"),
+                            str(skill.get("kind") or "prompt"),
                         ),
                         "skill",
                     )
