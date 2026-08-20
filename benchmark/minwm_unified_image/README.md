@@ -5,9 +5,11 @@ runtime image that supports Hopper, datacenter Blackwell, and SM120 RTX. It
 deliberately uses the repository's full `docker/Dockerfile` build instead of
 layering a new Torch ABI over the historical `bedc07...` image.
 
-The current H200/B200-validated immutable release and its exact gate results are
-recorded in [RELEASES.zh-CN.md](RELEASES.zh-CN.md).  H100 and B300 share the
-family dispatch paths but still require a SKU-specific smoke before production
+The current immutable releases and their exact gates are recorded in
+[RELEASES.zh-CN.md](RELEASES.zh-CN.md): the 2026-08-18 digest validates H200 and
+B200, while the 2026-08-20 r3 digest validates RTX PRO 6000 SM120 plus the
+32-GiB speed policy. H100, B300, and RTX 5090 share those family dispatch paths
+but still require a SKU-specific smoke of the intended digest before production
 use.
 
 ## Runtime contract

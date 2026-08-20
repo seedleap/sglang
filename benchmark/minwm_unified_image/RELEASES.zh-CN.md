@@ -1,5 +1,71 @@
 # MinWM 统一镜像发布记录
 
+## 2026-08-20：SM120 FA4 与 32GB speed profile 验证通过
+
+状态：**Accepted（RTX PRO 6000 / SM120 与 `sm120-32g-speed`）**。本次
+digest 在 RTX PRO 6000 Blackwell Server Edition 上完成了真实 FA4 kernel
+门禁和 832×480 性能/显存门禁。RTX 5090 使用同一 SM120 dispatch，且实测
+profile 峰值低于其 32GB 容量，但尚未在实体 RTX 5090 上跑 SKU 级门禁；
+H100/H200 与 B200/B300 路径保留在同一镜像中，本次 digest 未重复做这些
+SKU 的真机 smoke。
+
+- Source commit：`726c3bd84d958c8c88eabb2b36a3174b8d854d4b`
+- Tag：`minwm-unified-inference-r3-20260820`
+- Immutable image：
+  `829115578968.dkr.ecr.us-east-2.amazonaws.com/leap-world/minwm-runtime@sha256:3fc2bb1e8aef10c53160c13ce00490ce48ed3be812f9c05da9d51a27da0be1b4`
+- ECR image size：`12,430,677,439` bytes
+- Linux/amd64 manifest：
+  `sha256:950ecf2039382a8c75904afc34a0aa00e4137a00a2815ed9686dedc9936ca568`
+- Attestation manifest：
+  `sha256:7e840fbcdbf969876588247c56b94421c0d85bd8fb3d147c8ff0d1a7e6a23160`
+- SPDX SBOM layer：
+  `sha256:5afca9692ea47d804527b883195ae63bf465ad80e08145a4f567ea12c5275252`
+- SLSA provenance layer：
+  `sha256:c97bce81ff39f9708f0908f9fee769245e75754b474d8a533442bde8ffbdc8f2`
+
+构建前、推送后两次 software contract 与有界 dependency check 均通过。
+镜像固定 Torch `2.11.0+cu130`、CUDA `13.0`、FA4 `4.0.0b21`、CUTLASS DSL
+`4.6.0.dev0`、`quack-kernels==0.5.3`，并内置 `taehv==0.1.0`，其 PEP 610
+source revision 固定为 `093b918971d59001a0bad6dfd6e0409b5e1752cf`。
+`minwm-unified-inference-r2-20260820` 因漏装 `taehv` 在服务启动门禁失败，
+不得部署；r3 补齐依赖并将其加入 fail-closed 软件合同。
+
+### 单镜像 GPU dispatch
+
+| GPU family | Compute capability | dense / packed attention |
+|---|---:|---|
+| H100 / H200 | SM90 | FA3 / FA3 |
+| B200 / B300 | SM10x | FA4 / FA4 |
+| RTX 5090 / RTX PRO 6000 Blackwell | SM12x | FA4 / FA4 |
+
+本次 RTX PRO 6000 实机报告 CC 12.0，dense 和 packed 均解析到 FA4；
+`packed_self`、`dense_self`、`packed_cross`、`dense_cross` 四个 BF16 kernel
+全部通过 FP32 reference 误差门槛，最大绝对误差分别为 `0.0021045`、
+`0.0021045`、`0.0014068`、`0.0014068`。
+
+### 832×480 `sm120-32g-speed` 门禁
+
+配置为 Tianpeng gap12、packed-fast、`performance_mode=speed`、SP1/TP1、
+CFG off、segment compile、TAEHV `taew2_2.pth`。只将 Text Encoder offload
+到 pinned CPU memory；DiT 与 TAEHV 常驻 GPU。门禁先跑 10 个 warmup chunk，
+再跑 30 个测量 chunk，丢弃测量请求前 10 个 chunk，以客户端收到每个 chunk
+最终帧的时间戳统计后 20 个 chunk（320 帧）。该口径包含 denoise、TAEHV 和
+本机 WebSocket/raw-frame 传输。
+
+| 指标 | 实测 | 门槛 | 结果 |
+|---|---:|---:|---|
+| 稳态客户端 FPS | `30.944304911` | `>= 24` | PASS |
+| 全测量请求客户端 FPS | `31.500962877` | 记录项 | PASS |
+| 峰值 GPU memory | `27,751 MiB`（`27.1006 GiB`） | `< 32,000 MiB` | PASS |
+
+最终 Kubernetes Job exit code 为 0，Pod 的 kubelet `imageID` 精确等于上述
+top-level digest。结果 `result.json` SHA-256 为
+`5900f096f03b16c184a031ef8123e238cfa5e26ce3afb8b6077b06c8fceb126c`。
+构建/SBOM 证据归档在
+`s3://leap-world-us-east-2/world-model/evals/minwm/unified-image/20260820/r3/build/`，
+性能、显存与日志证据归档在
+`s3://leap-world-us-east-2/world-model/evals/minwm/unified-image/20260820/r3/profile-sm120-32g-speed/`。
+
 ## 2026-08-18：H200 / B200 验证通过
 
 状态：**Accepted**（H200、B200）。H100 与 B300 共用相同 family dispatch，
