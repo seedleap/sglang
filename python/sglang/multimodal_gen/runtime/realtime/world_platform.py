@@ -51,6 +51,19 @@ class Principal:
     allow_free_prompt: bool
     jti: str = ""  # one-time nonce to prevent two sessions from one token
     exp: int = 0  # expiry timestamp in seconds, used to age out replay cache
+    # Account-level pseudonym: stable across runs for the same player, unlike
+    # user_id which changes with every run. The coordinator's one-lease-per-user
+    # admission must key on this. Keyed on the per-run pseudonym instead, a
+    # player whose business-side ledger is cleared once (session declared dead,
+    # or the player left) gets a new run and therefore a new identity, so the
+    # same person can take a second seat while the old session still holds a
+    # GPU. Older tokens do not carry this claim and fall back to user_id.
+    account_id: str = ""
+
+    @property
+    def lease_key(self) -> str:
+        """Identity key for the coordinator lease."""
+        return self.account_id or self.user_id
 
 
 def _b64url_decode(segment: str) -> bytes:
@@ -99,6 +112,7 @@ def verify_session_token(token: str, public_key: Ed25519PublicKey) -> Principal:
         allow_free_prompt=bool(session.get("allow_free_prompt", False)),
         jti=str(claims.get("jti") or ""),
         exp=int(claims.get("exp") or 0),
+        account_id=str(claims.get("uid") or ""),
     )
 
 
@@ -194,6 +208,15 @@ class WorldCallbacks:
     def __init__(self, cfg: WorldPlatformConfig) -> None:
         self._cfg = cfg
         self._client = httpx.AsyncClient(timeout=5.0)
+        # Rewrites get their own client with a bounded connection pool. Sharing
+        # the pool with lifecycle callbacks lets one rewrite flood fill the
+        # default 100 connections and starve started/ended/aborted for *every
+        # session in this process*, spreading the blast radius from the player
+        # who is spamming to everyone. Eight is plenty: the coordinator collapses
+        # a burst into a single in-flight rewrite per session.
+        self._rewrite_client = httpx.AsyncClient(
+            timeout=25.0, limits=httpx.Limits(max_connections=8)
+        )
         self._pending: set[asyncio.Task] = set()  # strong task refs; see fire()
 
     def _sign(self, method: str, path: str, body: bytes) -> dict[str, str]:
@@ -263,11 +286,8 @@ class WorldCallbacks:
             {"run_id": run_id, "instruction": instruction, "baseline": baseline}
         ).encode()
         url = self._cfg.callback_url.rstrip("/") + path
-        resp = await self._client.post(
-            url,
-            content=body,
-            headers=self._sign("POST", path, body),
-            timeout=25.0,
+        resp = await self._rewrite_client.post(
+            url, content=body, headers=self._sign("POST", path, body)
         )
         resp.raise_for_status()
         data = resp.json()
@@ -297,7 +317,19 @@ class WorldCallbacks:
             },
         )
 
-    def aborted(self, run_id: str, trace_id: str, fault: str, reason: str) -> None:
+    def aborted(
+        self, run_id: str, trace_id: str, fault: str, reason: str, established: bool
+    ) -> None:
+        """Report session termination.
+
+        established=False means this session never actually came up (it never
+        reported started). The business side uses that to ignore "a connection
+        attempt that never established wants to terminate a run that is already
+        live" - such callbacks come from the same token landing on another
+        gateway replica, or from another run of the same account hitting the
+        engine's single-lease admission. The rejected party is the newcomer;
+        the live session is an innocent bystander.
+        """
         self.fire(
             "/internal/v1/runs/aborted",
             {
@@ -305,5 +337,6 @@ class WorldCallbacks:
                 "trace_id": trace_id,
                 "fault": fault,
                 "reason": reason,
+                "established": established,
             },
         )

@@ -340,6 +340,12 @@ _WORLD_ALLOWED_EVENT_KINDS = frozenset(
 # instruction as kind:"direction", then the gateway asks world-service to rewrite
 # and dispatch the full prompt. The direction length cap matches world-service.
 _WORLD_DIRECTION_MAX_CHARS = 2000
+# Cap on in-flight direction/skill tasks per session. The coordinator already
+# collapses a burst into "one in flight plus one queued", so normal play stays
+# in the single digits; anything above this is scripted frame spam and is
+# dropped. Without a cap the receive loop creates one task per frame and the
+# frame rate is chosen by the attacker.
+_WORLD_MAX_DIRECTION_TASKS = 8
 
 # Init-message extension block visible only to the gateway. This matches the
 # world-service zingproto.WorldExtKey value.
@@ -631,8 +637,17 @@ def create_app(
                     assignment = await coordinator.admit(
                         # D1: authorized sessions use the internal user id from
                         # the token. The wsvc: prefix isolates them from showcase.
+                        # Key the lease on the account-level pseudonym rather
+                        # than the per-run one: the coordinator's one-lease-per-
+                        # user rule is meant to bound a person, and the per-run
+                        # pseudonym changes with every run, so clearing the
+                        # business-side ledger once lets the same person take a
+                        # second seat while the old one still holds a GPU.
+                        # Tokens without that claim fall back to the per-run
+                        # pseudonym, so behaviour is unchanged before the
+                        # world-service rollout.
                         user_id=(
-                            f"wsvc:{principal.user_id}"
+                            f"wsvc:{principal.lease_key}"
                             if principal is not None
                             else _user_id(websocket)
                         ),
@@ -759,6 +774,18 @@ def create_app(
                 # in finally. Exceptions are logged only; the main task group owns
                 # session lifetime and one rewrite failure should not tear down
                 # the session.
+                if len(direction_tasks) >= _WORLD_MAX_DIRECTION_TASKS:
+                    # Dropped silently, like every other out-of-whitelist frame:
+                    # spam should stop working, not help the sender break their
+                    # own session.
+                    coro.close()
+                    _log_gateway_trace(
+                        trace_id,
+                        "gateway.direction_dropped",
+                        session_id=session_id,
+                        reason="too_many_inflight",
+                    )
+                    return
                 task = asyncio.create_task(coro, name=f"gateway-direction-{label}")
                 direction_tasks.add(task)
 
@@ -1146,6 +1173,11 @@ def create_app(
                 # D4: after admit and upstream readiness, notify the backend that
                 # the session has started.
                 if world_callbacks is not None:
+                    # Record that this session really came up. Terminal
+                    # callbacks carry the flag so the business side can tell
+                    # "a live session died" from "a connection attempt that
+                    # never established failed".
+                    world_session["started_reported"] = True
                     world_callbacks.started(
                         principal.run_id, trace_id, principal.max_lifetime_s
                     )
@@ -1263,12 +1295,17 @@ def create_app(
             # D4: terminal session callback. It is fire-and-forget; world-service
             # has a deadline fallback for lost callbacks.
             if principal is not None and world_callbacks is not None:
+                # Whether this session ever came up. Rejected or invalid-payload
+                # attempts never did, and the business side uses that to refuse
+                # letting them terminate a run that is already live.
+                established = bool(world_session.get("started_reported"))
                 if world_session.get("admit_rejected"):
                     world_callbacks.aborted(
                         principal.run_id,
                         trace_id,
                         fault="ours",
                         reason=str(world_session["admit_rejected"]),
+                        established=established,
                     )
                 elif world_session.get("init_rejected"):
                     world_callbacks.aborted(
@@ -1276,10 +1313,15 @@ def create_app(
                         trace_id,
                         fault="client",
                         reason="init payload mismatch",
+                        established=established,
                     )
                 elif assignment is None:
                     world_callbacks.aborted(
-                        principal.run_id, trace_id, fault="ours", reason="not admitted"
+                        principal.run_id,
+                        trace_id,
+                        fault="ours",
+                        reason="not admitted",
+                        established=established,
                     )
                 elif world_session.get("deadline_hit"):
                     world_callbacks.ended(principal.run_id, trace_id, "completed")
@@ -1291,6 +1333,7 @@ def create_app(
                         trace_id,
                         fault="ours",
                         reason=str(world_session["system_error"])[:200],
+                        established=established,
                     )
                 elif world_session.get("worker_finished"):
                     world_callbacks.ended(principal.run_id, trace_id, "completed")

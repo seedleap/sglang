@@ -11,7 +11,13 @@ scene descriptions.
 
 This module is pure orchestration over stdlib asyncio. Rewrite, dispatch, and
 notification hooks are injected by the caller, so unit tests do not need to boot
-the gateway. All methods run in one event loop, so no lock is required.
+the gateway.
+
+Concurrency contract: one event loop, but submit and apply each run in their own
+task and therefore interleave at every await. "Same loop" does not mean "cannot
+interleave". State updates that span an await must be completed inside one
+await-free block (claim the slot, cancel the old timer, register the new one),
+or a task arriving later observes an unregistered intermediate state.
 """
 
 from __future__ import annotations
@@ -65,6 +71,13 @@ class DirectionCoordinator:
         self._gen = 0  # generation counter: newest action supersedes old rewrites
         self._revert_task: asyncio.Task | None = None
         self._closed = False
+        # Single flight: one rewrite per session at a time, keeping only the
+        # newest queued instruction. Only the last one can take effect anyway,
+        # so calling the model for the ones in between is pure waste - and the
+        # model account is shared with judging and world creation, so that waste
+        # starves settlement.
+        self._rewriting = False
+        self._pending: tuple[Any, str] | None = None
 
     @property
     def baseline(self) -> str:
@@ -84,10 +97,47 @@ class DirectionCoordinator:
             self._pos += 1
 
     async def submit(self, event_id: Any, text: str) -> None:
-        """Run one player instruction through rewriting and apply."""
+        """Run one player instruction through rewriting and apply.
+
+        Single flight with a one-slot tail queue: while a rewrite is in flight,
+        only the newest instruction is queued and the one it replaces is closed
+        out immediately. The observable semantics are identical to "newest
+        wins"; the difference is that the replaced instructions never reach the
+        model, so a burst of typing no longer fans out into N concurrent calls.
+        """
+        # Claiming the slot must sit in the same await-free block as the check.
+        # With an await in between, two tasks both observe _rewriting=False and
+        # both enter.
+        if self._rewriting:
+            dropped, self._pending = self._pending, (event_id, text)
+            await self._notify(event_id, "rewriting")
+            if dropped is not None:
+                await self._notify(dropped[0], "superseded")
+            return
+        self._rewriting = True
+        try:
+            await self._notify(event_id, "rewriting")
+            while True:
+                await self._rewrite_once(event_id, text)
+                if self._pending is None or self._closed:
+                    return
+                event_id, text = self._pending
+                self._pending = None
+        finally:
+            # The queued instruction is owned by whoever holds the flight slot.
+            # The invariant is "no pending instruction while nobody is in
+            # flight". Both notify and dispatch inside the loop can raise (a
+            # browser under backpressure makes notify time out); clearing only
+            # _rewriting would leave an ownerless queued instruction that never
+            # reaches a terminal status and later supersedes the *newer*
+            # instruction before taking its place.
+            self._rewriting = False
+            self._pending = None
+
+    async def _rewrite_once(self, event_id: Any, text: str) -> None:
+        """Rewrite and land one instruction."""
         self._gen += 1
         gen = self._gen
-        await self._notify(event_id, "rewriting")
         try:
             prompt, change_type = await self._rewrite(text, self._baseline)
         except asyncio.CancelledError:
@@ -98,8 +148,10 @@ class DirectionCoordinator:
             # intended fallback state. The rewrite provider logs the root cause.
             await self._notify(event_id, "failed")
             return
-        if gen != self._gen or self._closed:
-            # A newer player action arrived while rewriting; discard the old result.
+        if gen != self._gen or self._pending is not None or self._closed:
+            # A newer player action arrived while rewriting; discard the old
+            # result. When the newer one is already queued we also skip the
+            # dispatch, which saves one intermediate frame.
             await self._notify(event_id, "superseded")
             return
         await self.apply(prompt, change_type, event_id)
@@ -108,12 +160,30 @@ class DirectionCoordinator:
         """Dispatch one full prompt and take ownership of scene state."""
         self._gen += 1  # newest action wins; in-flight old rewrites become stale
         self._cancel_revert()  # new content owns the scene; old one-time revert is stale
-        await self._dispatch(prompt, _as_event_id(event_id))
+        mine: asyncio.Task | None = None
         if change_type == CHANGE_ONE_TIME:
-            self._revert_task = asyncio.get_running_loop().create_task(
-                self._revert_later()
-            )
-        else:
+            # Registration must share the await-free block with the cancel
+            # above. Assigning after the dispatch means an interleaved apply
+            # cancels None, and this timer becomes an orphan that nobody can
+            # cancel and close() cannot reach: it fires a stray revert frame ten
+            # seconds later and outlives the session. Registering early only
+            # starts the sleep a few milliseconds sooner; _revert_later still
+            # reads the baseline after sleeping, so it reads the latest one.
+            mine = asyncio.get_running_loop().create_task(self._revert_later())
+            self._revert_task = mine
+        try:
+            await self._dispatch(prompt, _as_event_id(event_id))
+        except BaseException:
+            # The effect frame never went out, so it must not get a revert
+            # frame. Compare by task identity so an interleaved newer timer that
+            # already took the slot is not cancelled by mistake.
+            if mine is not None and self._revert_task is mine:
+                self._cancel_revert()
+            raise
+        if change_type != CHANGE_ONE_TIME:
+            # The baseline is assigned after the dispatch on purpose: only what
+            # actually went out counts, so a failed dispatch never records a
+            # prompt the engine never received.
             self._baseline = prompt
 
     async def _revert_later(self) -> None:
@@ -130,6 +200,9 @@ class DirectionCoordinator:
 
     def close(self) -> None:
         self._closed = True
+        # Drop the queued instruction too, otherwise the in-flight loop runs one
+        # more rewrite after the session is gone.
+        self._pending = None
         self._cancel_revert()
 
 
