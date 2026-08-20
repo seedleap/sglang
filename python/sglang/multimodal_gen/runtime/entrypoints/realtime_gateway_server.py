@@ -18,6 +18,7 @@ from typing import Any, Protocol
 from uuid import uuid4
 
 import httpx
+import msgspec.msgpack
 import uvicorn
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, Response
@@ -934,8 +935,12 @@ def create_app(
                             )
                         if directions is not None:
                             # 路过的遥测顺便驱动基线推进（时间轴条目滚进基线）。
-                            # 上游通道只有小体积控制消息，多解一次码可忽略
-                            telemetry = decode_message(wire)
+                            # 注意：worker 控制消息是裸 msgpack、没有 version 字段，
+                            # 必须用与 worker_message_allowed 相同的裸解码 ——
+                            # decode_message 的版本校验会把它当协议违规拆掉会话
+                            #（生产实测踩过）。上游通道只有小体积控制消息，
+                            # 多解一次码可忽略
+                            telemetry = msgspec.msgpack.decode(wire)
                             if (
                                 isinstance(telemetry, dict)
                                 and telemetry.get("type") == "chunk_telemetry"
