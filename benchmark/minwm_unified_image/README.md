@@ -183,44 +183,6 @@ logs, complete Pod JSON, requested top-level image digest, and kubelet `imageID`
 Do not submit the B200 Job while the warm p6 node is full unless provisioning a
 second Spot node is intentional.
 
-Before the 720p performance gate, verify that the current S3 objects still
-match the pinned checkpoint, first frame, and 12 donor-component versions. The
-preflight compares the control-plane VersionId, size, ETag, and available S3
-checksum and should be archived with the release evidence:
-
-```bash
-python3 benchmark/minwm_unified_image/verify_720p_inputs.py \
-  --profile spot \
-  --output /tmp/minwm-720p-input-preflight.json
-```
-
-The in-Pod runner independently checks the staged checkpoint and first-frame
-SHA256 plus every donor file's path, size, and SHA256 from `inputs_720p.json`. Render
-the matching performance Job only after the preflight passes:
-
-```bash
-bash benchmark/minwm_unified_image/render_gpu_performance_job.sh \
-  hopper <source-sha40> sha256:<image-digest> \
-  > /tmp/minwm-image-perf-h200.yaml
-kubectl --context codex-minwm-test-phx2 apply \
-  --dry-run=server -f /tmp/minwm-image-perf-h200.yaml
-
-bash benchmark/minwm_unified_image/render_gpu_performance_job.sh \
-  blackwell <source-sha40> sha256:<image-digest> \
-  > /tmp/minwm-image-perf-b200.yaml
-kubectl --context leap-world-use2 apply \
-  --dry-run=server -f /tmp/minwm-image-perf-b200.yaml
-```
-
-Each Job reserves all eight GPUs for isolation but exposes only device 0 to
-Torch. Audit and archive every Pod on the selected Node at gate start/end so a
-CPU-only co-tenant cannot silently contaminate the 3% threshold. The accepted
-H200 locked-FA3 scheduler/client baselines are `9.501709058` / `9.490211946`
-FPS, with 97% minima `9.216657786` / `9.205505587`. The accepted B200 packed-FA4
-scheduler/client baselines remain `14.395795593` / `14.376812178` FPS, with 97%
-minima `13.963921725` / `13.945507813`. Baselines are promoted only when a
-validated release establishes a higher same-contract high-water mark.
-
 An image is releasable only after:
 
 1. Software contract and `pip check` pass without startup installation.
