@@ -75,30 +75,8 @@ spec:
               value: http://minwm-webui-opt-gateway-20260813/backends/lingbot2
             - name: LINGBOT2_UPSTREAM_WS
               value: ws://minwm-webui-opt-gateway-20260813/backends/lingbot2
-            - name: H264_WS_PRESET
-              value: fast
-            - name: H264_WS_PROFILE
-              value: main
-            - name: H264_WS_CRF
-              value: "20"
-            - name: H264_WS_BITRATE_KBPS
-              value: "3000"
-            - name: H264_WS_VBV_BUFFER_MS
-              value: "250"
-            - name: H264_WS_GOP_SECONDS
-              value: "2"
-            - name: H264_WS_MAX_SESSIONS
-              value: "8"
-            - name: H264_WS_MAX_QUEUED_FRAMES
-              value: "24"
-            - name: H264_WS_MAX_FRAME_AGE_MS
-              value: "250"
-            - name: H264_WS_LIVE_EDGE_FRAMES
-              value: "6"
-            - name: H264_WS_RAW_CHANNEL_ORDER
-              value: rgb
             - name: REALTIME_UI_CONFIG_JSON
-              value: '{"generationModes":["i2v","t2v"],"defaultGenerationMode":"i2v","t2vFrameStep":4,"t2vDefaultNumFrames":121,"sessionMaxLifetimeSeconds":70,"playbackAckEnabled":false,"h264WebSocketEnabled":true,"h264DirectGatewayEnabled":true,"h264CompressedBitrateKbps":3000,"h264CompressedCrf":20,"h264CompressedPreset":"fast","h264CompressedGopSeconds":2,"h264CompressedVbvBufferMs":250,"h264WebSocketLiveEdgeTargetMs":80,"h264WebSocketSeekThresholdMs":260,"secureBaseUrl":"https://zing-world-studio.loopit.me","singleExperience":false,"smoothCatchupRateMax":1.1,"dualModels":{"minwm":{"label":"Zing","sinkSize":8,"windowFrames":32,"h264StartupDropFrames":0},"lingbot2":{"label":"LingBot2","targetFps":16,"sinkSize":9,"windowFrames":18,"h264StartupDropFrames":8}}}'
+              value: '{"generationModes":["i2v","t2v"],"defaultGenerationMode":"i2v","t2vFrameStep":4,"t2vDefaultNumFrames":121,"sessionMaxLifetimeSeconds":70,"playbackAckEnabled":false,"h264WebSocketEnabled":true,"h264CompressedBitrateKbps":3000,"h264CompressedCrf":20,"h264CompressedPreset":"fast","h264CompressedGopSeconds":2,"h264CompressedVbvBufferMs":250,"h264WebSocketLiveEdgeTargetMs":160,"h264WebSocketSeekThresholdMs":500,"secureBaseUrl":"https://zing-world-studio.loopit.me","singleExperience":false,"smoothCatchupRateMax":1.1,"dualModels":{"minwm":{"label":"Zing","sinkSize":8,"windowFrames":32,"h264StartupDropFrames":0},"lingbot2":{"label":"LingBot2","targetFps":16,"sinkSize":9,"windowFrames":18,"h264StartupDropFrames":8}}}'
             - name: VIDEO_PROMPT_REWRITE_CREDENTIALS
               value: /run/secrets/realtime-webui/prompt-rewriter-vertex.json
             - name: CREATE_WORLD_IMAGE_CONFIG

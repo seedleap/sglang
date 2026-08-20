@@ -11,7 +11,6 @@ const H264_MSE_MIME_TYPE = 'video/mp4; codecs="avc1.4D401F"';
 const H264_WEBSOCKET_REQUESTED = UI_CONFIG.h264WebSocketEnabled === true;
 const H264_WEBSOCKET_ENABLED = H264_WEBSOCKET_REQUESTED
   && Boolean(globalThis.MediaSource?.isTypeSupported?.(H264_MSE_MIME_TYPE));
-const H264_DIRECT_GATEWAY = UI_CONFIG.h264DirectGatewayEnabled === true;
 const H264_CONNECT_MAX_ATTEMPTS = Math.max(
   1,
   Math.min(10, Math.trunc(Number(UI_CONFIG.h264WebSocketConnectAttempts) || 3)),
@@ -91,9 +90,7 @@ function h264CompressionInit(init, key) {
 }
 
 function h264WebSocketEndpoint(key) {
-  const defaultEndpoint = H264_DIRECT_GATEWAY
-    ? `/backends/${key}/v1/realtime_video/generate`
-    : `/api/h264ws/${key}`;
+  const defaultEndpoint = `/backends/${key}/v1/realtime_video/generate`;
   const configuredEndpoint = String(
     DUAL_MODEL_CONFIG[key]?.h264WsUrl || UI_CONFIG.h264WebSocketBaseUrl || "",
   ).trim();
@@ -1016,7 +1013,6 @@ function createH264ModelSession(key) {
     overlay: $(`${key}PreviewOverlay`),
     root: document.querySelector(`[data-model-key="${key}"]`),
     endpoint: h264WebSocketEndpoint(key),
-    directGateway: H264_DIRECT_GATEWAY,
     packMessage: pack,
     unpackMessage: unpack,
     liveEdgeTargetMs: configuredNumber("h264WebSocketLiveEdgeTargetMs", 80),
@@ -2302,8 +2298,8 @@ function renderProtocolPerformance(key, stats = {}) {
     telemetry.vae_decode_ms,
     telemetry.model_vae_decode_ms,
   );
-  const h264FeedMs = protocolMetric(stats.lastBridgeEncoderFeedMs);
-  const bridgeQueueMs = protocolMetric(stats.lastBridgeQueueMs);
+  const h264FeedMs = protocolMetric(stats.lastH264EncoderFeedMs);
+  const h264QueueMs = protocolMetric(stats.lastH264QueueMs);
   const webSocketDownlinkMs = protocolMetric(
     stats.lastWebSocketDownlinkMs,
     stats.lastDownlinkMs,
@@ -2340,7 +2336,7 @@ function renderProtocolPerformance(key, stats = {}) {
     ? `q ${protocolMetricText(vaeQueueMs)} · dec ${protocolMetricText(vaeDecodeMs)}`
     : "-";
   $(`${key}PerfH264Queue`).textContent = isH264
-    ? protocolMetricText(bridgeQueueMs)
+    ? protocolMetricText(h264QueueMs)
     : "不适用";
   $(`${key}PerfH264Feed`).textContent = isH264
     ? protocolMetricText(h264FeedMs)

@@ -2,22 +2,6 @@
   const OPEN = 1;
   const MIME_TYPE = 'video/mp4; codecs="avc1.4D401F"';
 
-  function bytesToDataUrl(value, mimeType = "image/png") {
-    if (typeof value === "string") return Promise.resolve(value);
-    const bytes = value instanceof Uint8Array
-      ? value
-      : value instanceof ArrayBuffer
-        ? new Uint8Array(value)
-        : null;
-    if (!bytes) return Promise.resolve(value);
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => resolve(String(reader.result || ""));
-      reader.onerror = () => reject(reader.error || new Error("first frame conversion failed"));
-      reader.readAsDataURL(new Blob([bytes], { type: mimeType }));
-    });
-  }
-
   function waitForSourceOpen(mediaSource, timeoutMs) {
     if (mediaSource.readyState === "open") return Promise.resolve();
     return new Promise((resolve, reject) => {
@@ -88,7 +72,7 @@
       video,
       overlay = null,
       root = null,
-      endpoint = "/api/h264ws",
+      endpoint = "/backends/minwm/v1/realtime_video/generate",
       startupTimeoutMs = 30000,
       liveEdgeTargetMs = 80,
       liveEdgeSeekThresholdMs = 420,
@@ -101,7 +85,6 @@
       MediaSourceImpl = global.MediaSource,
       metricFlushMs = 250,
       maxMetricBatch = 32,
-      directGateway = false,
       packMessage = null,
       unpackMessage = null,
     }) {
@@ -125,11 +108,10 @@
       this.MediaSourceImpl = MediaSourceImpl;
       this.metricFlushMs = Math.max(0, Number(metricFlushMs) || 0);
       this.maxMetricBatch = Math.max(1, Number(maxMetricBatch) || 32);
-      this.directGateway = directGateway === true;
       this.packMessage = packMessage;
       this.unpackMessage = unpackMessage;
-      if (this.directGateway && (!this.packMessage || !this.unpackMessage)) {
-        throw new Error("Direct H.264 Gateway mode requires MessagePack codecs");
+      if (!this.packMessage || !this.unpackMessage) {
+        throw new Error("H.264 Gateway mode requires MessagePack codecs");
       }
       this.socket = null;
       this.mediaSource = null;
@@ -148,7 +130,7 @@
       this.presentedSequence = 0;
       this.lastPresentedEventId = 0;
       this.controlSentEpochByEvent = new Map();
-      this.lastBridgeClockOffsetMs = 0;
+      this.lastGatewayClockOffsetMs = 0;
       this.bytesReceived = 0;
       this.framesPresented = 0;
       this.presentedSamples = [];
@@ -242,11 +224,9 @@
         this._fail(new Error("H.264 MSE SourceBuffer error"));
       });
 
-      const firstFrame = this.directGateway
-        ? (init.first_frame instanceof ArrayBuffer
-          ? new Uint8Array(init.first_frame)
-          : init.first_frame)
-        : await bytesToDataUrl(init.first_frame);
+      const firstFrame = init.first_frame instanceof ArrayBuffer
+        ? new Uint8Array(init.first_frame)
+        : init.first_frame;
       return new Promise((resolve, reject) => {
         const endpoint = resolveEndpoint(endpointOverride || this.endpoint);
         const socket = new this.WebSocketImpl(endpoint);
@@ -262,15 +242,11 @@
         socket.onopen = () => {
           if (generation !== this.generation) return;
           const serializeStartedAt = performance.now();
-          const directInit = this.directGateway
-            // JPEG is an opt-in sentinel understood by the dedicated VAE
-            // deployment. The VAE rewrites it to raw locally, then emits
-            // H.264/fMP4; no JPEG or RGB crosses the network.
-            ? { ...init, first_frame: firstFrame, realtime_output_format: "jpeg" }
-            : { ...init, first_frame: firstFrame };
-          const payload = this.directGateway
-            ? this.packMessage(directInit)
-            : JSON.stringify(directInit);
+          // JPEG is an opt-in sentinel understood by the dedicated VAE
+          // deployment. The VAE rewrites it to raw locally, then emits
+          // H.264/fMP4; no JPEG or RGB crosses the network.
+          const directInit = { ...init, first_frame: firstFrame, realtime_output_format: "jpeg" };
+          const payload = this.packMessage(directInit);
           socket.send(payload);
           this._queueMetric(
             "client_serialize_queue",
@@ -280,18 +256,12 @@
         };
         socket.onmessage = (message) => {
           if (generation !== this.generation) return;
-          if (!this.directGateway && typeof message.data !== "string") {
-            this._queueMedia(message.data);
-            return;
-          }
           try {
-            const event = this.directGateway
-              ? this.unpackMessage(new Uint8Array(message.data))
-              : JSON.parse(message.data);
+            const event = this.unpackMessage(new Uint8Array(message.data));
             if (
               (event.type === "status" && event.state === "connected")
               || event.type === "session_ready"
-              || (this.directGateway && event.type === "media_init")
+              || event.type === "media_init"
             ) {
               this.startupConnected = true;
               if (!settled) {
@@ -359,9 +329,7 @@
       }
       const serializeStartedAt = performance.now();
       const outgoing = { ...envelope, trace_id: this.traceId };
-      const payload = this.directGateway
-        ? this.packMessage(outgoing)
-        : JSON.stringify(outgoing);
+      const payload = this.packMessage(outgoing);
       this.socket.send(payload);
       this._queueMetric(
         "client_serialize_queue",
@@ -405,9 +373,7 @@
         ? { type: "client_metric", ...events[0] }
         : { type: "client_metric_batch", events };
       try {
-        this.socket.send(
-          this.directGateway ? this.packMessage(payload) : JSON.stringify(payload),
-        );
+        this.socket.send(this.packMessage(payload));
       } catch {
         this.metricBuffer.unshift(...events);
       }
@@ -511,7 +477,7 @@
       const webSocketDownlinkMs = serverSentEpochMs
         ? Math.max(
             0,
-            Date.now() - serverSentEpochMs + this.lastBridgeClockOffsetMs,
+            Date.now() - serverSentEpochMs + this.lastGatewayClockOffsetMs,
           )
         : 0;
       this.bytesReceived += data.byteLength;
@@ -626,27 +592,21 @@
           eventId: Number(event.event_id || 0),
           frameBatchIndex: Number(event.frame_batch_index || 0),
           isFinalFrameBatch: Boolean(event.is_final_frame_batch),
-          bridgeEncodedEpochMs: Number(
-            event.h264_encoded_epoch_ms || event.bridge_encoded_epoch_ms || 0,
+          h264EncodedEpochMs: Number(
+            event.h264_encoded_epoch_ms || 0,
           ),
-          bridgeEncodeStartedEpochMs: Number(
-            event.h264_encode_started_epoch_ms
-              || event.bridge_encode_started_epoch_ms
-              || 0,
+          h264EncodeStartedEpochMs: Number(
+            event.h264_encode_started_epoch_ms || 0,
           ),
-          bridgeQueueMs: Number(event.h264_queue_ms || event.bridge_queue_ms || 0),
-          bridgeEncoderFeedMs: Number(
-            event.h264_encoder_feed_ms || event.bridge_encoder_feed_ms || 0,
-          ),
+          h264QueueMs: Number(event.h264_queue_ms || 0),
+          h264EncoderFeedMs: Number(event.h264_encoder_feed_ms || 0),
           metadataReceivedAtMs: performance.now(),
           appendCompletedAtMs: 0,
         });
         if (this.mediaBatches.length > 1024) this.mediaBatches.shift();
         this._emitStats({
-          lastBridgeQueueMs: Number(event.h264_queue_ms || event.bridge_queue_ms || 0),
-          lastBridgeEncoderFeedMs: Number(
-            event.h264_encoder_feed_ms || event.bridge_encoder_feed_ms || 0,
-          ),
+          lastH264QueueMs: Number(event.h264_queue_ms || 0),
+          lastH264EncoderFeedMs: Number(event.h264_encoder_feed_ms || 0),
           droppedFrames: Number(event.dropped_frames || 0),
           startupDroppedFrames: Number(event.startup_dropped_frames || 0),
           serverFps: this.sourceSamples.length,
@@ -659,20 +619,13 @@
           (item) => Number(item.sourceFrameIndex || 0) === frameIndex,
         );
         if (metadata) {
-          metadata.bridgeEncodedEpochMs = Number(
-            event.h264_encoded_epoch_ms
-              || event.bridge_encoded_epoch_ms
-              || metadata.bridgeEncodedEpochMs
-              || 0,
+          metadata.h264EncodedEpochMs = Number(
+            event.h264_encoded_epoch_ms || metadata.h264EncodedEpochMs || 0,
           );
-          metadata.bridgeEncoderFeedMs = Number(
-            event.h264_encoder_feed_ms || event.bridge_encoder_feed_ms || 0,
-          );
+          metadata.h264EncoderFeedMs = Number(event.h264_encoder_feed_ms || 0);
         }
         this._emitStats({
-          lastBridgeEncoderFeedMs: Number(
-            event.h264_encoder_feed_ms || event.bridge_encoder_feed_ms || 0,
-          ),
+          lastH264EncoderFeedMs: Number(event.h264_encoder_feed_ms || 0),
         });
       } else if (event.type === "media_payload") {
         this.pendingPayloadTimings.push({
@@ -687,9 +640,7 @@
         this._emitStats({ chunkTelemetry: { ...event } });
       } else if (event.type === "control_ack") {
         const clientSentEpochMs = Number(event.client_sent_epoch_ms || 0);
-        const serverReceivedEpochMs = Number(
-          event.server_received_epoch_ms || event.bridge_received_epoch_ms || 0,
-        );
+        const serverReceivedEpochMs = Number(event.server_received_epoch_ms || 0);
         const serverSentEpochMs = Number(event.server_sent_epoch_ms || 0);
         const clientReceivedEpochMs = Date.now();
         const serverProcessingMs = serverReceivedEpochMs && serverSentEpochMs
@@ -699,7 +650,7 @@
           ? Math.max(0, clientReceivedEpochMs - clientSentEpochMs)
           : 0;
         if (clientSentEpochMs && serverReceivedEpochMs && serverSentEpochMs) {
-          this.lastBridgeClockOffsetMs = (
+          this.lastGatewayClockOffsetMs = (
             (serverReceivedEpochMs - clientSentEpochMs)
             + (serverSentEpochMs - clientReceivedEpochMs)
           ) / 2;
@@ -718,8 +669,8 @@
           ...(clientSentEpochMs && isInteractiveControl
             ? { lastInputUplinkMs: Math.max(0, (roundTripMs - serverProcessingMs) / 2) }
             : {}),
-          controlBridgeRoundTripMs: roundTripMs,
-          bridgeClockOffsetMs: this.lastBridgeClockOffsetMs,
+          controlGatewayRoundTripMs: roundTripMs,
+          gatewayClockOffsetMs: this.lastGatewayClockOffsetMs,
         });
       }
     }
@@ -761,12 +712,12 @@
           framesDecoded: this.framesPresented,
           lastChunk: this.lastRenderedChunk,
           lastPresentedMediaEventId: eventId,
-          lastBridgeQueueMs: Number(metadata.bridgeQueueMs || 0),
-          lastBridgeEncoderFeedMs: Number(metadata.bridgeEncoderFeedMs || 0),
-          lastEncodeToPresentMs: metadata.bridgeEncodedEpochMs
+          lastH264QueueMs: Number(metadata.h264QueueMs || 0),
+          lastH264EncoderFeedMs: Number(metadata.h264EncoderFeedMs || 0),
+          lastEncodeToPresentMs: metadata.h264EncodedEpochMs
             ? Math.max(
                 0,
-                Date.now() - metadata.bridgeEncodedEpochMs + this.lastBridgeClockOffsetMs,
+                Date.now() - metadata.h264EncodedEpochMs + this.lastGatewayClockOffsetMs,
               )
             : 0,
           lastPresentedAfterMetadataMs: metadata.metadataReceivedAtMs
@@ -821,9 +772,7 @@
         },
       };
       this.socket.send(
-        this.directGateway
-          ? this.packMessage(acknowledgement)
-          : JSON.stringify(acknowledgement),
+        this.packMessage(acknowledgement),
       );
     }
 
