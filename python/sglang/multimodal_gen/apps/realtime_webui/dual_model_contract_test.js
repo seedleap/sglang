@@ -32,7 +32,7 @@ assert.match(
   /<div class="model-parameters-grid"[^>]*\shidden(?:\s|>)/,
   "model parameters should stay in the DOM for request defaults but remain hidden from users",
 );
-assert.match(html, /id="size" value="832x480"/, "MinWM should default to the native realtime size");
+assert.match(html, /id="size" value="1280x704"/, "MinWM should keep the 720p default");
 assert.match(html, /id="lingbot2Size" value="832x480"/, "LingBot2 should use its native default size");
 assert.match(html, /id="fps" type="number" value="24"/, "Zing should keep its 24 FPS default");
 assert.match(html, /id="lingbot2Fps" type="number" value="16"/, "LingBot2 should use its official 16 FPS default");
@@ -41,17 +41,6 @@ assert.match(html, /id="lingbot2WindowFrames" type="number" value="18"/, "LingBo
 assert.match(app, /const DEFAULT_LINGBOT2_TARGET_FPS\s*=\s*configuredModelNumber\("lingbot2", "targetFps", 16\)/);
 assert.match(app, /const DEFAULT_LINGBOT2_SINK_SIZE\s*=\s*configuredModelNumber\("lingbot2", "sinkSize", 9\)/);
 assert.match(app, /const DEFAULT_LINGBOT2_WINDOW_FRAMES\s*=\s*configuredModelNumber\("lingbot2", "windowFrames", 18\)/);
-assert.match(app, /configuredModelString\(\s*key,\s*"size"/, "runtime model config should override static size defaults");
-assert.match(
-  app,
-  /configuredModelOrGlobalNumber\(key, "sinkSize", fallbackSinkSize, "sinkSize"\)/,
-  "Zing runtime config must preserve the model-specific sink size",
-);
-assert.match(
-  app,
-  /configuredModelOrGlobalNumber\(key, "windowFrames", fallbackWindowFrames, "windowFrames"\)/,
-  "Zing runtime config must preserve the model-specific attention window",
-);
 assert.match(
   app,
   /startupTimeoutMs:\s*configuredModelNumber\("lingbot2", "startupTimeoutMs", 60000\)/,
@@ -102,14 +91,14 @@ assert.match(html, /<span>FPS<b id="lingbot2RateText">-<\/b><\/span>/, "LingBot2
 assert.match(html, /<span>FPS<b id="minwmPerfFps">-<\/b><\/span>/, "MinWM should show stage FPS");
 assert.match(html, /<span>FPS<b id="lingbot2PerfFps">-<\/b><\/span>/, "LingBot2 should show stage FPS");
 assert.match(html, /下行带宽<b id="minwmPerfData">-<\/b>/, "Zing should show measured downlink bandwidth");
-assert.match(html, /H\.264 前队列<b id="minwmPerfH264Queue">-<\/b>/, "Zing should show encoder input queue latency");
-assert.match(html, /FFmpeg 写入<b id="minwmPerfH264Feed">-<\/b>/, "Zing should show FFmpeg feed latency");
+assert.match(html, /VAE 编码队列<b id="minwmPerfH264Queue">-<\/b>/, "Zing should show VAE encoder queue latency");
+assert.match(html, /H\.264 写入<b id="minwmPerfH264Feed">-<\/b>/, "Zing should show H.264 encoder feed latency");
 assert.match(html, /WS 下行<b id="minwmPerfDownlink">-<\/b>/, "Zing should show wire downlink latency separately");
 assert.match(html, /MSE 队列<b id="minwmPerfMseQueue">-<\/b>/, "Zing should show browser append queue latency");
 assert.match(html, /MSE 追加<b id="minwmPerfMseAppend">-<\/b>/, "Zing should show SourceBuffer append latency");
 assert.match(html, /播放缓冲<b id="minwmPerfPlaybackBuffer">-<\/b>/, "Zing should show playback lead");
-assert.match(html, /H\.264 前队列<b id="lingbot2PerfH264Queue">-<\/b>/, "LingBot2 should show encoder input queue latency");
-assert.match(html, /FFmpeg 写入<b id="lingbot2PerfH264Feed">-<\/b>/, "LingBot2 should show FFmpeg feed latency");
+assert.match(html, /VAE 编码队列<b id="lingbot2PerfH264Queue">-<\/b>/, "LingBot2 should show VAE encoder queue latency");
+assert.match(html, /H\.264 写入<b id="lingbot2PerfH264Feed">-<\/b>/, "LingBot2 should show H.264 encoder feed latency");
 assert.match(html, /WS 下行<b id="lingbot2PerfDownlink">-<\/b>/, "LingBot2 should show wire downlink latency separately");
 assert.match(html, /MSE 队列<b id="lingbot2PerfMseQueue">-<\/b>/, "LingBot2 should show browser append queue latency");
 assert.match(html, /MSE 追加<b id="lingbot2PerfMseAppend">-<\/b>/, "LingBot2 should show SourceBuffer append latency");
@@ -194,6 +183,7 @@ assert.match(
   "author styles must not override the hidden parameter panel",
 );
 assert.match(css, /grid-template-columns:\s*repeat\(2,/);
+assert.match(css, /\.model-player-grid\.is-single-up\s*\{[\s\S]*?grid-template-columns:\s*minmax\(0, 1280px\)/);
 assert.match(css, /@media[^}]*max-width[\s\S]*\.model-player-grid\s*\{[\s\S]*grid-template-columns:\s*1fr/);
 assert.match(css, /\.stage\s*\{[\s\S]*container-type:\s*inline-size/);
 assert.match(css, /@container[^}]*max-width:\s*1180px[\s\S]*\.topbar\s*\{[\s\S]*flex-wrap:\s*wrap/);
@@ -224,11 +214,11 @@ for (const selector of ["model-slot-config", "stage-controls", "prompt-update-he
 assert.match(html, /playback_controller\.js\?v=realtime-playback-v34/);
 assert.match(html, /model_session\.js\?v=dual-h264-telemetry-v1/);
 assert.match(html, /dual_model_controller\.js\?v=dual-model-v6/);
-assert.match(html, /h264_websocket_session\.js\?v=h264-direct-gateway-userid-v2/);
+assert.match(html, /h264_websocket_session\.js\?v=h264-direct-gateway-only-v1/);
 assert.match(html, /prompt_rewrite_controller\.js\?v=prompt-rewrite-v3/);
 assert.match(html, /world_rules_controller\.js\?v=world-rules-v4/);
-assert.match(html, /styles\.css\?v=world-studio-h264-rules-v6/);
-assert.match(html, /app\.js\?v=world-studio-single-h264-v9/);
+assert.match(html, /styles\.css\?v=world-studio-single-zing-v3/);
+assert.match(html, /app\.js\?v=world-studio-single-zing-v4/);
 assert.match(html, /id="minwmH264Viewport"/);
 assert.match(html, /id="lingbot2H264Viewport"/);
 assert.match(html, /id="minwmPerfScheduler"/);
@@ -347,8 +337,6 @@ assert.match(app, /secureBaseUrl/);
 assert.match(app, /function h264WebSocketEndpoint\(key\)/);
 assert.match(app, /UI_CONFIG\.h264WebSocketBaseUrl/);
 assert.match(app, /endpoint: h264WebSocketEndpoint\(key\)/);
-assert.match(app, /directGateway: true/);
-assert.doesNotMatch(app, /\/api\/h264ws/);
 assert.match(app, /async function connectH264SessionWithRetry\(key, h264Session, init, url = ""\)/);
 assert.match(app, /H264_CONNECT_MAX_ATTEMPTS/);
 assert.match(app, /H264_RUNTIME_RECONNECT_MAX_ATTEMPTS/);

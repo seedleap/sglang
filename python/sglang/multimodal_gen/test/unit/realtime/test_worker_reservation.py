@@ -415,14 +415,13 @@ def test_vae_direct_output_sends_authoritative_media_completion(monkeypatch):
             )
             future = asyncio.get_running_loop().create_future()
             future.set_result(
-                    SimpleNamespace(
-                        num_frames=1,
-                        queue_wait_ms=1.0,
-                        decode_ms=2.0,
-                        post_decode_ms=0.5,
-                        encode_ms=3.0,
-                    )
+                SimpleNamespace(
+                    num_frames=1,
+                    queue_wait_ms=1.0,
+                    decode_ms=2.0,
+                    encode_ms=3.0,
                 )
+            )
             return future
 
         async def close(self, *_identity):
@@ -551,11 +550,18 @@ def test_denoiser_health_returns_503_when_reservation_watchdog_failed():
         )
     )
     app.state.worker_reservations._lifecycle = "failed"
+    endpoint = next(
+        route.endpoint
+        for route in app.routes
+        if getattr(route, "path", None) == "/health"
+        and "GET" in getattr(route, "methods", set())
+    )
+    request = SimpleNamespace(app=SimpleNamespace(state=app.state))
 
-    response = TestClient(app).get("/health")
-
-    assert response.status_code == 503
-    assert response.json()["detail"]["status"] == "failed"
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(endpoint(request))
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.detail["status"] == "failed"
 
 
 def test_vae_health_returns_503_when_reservation_watchdog_failed():

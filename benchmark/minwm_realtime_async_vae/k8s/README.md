@@ -84,6 +84,12 @@ Coordinator TTL 自动回收 Lease。
 
 ## B300 Capacity Block 经验
 
+2026-08-20 的单模型 Zing-only B300 链路（7 个 SP=1 denoiser + 1 个异步
+TAEHV VAE、WebSocket direct H.264、70s 游戏时间）记录在
+[`B300_ZING_SP1_DIRECT_H264_20260820.md`](B300_ZING_SP1_DIRECT_H264_20260820.md)。
+这是当前 `zing-b300-world-studio.loopit.me` 验证链路的参考方案；不要和下面
+2026-08-13 的 Zing/LingBot2 双模型 Capacity Block 记录混用。
+
 `aws03-west2-haoze-20260813.yaml` 是一次隔离的 us-west-2 B300 Capacity Block 部署记录。
 该拓扑复用一台 8 卡 B300 节点：Zing denoiser 使用 2 卡 SP=2，LingBot2 denoiser
 使用 4 卡 SP=4，剩余 2 卡分别作为 Zing 与 LingBot2 的异步 TAEHV VAE worker。

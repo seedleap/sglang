@@ -332,14 +332,24 @@ async def _receive_browser(websocket: WebSocket) -> bytes | str:
 # denylist so future engine control fields do not become browser-injectable just
 # because they were not explicitly blocked.
 _WORLD_PASSTHROUGH_TYPES = frozenset({"client_metric", "client_metric_batch", "ack"})
-_WORLD_ALLOWED_EVENT_KINDS = frozenset(
-    {"camera", "camera_actions", "move", "action", "playback_ack", "heartbeat"}
-)
+# Only kinds the MinWM adapter actually ingests. "camera", "move", and "action"
+# used to sit here: MinWM.ingest_event rejects all three (it accepts
+# action_labels, action_weights, camera_actions, prompt, scene_cut, seed, and
+# chunk_seeds), so forwarding them produced an engine-side "unsupported MinWM
+# event kind" error instead of doing anything. They were dead slots that made
+# the contract look wider than it is.
+_WORLD_ALLOWED_EVENT_KINDS = frozenset({"camera_actions", "playback_ack", "heartbeat"})
 # Free-form input no longer passes raw prompt/scene_cut through. Full scene
 # descriptions are server-side assets; the browser sends only the user's raw
 # instruction as kind:"direction", then the gateway asks world-service to rewrite
 # and dispatch the full prompt. The direction length cap matches world-service.
 _WORLD_DIRECTION_MAX_CHARS = 2000
+# Cap on in-flight direction/skill tasks per session. The coordinator already
+# collapses a burst into "one in flight plus one queued", so normal play stays
+# in the single digits; anything above this is scripted frame spam and is
+# dropped. Without a cap the receive loop creates one task per frame and the
+# frame rate is chosen by the attacker.
+_WORLD_MAX_DIRECTION_TASKS = 8
 
 # Init-message extension block visible only to the gateway. This matches the
 # world-service zingproto.WorldExtKey value.
@@ -631,8 +641,17 @@ def create_app(
                     assignment = await coordinator.admit(
                         # D1: authorized sessions use the internal user id from
                         # the token. The wsvc: prefix isolates them from showcase.
+                        # Key the lease on the account-level pseudonym rather
+                        # than the per-run one: the coordinator's one-lease-per-
+                        # user rule is meant to bound a person, and the per-run
+                        # pseudonym changes with every run, so clearing the
+                        # business-side ledger once lets the same person take a
+                        # second seat while the old one still holds a GPU.
+                        # Tokens without that claim fall back to the per-run
+                        # pseudonym, so behaviour is unchanged before the
+                        # world-service rollout.
                         user_id=(
-                            f"wsvc:{principal.user_id}"
+                            f"wsvc:{principal.lease_key}"
                             if principal is not None
                             else _user_id(websocket)
                         ),
@@ -731,11 +750,14 @@ def create_app(
                 # would burn a transient effect into the baseline.
                 return str(data["prompt"]), str(data.get("change_type") or "one_time")
 
-            async def _direction_dispatch(prompt: str, event_id) -> None:
+            async def _direction_dispatch(
+                prompt: str, event_id, kind: str = "prompt"
+            ) -> None:
                 # The engine reads RealtimeEvent.payload. Passing event_id through
                 # lets control_ack, frame_batch, and chunk_telemetry correlate
-                # back to this player input.
-                fields: dict[str, Any] = {"kind": "prompt", "payload": prompt}
+                # back to this player input. kind picks the transition and is
+                # decided server side (compiled world), never by the browser.
+                fields: dict[str, Any] = {"kind": kind, "payload": prompt}
                 if event_id is not None:
                     fields["event_id"] = event_id
                 await _upstream_send(encode_message("event", **fields))
@@ -759,6 +781,18 @@ def create_app(
                 # in finally. Exceptions are logged only; the main task group owns
                 # session lifetime and one rewrite failure should not tear down
                 # the session.
+                if len(direction_tasks) >= _WORLD_MAX_DIRECTION_TASKS:
+                    # Dropped silently, like every other out-of-whitelist frame:
+                    # spam should stop working, not help the sender break their
+                    # own session.
+                    coro.close()
+                    _log_gateway_trace(
+                        trace_id,
+                        "gateway.direction_dropped",
+                        session_id=session_id,
+                        reason="too_many_inflight",
+                    )
+                    return
                 task = asyncio.create_task(coro, name=f"gateway-direction-{label}")
                 direction_tasks.add(task)
 
@@ -915,6 +949,7 @@ def create_app(
                             str(skill.get("prompt") or ""),
                             str(skill.get("change_type") or "one_time"),
                             control.get("event_id"),
+                            str(skill.get("kind") or "prompt"),
                         ),
                         "skill",
                     )
@@ -1146,6 +1181,11 @@ def create_app(
                 # D4: after admit and upstream readiness, notify the backend that
                 # the session has started.
                 if world_callbacks is not None:
+                    # Record that this session really came up. Terminal
+                    # callbacks carry the flag so the business side can tell
+                    # "a live session died" from "a connection attempt that
+                    # never established failed".
+                    world_session["started_reported"] = True
                     world_callbacks.started(
                         principal.run_id, trace_id, principal.max_lifetime_s
                     )
@@ -1263,12 +1303,17 @@ def create_app(
             # D4: terminal session callback. It is fire-and-forget; world-service
             # has a deadline fallback for lost callbacks.
             if principal is not None and world_callbacks is not None:
+                # Whether this session ever came up. Rejected or invalid-payload
+                # attempts never did, and the business side uses that to refuse
+                # letting them terminate a run that is already live.
+                established = bool(world_session.get("started_reported"))
                 if world_session.get("admit_rejected"):
                     world_callbacks.aborted(
                         principal.run_id,
                         trace_id,
                         fault="ours",
                         reason=str(world_session["admit_rejected"]),
+                        established=established,
                     )
                 elif world_session.get("init_rejected"):
                     world_callbacks.aborted(
@@ -1276,10 +1321,15 @@ def create_app(
                         trace_id,
                         fault="client",
                         reason="init payload mismatch",
+                        established=established,
                     )
                 elif assignment is None:
                     world_callbacks.aborted(
-                        principal.run_id, trace_id, fault="ours", reason="not admitted"
+                        principal.run_id,
+                        trace_id,
+                        fault="ours",
+                        reason="not admitted",
+                        established=established,
                     )
                 elif world_session.get("deadline_hit"):
                     world_callbacks.ended(principal.run_id, trace_id, "completed")
@@ -1291,6 +1341,7 @@ def create_app(
                         trace_id,
                         fault="ours",
                         reason=str(world_session["system_error"])[:200],
+                        established=established,
                     )
                 elif world_session.get("worker_finished"):
                     world_callbacks.ended(principal.run_id, trace_id, "completed")
@@ -1442,13 +1493,29 @@ def _parse_args() -> argparse.Namespace:
 
 
 def _build_world_platform(args) -> WorldPlatformConfig | None:
-    """Enable world-platform routes only when all required settings are present."""
-    if not (
-        args.world_token_ed25519_pub
-        and args.world_callback_url
-        and args.world_callback_hmac_secret
-    ):
-        return None
+    """Enable world-platform routes only when all --world-* settings are present.
+
+    All three or none. A partial set used to silently skip route registration:
+    authorized_generate then answers 404 and the operator debugs "route not
+    found" instead of reading a config error. That 404 is also underdetermined
+    (a proxy in front produces the same one), so the silent path wastes hours.
+    Failing startup turns a misconfiguration into a ten-minute deploy failure
+    that names the missing flag.
+    """
+    provided = {
+        "--world-token-ed25519-pub": bool(args.world_token_ed25519_pub),
+        "--world-callback-url": bool(args.world_callback_url),
+        "--world-callback-hmac-secret": bool(args.world_callback_hmac_secret),
+    }
+    if not any(provided.values()):
+        return None  # world platform intentionally disabled (showcase-only deploy)
+    missing = [flag for flag, ok in provided.items() if not ok]
+    if missing:
+        raise SystemExit(
+            "world platform is partially configured; refusing to start with the "
+            "authorized_generate route silently missing. Provide all of "
+            f"{sorted(provided)} or none. Missing: {missing}"
+        )
     from sglang.multimodal_gen.runtime.realtime.world_platform import load_public_key
 
     return WorldPlatformConfig(

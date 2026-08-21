@@ -23,7 +23,7 @@ const session = new H264WebSocketSession({
   WebSocketImpl: FakeWebSocket,
   MediaSourceImpl: FakeMediaSource,
   packMessage: JSON.stringify,
-  unpackMessage: JSON.parse,
+  unpackMessage: (value) => JSON.parse(Buffer.from(value).toString("utf8")),
   onStats: (value) => stats.push(value),
 });
 const sent = [];
@@ -76,13 +76,6 @@ assert.equal(
   session.mediaBatches.find((item) => item.sourceFrameIndex === 7).h264EncoderFeedMs,
   6.5,
 );
-session._handleMetadata({
-  type: "media_encode_timing",
-  first_frame_index: 7,
-  bridge_encoded_epoch_ms: Date.now(),
-  bridge_encoder_feed_ms: 7.5,
-});
-assert.equal(stats.at(-1).lastH264EncoderFeedMs, 7.5);
 
 session._handleMetadata({
   type: "media_payload",
@@ -113,7 +106,7 @@ const normalCloseSession = new H264WebSocketSession({
   WebSocketImpl: FakeWebSocket,
   MediaSourceImpl: FakeMediaSource,
   packMessage: JSON.stringify,
-  unpackMessage: JSON.parse,
+  unpackMessage: (value) => JSON.parse(Buffer.from(value).toString("utf8")),
   onState: (state, details) => normalCloseStates.push({ state, details }),
   onError: (error) => normalCloseErrors.push(error),
 });
@@ -133,7 +126,7 @@ const recoverableCloseSession = new H264WebSocketSession({
   WebSocketImpl: FakeWebSocket,
   MediaSourceImpl: FakeMediaSource,
   packMessage: JSON.stringify,
-  unpackMessage: JSON.parse,
+  unpackMessage: (value) => JSON.parse(Buffer.from(value).toString("utf8")),
   onState: (state, details) => recoverableCloseStates.push({ state, details }),
   onError: (error) => recoverableCloseErrors.push(error),
 });
@@ -167,7 +160,6 @@ const directSession = new H264WebSocketSession({
   video,
   WebSocketImpl: FakeWebSocket,
   MediaSourceImpl: FakeMediaSource,
-  directGateway: true,
   packMessage: (value) => value,
   unpackMessage: (value) => value,
 });

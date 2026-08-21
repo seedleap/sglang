@@ -78,12 +78,12 @@ assert.match(
 );
 assert.match(
   indexHtml,
-  /<input id="size" value="832x480" \/>/,
-  "webui should default to the native realtime profile",
+  /<input id="size" value="1280x704" \/>/,
+  "webui should default to the 720p-ish realtime profile",
 );
 assert.match(
   indexHtml,
-  /<span class="stage-stat">output <b id="outputSizeText">832x480<\/b><\/span>/,
+  /<span class="stage-stat">output <b id="outputSizeText">1280x704<\/b><\/span>/,
   "webui should show the default output size before the first server response",
 );
 assert.match(

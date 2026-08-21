@@ -526,6 +526,10 @@ def _minwm_packed_attention_backend(device: torch.device) -> str:
     capability = torch.cuda.get_device_capability(device)[0]
     if capability >= 10 and importlib.util.find_spec("flash_attn.cute") is not None:
         return "fa4"
+    if capability == 12 and _env_flag("SGLANG_MINWM_REQUIRE_SM120_FA4", False):
+        raise RuntimeError(
+            "SGLANG_MINWM_REQUIRE_SM120_FA4=1 requires FlashAttention-4 on SM120"
+        )
     if capability == 9:
         if importlib.util.find_spec("sglang.jit_kernel.flash_attention_v3") is None:
             raise RuntimeError(

@@ -1,0 +1,187 @@
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: minwm-image-gate-sm120-spot
+  labels:
+    seedleap.ai/task: minwm-image-release-gate
+    seedleap.ai/owner: chenshengdong
+spec:
+  limits:
+    nvidia.com/gpu: "1"
+  disruption:
+    consolidationPolicy: WhenEmpty
+    consolidateAfter: 1m
+  template:
+    metadata:
+      labels:
+        seedleap.ai/capacity-pool: minwm-image-gate-sm120-spot
+        seedleap.ai/task: minwm-image-release-gate
+    spec:
+      expireAfter: 2h
+      nodeClassRef:
+        group: karpenter.k8s.aws
+        kind: EC2NodeClass
+        name: ray-gpu-ec2-all
+      requirements:
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: [spot]
+        - key: kubernetes.io/arch
+          operator: In
+          values: [amd64]
+        - key: topology.kubernetes.io/zone
+          operator: In
+          values: [us-east-2a, us-east-2b]
+        - key: node.kubernetes.io/instance-type
+          operator: In
+          values: [g7e.4xlarge]
+      taints:
+        - key: seedleap.ai/capacity-pool
+          value: minwm-image-gate-sm120-spot
+          effect: NoSchedule
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: minwm-image-gate-sm120-device-plugin
+  namespace: kube-system
+  labels:
+    seedleap.ai/task: minwm-image-release-gate
+    seedleap.ai/owner: chenshengdong
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: minwm-image-gate-sm120-device-plugin
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: minwm-image-gate-sm120-device-plugin
+        seedleap.ai/task: minwm-image-release-gate
+    spec:
+      priorityClassName: system-node-critical
+      nodeSelector:
+        seedleap.ai/capacity-pool: minwm-image-gate-sm120-spot
+      tolerations:
+        - key: seedleap.ai/capacity-pool
+          operator: Equal
+          value: minwm-image-gate-sm120-spot
+          effect: NoSchedule
+      containers:
+        - name: nvidia-device-plugin
+          image: nvcr.io/nvidia/k8s-device-plugin:v0.19.1
+          imagePullPolicy: IfNotPresent
+          command: [nvidia-device-plugin]
+          env:
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: all
+            - name: NVIDIA_DRIVER_CAPABILITIES
+              value: compute,utility
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: kubelet-device-plugins
+              mountPath: /var/lib/kubelet/device-plugins
+      volumes:
+        - name: kubelet-device-plugins
+          hostPath:
+            path: /var/lib/kubelet/device-plugins
+            type: Directory
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: minwm-image-gate-sm120-__SOURCE_SHA12__-__IMAGE_DIGEST12__
+  namespace: ray
+  labels:
+    app.kubernetes.io/name: minwm-image-release-gate
+    seedleap.ai/owner: chenshengdong
+    seedleap.ai/task: minwm-image-release-gate
+    seedleap.ai/gpu-family: sm120
+  annotations:
+    seedleap.ai/source-commit: "__SOURCE_SHA40__"
+    seedleap.ai/requested-image-digest: "__IMAGE_DIGEST__"
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 1800
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: minwm-image-release-gate
+        seedleap.ai/task: minwm-image-release-gate
+        seedleap.ai/gpu-family: sm120
+    spec:
+      restartPolicy: Never
+      terminationGracePeriodSeconds: 30
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        seLinuxOptions:
+          type: spc_t
+      nodeSelector:
+        seedleap.ai/capacity-pool: minwm-image-gate-sm120-spot
+        karpenter.sh/capacity-type: spot
+        node.kubernetes.io/instance-type: g7e.4xlarge
+      tolerations:
+        - key: seedleap.ai/capacity-pool
+          operator: Equal
+          value: minwm-image-gate-sm120-spot
+          effect: NoSchedule
+      containers:
+        - name: probe
+          image: 829115578968.dkr.ecr.us-east-2.amazonaws.com/leap-world/minwm-runtime@__IMAGE_DIGEST__
+          imagePullPolicy: IfNotPresent
+          workingDir: /sgl-workspace/sglang
+          command: ["/bin/bash", "-lc"]
+          args:
+            - |
+              set -euo pipefail
+              exec python3 -m sglang.multimodal_gen.tools.minwm_image_runtime_probe \
+                --expected-source-commit "${EXPECTED_SOURCE_COMMIT}" \
+                --expected-family sm120 \
+                --expected-visible-gpus 1 \
+                --expected-image-digest "${EXPECTED_IMAGE_DIGEST}"
+          env:
+            - name: EXPECTED_SOURCE_COMMIT
+              value: "__SOURCE_SHA40__"
+            - name: EXPECTED_IMAGE_DIGEST
+              value: "__IMAGE_DIGEST__"
+            - name: HF_HUB_OFFLINE
+              value: "1"
+            - name: HF_DATASETS_OFFLINE
+              value: "1"
+            - name: TRANSFORMERS_OFFLINE
+              value: "1"
+            - name: DIFFUSERS_OFFLINE
+              value: "1"
+            - name: WANDB_MODE
+              value: disabled
+            - name: PYTHONUNBUFFERED
+              value: "1"
+          resources:
+            requests:
+              cpu: "8"
+              memory: 32Gi
+              nvidia.com/gpu: "1"
+            limits:
+              cpu: "8"
+              memory: 32Gi
+              nvidia.com/gpu: "1"
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: shm
+              mountPath: /dev/shm
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 8Gi
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Gi

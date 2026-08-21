@@ -1,0 +1,16 @@
+ARG WEBUI_IMAGE
+
+FROM ${WEBUI_IMAGE}
+
+USER 0
+COPY python/sglang/multimodal_gen/apps/realtime_webui \
+     /opt/sglang/python/sglang/multimodal_gen/apps/realtime_webui
+RUN chmod 0644 \
+      /opt/sglang/python/sglang/multimodal_gen/apps/realtime_webui/happyoyster_prebuilt_worlds.json && \
+    python -m compileall -q \
+      /opt/sglang/python/sglang/multimodal_gen/apps/realtime_webui && \
+    ffmpeg -hide_banner -encoders 2>/dev/null | grep -q 'libx264'
+
+USER 65532:65532
+WORKDIR /opt/sglang/python/sglang/multimodal_gen/apps/realtime_webui
+ENTRYPOINT ["python", "server.py"]
