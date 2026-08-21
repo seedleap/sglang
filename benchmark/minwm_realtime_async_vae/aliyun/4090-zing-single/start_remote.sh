@@ -48,6 +48,20 @@ PUBLIC_WEB_PORT="${PUBLIC_WEB_PORT:-80}"
 PUBLIC_WEB_HOST="${PUBLIC_WEB_HOST:?set PUBLIC_WEB_HOST to the new public host/IP}"
 PUBLIC_GATEWAY_PORT="${PUBLIC_GATEWAY_PORT:-18080}"
 PUBLIC_GATEWAY_BASE_URL="${PUBLIC_GATEWAY_BASE_URL:-http://${PUBLIC_WEB_HOST}:${PUBLIC_GATEWAY_PORT}}"
+DEPLOY_ROLE="${DEPLOY_ROLE:-all}"
+COORDINATOR_HOST_PORT="${COORDINATOR_HOST_PORT:-18081}"
+PUBLISH_COORDINATOR_PORT="${PUBLISH_COORDINATOR_PORT:-}"
+WORKER_COORDINATOR_URL="${WORKER_COORDINATOR_URL:-http://zing-coordinator:18081}"
+GATEWAY_COORDINATOR_URL="${GATEWAY_COORDINATOR_URL:-http://zing-coordinator:18081}"
+GATEWAY_INTERNAL_OUTPUT_URL="${GATEWAY_INTERNAL_OUTPUT_URL:-ws://zing-gateway:18080/v1/internal/realtime_output}"
+PUBLISH_WORKER_PORTS="${PUBLISH_WORKER_PORTS:-}"
+WORKER_ADVERTISE_HOST="${WORKER_ADVERTISE_HOST:-}"
+WORKER_ID_PREFIX="${WORKER_ID_PREFIX:-zing}"
+START_VAE_WORKER="${START_VAE_WORKER:-true}"
+VAE_HOST_PORT="${VAE_HOST_PORT:-18082}"
+DENOISER_GPU_INDICES="${DENOISER_GPU_INDICES:-1 2 3 4 5 6 7}"
+DENOISER_HOST_PORT_BASE="${DENOISER_HOST_PORT_BASE:-30000}"
+DENOISER_MAX_SLOTS="${DENOISER_MAX_SLOTS:-16}"
 USE_DEDICATED_DATA_DISK="${USE_DEDICATED_DATA_DISK:-false}"
 START_GPU_WORKERS="${START_GPU_WORKERS:-true}"
 DEPLOY_STRATEGY="${DEPLOY_STRATEGY:-rolling}"
@@ -91,6 +105,60 @@ require_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
     echo "missing required command: $1" >&2
     exit 1
+  fi
+}
+
+deploys_control_plane() {
+  [[ "${DEPLOY_ROLE}" == "all" || "${DEPLOY_ROLE}" == "control" ]]
+}
+
+deploys_worker_plane() {
+  [[ "${START_GPU_WORKERS}" == "true" ]] && \
+    [[ "${DEPLOY_ROLE}" == "all" || "${DEPLOY_ROLE}" == "workers" ]]
+}
+
+bool_enabled() {
+  case "${1,,}" in
+    1|true|yes|y|on) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+denoiser_slot_count() {
+  local count=0
+  local _
+  for _ in ${DENOISER_GPU_INDICES}; do
+    count=$((count + 1))
+  done
+  printf '%s\n' "${count}"
+}
+
+denoiser_host_port() {
+  local index="$1"
+  printf '%s\n' "$((DENOISER_HOST_PORT_BASE + index))"
+}
+
+resolve_network_defaults() {
+  if [[ -z "${PUBLISH_COORDINATOR_PORT}" ]]; then
+    if [[ "${DEPLOY_ROLE}" == "control" ]]; then
+      PUBLISH_COORDINATOR_PORT=true
+    else
+      PUBLISH_COORDINATOR_PORT=false
+    fi
+  fi
+  if [[ -z "${PUBLISH_WORKER_PORTS}" ]]; then
+    if [[ "${DEPLOY_ROLE}" == "workers" ]]; then
+      PUBLISH_WORKER_PORTS=true
+    else
+      PUBLISH_WORKER_PORTS=false
+    fi
+  fi
+  if bool_enabled "${PUBLISH_WORKER_PORTS}" && [[ -z "${WORKER_ADVERTISE_HOST}" ]]; then
+    WORKER_ADVERTISE_HOST="$(hostname -I 2>/dev/null | awk '{print $1}')"
+    if [[ -z "${WORKER_ADVERTISE_HOST}" ]]; then
+      echo "set WORKER_ADVERTISE_HOST when PUBLISH_WORKER_PORTS=true" >&2
+      exit 1
+    fi
   fi
 }
 
@@ -398,20 +466,32 @@ ensure_docker_network() {
 stop_old_containers() {
   log "stopping old zing-realtime containers"
   local gpu
-  local names=(
-    zing-coordinator
-    zing-vae
-    zing-vae-heartbeat
-    zing-gateway
-    zing-webui
-    zing-h264-bridge
-    zing-h264ws-bridge
-    zing-webui-h264-bridge
-    torch-cu128-test
-  )
-  for gpu in 1 2 3 4 5 6 7; do
-    names+=("zing-denoiser-${gpu}" "zing-denoiser-${gpu}-heartbeat")
-  done
+  local names=()
+  if deploys_control_plane; then
+    names+=(
+      zing-coordinator
+      zing-gateway
+      zing-webui
+      zing-h264-bridge
+      zing-h264ws-bridge
+      zing-webui-h264-bridge
+      torch-cu128-test
+    )
+  fi
+  if deploys_worker_plane; then
+    names+=(
+      zing-vae
+      zing-vae-heartbeat
+    )
+    for ((gpu = 1; gpu <= DENOISER_MAX_SLOTS; gpu++)); do
+      names+=("zing-denoiser-${gpu}" "zing-denoiser-${gpu}-heartbeat")
+    done
+  fi
+  if [[ "${#names[@]}" -eq 0 ]]; then
+    log "no containers selected for DEPLOY_ROLE=${DEPLOY_ROLE}"
+    ensure_docker_network
+    return
+  fi
   docker rm -f "${names[@]}" >/dev/null 2>&1 || true
   ensure_docker_network
 }
@@ -431,8 +511,13 @@ build_common_mounts() {
 
 start_coordinator() {
   log "starting coordinator"
+  local port_args=()
+  if bool_enabled "${PUBLISH_COORDINATOR_PORT}"; then
+    port_args=(-p "${COORDINATOR_HOST_PORT}:18081")
+  fi
   docker run -d --name zing-coordinator --restart unless-stopped \
     --network "${DOCKER_NETWORK}" \
+    "${port_args[@]}" \
     -e PYTHONUNBUFFERED=1 \
     -e PYTHONPATH="${CONTAINER_PYTHONPATH}" \
     "${common_mounts[@]}" \
@@ -453,8 +538,17 @@ start_coordinator() {
 
 start_vae() {
   log "starting async TAEHV VAE on GPU 0"
+  local port_args=()
+  local advertised_endpoint="ws://zing-vae:18082/v1/realtime_vae/decode"
+  local advertised_reservation_endpoint="http://zing-vae:18082/v1/realtime_worker"
+  if bool_enabled "${PUBLISH_WORKER_PORTS}"; then
+    port_args=(-p "${VAE_HOST_PORT}:18082")
+    advertised_endpoint="ws://${WORKER_ADVERTISE_HOST}:${VAE_HOST_PORT}/v1/realtime_vae/decode"
+    advertised_reservation_endpoint="http://${WORKER_ADVERTISE_HOST}:${VAE_HOST_PORT}/v1/realtime_worker"
+  fi
   docker run -d --name zing-vae --restart unless-stopped \
     --network "${DOCKER_NETWORK}" \
+    "${port_args[@]}" \
     --gpus "device=0" \
     -e PYTHONUNBUFFERED=1 \
     -e PYTHONPATH="${CONTAINER_PYTHONPATH}" \
@@ -499,14 +593,14 @@ start_vae() {
     --entrypoint python3 \
     "${CONTROL_IMAGE}" \
     -m sglang.multimodal_gen.runtime.entrypoints.realtime_worker_heartbeat \
-      --coordinator-url=http://zing-coordinator:18081 \
+      --coordinator-url="${WORKER_COORDINATOR_URL}" \
       --health-url=http://zing-vae:18082/health \
       --state-url=http://zing-vae:18082/v1/realtime_worker/state \
-      --worker-id=zing-vae-0 \
+      --worker-id="${WORKER_ID_PREFIX}-vae-0" \
       --worker-epoch-file=/worker-epoch/vae-0 \
       --role=vae \
-      --endpoint=ws://zing-vae:18082/v1/realtime_vae/decode \
-      --reservation-endpoint=http://zing-vae:18082/v1/realtime_worker \
+      --endpoint="${advertised_endpoint}" \
+      --reservation-endpoint="${advertised_reservation_endpoint}" \
       --az="${ALIYUN_ZONE}" \
       --capacity=16 \
       --model-revision=all \
@@ -519,9 +613,19 @@ start_denoiser() {
   local index="$1"
   local gpu_devices="$2"
   local name="zing-denoiser-${index}"
+  local host_port
+  local port_args=()
+  local advertised_endpoint="ws://${name}:30000/v1/realtime_video/generate"
+  local advertised_reservation_endpoint="http://${name}:30000/v1/realtime_worker"
   local launch_module=""
   local model_mount_args=()
   local launch_args=()
+  host_port="$(denoiser_host_port "${index}")"
+  if bool_enabled "${PUBLISH_WORKER_PORTS}"; then
+    port_args=(-p "${host_port}:30000")
+    advertised_endpoint="ws://${WORKER_ADVERTISE_HOST}:${host_port}/v1/realtime_video/generate"
+    advertised_reservation_endpoint="http://${WORKER_ADVERTISE_HOST}:${host_port}/v1/realtime_worker"
+  fi
 
   case "${DENOISER_START_MODE}" in
     profile)
@@ -590,6 +694,7 @@ start_denoiser() {
 
   docker run -d --name "${name}" --restart unless-stopped \
     --network "${DOCKER_NETWORK}" \
+    "${port_args[@]}" \
     --gpus "device=${gpu_devices}" \
     -e PYTHONUNBUFFERED=1 \
     -e PYTHONPATH="${CONTAINER_PYTHONPATH}" \
@@ -627,14 +732,14 @@ start_denoiser() {
     --entrypoint python3 \
     "${CONTROL_IMAGE}" \
     -m sglang.multimodal_gen.runtime.entrypoints.realtime_worker_heartbeat \
-      --coordinator-url=http://zing-coordinator:18081 \
+      --coordinator-url="${WORKER_COORDINATOR_URL}" \
       --health-url=http://${name}:30000/health \
       --state-url=http://${name}:30000/v1/realtime_worker/state \
-      --worker-id="${name}" \
+      --worker-id="${WORKER_ID_PREFIX}-denoiser-${index}" \
       --worker-epoch-file="/worker-epoch/denoiser-${index}" \
       --role=denoiser \
-      --endpoint=ws://${name}:30000/v1/realtime_video/generate \
-      --reservation-endpoint=http://${name}:30000/v1/realtime_worker \
+      --endpoint="${advertised_endpoint}" \
+      --reservation-endpoint="${advertised_reservation_endpoint}" \
       --az="${ALIYUN_ZONE}" \
       --capacity=1 \
       --model-revision="${MODEL_ID}" \
@@ -656,10 +761,10 @@ start_gateway() {
       -m sglang.multimodal_gen.runtime.entrypoints.realtime_gateway_server \
       --host=0.0.0.0 \
       --port=18080 \
-      --coordinator-url=http://zing-coordinator:18081 \
+      --coordinator-url="${GATEWAY_COORDINATOR_URL}" \
       --model-revision="${MODEL_ID}" \
       --vae-fingerprint="${VAE_FINGERPRINT}" \
-      --internal-output-url=ws://zing-gateway:18080/v1/internal/realtime_output \
+      --internal-output-url="${GATEWAY_INTERNAL_OUTPUT_URL}" \
       --output-queue-depth=64 \
       --output-enqueue-timeout-s=0 \
       --output-queue-max-messages="${GATEWAY_OUTPUT_QUEUE_MAX_MESSAGES}" \
@@ -827,7 +932,9 @@ wait_worker_idle() {
 wait_all_workers_idle() {
   local index
   wait_worker_idle zing-vae 18082
-  for index in 1 2 3 4 5 6 7; do
+  local count
+  count="$(denoiser_slot_count)"
+  for ((index = 1; index <= count; index++)); do
     wait_worker_idle "zing-denoiser-${index}" 30000
   done
 }
@@ -859,13 +966,14 @@ restart_vae_rolling() {
 
 restart_denoiser_rolling() {
   local index="$1"
+  local gpu_devices="$2"
   local name="zing-denoiser-${index}"
   if container_running "${name}"; then
     drain_worker_container "${name}" 30000
     wait_worker_idle "${name}" 30000
   fi
   docker rm -f "${name}-heartbeat" "${name}" >/dev/null 2>&1 || true
-  start_denoiser "${index}" "${index}"
+  start_denoiser "${index}" "${gpu_devices}"
   wait_container_http "${name}" http://127.0.0.1:30000/health
 }
 
@@ -914,65 +1022,106 @@ print_status() {
 replace_deploy() {
   stop_old_containers
   build_common_mounts
-  start_coordinator
-  wait_container_http zing-coordinator http://127.0.0.1:18081/healthz
-  if [[ "${START_GPU_WORKERS}" == "true" ]]; then
-    start_vae
-    wait_container_http zing-vae http://127.0.0.1:18082/health
-    for index in 1 2 3 4 5 6 7; do
-      start_denoiser "${index}" "${index}"
+  if deploys_control_plane; then
+    start_coordinator
+    wait_container_http zing-coordinator http://127.0.0.1:18081/healthz
+  else
+    log "skipping coordinator/gateway/webui startup because DEPLOY_ROLE=${DEPLOY_ROLE}"
+  fi
+  if deploys_worker_plane; then
+    if bool_enabled "${START_VAE_WORKER}"; then
+      start_vae
+      wait_container_http zing-vae http://127.0.0.1:18082/health
+    else
+      log "skipping VAE startup because START_VAE_WORKER=${START_VAE_WORKER}"
+    fi
+    local index=0
+    local gpu
+    for gpu in ${DENOISER_GPU_INDICES}; do
+      index=$((index + 1))
+      start_denoiser "${index}" "${gpu}"
     done
-    for index in 1 2 3 4 5 6 7; do
+    local count
+    count="$(denoiser_slot_count)"
+    for ((index = 1; index <= count; index++)); do
       wait_container_http "zing-denoiser-${index}" http://127.0.0.1:30000/health
     done
   else
-    log "skipping VAE and denoiser startup because START_GPU_WORKERS=${START_GPU_WORKERS}"
+    log "skipping VAE and denoiser startup because DEPLOY_ROLE=${DEPLOY_ROLE}, START_GPU_WORKERS=${START_GPU_WORKERS}"
   fi
-  start_gateway
-  wait_container_http zing-gateway http://127.0.0.1:18080/healthz
-  start_webui
-  wait_http "http://127.0.0.1:${PUBLIC_WEB_PORT}/runtime-config.js"
+  if deploys_control_plane; then
+    start_gateway
+    wait_container_http zing-gateway http://127.0.0.1:18080/healthz
+    start_webui
+    wait_http "http://127.0.0.1:${PUBLIC_WEB_PORT}/runtime-config.js"
+  fi
 }
 
 rolling_deploy() {
   ensure_docker_network
-  remove_retired_bridge_containers
+  if deploys_control_plane; then
+    remove_retired_bridge_containers
+  fi
   build_common_mounts
-  restart_coordinator_rolling
+  if deploys_control_plane; then
+    restart_coordinator_rolling
+  else
+    log "skipping coordinator/gateway/webui startup because DEPLOY_ROLE=${DEPLOY_ROLE}"
+  fi
 
-  if [[ "${START_GPU_WORKERS}" == "true" ]]; then
-    if [[ "${ROLLING_RESTART_VAE}" == "true" ]] || ! container_running zing-vae; then
-      restart_vae_rolling
+  if deploys_worker_plane; then
+    if bool_enabled "${START_VAE_WORKER}"; then
+      if [[ "${ROLLING_RESTART_VAE}" == "true" ]] || ! container_running zing-vae; then
+        restart_vae_rolling
+      else
+        log "keeping existing VAE during rolling deploy"
+      fi
     else
-      log "keeping existing VAE during rolling deploy"
+      log "skipping VAE startup because START_VAE_WORKER=${START_VAE_WORKER}"
     fi
 
     if [[ "${ROLLING_RESTART_DENOISERS}" == "true" ]]; then
       local index
-      for index in 1 2 3 4 5 6 7; do
-        restart_denoiser_rolling "${index}"
+      local gpu
+      index=0
+      for gpu in ${DENOISER_GPU_INDICES}; do
+        index=$((index + 1))
+        restart_denoiser_rolling "${index}" "${gpu}"
       done
     else
       log "keeping existing denoisers during rolling deploy"
     fi
   else
-    log "skipping VAE and denoiser startup because START_GPU_WORKERS=${START_GPU_WORKERS}"
+    log "skipping VAE and denoiser startup because DEPLOY_ROLE=${DEPLOY_ROLE}, START_GPU_WORKERS=${START_GPU_WORKERS}"
   fi
 
-  if [[ "${ROLLING_RESTART_GATEWAY}" == "true" ]] || ! container_running zing-gateway; then
-    restart_gateway_rolling
-  else
-    log "keeping existing gateway during rolling deploy"
-  fi
+  if deploys_control_plane; then
+    if [[ "${ROLLING_RESTART_GATEWAY}" == "true" ]] || ! container_running zing-gateway; then
+      restart_gateway_rolling
+    else
+      log "keeping existing gateway during rolling deploy"
+    fi
 
-  if [[ "${ROLLING_RESTART_WEBUI}" == "true" ]] || ! container_running zing-webui; then
-    restart_webui_rolling
-  else
-    log "keeping existing webui during rolling deploy"
+    if [[ "${ROLLING_RESTART_WEBUI}" == "true" ]] || ! container_running zing-webui; then
+      restart_webui_rolling
+    else
+      log "keeping existing webui during rolling deploy"
+    fi
   fi
 }
 
 validate_deployment_config() {
+  case "${DEPLOY_ROLE}" in
+    all|control|workers) ;;
+    *)
+      echo "unsupported DEPLOY_ROLE=${DEPLOY_ROLE}; expected all, control, or workers" >&2
+      exit 1
+      ;;
+  esac
+  if [[ "${DEPLOY_ROLE}" == "workers" && "${START_GPU_WORKERS}" != "true" ]]; then
+    echo "DEPLOY_ROLE=workers requires START_GPU_WORKERS=true" >&2
+    exit 1
+  fi
   case "${DEPLOY_STRATEGY}" in
     replace|rolling) ;;
     *)
@@ -987,10 +1136,24 @@ validate_deployment_config() {
       exit 1
       ;;
   esac
+  resolve_network_defaults
+  log "deploy role: ${DEPLOY_ROLE}"
   log "deploy strategy: ${DEPLOY_STRATEGY}"
   log "denoiser startup mode: ${DENOISER_START_MODE}"
   if [[ "${DENOISER_START_MODE}" == "profile" ]]; then
     log "profile launcher: profile=${MINWM_PROFILE}, model=${PROFILE_MODEL_PATH}, taehv=${PROFILE_TAEHV_CHECKPOINT_PATH}"
+  fi
+  if deploys_control_plane; then
+    log "gateway coordinator url: ${GATEWAY_COORDINATOR_URL}"
+    log "gateway internal output url: ${GATEWAY_INTERNAL_OUTPUT_URL}"
+  fi
+  if deploys_worker_plane; then
+    log "worker coordinator url: ${WORKER_COORDINATOR_URL}"
+    log "worker id prefix: ${WORKER_ID_PREFIX}"
+    log "denoiser gpu indices: ${DENOISER_GPU_INDICES}"
+    if bool_enabled "${PUBLISH_WORKER_PORTS}"; then
+      log "publishing worker ports on ${WORKER_ADVERTISE_HOST}; VAE=${VAE_HOST_PORT}, denoisers base=${DENOISER_HOST_PORT_BASE}"
+    fi
   fi
 }
 
@@ -1005,30 +1168,34 @@ main() {
   ensure_data_mount
   configure_docker_data_root
   download_code_overlay
-  if [[ "${START_GPU_WORKERS}" == "true" ]]; then
+  if deploys_worker_plane; then
     ensure_taehv_checkpoint
     download_model
   else
-    log "skipping model download because START_GPU_WORKERS=${START_GPU_WORKERS}"
+    log "skipping model download because DEPLOY_ROLE=${DEPLOY_ROLE}, START_GPU_WORKERS=${START_GPU_WORKERS}"
   fi
   if [[ "${SKIP_IMAGE_PULL:-false}" != "true" ]]; then
     login_acr
     login_ecr
   fi
   pull_images
-  ensure_vae_ffmpeg_image
+  if deploys_worker_plane; then
+    ensure_vae_ffmpeg_image
+  fi
   if [[ "${DEPLOY_STRATEGY}" == "replace" ]]; then
     replace_deploy
   else
     rolling_deploy
   fi
-  if ! wait_http "http://127.0.0.1:${PUBLIC_WEB_PORT}/runtime-config.js"; then
+  if deploys_control_plane && ! wait_http "http://127.0.0.1:${PUBLIC_WEB_PORT}/runtime-config.js"; then
     show_failed_logs
     exit 1
   fi
   print_status
-  log "webui: http://${PUBLIC_WEB_HOST}/?mode=i2v&playback=smooth_timeline"
-  log "gateway: ${PUBLIC_GATEWAY_BASE_URL}"
+  if deploys_control_plane; then
+    log "webui: http://${PUBLIC_WEB_HOST}/?mode=i2v&playback=smooth_timeline"
+    log "gateway: ${PUBLIC_GATEWAY_BASE_URL}"
+  fi
 }
 
 main "$@"
