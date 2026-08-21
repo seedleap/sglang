@@ -7,10 +7,10 @@ import pytest
 
 from sglang.multimodal_gen.tools import minwm_profile_launcher as launcher
 from sglang.multimodal_gen.tools.minwm_profile_launcher import (
-    GPUInfo,
     PROFILE_RESIDENT_SPEED,
     PROFILE_SM120_32G_SPEED,
     PROFILE_SM120_HIGHMEM_SPEED,
+    GPUInfo,
     build_launch_contract,
     resolve_profile,
 )

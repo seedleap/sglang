@@ -10,7 +10,6 @@ import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-
 TAEHV_SHA256 = "d053e216ca50e2bb837bbcd79b85f0366bea00e5938025572382a773b74c559a"
 PROFILE_AUTO = "auto"
 PROFILE_SM120_32G_SPEED = "sm120-32g-speed"

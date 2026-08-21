@@ -62,24 +62,52 @@ class TestCudaAttentionBackendSelection(unittest.TestCase):
             "sglang.multimodal_gen.runtime.layers.attention.backends.aiter.AITerBackend",
         )
 
-    def test_default_backend_uses_flash_attention_on_sm120(self):
+    def test_default_backend_uses_torch_sdpa_on_sm120_without_strict_mode(self):
         FakeCudaPlatform.is_sm120_device = True
 
-        with patch(
-            "sglang.multimodal_gen.runtime.layers.attention.backends.flash_attn.set_fa_ver"
-        ) as set_fa_ver:
+        with patch.dict(os.environ, {"SGLANG_MINWM_REQUIRE_SM120_FA4": "0"}):
+            self.assertEqual(self.resolve(None), SDPA_BACKEND_CLS_STR)
+
+    def test_requested_flash_attention_uses_torch_sdpa_on_sm120_without_strict_mode(
+        self,
+    ):
+        FakeCudaPlatform.is_sm120_device = True
+
+        with patch.dict(os.environ, {"SGLANG_MINWM_REQUIRE_SM120_FA4": "0"}):
+            self.assertEqual(
+                self.resolve(AttentionBackendEnum.FA), SDPA_BACKEND_CLS_STR
+            )
+
+    def test_strict_sm120_default_backend_uses_flash_attention_4(self):
+        FakeCudaPlatform.is_sm120_device = True
+
+        with (
+            patch.dict(os.environ, {"SGLANG_MINWM_REQUIRE_SM120_FA4": "1"}),
+            patch(
+                "sglang.multimodal_gen.runtime.layers.attention.backends.flash_attn.set_fa_ver"
+            ) as set_fa_ver,
+            patch(
+                "sglang.multimodal_gen.runtime.platforms.cuda.importlib.import_module"
+            ),
+        ):
             self.assertEqual(
                 self.resolve(None),
                 "sglang.multimodal_gen.runtime.layers.attention.backends.flash_attn.FlashAttentionBackend",
             )
         set_fa_ver.assert_called_once_with(4)
 
-    def test_requested_flash_attention_uses_flash_attention_on_sm120(self):
+    def test_strict_sm120_requested_flash_attention_uses_flash_attention_4(self):
         FakeCudaPlatform.is_sm120_device = True
 
-        with patch(
-            "sglang.multimodal_gen.runtime.layers.attention.backends.flash_attn.set_fa_ver"
-        ) as set_fa_ver:
+        with (
+            patch.dict(os.environ, {"SGLANG_MINWM_REQUIRE_SM120_FA4": "1"}),
+            patch(
+                "sglang.multimodal_gen.runtime.layers.attention.backends.flash_attn.set_fa_ver"
+            ) as set_fa_ver,
+            patch(
+                "sglang.multimodal_gen.runtime.platforms.cuda.importlib.import_module"
+            ),
+        ):
             self.assertEqual(
                 self.resolve(AttentionBackendEnum.FA),
                 "sglang.multimodal_gen.runtime.layers.attention.backends.flash_attn.FlashAttentionBackend",
@@ -89,9 +117,10 @@ class TestCudaAttentionBackendSelection(unittest.TestCase):
     def test_strict_sm120_rejects_non_fa_backend(self):
         FakeCudaPlatform.is_sm120_device = True
 
-        with patch.dict(
-            os.environ, {"SGLANG_MINWM_REQUIRE_SM120_FA4": "1"}
-        ), self.assertRaisesRegex(RuntimeError, "requires FlashAttention-4"):
+        with (
+            patch.dict(os.environ, {"SGLANG_MINWM_REQUIRE_SM120_FA4": "1"}),
+            self.assertRaisesRegex(RuntimeError, "requires FlashAttention-4"),
+        ):
             self.resolve(AttentionBackendEnum.TORCH_SDPA)
 
     def test_strict_sm120_refuses_sdpa_fallback(self):

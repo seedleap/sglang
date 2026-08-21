@@ -258,6 +258,9 @@ class _FlashAttentionBackendResolver(_CudaAttentionBackendResolver):
 
     @classmethod
     def resolve(cls, platform) -> AttentionBackendEnum:
+        if platform.is_sm120() and not platform._requires_sm120_fa4():
+            logger.info("Defaulting to Torch SDPA backend on SM12.x")
+            return AttentionBackendEnum.TORCH_SDPA
         return AttentionBackendEnum.FA
 
 
@@ -429,6 +432,9 @@ class CudaPlatformBase(Platform):
 
     @classmethod
     def _resolve_default_attn_backend(cls) -> AttentionBackendEnum:
+        if cls.is_sm120() and not cls._requires_sm120_fa4():
+            logger.info("Defaulting to Torch SDPA backend on SM12.x")
+            return AttentionBackendEnum.TORCH_SDPA
         return AttentionBackendEnum.FA
 
     @classmethod

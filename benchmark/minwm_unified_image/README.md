@@ -48,11 +48,12 @@ Source revisions after r3 set `SGLANG_MINWM_REQUIRE_SM120_FA4=1` in the
 specialized build. On SM120, native CUDA attention then rejects an explicitly
 selected non-FA backend and refuses to fall back to Torch SDPA; MinWM packed
 attention likewise refuses an FA2 fallback. When the setting is absent or
-false, the general SGLang policy does **not** restore an older SM120-first SDPA
-guard: eligible SM120 workloads still default to FA and select FA4, while an
-explicit alternative backend or an SDPA fallback remains possible. The runtime
-contract rejects a specialized strict candidate if the selector is missing or
-disabled.
+false, the general SGLang policy preserves its SM120-first SDPA guard for both
+the default backend and an explicit FA request. This avoids selecting the
+general dependency set's unvalidated FA4 beta on SM120. The MinWM image and its
+profile launcher always enable the strict setting, so supported SM120 profiles
+use the gated beta21/CUTLASS 4.6 stack. The runtime contract rejects a
+specialized strict candidate if the selector is missing or disabled.
 
 No existing tag or digest acquires this source-level contract. A strict release
 must be rebuilt under a new immutable tag/digest and must repeat the real SM120

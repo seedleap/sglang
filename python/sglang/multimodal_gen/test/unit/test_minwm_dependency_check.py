@@ -1,4 +1,5 @@
 import pytest
+
 from sglang.multimodal_gen.tools.minwm_dependency_check import validate_pip_check
 
 EXPECTED_CONFLICTS = """\

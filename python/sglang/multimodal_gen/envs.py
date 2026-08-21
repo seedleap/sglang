@@ -241,9 +241,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Specialized MinWM images use this to reject non-FA4 attention and
     # fallback backends on SM120. General SGLang images leave it disabled.
-    "SGLANG_MINWM_REQUIRE_SM120_FA4": _lazy_bool(
-        "SGLANG_MINWM_REQUIRE_SM120_FA4"
-    ),
+    "SGLANG_MINWM_REQUIRE_SM120_FA4": _lazy_bool("SGLANG_MINWM_REQUIRE_SM120_FA4"),
     # Use dedicated multiprocess context for workers.
     # Both spawn and fork work
     "SGLANG_DIFFUSION_WORKER_MULTIPROC_METHOD": _lazy_str(

@@ -366,11 +366,11 @@ validate_attestation_statement() {
 validate_attestation_statement \
   "${PROVENANCE_LAYER}" \
   "${PROVENANCE_PREDICATE}" \
-  "${OUTPUT_DIR}/provenance.intoto.json"
+  "${OUTPUT_DIR}/provenance.intoto.json" # codespell:ignore intoto
 validate_attestation_statement \
   "${SBOM_LAYER}" \
   "${SBOM_PREDICATE}" \
-  "${OUTPUT_DIR}/sbom.spdx.intoto.json"
+  "${OUTPUT_DIR}/sbom.spdx.intoto.json" # codespell:ignore intoto
 
 aws ecr batch-get-image \
   --region "${AWS_REGION}" \

@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Fail-fast runtime contract for the unified MinWM CUDA inference image."""
 
 from __future__ import annotations
