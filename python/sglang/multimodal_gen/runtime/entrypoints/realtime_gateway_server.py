@@ -338,9 +338,7 @@ _WORLD_PASSTHROUGH_TYPES = frozenset({"client_metric", "client_metric_batch", "a
 # chunk_seeds), so forwarding them produced an engine-side "unsupported MinWM
 # event kind" error instead of doing anything. They were dead slots that made
 # the contract look wider than it is.
-_WORLD_ALLOWED_EVENT_KINDS = frozenset(
-    {"camera_actions", "playback_ack", "heartbeat"}
-)
+_WORLD_ALLOWED_EVENT_KINDS = frozenset({"camera_actions", "playback_ack", "heartbeat"})
 # Free-form input no longer passes raw prompt/scene_cut through. Full scene
 # descriptions are server-side assets; the browser sends only the user's raw
 # instruction as kind:"direction", then the gateway asks world-service to rewrite

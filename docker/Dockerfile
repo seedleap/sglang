@@ -1,5 +1,6 @@
 ARG CUDA_VERSION=13.0.1
-FROM nvidia/cuda:${CUDA_VERSION}-cudnn-devel-ubuntu24.04 AS base
+ARG CUDA_BASE_IMAGE=nvidia/cuda:${CUDA_VERSION}-cudnn-devel-ubuntu24.04
+FROM ${CUDA_BASE_IMAGE} AS base
 
 ARG TARGETARCH
 ARG BUILD_TYPE=all
@@ -19,6 +20,7 @@ ARG PIP_DEFAULT_INDEX
 ARG UBUNTU_MIRROR
 ARG GITHUB_ARTIFACTORY=github.com
 ARG INSTALL_FLASHINFER_JIT_CACHE=0
+ARG REQUIRE_KERNELS_DOWNLOAD=0
 ARG FLASHINFER_VERSION=0.6.12
 ARG MOONCAKE_VERSION=0.3.11.post1
 ARG MSCCLPP_VERSION=sglang-v0.9.1
@@ -612,14 +614,15 @@ COPY docker/configs/opt/.gitconfig /opt/sglang/.gitconfig
 COPY docker/configs/.zshrc /root/.zshrc
 
 # Fix Trivy-reported CVEs
-# pip:             urllib3 (CVE-2025-43859), pillow (CVE-2026-25990)
+# pip:             urllib3 (CVE-2025-43859), pillow (CVE-2026-25990,
+#                  CVE-2026-40192)
 # binutils family: CVE-2025-{1147,1148,3198,5244,5245,7545,7546,8225,11082,11083,11412,11413,11414,11494,11839,11840}
 # libgnutls30t64:  CVE-2025-{9820,14831}
 # libpam:          CVE-2024-10963
 # libsqlite3-0:    CVE-2025-{6965,7709}
 # libtasn1-6:      CVE-2025-13151
 # dpkg:            CVE-2025-6297
-RUN python3 -m pip install --upgrade "urllib3>=2.6.3" "pillow>=12.1.1"
+RUN python3 -m pip install --upgrade "urllib3>=2.6.3" "pillow>=12.2.0"
 RUN --mount=type=cache,target=/var/cache/apt,id=framework-apt \
     apt-get update && apt-get install -y --only-upgrade \
     binutils binutils-common binutils-x86-64-linux-gnu libbinutils \
@@ -646,6 +649,7 @@ ARG CUDA_VERSION
 ARG SGL_VERSION
 ARG USE_LATEST_SGLANG
 ARG INSTALL_DYNAMO=0
+ARG REQUIRE_KERNELS_DOWNLOAD
 
 WORKDIR /sgl-workspace
 
@@ -666,7 +670,7 @@ RUN if [ "$BRANCH_TYPE" = "local" ]; then \
 RUN --mount=type=cache,target=/root/.cache/pip \
     cd /sgl-workspace/sglang \
     && python3 -m pip install --no-deps -e "python[${BUILD_TYPE}]" \
-    && kernels lock python \
+    && ( if [ ! -f python/kernels.lock ]; then kernels lock python; fi ) \
     && ( success=0; \
          # aarch64: kernels-community/sgl-flash-attn3 ships no arm variants; JIT-compile at runtime.
          # Remove this branch once arm cubins are published upstream.
@@ -684,6 +688,10 @@ RUN --mount=type=cache,target=/root/.cache/pip \
              # combo (e.g. cu129 publishes no torch>=2.10 cubin), fall back to \
              # runtime JIT instead of failing the build, mirroring the aarch64 branch. \
              if [ "$success" != "1" ]; then \
+                 if [ "$REQUIRE_KERNELS_DOWNLOAD" = "1" ]; then \
+                     echo "ERROR: required kernels-community artifacts were not downloaded"; \
+                     exit 1; \
+                 fi; \
                  echo "WARNING: no matching sgl-flash-attn3 cubin variant for this torch+CUDA; kernels will be JIT-compiled at runtime"; \
                  success=1; \
              fi; \
@@ -715,10 +723,13 @@ WORKDIR /sgl-workspace/sglang
 ARG SGLANG_BUILD_COMMIT=unknown
 ARG SGLANG_BUILD_URL=
 ARG SGLANG_IMAGE_TAG=local/sglang:dev
+ARG SGLANG_BUILD_SOURCE=https://github.com/sgl-project/sglang
+ARG SGLANG_USE_SGL_FA3_KERNEL=1
 ENV SGLANG_BUILD_COMMIT=${SGLANG_BUILD_COMMIT:-unknown} \
     SGLANG_BUILD_URL=${SGLANG_BUILD_URL:-} \
-    SGLANG_IMAGE_TAG=${SGLANG_IMAGE_TAG:-local/sglang:dev}
-LABEL org.opencontainers.image.source="https://github.com/sgl-project/sglang" \
+    SGLANG_IMAGE_TAG=${SGLANG_IMAGE_TAG:-local/sglang:dev} \
+    SGLANG_USE_SGL_FA3_KERNEL=${SGLANG_USE_SGL_FA3_KERNEL}
+LABEL org.opencontainers.image.source="${SGLANG_BUILD_SOURCE}" \
       org.opencontainers.image.revision="${SGLANG_BUILD_COMMIT}" \
       org.opencontainers.image.version="${SGLANG_IMAGE_TAG}" \
       org.opencontainers.image.url="${SGLANG_BUILD_URL}" \
@@ -744,15 +755,21 @@ LABEL org.opencontainers.image.source="https://github.com/sgl-project/sglang" \
 # - Ready-to-run inference server environment
 #
 # Note: Uses devel base for complete NVCC toolchain required by DeepGEMM JIT
-FROM nvidia/cuda:${CUDA_VERSION}-cudnn-devel-ubuntu24.04 AS runtime
+FROM ${CUDA_BASE_IMAGE} AS runtime
 
 ARG CUDA_VERSION
 ARG TARGETARCH
 ARG GDRCOPY_VERSION=2.5.1
+ARG SGLANG_EXCLUDE_MOVIEPY=0
+ARG SGLANG_EXCLUDE_NIXL=0
+ARG SGLANG_MINWM_SM120_FA4=0
+ARG SGLANG_MINWM_TAEHV=0
+ARG TAEHV_REVISION=093b918971d59001a0bad6dfd6e0409b5e1752cf
 
 ENV DEBIAN_FRONTEND=noninteractive \
     CUDA_HOME=/usr/local/cuda \
-    GDRCOPY_HOME=/usr/src/gdrdrv-${GDRCOPY_VERSION}/
+    GDRCOPY_HOME=/usr/src/gdrdrv-${GDRCOPY_VERSION}/ \
+    SGLANG_MINWM_REQUIRE_SM120_FA4=${SGLANG_MINWM_SM120_FA4}
 
 # Add GKE default lib and bin locations + CUDA compiler paths for FlashInfer JIT
 ENV PATH="${PATH}:/usr/local/nvidia/bin:/usr/local/cuda/bin:/usr/local/cuda/nvvm/bin" \
@@ -841,6 +858,52 @@ COPY --from=framework_final /usr/local/lib/python3.12/dist-packages /usr/local/l
 # Copy SGLang workspace
 COPY --from=framework_final /sgl-workspace /sgl-workspace
 
+# The framework build can satisfy these packages from Ubuntu's Python path,
+# which is intentionally absent from the minimal runtime stage. Install the
+# runtime copies explicitly so the copied Python environment is self-contained.
+RUN python3 -m pip install --no-cache-dir \
+        "cryptography==50.0.0" \
+        "distro==1.9.0" \
+        "PyJWT==2.13.0" \
+        "pyparsing==3.3.2"
+
+# MoviePy 2.2.1 declares Pillow<12 and its unreleased Pillow 12 compatibility
+# changes are unsuitable for an immutable release image. MinWM does not import
+# MoviePy: video encoding uses PyAV/imageio-ffmpeg. Keep the general SGLang
+# runtime unchanged unless a specialized image explicitly opts out.
+RUN if [ "${SGLANG_EXCLUDE_MOVIEPY}" = "1" ]; then \
+        python3 -m pip uninstall -y moviepy \
+        && sed -i '/^moviepy==/d' /sgl-workspace/constraints.txt; \
+    fi
+
+# The nixl 1.4 meta package deliberately requires both CUDA 12 and CUDA 13
+# backends. MinWM does not use disaggregated transfer or NIXL collectives, so a
+# specialized runtime can omit that otherwise-valid but large dual-CUDA stack.
+RUN if [ "${SGLANG_EXCLUDE_NIXL}" = "1" ]; then \
+        python3 -m pip uninstall -y nixl nixl-cu12 nixl-cu13; \
+    fi
+
+# The MinWM release overlay carries the first FlashAttention release with the
+# upstream SM120 compile-time and Pack-GQA fixes. Install it without resolving
+# the general SGLang dependency graph: the active TVM/protobuf versions are
+# exercised by the release's real SM120 kernel gate.
+RUN if [ "${SGLANG_MINWM_SM120_FA4}" = "1" ]; then \
+        python3 -m pip install --no-cache-dir --no-deps --force-reinstall \
+            "flash-attn-4==4.0.0b21" \
+            "nvidia-cutlass-dsl[cu13]==4.6.0.dev0" \
+            "nvidia-cutlass-dsl-libs-base==4.6.0.dev0" \
+            "nvidia-cutlass-dsl-libs-cu13==4.6.0.dev0" \
+            "quack-kernels==0.5.3"; \
+    fi
+
+# The MinWM speed profiles use the lightweight streaming TAEHV decoder on all
+# GPU families. Pin its source revision and install it in the image so serving
+# never clones or installs packages during Pod startup.
+RUN if [ "${SGLANG_MINWM_TAEHV}" = "1" ]; then \
+        python3 -m pip install --no-cache-dir --no-deps \
+            "taehv @ git+https://github.com/madebyollin/taehv.git@${TAEHV_REVISION}"; \
+    fi
+
 # Copy sgl-model-gateway binary
 COPY --from=framework_final /usr/local/bin/sgl-model-gateway /usr/local/bin/sgl-model-gateway
 
@@ -868,10 +931,13 @@ WORKDIR /sgl-workspace/sglang
 ARG SGLANG_BUILD_COMMIT=unknown
 ARG SGLANG_BUILD_URL=
 ARG SGLANG_IMAGE_TAG=local/sglang:dev
+ARG SGLANG_BUILD_SOURCE=https://github.com/sgl-project/sglang
+ARG SGLANG_USE_SGL_FA3_KERNEL=1
 ENV SGLANG_BUILD_COMMIT=${SGLANG_BUILD_COMMIT:-unknown} \
     SGLANG_BUILD_URL=${SGLANG_BUILD_URL:-} \
-    SGLANG_IMAGE_TAG=${SGLANG_IMAGE_TAG:-local/sglang:dev}
-LABEL org.opencontainers.image.source="https://github.com/sgl-project/sglang" \
+    SGLANG_IMAGE_TAG=${SGLANG_IMAGE_TAG:-local/sglang:dev} \
+    SGLANG_USE_SGL_FA3_KERNEL=${SGLANG_USE_SGL_FA3_KERNEL}
+LABEL org.opencontainers.image.source="${SGLANG_BUILD_SOURCE}" \
       org.opencontainers.image.revision="${SGLANG_BUILD_COMMIT}" \
       org.opencontainers.image.version="${SGLANG_IMAGE_TAG}" \
       org.opencontainers.image.url="${SGLANG_BUILD_URL}" \

@@ -60,6 +60,7 @@ if TYPE_CHECKING:
     SGLANG_LINGBOT_ENABLE_INTERACTIVE_KV_WINDOW: bool = False
     SGLANG_LINGBOT_LAZY_VAE_ENCODE_BLACK_FRAMES: int | None = None
     SGLANG_DIFFUSION_FLASHINFER_FP4_GEMM_BACKEND: str | None = None
+    SGLANG_MINWM_REQUIRE_SM120_FA4: bool = False
     SGLANG_DIFFUSION_ENABLE_W8A8_FP8_GEMM: bool = False
     SGLANG_DIFFUSION_VAE_CHANNELS_LAST_3D: str = "auto"
     SGLANG_USE_CUDA_HUNYUANVIDEO_GROUP_NORM_SILU: bool = False
@@ -238,6 +239,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "SGLANG_DIFFUSION_ATTENTION_BACKEND": _lazy_str(
         "SGLANG_DIFFUSION_ATTENTION_BACKEND"
     ),
+    # Specialized MinWM images use this to reject non-FA4 attention and
+    # fallback backends on SM120. General SGLang images leave it disabled.
+    "SGLANG_MINWM_REQUIRE_SM120_FA4": _lazy_bool("SGLANG_MINWM_REQUIRE_SM120_FA4"),
     # Use dedicated multiprocess context for workers.
     # Both spawn and fork work
     "SGLANG_DIFFUSION_WORKER_MULTIPROC_METHOD": _lazy_str(

@@ -6,6 +6,7 @@ import json
 import time
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
 from sglang.multimodal_gen.runtime.realtime.world_platform import (
     Principal,
     WorldCallbacks,

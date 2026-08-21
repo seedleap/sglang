@@ -6,6 +6,7 @@
 pynvml. However, it should not initialize cuda context.
 """
 
+import importlib
 import os
 from collections.abc import Callable
 from functools import lru_cache, wraps
@@ -257,10 +258,8 @@ class _FlashAttentionBackendResolver(_CudaAttentionBackendResolver):
 
     @classmethod
     def resolve(cls, platform) -> AttentionBackendEnum:
-        if platform.is_sm120():
-            logger.info(
-                "FlashAttention is not supported on SM12.x in this build; falling back to Torch SDPA."
-            )
+        if platform.is_sm120() and not platform._requires_sm120_fa4():
+            logger.info("Defaulting to Torch SDPA backend on SM12.x")
             return AttentionBackendEnum.TORCH_SDPA
         return AttentionBackendEnum.FA
 
@@ -433,17 +432,29 @@ class CudaPlatformBase(Platform):
 
     @classmethod
     def _resolve_default_attn_backend(cls) -> AttentionBackendEnum:
-        if cls.is_sm120():
-            # On SM12.x, the sgl-kernel FlashAttention wheels may not include
-            # support yet. Default to Torch SDPA for correctness.
+        if cls.is_sm120() and not cls._requires_sm120_fa4():
             logger.info("Defaulting to Torch SDPA backend on SM12.x")
             return AttentionBackendEnum.TORCH_SDPA
         return AttentionBackendEnum.FA
 
     @classmethod
+    def _requires_sm120_fa4(cls) -> bool:
+        return cls.is_sm120() and envs.SGLANG_MINWM_REQUIRE_SM120_FA4
+
+    @classmethod
     def _prepare_flash_attention_for_blackwell(cls) -> bool:
-        if not cls.is_blackwell():
+        if not (cls.is_blackwell() or cls.is_sm120()):
             return True
+
+        if cls._requires_sm120_fa4():
+            try:
+                importlib.import_module("flash_attn.cute")
+            except Exception as exc:
+                logger.error(
+                    "Cannot satisfy strict SM120 FlashAttention-4 contract: %s",
+                    exc,
+                )
+                return False
 
         try:
             from sglang.multimodal_gen.runtime.layers.attention.backends.flash_attn import (
@@ -463,7 +474,11 @@ class CudaPlatformBase(Platform):
 
     @classmethod
     def _resolve_flash_attention_backend_cls_str(
-        cls, target_backend: AttentionBackendEnum, head_size: int, dtype: torch.dtype
+        cls,
+        target_backend: AttentionBackendEnum,
+        head_size: int,
+        dtype: torch.dtype,
+        require_sm120_fa4: bool = False,
     ) -> str:
         if not cls.has_device_capability(80):
             logger.info("Cannot use FlashAttention backend for Volta and Turing GPUs.")
@@ -504,6 +519,11 @@ class CudaPlatformBase(Platform):
                 target_backend = AttentionBackendEnum.TORCH_SDPA
 
         if target_backend == AttentionBackendEnum.TORCH_SDPA:
+            if require_sm120_fa4:
+                raise RuntimeError(
+                    "SGLANG_MINWM_REQUIRE_SM120_FA4=1 requires FlashAttention-4 "
+                    "on SM120; refusing fallback to Torch SDPA"
+                )
             return _SDPA_BACKEND_CLS_STR
 
         return "sglang.multimodal_gen.runtime.layers.attention.backends.flash_attn.FlashAttentionBackend"
@@ -515,6 +535,16 @@ class CudaPlatformBase(Platform):
         head_size: int,
         dtype: torch.dtype,
     ) -> str:
+        require_sm120_fa4 = cls._requires_sm120_fa4()
+        if require_sm120_fa4 and selected_backend not in (
+            None,
+            AttentionBackendEnum.FA,
+        ):
+            raise RuntimeError(
+                "SGLANG_MINWM_REQUIRE_SM120_FA4=1 requires FlashAttention-4 "
+                f"on SM120; backend {selected_backend} is not allowed"
+            )
+
         if selected_backend is None:
             target_backend = cls._resolve_default_attn_backend()
         else:
@@ -528,7 +558,10 @@ class CudaPlatformBase(Platform):
             target_backend = resolved_backend
 
         return cls._resolve_flash_attention_backend_cls_str(
-            target_backend, head_size, dtype
+            target_backend,
+            head_size,
+            dtype,
+            require_sm120_fa4=require_sm120_fa4,
         )
 
     @classmethod

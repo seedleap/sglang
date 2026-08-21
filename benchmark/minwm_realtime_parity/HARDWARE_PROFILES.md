@@ -36,7 +36,8 @@ Use this decision table when Codex renders a job:
 
 | Visible memory and architecture | `vae_cpu_offload` | Decision |
 | --- | --- | --- |
-| SM120 and <=36,864 MiB | `true` | Required by the current 32 GiB candidate |
+| SM120 and <=36,864 MiB, conservative fit validation | `true` | `blackwell-32g` |
+| SM120 and 28,672-36,864 MiB, explicit speed validation | `false` | `sm120-32g-speed`; use only through the image-bundled launcher and apply the speed gates below |
 | SM120 and >=65,536 MiB | omitted / `false` | High-memory speed default |
 | SM100 and >=180,000 MiB | `false` | `experimental-sm100-high-memory`; B200 validation only |
 | SM103 and >=250,000 MiB | `false` | `experimental-sm103-high-memory`; B300 validation only |
@@ -146,6 +147,34 @@ Validation status:
   32,623 MiB: 17,411 MiB peak at 832x480 and 25,505 MiB at 1248x704.
 - The same-SKU performance gate has **not** passed for the 32 GiB 5090/6000
   production target. Do not claim production readiness from the fit result.
+
+### `sm120-32g-speed`
+
+Select this explicit speed-validation profile only when an SM120 GPU reports
+28,672-36,864 MiB, or on a larger SM120 GPU when qualifying the exact low-memory
+policy. Start the server through
+`sglang.multimodal_gen.tools.minwm_profile_launcher`; do not reproduce the
+managed arguments by hand. The launcher fixes the following residency policy:
+
+```text
+--performance-mode speed
+--text-encoder-cpu-offload true
+--vae-cpu-offload false
+--dit-cpu-offload false
+--dit-layerwise-offload false
+```
+
+The DiT and TAEHV remain resident to preserve throughput. Promotion requires an
+832x480 same-digest run with client FPS >=24 and peak process memory <30,720 MiB.
+
+Validation status:
+
+- The exact policy passed on an RTX PRO 6000 Blackwell Server Edition at
+  30.944 FPS with a 27,751 MiB peak. This qualifies the policy and proves
+  32 GiB memory feasibility on SM120.
+- RTX 5090 uses the same SM120 dispatch but has not completed the same-SKU
+  acceptance gate. Treat it as a validation candidate, not a production-ready
+  profile, until that run passes.
 
 ### `blackwell-high-memory`
 
