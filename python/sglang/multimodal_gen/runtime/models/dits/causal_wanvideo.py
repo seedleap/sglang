@@ -280,11 +280,33 @@ class CausalWanTransformerBlock(nn.Module):
             self.local_num_heads = divide(num_heads, tp_size)
             head_start = get_tp_rank() * self.local_num_heads
         else:
-            self.to_q = ReplicatedLinear(dim, dim, bias=True, quant_config=quant_config)
-            self.to_k = ReplicatedLinear(dim, dim, bias=True, quant_config=quant_config)
-            self.to_v = ReplicatedLinear(dim, dim, bias=True, quant_config=quant_config)
+            self.to_q = ReplicatedLinear(
+                dim,
+                dim,
+                bias=True,
+                quant_config=quant_config,
+                prefix=add_prefix("to_q", prefix),
+            )
+            self.to_k = ReplicatedLinear(
+                dim,
+                dim,
+                bias=True,
+                quant_config=quant_config,
+                prefix=add_prefix("to_k", prefix),
+            )
+            self.to_v = ReplicatedLinear(
+                dim,
+                dim,
+                bias=True,
+                quant_config=quant_config,
+                prefix=add_prefix("to_v", prefix),
+            )
             self.to_out = ReplicatedLinear(
-                dim, dim, bias=True, quant_config=quant_config
+                dim,
+                dim,
+                bias=True,
+                quant_config=quant_config,
+                prefix=add_prefix("to_out", prefix),
             )
             tp_size = 1
             self.local_num_heads = num_heads
@@ -334,6 +356,7 @@ class CausalWanTransformerBlock(nn.Module):
             eps=eps,
             supported_attention_backends=cross_attn_backends,
             quant_config=quant_config,
+            prefix=add_prefix("attn2", prefix),
         )
         self.cross_attn_residual_norm = ScaleResidualLayerNormScaleShift(
             dim, eps=eps, elementwise_affine=False, dtype=torch.float32
@@ -341,7 +364,11 @@ class CausalWanTransformerBlock(nn.Module):
 
         # 3. Feed-forward
         self.ffn = MLP(
-            dim, ffn_dim, act_type="gelu_pytorch_tanh", quant_config=quant_config
+            dim,
+            ffn_dim,
+            act_type="gelu_pytorch_tanh",
+            quant_config=quant_config,
+            prefix=add_prefix("ffn", prefix),
         )
         self.mlp_residual = MulAdd()
 

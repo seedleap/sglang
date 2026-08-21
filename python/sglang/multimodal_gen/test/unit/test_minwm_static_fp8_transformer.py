@@ -1,5 +1,7 @@
 import json
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import torch
 from safetensors.torch import load_file, save_file
@@ -149,3 +151,65 @@ def test_ffn_scope_selects_runtime_quant_methods():
     assert isinstance(
         config.get_quant_method(layer, "blocks.0.ffn.fc_out"), Fp8LinearMethod
     )
+
+
+def test_ffn_scope_routes_real_minwm_block():
+    from sglang.multimodal_gen.runtime.layers.linear import UnquantizedLinearMethod
+    from sglang.multimodal_gen.runtime.layers.quantization.fp8 import (
+        Fp8Config,
+        Fp8LinearMethod,
+    )
+    from sglang.multimodal_gen.runtime.models.dits.minwm import (
+        MinWMCausalTransformerBlock,
+    )
+    from sglang.multimodal_gen.runtime.platforms import AttentionBackendEnum
+
+    config = Fp8Config(
+        is_checkpoint_fp8_serialized=True,
+        activation_scheme="static",
+        ignored_layers=["to_q", "to_k", "to_v", "to_out", "attn2"],
+    )
+    fake_tp_group = SimpleNamespace(world_size=1, rank_in_group=0)
+    fake_sp_group = SimpleNamespace(ulysses_world_size=1, ring_world_size=1)
+    with (
+        patch(
+            "sglang.multimodal_gen.runtime.distributed.parallel_state._TP",
+            fake_tp_group,
+        ),
+        patch(
+            "sglang.multimodal_gen.runtime.distributed.parallel_state._SP",
+            fake_sp_group,
+        ),
+        torch.device("meta"),
+    ):
+        block = MinWMCausalTransformerBlock(
+            dim=128,
+            ffn_dim=256,
+            num_heads=1,
+            local_attn_size=-1,
+            sink_size=0,
+            qk_norm="rms_norm",
+            cross_attn_norm=True,
+            eps=1e-6,
+            supported_attention_backends={AttentionBackendEnum.TORCH_SDPA},
+            prefix="Wan.blocks.0",
+            quant_config=config,
+        )
+
+    attention_layers = (
+        (block.to_q, "Wan.blocks.0.to_q"),
+        (block.to_k, "Wan.blocks.0.to_k"),
+        (block.to_v, "Wan.blocks.0.to_v"),
+        (block.to_out, "Wan.blocks.0.to_out"),
+        (block.attn2.to_q, "Wan.blocks.0.attn2.to_q"),
+        (block.attn2.to_k, "Wan.blocks.0.attn2.to_k"),
+        (block.attn2.to_v, "Wan.blocks.0.attn2.to_v"),
+        (block.attn2.to_out, "Wan.blocks.0.attn2.to_out"),
+    )
+    for layer, expected_prefix in attention_layers:
+        assert layer.prefix == expected_prefix
+        assert isinstance(layer.quant_method, UnquantizedLinearMethod)
+    assert block.ffn.fc_in.prefix == "Wan.blocks.0.ffn.fc_in"
+    assert block.ffn.fc_out.prefix == "Wan.blocks.0.ffn.fc_out"
+    assert isinstance(block.ffn.fc_in.quant_method, Fp8LinearMethod)
+    assert isinstance(block.ffn.fc_out.quant_method, Fp8LinearMethod)
