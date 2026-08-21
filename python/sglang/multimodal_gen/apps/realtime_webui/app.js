@@ -40,6 +40,12 @@ function configuredModelNumber(key, name, fallback) {
   return Number.isFinite(value) ? value : fallback;
 }
 
+function configuredModelString(key, name, fallback = "") {
+  const value = DUAL_MODEL_CONFIG[key]?.[name];
+  if (value == null || value === "") return fallback;
+  return String(value);
+}
+
 function h264CompressionInit(init, key) {
   const bitrateKbps = Math.max(
     250,
@@ -290,21 +296,39 @@ const RECORDING_KEYFRAME_INTERVAL_FRAMES = 120;
 function applyRuntimeUiConfig() {
   for (const key of ["minwm", "lingbot2"]) {
     const isLingBot2 = key === "lingbot2";
+    const configuredSize = configuredModelString(
+      key,
+      "size",
+      isLingBot2 ? "" : String(UI_CONFIG.size || ""),
+    ).trim();
+    if (configuredSize) modelControl(key, "size").value = configuredSize;
     modelControl(key, "fps").value = String(
-      isLingBot2 ? DEFAULT_LINGBOT2_TARGET_FPS : DEFAULT_TARGET_FPS,
+      configuredModelNumber(
+        key,
+        "targetFps",
+        isLingBot2 ? DEFAULT_LINGBOT2_TARGET_FPS : DEFAULT_TARGET_FPS,
+      ),
     );
     modelControl(key, "guidance").value = String(
       configuredNumber("guidanceScale", Number(modelControl(key, "guidance").value)),
     );
     modelControl(key, "sinkSize").value = String(
-      isLingBot2
-        ? DEFAULT_LINGBOT2_SINK_SIZE
-        : configuredNumber("sinkSize", Number(modelControl(key, "sinkSize").value)),
+      configuredModelNumber(
+        key,
+        "sinkSize",
+        isLingBot2
+          ? DEFAULT_LINGBOT2_SINK_SIZE
+          : configuredNumber("sinkSize", Number(modelControl(key, "sinkSize").value)),
+      ),
     );
     modelControl(key, "windowFrames").value = String(
-      isLingBot2
-        ? DEFAULT_LINGBOT2_WINDOW_FRAMES
-        : configuredNumber("windowFrames", Number(modelControl(key, "windowFrames").value)),
+      configuredModelNumber(
+        key,
+        "windowFrames",
+        isLingBot2
+          ? DEFAULT_LINGBOT2_WINDOW_FRAMES
+          : configuredNumber("windowFrames", Number(modelControl(key, "windowFrames").value)),
+      ),
     );
   }
   if (UI_CONFIG.titleSuffix) {

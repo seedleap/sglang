@@ -43,6 +43,21 @@ assert.match(app, /const DEFAULT_LINGBOT2_SINK_SIZE\s*=\s*configuredModelNumber\
 assert.match(app, /const DEFAULT_LINGBOT2_WINDOW_FRAMES\s*=\s*configuredModelNumber\("lingbot2", "windowFrames", 18\)/);
 assert.match(
   app,
+  /configuredModelNumber\(\s*key,\s*"targetFps"[\s\S]*?isLingBot2 \? DEFAULT_LINGBOT2_TARGET_FPS : DEFAULT_TARGET_FPS/,
+  "Zing should honor model-specific deployment FPS before falling back to the global target",
+);
+assert.match(
+  app,
+  /configuredModelNumber\(\s*key,\s*"sinkSize"[\s\S]*?configuredNumber\("sinkSize", Number\(modelControl\(key, "sinkSize"\)\.value\)\)/,
+  "Zing should honor model-specific sink size such as the Aliyun 8-frame profile",
+);
+assert.match(
+  app,
+  /configuredModelNumber\(\s*key,\s*"windowFrames"[\s\S]*?configuredNumber\("windowFrames", Number\(modelControl\(key, "windowFrames"\)\.value\)\)/,
+  "Zing should honor model-specific attention window such as the Aliyun 32-frame profile",
+);
+assert.match(
+  app,
   /startupTimeoutMs:\s*configuredModelNumber\("lingbot2", "startupTimeoutMs", 60000\)/,
   "LingBot2 should wait for its measured cold first-frame latency instead of the generic 12s timeout",
 );
@@ -218,7 +233,7 @@ assert.match(html, /h264_websocket_session\.js\?v=h264-direct-gateway-only-v1/);
 assert.match(html, /prompt_rewrite_controller\.js\?v=prompt-rewrite-v3/);
 assert.match(html, /world_rules_controller\.js\?v=world-rules-v4/);
 assert.match(html, /styles\.css\?v=world-studio-single-zing-v3/);
-assert.match(html, /app\.js\?v=world-studio-single-zing-v4/);
+assert.match(html, /app\.js\?v=world-studio-single-zing-v5/);
 assert.match(html, /id="minwmH264Viewport"/);
 assert.match(html, /id="lingbot2H264Viewport"/);
 assert.match(html, /id="minwmPerfScheduler"/);

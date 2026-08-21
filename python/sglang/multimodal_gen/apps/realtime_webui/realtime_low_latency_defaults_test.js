@@ -96,6 +96,11 @@ assert.match(
   /async function applyPreset\(preset, options = \{\}\) \{[\s\S]*?\$\("prompt"\)\.value = preset\.prompt;[\s\S]*?modelControl\("minwm", "fps"\)\.value/,
   "preset application should hydrate shared prompt/reference without overwriting LingBot2 defaults",
 );
+assert.match(
+  appJs,
+  /function applyRuntimeUiConfig\(\) \{[\s\S]*?configuredModelString\([\s\S]*?"size"[\s\S]*?modelControl\(key, "size"\)\.value = configuredSize/,
+  "deployment runtime config should initialize hidden model Size controls before requests are sent",
+);
 assert.doesNotMatch(
   appJs,
   /\$\("size"\)\.value\s*=\s*preset\.size/,
