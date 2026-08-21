@@ -13,6 +13,7 @@ from sglang.multimodal_gen.runtime.entrypoints.realtime_gateway_server import (
     HTTPCoordinatorClient,
     _browser_send_trace_fields,
     _parse_args,
+    _build_world_platform,
     _parse_ui_config,
     create_app,
 )
@@ -313,3 +314,30 @@ def test_gateway_uses_retryable_close_semantics_for_capacity_only(
             with pytest.raises(WebSocketDisconnect) as closed:
                 websocket.receive_bytes()
             assert closed.value.code == expected_code
+
+
+def test_partial_world_config_refuses_to_start():
+    """All three --world-* flags or none.
+
+    A partial set used to silently skip registering authorized_generate; the
+    resulting 404 is underdetermined (a fronting proxy yields the same one), so
+    operators lose hours. Startup failure names the missing flags instead.
+    """
+
+    class Args:
+        world_token_ed25519_pub = ""
+        world_callback_url = ""
+        world_callback_hmac_secret = ""
+
+    none_given = Args()
+    assert _build_world_platform(none_given) is None  # showcase-only deploy stays valid
+
+    partial = Args()
+    partial.world_callback_url = "https://zing-api.example"
+    with pytest.raises(SystemExit) as exc:
+        _build_world_platform(partial)
+    message = str(exc.value)
+    missing_part = message.split("Missing:")[1]
+    assert "--world-token-ed25519-pub" in missing_part
+    assert "--world-callback-hmac-secret" in missing_part
+    assert "--world-callback-url" not in missing_part

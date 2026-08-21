@@ -1493,13 +1493,29 @@ def _parse_args() -> argparse.Namespace:
 
 
 def _build_world_platform(args) -> WorldPlatformConfig | None:
-    """Enable world-platform routes only when all required settings are present."""
-    if not (
-        args.world_token_ed25519_pub
-        and args.world_callback_url
-        and args.world_callback_hmac_secret
-    ):
-        return None
+    """Enable world-platform routes only when all --world-* settings are present.
+
+    All three or none. A partial set used to silently skip route registration:
+    authorized_generate then answers 404 and the operator debugs "route not
+    found" instead of reading a config error. That 404 is also underdetermined
+    (a proxy in front produces the same one), so the silent path wastes hours.
+    Failing startup turns a misconfiguration into a ten-minute deploy failure
+    that names the missing flag.
+    """
+    provided = {
+        "--world-token-ed25519-pub": bool(args.world_token_ed25519_pub),
+        "--world-callback-url": bool(args.world_callback_url),
+        "--world-callback-hmac-secret": bool(args.world_callback_hmac_secret),
+    }
+    if not any(provided.values()):
+        return None  # world platform intentionally disabled (showcase-only deploy)
+    missing = [flag for flag, ok in provided.items() if not ok]
+    if missing:
+        raise SystemExit(
+            "world platform is partially configured; refusing to start with the "
+            "authorized_generate route silently missing. Provide all of "
+            f"{sorted(provided)} or none. Missing: {missing}"
+        )
     from sglang.multimodal_gen.runtime.realtime.world_platform import load_public_key
 
     return WorldPlatformConfig(
