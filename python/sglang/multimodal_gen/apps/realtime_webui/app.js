@@ -11,7 +11,6 @@ const H264_MSE_MIME_TYPE = 'video/mp4; codecs="avc1.4D401F"';
 const H264_WEBSOCKET_REQUESTED = UI_CONFIG.h264WebSocketEnabled === true;
 const H264_WEBSOCKET_ENABLED = H264_WEBSOCKET_REQUESTED
   && Boolean(globalThis.MediaSource?.isTypeSupported?.(H264_MSE_MIME_TYPE));
-const H264_DIRECT_GATEWAY = UI_CONFIG.h264DirectGatewayEnabled === true;
 const H264_CONNECT_MAX_ATTEMPTS = Math.max(
   1,
   Math.min(10, Math.trunc(Number(UI_CONFIG.h264WebSocketConnectAttempts) || 3)),
@@ -39,6 +38,17 @@ function configuredNumber(name, fallback) {
 function configuredModelNumber(key, name, fallback) {
   const value = Number(DUAL_MODEL_CONFIG[key]?.[name]);
   return Number.isFinite(value) ? value : fallback;
+}
+
+function configuredModelString(key, name, fallback) {
+  const value = DUAL_MODEL_CONFIG[key]?.[name];
+  return value == null || value === "" ? fallback : String(value);
+}
+
+function configuredModelOrGlobalNumber(key, name, fallback, globalName = name) {
+  const modelValue = Number(DUAL_MODEL_CONFIG[key]?.[name]);
+  if (Number.isFinite(modelValue)) return modelValue;
+  return configuredNumber(globalName, fallback);
 }
 
 function h264CompressionInit(init, key) {
@@ -91,9 +101,7 @@ function h264CompressionInit(init, key) {
 }
 
 function h264WebSocketEndpoint(key) {
-  const defaultEndpoint = H264_DIRECT_GATEWAY
-    ? `/backends/${key}/v1/realtime_video/generate`
-    : `/api/h264ws/${key}`;
+  const defaultEndpoint = `/backends/${key}/v1/realtime_video/generate`;
   const configuredEndpoint = String(
     DUAL_MODEL_CONFIG[key]?.h264WsUrl || UI_CONFIG.h264WebSocketBaseUrl || "",
   ).trim();
@@ -293,23 +301,33 @@ const RECORDING_KEYFRAME_INTERVAL_FRAMES = 120;
 function applyRuntimeUiConfig() {
   for (const key of ["minwm", "lingbot2"]) {
     const isLingBot2 = key === "lingbot2";
+    const configuredSize = configuredModelString(
+      key,
+      "size",
+      isLingBot2 ? modelControl(key, "size").value : UI_CONFIG.size,
+    );
+    if (configuredSize) modelControl(key, "size").value = configuredSize;
+    const fallbackFps = isLingBot2 ? DEFAULT_LINGBOT2_TARGET_FPS : DEFAULT_TARGET_FPS;
     modelControl(key, "fps").value = String(
-      isLingBot2 ? DEFAULT_LINGBOT2_TARGET_FPS : DEFAULT_TARGET_FPS,
+      configuredModelOrGlobalNumber(key, "targetFps", fallbackFps, "targetFps"),
     );
     modelControl(key, "guidance").value = String(
       configuredNumber("guidanceScale", Number(modelControl(key, "guidance").value)),
     );
+    const fallbackSinkSize = isLingBot2
+      ? DEFAULT_LINGBOT2_SINK_SIZE
+      : Number(modelControl(key, "sinkSize").value);
+    const fallbackWindowFrames = isLingBot2
+      ? DEFAULT_LINGBOT2_WINDOW_FRAMES
+      : Number(modelControl(key, "windowFrames").value);
     modelControl(key, "sinkSize").value = String(
-      isLingBot2
-        ? DEFAULT_LINGBOT2_SINK_SIZE
-        : configuredNumber("sinkSize", Number(modelControl(key, "sinkSize").value)),
+      configuredModelOrGlobalNumber(key, "sinkSize", fallbackSinkSize, "sinkSize"),
     );
     modelControl(key, "windowFrames").value = String(
-      isLingBot2
-        ? DEFAULT_LINGBOT2_WINDOW_FRAMES
-        : configuredNumber("windowFrames", Number(modelControl(key, "windowFrames").value)),
+      configuredModelOrGlobalNumber(key, "windowFrames", fallbackWindowFrames, "windowFrames"),
     );
   }
+  updateOutputSizeText();
   if (UI_CONFIG.titleSuffix) {
     const suffix = String(UI_CONFIG.titleSuffix);
     $("studioTitle").textContent = `Realtime Studio · ${suffix}`;
@@ -1023,7 +1041,7 @@ function createH264ModelSession(key) {
     overlay: $(`${key}PreviewOverlay`),
     root: document.querySelector(`[data-model-key="${key}"]`),
     endpoint: h264WebSocketEndpoint(key),
-    directGateway: H264_DIRECT_GATEWAY,
+    directGateway: true,
     packMessage: pack,
     unpackMessage: unpack,
     liveEdgeTargetMs: configuredNumber("h264WebSocketLiveEdgeTargetMs", 80),
@@ -2309,8 +2327,8 @@ function renderProtocolPerformance(key, stats = {}) {
     telemetry.vae_decode_ms,
     telemetry.model_vae_decode_ms,
   );
-  const h264FeedMs = protocolMetric(stats.lastBridgeEncoderFeedMs);
-  const bridgeQueueMs = protocolMetric(stats.lastBridgeQueueMs);
+  const h264FeedMs = protocolMetric(stats.lastH264EncoderFeedMs);
+  const h264QueueMs = protocolMetric(stats.lastH264QueueMs);
   const webSocketDownlinkMs = protocolMetric(
     stats.lastWebSocketDownlinkMs,
     stats.lastDownlinkMs,
@@ -2347,7 +2365,7 @@ function renderProtocolPerformance(key, stats = {}) {
     ? `q ${protocolMetricText(vaeQueueMs)} · dec ${protocolMetricText(vaeDecodeMs)}`
     : "-";
   $(`${key}PerfH264Queue`).textContent = isH264
-    ? protocolMetricText(bridgeQueueMs)
+    ? protocolMetricText(h264QueueMs)
     : "不适用";
   $(`${key}PerfH264Feed`).textContent = isH264
     ? protocolMetricText(h264FeedMs)

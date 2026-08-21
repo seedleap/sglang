@@ -32,7 +32,7 @@ assert.match(
   /<div class="model-parameters-grid"[^>]*\shidden(?:\s|>)/,
   "model parameters should stay in the DOM for request defaults but remain hidden from users",
 );
-assert.match(html, /id="size" value="1280x704"/, "MinWM should keep the 720p default");
+assert.match(html, /id="size" value="832x480"/, "MinWM should default to the native realtime size");
 assert.match(html, /id="lingbot2Size" value="832x480"/, "LingBot2 should use its native default size");
 assert.match(html, /id="fps" type="number" value="24"/, "Zing should keep its 24 FPS default");
 assert.match(html, /id="lingbot2Fps" type="number" value="16"/, "LingBot2 should use its official 16 FPS default");
@@ -41,6 +41,17 @@ assert.match(html, /id="lingbot2WindowFrames" type="number" value="18"/, "LingBo
 assert.match(app, /const DEFAULT_LINGBOT2_TARGET_FPS\s*=\s*configuredModelNumber\("lingbot2", "targetFps", 16\)/);
 assert.match(app, /const DEFAULT_LINGBOT2_SINK_SIZE\s*=\s*configuredModelNumber\("lingbot2", "sinkSize", 9\)/);
 assert.match(app, /const DEFAULT_LINGBOT2_WINDOW_FRAMES\s*=\s*configuredModelNumber\("lingbot2", "windowFrames", 18\)/);
+assert.match(app, /configuredModelString\(\s*key,\s*"size"/, "runtime model config should override static size defaults");
+assert.match(
+  app,
+  /configuredModelOrGlobalNumber\(key, "sinkSize", fallbackSinkSize, "sinkSize"\)/,
+  "Zing runtime config must preserve the model-specific sink size",
+);
+assert.match(
+  app,
+  /configuredModelOrGlobalNumber\(key, "windowFrames", fallbackWindowFrames, "windowFrames"\)/,
+  "Zing runtime config must preserve the model-specific attention window",
+);
 assert.match(
   app,
   /startupTimeoutMs:\s*configuredModelNumber\("lingbot2", "startupTimeoutMs", 60000\)/,
@@ -217,7 +228,7 @@ assert.match(html, /h264_websocket_session\.js\?v=h264-direct-gateway-userid-v2/
 assert.match(html, /prompt_rewrite_controller\.js\?v=prompt-rewrite-v3/);
 assert.match(html, /world_rules_controller\.js\?v=world-rules-v4/);
 assert.match(html, /styles\.css\?v=world-studio-h264-rules-v6/);
-assert.match(html, /app\.js\?v=world-studio-single-h264-v7/);
+assert.match(html, /app\.js\?v=world-studio-single-h264-v9/);
 assert.match(html, /id="minwmH264Viewport"/);
 assert.match(html, /id="lingbot2H264Viewport"/);
 assert.match(html, /id="minwmPerfScheduler"/);
@@ -336,6 +347,8 @@ assert.match(app, /secureBaseUrl/);
 assert.match(app, /function h264WebSocketEndpoint\(key\)/);
 assert.match(app, /UI_CONFIG\.h264WebSocketBaseUrl/);
 assert.match(app, /endpoint: h264WebSocketEndpoint\(key\)/);
+assert.match(app, /directGateway: true/);
+assert.doesNotMatch(app, /\/api\/h264ws/);
 assert.match(app, /async function connectH264SessionWithRetry\(key, h264Session, init, url = ""\)/);
 assert.match(app, /H264_CONNECT_MAX_ATTEMPTS/);
 assert.match(app, /H264_RUNTIME_RECONNECT_MAX_ATTEMPTS/);

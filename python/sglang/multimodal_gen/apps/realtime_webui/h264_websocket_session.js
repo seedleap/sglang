@@ -83,12 +83,21 @@
     return `${protocol}//${host}${endpoint.startsWith("/") ? "" : "/"}${endpoint}`;
   }
 
+  function firstNumeric(...values) {
+    for (const value of values) {
+      if (value === undefined || value === null || value === "") continue;
+      const number = Number(value);
+      if (Number.isFinite(number)) return number;
+    }
+    return 0;
+  }
+
   class H264WebSocketSession {
     constructor({
       video,
       overlay = null,
       root = null,
-      endpoint = "/api/h264ws",
+      endpoint = "/backends/minwm/v1/realtime_video/generate",
       startupTimeoutMs = 30000,
       liveEdgeTargetMs = 80,
       liveEdgeSeekThresholdMs = 420,
@@ -101,7 +110,7 @@
       MediaSourceImpl = global.MediaSource,
       metricFlushMs = 250,
       maxMetricBatch = 32,
-      directGateway = false,
+      directGateway = true,
       packMessage = null,
       unpackMessage = null,
     }) {
@@ -148,7 +157,7 @@
       this.presentedSequence = 0;
       this.lastPresentedEventId = 0;
       this.controlSentEpochByEvent = new Map();
-      this.lastBridgeClockOffsetMs = 0;
+      this.lastH264ClockOffsetMs = 0;
       this.bytesReceived = 0;
       this.framesPresented = 0;
       this.presentedSamples = [];
@@ -511,7 +520,7 @@
       const webSocketDownlinkMs = serverSentEpochMs
         ? Math.max(
             0,
-            Date.now() - serverSentEpochMs + this.lastBridgeClockOffsetMs,
+            Date.now() - serverSentEpochMs + this.lastH264ClockOffsetMs,
           )
         : 0;
       this.bytesReceived += data.byteLength;
@@ -626,26 +635,28 @@
           eventId: Number(event.event_id || 0),
           frameBatchIndex: Number(event.frame_batch_index || 0),
           isFinalFrameBatch: Boolean(event.is_final_frame_batch),
-          bridgeEncodedEpochMs: Number(
-            event.h264_encoded_epoch_ms || event.bridge_encoded_epoch_ms || 0,
+          h264EncodedEpochMs: firstNumeric(
+            event.h264_encoded_epoch_ms,
+            event.bridge_encoded_epoch_ms,
           ),
-          bridgeEncodeStartedEpochMs: Number(
-            event.h264_encode_started_epoch_ms
-              || event.bridge_encode_started_epoch_ms
-              || 0,
+          h264EncodeStartedEpochMs: firstNumeric(
+            event.h264_encode_started_epoch_ms,
+            event.bridge_encode_started_epoch_ms,
           ),
-          bridgeQueueMs: Number(event.h264_queue_ms || event.bridge_queue_ms || 0),
-          bridgeEncoderFeedMs: Number(
-            event.h264_encoder_feed_ms || event.bridge_encoder_feed_ms || 0,
+          h264QueueMs: firstNumeric(event.h264_queue_ms, event.bridge_queue_ms),
+          h264EncoderFeedMs: firstNumeric(
+            event.h264_encoder_feed_ms,
+            event.bridge_encoder_feed_ms,
           ),
           metadataReceivedAtMs: performance.now(),
           appendCompletedAtMs: 0,
         });
         if (this.mediaBatches.length > 1024) this.mediaBatches.shift();
         this._emitStats({
-          lastBridgeQueueMs: Number(event.h264_queue_ms || event.bridge_queue_ms || 0),
-          lastBridgeEncoderFeedMs: Number(
-            event.h264_encoder_feed_ms || event.bridge_encoder_feed_ms || 0,
+          lastH264QueueMs: firstNumeric(event.h264_queue_ms, event.bridge_queue_ms),
+          lastH264EncoderFeedMs: firstNumeric(
+            event.h264_encoder_feed_ms,
+            event.bridge_encoder_feed_ms,
           ),
           droppedFrames: Number(event.dropped_frames || 0),
           startupDroppedFrames: Number(event.startup_dropped_frames || 0),
@@ -659,19 +670,20 @@
           (item) => Number(item.sourceFrameIndex || 0) === frameIndex,
         );
         if (metadata) {
-          metadata.bridgeEncodedEpochMs = Number(
-            event.h264_encoded_epoch_ms
-              || event.bridge_encoded_epoch_ms
-              || metadata.bridgeEncodedEpochMs
-              || 0,
+          metadata.h264EncodedEpochMs = firstNumeric(
+            event.h264_encoded_epoch_ms,
+            event.bridge_encoded_epoch_ms,
+            metadata.h264EncodedEpochMs,
           );
-          metadata.bridgeEncoderFeedMs = Number(
-            event.h264_encoder_feed_ms || event.bridge_encoder_feed_ms || 0,
+          metadata.h264EncoderFeedMs = firstNumeric(
+            event.h264_encoder_feed_ms,
+            event.bridge_encoder_feed_ms,
           );
         }
         this._emitStats({
-          lastBridgeEncoderFeedMs: Number(
-            event.h264_encoder_feed_ms || event.bridge_encoder_feed_ms || 0,
+          lastH264EncoderFeedMs: firstNumeric(
+            event.h264_encoder_feed_ms,
+            event.bridge_encoder_feed_ms,
           ),
         });
       } else if (event.type === "media_payload") {
@@ -699,7 +711,7 @@
           ? Math.max(0, clientReceivedEpochMs - clientSentEpochMs)
           : 0;
         if (clientSentEpochMs && serverReceivedEpochMs && serverSentEpochMs) {
-          this.lastBridgeClockOffsetMs = (
+          this.lastH264ClockOffsetMs = (
             (serverReceivedEpochMs - clientSentEpochMs)
             + (serverSentEpochMs - clientReceivedEpochMs)
           ) / 2;
@@ -718,8 +730,8 @@
           ...(clientSentEpochMs && isInteractiveControl
             ? { lastInputUplinkMs: Math.max(0, (roundTripMs - serverProcessingMs) / 2) }
             : {}),
-          controlBridgeRoundTripMs: roundTripMs,
-          bridgeClockOffsetMs: this.lastBridgeClockOffsetMs,
+          controlServerRoundTripMs: roundTripMs,
+          h264ClockOffsetMs: this.lastH264ClockOffsetMs,
         });
       }
     }
@@ -761,12 +773,12 @@
           framesDecoded: this.framesPresented,
           lastChunk: this.lastRenderedChunk,
           lastPresentedMediaEventId: eventId,
-          lastBridgeQueueMs: Number(metadata.bridgeQueueMs || 0),
-          lastBridgeEncoderFeedMs: Number(metadata.bridgeEncoderFeedMs || 0),
-          lastEncodeToPresentMs: metadata.bridgeEncodedEpochMs
+          lastH264QueueMs: Number(metadata.h264QueueMs || 0),
+          lastH264EncoderFeedMs: Number(metadata.h264EncoderFeedMs || 0),
+          lastEncodeToPresentMs: metadata.h264EncodedEpochMs
             ? Math.max(
                 0,
-                Date.now() - metadata.bridgeEncodedEpochMs + this.lastBridgeClockOffsetMs,
+                Date.now() - metadata.h264EncodedEpochMs + this.lastH264ClockOffsetMs,
               )
             : 0,
           lastPresentedAfterMetadataMs: metadata.metadataReceivedAtMs

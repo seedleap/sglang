@@ -1,15 +1,17 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-ALIYUN_REGION="${ALIYUN_REGION:-cn-beijing}"
-ALIYUN_ZONE="${ALIYUN_ZONE:-cn-beijing-i}"
-OSS_ENDPOINT="${OSS_ENDPOINT:-oss-cn-beijing-internal.aliyuncs.com}"
+ALIYUN_REGION="${ALIYUN_REGION:-cn-wulanchabu}"
+ALIYUN_ZONE="${ALIYUN_ZONE:-cn-wulanchabu-a}"
+OSS_REGION="${OSS_REGION:-cn-beijing}"
+OSS_ENDPOINT="${OSS_ENDPOINT:-oss-cn-beijing.aliyuncs.com}"
 OSS_BUCKET="${OSS_BUCKET:-seedleap-sglang-rtx6000-beijing-20260813}"
 OSS_MODEL_URI="${OSS_MODEL_URI:-oss://${OSS_BUCKET}/world-model/minwm/serving-artifacts/wan22-5b-stage3-dmd-47-0808-2fb2cfec2a2/gs3200-ema-student-v1/model/}"
 CODE_OVERLAY_OSS_URI="${CODE_OVERLAY_OSS_URI:-}"
 CODE_OVERLAY_ARCHIVE="${CODE_OVERLAY_ARCHIVE:-}"
 
 ACR_INSTANCE_ID="${ACR_INSTANCE_ID:-cri-ghpj9pt8jwhxdk0e}"
+ACR_REGION="${ACR_REGION:-cn-beijing}"
 ACR_REGISTRY="${ACR_REGISTRY:-loopit-registry-bj-registry.cn-beijing.cr.aliyuncs.com}"
 ACR_REPOSITORY="${ACR_REPOSITORY:-minwm/sglang-minwm-realtime}"
 DENOISER_IMAGE="${DENOISER_IMAGE:-${ACR_REGISTRY}/${ACR_REPOSITORY}:gpu-cu128-rtx5880-20260819}"
@@ -17,18 +19,38 @@ VAE_IMAGE="${VAE_IMAGE:-${DENOISER_IMAGE}}"
 GATEWAY_IMAGE="${GATEWAY_IMAGE:-${ACR_REGISTRY}/${ACR_REPOSITORY}:gateway-c7ae70a65a2d}"
 WEBUI_IMAGE="${WEBUI_IMAGE:-${ACR_REGISTRY}/${ACR_REPOSITORY}:webui-prompt-rewriter-20260818}"
 CONTROL_IMAGE="${CONTROL_IMAGE:-${DENOISER_IMAGE}}"
+ALIYUN_ECS_RAM_ROLE="${ALIYUN_ECS_RAM_ROLE:-}"
+RELEASED_PUBLIC_WEB_HOST="${RELEASED_PUBLIC_WEB_HOST:-116.62.150.115}"
 
 MODEL_ID="${MODEL_ID:-wan22-5b-stage3-dmd-47-0808-2fb2cfec2a2}"
 MODEL_REVISION="${MODEL_REVISION:-gs3200-ema-student-v1}"
 VAE_FINGERPRINT="${VAE_FINGERPRINT:-taew2_2-d053e216}"
 MODEL_DIR="${MODEL_DIR:-/data/zing-realtime/model-cache/zing/model}"
 BASE_DIR="${BASE_DIR:-/data/zing-realtime}"
+WEBUI_SECRET_DIR="${WEBUI_SECRET_DIR:-${BASE_DIR}/secrets/realtime-webui}"
+WEBUI_GENERATED_DIR="${WEBUI_GENERATED_DIR:-${BASE_DIR}/realtime_webui_generated}"
+WEBUI_PROXY_ENV_FILE="${WEBUI_PROXY_ENV_FILE:-${WEBUI_SECRET_DIR}/proxy.env}"
 DOCKER_NETWORK="${DOCKER_NETWORK:-zing-realtime}"
 PUBLIC_WEB_PORT="${PUBLIC_WEB_PORT:-80}"
-PUBLIC_WEB_HOST="${PUBLIC_WEB_HOST:-116.62.150.115}"
+PUBLIC_WEB_HOST="${PUBLIC_WEB_HOST:?set PUBLIC_WEB_HOST to the new public host/IP}"
+PUBLIC_GATEWAY_PORT="${PUBLIC_GATEWAY_PORT:-18080}"
+PUBLIC_GATEWAY_BASE_URL="${PUBLIC_GATEWAY_BASE_URL:-http://${PUBLIC_WEB_HOST}:${PUBLIC_GATEWAY_PORT}}"
 USE_DEDICATED_DATA_DISK="${USE_DEDICATED_DATA_DISK:-false}"
+START_GPU_WORKERS="${START_GPU_WORKERS:-true}"
+DENOISER_ATTENTION_BACKEND="${DENOISER_ATTENTION_BACKEND:-fa}"
+DENOISER_ATTENTION_IMPL="${DENOISER_ATTENTION_IMPL:-packed}"
+DENOISER_CACHE_ROTATED_K="${DENOISER_CACHE_ROTATED_K:-false}"
+DENOISER_PERFORMANCE_MODE="${DENOISER_PERFORMANCE_MODE:-speed}"
+DENOISER_ENABLE_CUDA_GRAPH="${DENOISER_ENABLE_CUDA_GRAPH:-false}"
+DENOISER_PYTORCH_CUDA_ALLOC_CONF="${DENOISER_PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
+REALTIME_WORKER_MAX_CONSUMED_AGE_S="${REALTIME_WORKER_MAX_CONSUMED_AGE_S:-120}"
+REALTIME_TARGET_FPS="${REALTIME_TARGET_FPS:-18}"
+H264_LIVE_EDGE_TARGET_MS="${H264_LIVE_EDGE_TARGET_MS:-500}"
+H264_LIVE_EDGE_SEEK_THRESHOLD_MS="${H264_LIVE_EDGE_SEEK_THRESHOLD_MS:-900}"
+GATEWAY_OUTPUT_QUEUE_MAX_MESSAGES="${GATEWAY_OUTPUT_QUEUE_MAX_MESSAGES:-4096}"
+GATEWAY_OUTPUT_QUEUE_MAX_BYTES="${GATEWAY_OUTPUT_QUEUE_MAX_BYTES:-67108864}"
 
-UI_CONFIG_JSON="${UI_CONFIG_JSON:-{\"generationModes\":[\"i2v\"],\"defaultGenerationMode\":\"i2v\",\"modelSlots\":[\"minwm\"],\"lockModelSlots\":true,\"size\":\"832x480\",\"targetFps\":24,\"sessionMaxLifetimeSeconds\":70,\"playbackAckEnabled\":false,\"h264WebSocketEnabled\":true,\"h264DirectGatewayEnabled\":true,\"h264CompressedBitrateKbps\":3000,\"h264CompressedCrf\":20,\"h264CompressedPreset\":\"fast\",\"h264CompressedGopSeconds\":2,\"h264CompressedVbvBufferMs\":250,\"h264WebSocketLiveEdgeTargetMs\":80,\"h264WebSocketSeekThresholdMs\":260,\"singleExperience\":false,\"smoothCatchupRateMax\":1.1,\"dualModels\":{\"minwm\":{\"label\":\"Zing\",\"size\":\"832x480\",\"targetFps\":24,\"sinkSize\":8,\"windowFrames\":32,\"continuous\":true,\"h264StartupDropFrames\":0}}}}"
+UI_CONFIG_JSON="${UI_CONFIG_JSON:-{\"generationModes\":[\"i2v\"],\"defaultGenerationMode\":\"i2v\",\"modelSlots\":[\"minwm\"],\"lockModelSlots\":true,\"size\":\"832x480\",\"targetFps\":${REALTIME_TARGET_FPS},\"sessionMaxLifetimeSeconds\":70,\"playbackAckEnabled\":false,\"h264WebSocketEnabled\":true,\"h264DirectGatewayEnabled\":true,\"h264WebSocketBaseUrl\":\"${PUBLIC_GATEWAY_BASE_URL}\",\"h264CompressedBitrateKbps\":3000,\"h264CompressedCrf\":20,\"h264CompressedPreset\":\"fast\",\"h264CompressedGopSeconds\":2,\"h264CompressedVbvBufferMs\":250,\"h264WebSocketLiveEdgeTargetMs\":${H264_LIVE_EDGE_TARGET_MS},\"h264WebSocketSeekThresholdMs\":${H264_LIVE_EDGE_SEEK_THRESHOLD_MS},\"singleExperience\":false,\"smoothCatchupRateMax\":1.1,\"dualModels\":{\"minwm\":{\"label\":\"Zing\",\"size\":\"832x480\",\"targetFps\":${REALTIME_TARGET_FPS},\"sinkSize\":8,\"windowFrames\":32,\"continuous\":true,\"h264StartupDropFrames\":0}}}}"
 
 log() {
   printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"
@@ -44,12 +66,28 @@ require_cmd() {
 configure_aliyun_cli() {
   require_cmd aliyun
   if [[ -n "${ALIYUN_ACCESS_KEY_ID:-}" && -n "${ALIYUN_ACCESS_KEY_SECRET:-}" ]]; then
+    if [[ -n "${ALIYUN_STS_TOKEN:-}" ]]; then
+      aliyun configure set \
+        --profile default \
+        --mode StsToken \
+        --region "${ALIYUN_REGION}" \
+        --access-key-id "${ALIYUN_ACCESS_KEY_ID}" \
+        --access-key-secret "${ALIYUN_ACCESS_KEY_SECRET}" \
+        --sts-token "${ALIYUN_STS_TOKEN}" >/dev/null
+      return
+    fi
     aliyun configure set \
       --profile default \
       --mode AK \
       --region "${ALIYUN_REGION}" \
       --access-key-id "${ALIYUN_ACCESS_KEY_ID}" \
       --access-key-secret "${ALIYUN_ACCESS_KEY_SECRET}" >/dev/null
+  elif [[ -n "${ALIYUN_ECS_RAM_ROLE}" ]]; then
+    aliyun configure set \
+      --profile default \
+      --mode EcsRamRole \
+      --region "${ALIYUN_REGION}" \
+      --ram-role-name "${ALIYUN_ECS_RAM_ROLE}" >/dev/null
   fi
 }
 
@@ -58,7 +96,8 @@ ensure_data_mount() {
   if [[ "${USE_DEDICATED_DATA_DISK}" != "true" ]]; then
     log "using the root filesystem for /data; dedicated-disk discovery is disabled"
     mkdir -p "${BASE_DIR}" "${BASE_DIR}/logs" "${BASE_DIR}/worker-epochs" \
-      "${BASE_DIR}/code-overlay" "${BASE_DIR}/model-cache" /data/docker
+      "${BASE_DIR}/code-overlay" "${BASE_DIR}/model-cache" \
+      "${WEBUI_SECRET_DIR}" "${WEBUI_GENERATED_DIR}" /data/docker
     return
   fi
   local root_source
@@ -91,7 +130,8 @@ ensure_data_mount() {
   fi
 
   mkdir -p "${BASE_DIR}" "${BASE_DIR}/logs" "${BASE_DIR}/worker-epochs" \
-    "${BASE_DIR}/code-overlay" "${BASE_DIR}/model-cache" /data/docker
+    "${BASE_DIR}/code-overlay" "${BASE_DIR}/model-cache" \
+    "${WEBUI_SECRET_DIR}" "${WEBUI_GENERATED_DIR}" /data/docker
 }
 
 configure_docker_data_root() {
@@ -126,7 +166,7 @@ PY
 }
 
 oss_cp() {
-  aliyun oss cp "$@" --region "${ALIYUN_REGION}" --endpoint "${OSS_ENDPOINT}" -f
+  aliyun oss cp "$@" --region "${OSS_REGION}" --endpoint "${OSS_ENDPOINT}" -f
 }
 
 download_code_overlay() {
@@ -146,6 +186,7 @@ download_code_overlay() {
   fi
   tar -xzf "${archive}" -C "${extract_dir}"
   find "${extract_dir}" \( -name '._*' -o -name '.DS_Store' \) -delete
+  mkdir -p "${extract_dir}/python/sglang/multimodal_gen/apps/realtime_webui_generated"
   test -f "${extract_dir}/python/sglang/multimodal_gen/apps/realtime_webui/app.js"
 }
 
@@ -158,7 +199,7 @@ download_model() {
   rm -rf "${MODEL_DIR}"
   mkdir -p "${MODEL_DIR}"
   aliyun oss cp "${OSS_MODEL_URI}" "${MODEL_DIR}/" \
-    --region "${ALIYUN_REGION}" \
+    --region "${OSS_REGION}" \
     --endpoint "${OSS_ENDPOINT}" \
     --recursive \
     --update \
@@ -171,7 +212,7 @@ download_model() {
 login_acr() {
   log "logging in to ACR"
   local auth_json user token
-  auth_json="$(aliyun cr GetAuthorizationToken --RegionId "${ALIYUN_REGION}" --InstanceId "${ACR_INSTANCE_ID}")"
+  auth_json="$(aliyun cr GetAuthorizationToken --RegionId "${ACR_REGION}" --InstanceId "${ACR_INSTANCE_ID}")"
   user="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["TempUsername"])' <<<"${auth_json}")"
   token="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["AuthorizationToken"])' <<<"${auth_json}")"
   printf '%s' "${token}" | docker login --username "${user}" --password-stdin "${ACR_REGISTRY}" >/dev/null
@@ -199,9 +240,12 @@ stop_old_containers() {
     zing-vae-heartbeat
     zing-gateway
     zing-webui
+    zing-h264-bridge
+    zing-h264ws-bridge
+    zing-webui-h264-bridge
     torch-cu128-test
   )
-  for gpu in 1 2 3; do
+  for gpu in 1 2 3 4 5 6 7; do
     names+=("zing-denoiser-${gpu}" "zing-denoiser-${gpu}-heartbeat")
   done
   docker rm -f "${names[@]}" >/dev/null 2>&1 || true
@@ -253,12 +297,13 @@ start_vae() {
       --device=cuda \
       --dtype=bfloat16 \
       --max-sessions=16 \
+      --max-consumed-age-s="${REALTIME_WORKER_MAX_CONSUMED_AGE_S}" \
       --queue-depth-per-session=1 \
       --encoded-frames-per-batch=1 \
       --encode-workers=4 \
       --direct-h264-output \
       --direct-h264-trigger-output-format=jpeg \
-      --h264-fps=24 \
+      --h264-fps="${REALTIME_TARGET_FPS}" \
       --h264-threads=2 \
       --h264-preset=fast \
       --h264-profile=main \
@@ -308,6 +353,7 @@ start_denoiser() {
     --network "${DOCKER_NETWORK}" \
     --gpus "device=${gpu_devices}" \
     -e PYTHONUNBUFFERED=1 \
+    -e PYTORCH_CUDA_ALLOC_CONF="${DENOISER_PYTORCH_CUDA_ALLOC_CONF}" \
     -e SGLANG_DISABLE_PDEATHSIG=1 \
     -e OMP_NUM_THREADS=4 \
     -e MKL_NUM_THREADS=4 \
@@ -316,7 +362,8 @@ start_denoiser() {
     -e VECLIB_MAXIMUM_THREADS=4 \
     -e TOKENIZERS_PARALLELISM=false \
     -e WORKER_EPOCH_FILE="/worker-epoch/denoiser-${index}" \
-    -e MINWM_ATTENTION_IMPL=dense \
+    -e MINWM_ATTENTION_IMPL="${DENOISER_ATTENTION_IMPL}" \
+    -e MINWM_CACHE_ROTATED_K="${DENOISER_CACHE_ROTATED_K}" \
     -e MINWM_PACKED_ATTENTION_DETERMINISTIC=false \
     -e MINWM_NATIVE_COMPONENTS= \
     -e SGLANG_DIFFUSION_VAE_CHANNELS_LAST_3D=false \
@@ -330,14 +377,14 @@ start_denoiser() {
     -m sglang.multimodal_gen.runtime.launch_server \
       --model-path=/work/model \
       --pipeline-class-name=MinWMCausalDMDPipeline \
-      --attention-backend=torch_sdpa \
-      --performance-mode=speed \
+      --attention-backend="${DENOISER_ATTENTION_BACKEND}" \
+      --performance-mode="${DENOISER_PERFORMANCE_MODE}" \
       --num-gpus=1 \
       --tp-size=1 \
       --sp-degree=1 \
       --ulysses-degree=1 \
       --ring-degree=1 \
-      --enable-cuda-graph \
+      --enable-cuda-graph="${DENOISER_ENABLE_CUDA_GRAPH}" \
       --enable-cfg-parallel=false \
       --enable-torch-compile=false \
       --warmup-mode=off \
@@ -349,6 +396,7 @@ start_denoiser() {
       --realtime-vae-transport=websocket \
       --realtime-session-idle-timeout-s=90 \
       --realtime-session-max-lifetime-s=70 \
+      --realtime-worker-max-consumed-age-s="${REALTIME_WORKER_MAX_CONSUMED_AGE_S}" \
       --realtime-admission-wait-s=10 \
       --realtime-causal-sink-size=8 \
       --realtime-causal-kv-cache-num-frames=32 \
@@ -386,6 +434,7 @@ start_gateway() {
   log "starting gateway"
   docker run -d --name zing-gateway --restart unless-stopped \
     --network "${DOCKER_NETWORK}" \
+    -p "${PUBLIC_GATEWAY_PORT}:18080" \
     -e PYTHONUNBUFFERED=1 \
     "${common_mounts[@]}" \
     --entrypoint python3 \
@@ -399,6 +448,8 @@ start_gateway() {
       --internal-output-url=ws://zing-gateway:18080/v1/internal/realtime_output \
       --output-queue-depth=64 \
       --output-enqueue-timeout-s=0 \
+      --output-queue-max-messages="${GATEWAY_OUTPUT_QUEUE_MAX_MESSAGES}" \
+      --output-queue-max-bytes="${GATEWAY_OUTPUT_QUEUE_MAX_BYTES}" \
       --output-drain-timeout-s=70 \
       --lease-renew-interval-s=10 \
       --release-grace-s=0.5 \
@@ -409,9 +460,14 @@ start_gateway() {
 
 start_webui() {
   log "starting webui on host port ${PUBLIC_WEB_PORT}"
+  local proxy_env_args=()
+  if [[ -f "${WEBUI_PROXY_ENV_FILE}" ]]; then
+    proxy_env_args=(--env-file "${WEBUI_PROXY_ENV_FILE}")
+  fi
   docker run -d --name zing-webui --restart unless-stopped \
     --network "${DOCKER_NETWORK}" \
     -p "${PUBLIC_WEB_PORT}:18080" \
+    "${proxy_env_args[@]}" \
     -e PYTHONUNBUFFERED=1 \
     -e WEBUI_PORT=18080 \
     -e REALTIME_UPSTREAM_HTTP=http://zing-gateway:18080 \
@@ -419,8 +475,12 @@ start_webui() {
     -e MINWM_UPSTREAM_HTTP=http://zing-gateway:18080/backends/minwm \
     -e MINWM_UPSTREAM_WS=ws://zing-gateway:18080/backends/minwm \
     -e VIDEO_PROMPT_REWRITE_PROVIDER=local \
+    -e VIDEO_PROMPT_REWRITE_CREDENTIALS=/run/secrets/realtime-webui/prompt-rewriter-vertex.json \
+    -e CREATE_WORLD_IMAGE_CONFIG=/run/secrets/realtime-webui/world-image-model-config.json \
     -e REALTIME_UI_CONFIG_JSON="${UI_CONFIG_JSON}" \
     "${common_mounts[@]}" \
+    -v "${WEBUI_SECRET_DIR}:/run/secrets/realtime-webui:ro" \
+    -v "${WEBUI_GENERATED_DIR}:/opt/sglang/python/sglang/multimodal_gen/apps/realtime_webui_generated" \
     --entrypoint python \
     "${WEBUI_IMAGE}" \
     /opt/sglang/python/sglang/multimodal_gen/apps/realtime_webui/server.py \
@@ -473,11 +533,20 @@ print_status() {
 }
 
 main() {
+  if [[ "${PUBLIC_WEB_HOST}" == "${RELEASED_PUBLIC_WEB_HOST}" ]]; then
+    echo "${RELEASED_PUBLIC_WEB_HOST} was released; set PUBLIC_WEB_HOST to the new Aliyun host." >&2
+    exit 1
+  fi
+
   configure_aliyun_cli
   ensure_data_mount
   configure_docker_data_root
   download_code_overlay
-  download_model
+  if [[ "${START_GPU_WORKERS}" == "true" ]]; then
+    download_model
+  else
+    log "skipping model download because START_GPU_WORKERS=${START_GPU_WORKERS}"
+  fi
   if [[ "${SKIP_IMAGE_PULL:-false}" != "true" ]]; then
     login_acr
   fi
@@ -486,14 +555,18 @@ main() {
   build_common_mounts
   start_coordinator
   wait_container_http zing-coordinator http://127.0.0.1:18081/healthz
-  start_vae
-  wait_container_http zing-vae http://127.0.0.1:18082/health
-  start_denoiser "1" "1"
-  start_denoiser "2" "2"
-  start_denoiser "3" "3"
-  for index in 1 2 3; do
-    wait_container_http "zing-denoiser-${index}" http://127.0.0.1:30000/health
-  done
+  if [[ "${START_GPU_WORKERS}" == "true" ]]; then
+    start_vae
+    wait_container_http zing-vae http://127.0.0.1:18082/health
+    for index in 1 2 3 4 5 6 7; do
+      start_denoiser "${index}" "${index}"
+    done
+    for index in 1 2 3 4 5 6 7; do
+      wait_container_http "zing-denoiser-${index}" http://127.0.0.1:30000/health
+    done
+  else
+    log "skipping VAE and denoiser startup because START_GPU_WORKERS=${START_GPU_WORKERS}"
+  fi
   start_gateway
   wait_container_http zing-gateway http://127.0.0.1:18080/healthz
   start_webui
@@ -503,6 +576,7 @@ main() {
   fi
   print_status
   log "webui: http://${PUBLIC_WEB_HOST}/?mode=i2v&playback=smooth_timeline"
+  log "gateway: ${PUBLIC_GATEWAY_BASE_URL}"
 }
 
 main "$@"

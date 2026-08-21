@@ -662,6 +662,7 @@ class MinWMCausalSelfAttention(CausalWanSelfAttention):
         )
         if (
             _MINWM_CACHE_ROTATED_K
+            and cache_view.rotated_k is not None
             and cache_view.rotated_k_is_valid
             and cache_view.is_recompute
         ):
@@ -682,7 +683,7 @@ class MinWMCausalSelfAttention(CausalWanSelfAttention):
             attention_key = apply_minwm_rotary_embedding(
                 cache_view.k, key_cos, key_sin
             ).type_as(value)
-            if _MINWM_CACHE_ROTATED_K:
+            if _MINWM_CACHE_ROTATED_K and cache_view.rotated_k is not None:
                 cache_view.rotated_k.copy_(attention_key)
                 kv_cache.rotated_k_is_valid = True
         attention_value = cache_view.v

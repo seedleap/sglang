@@ -4,12 +4,23 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 
 import torch
 
 from sglang.multimodal_gen.runtime.layers.kvcache.causal_attention_cache import (
     CausalSelfAttentionKVCache,
 )
+
+
+def _env_flag(name: str, default: bool) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() not in {"", "0", "false", "no", "off"}
+
+
+_MINWM_CACHE_ROTATED_K = _env_flag("MINWM_CACHE_ROTATED_K", True)
 
 
 @dataclass(slots=True)
@@ -149,6 +160,10 @@ class MinWMCausalSelfAttentionKVCache(CausalSelfAttentionKVCache):
         old_cache_size = self.cache_size
         old_rotated_k = self.rotated_k
         CausalSelfAttentionKVCache._grow_to_fit(self, required_tokens)
+        if not _MINWM_CACHE_ROTATED_K:
+            self.rotated_k = None
+            self.rotated_k_is_valid = False
+            return
         if self.cache_size == old_cache_size or old_rotated_k is None:
             return
         self.rotated_k = self.k.new_empty(self.k.shape)
@@ -589,16 +604,20 @@ class MinWMCausalSelfAttentionKVCache(CausalSelfAttentionKVCache):
             local_end_index=plan.selected_len,
         )
         self.last_attention_plan = plan
-        rotated_k = self._head_view(
-            self._ensure_rotated_k()[:, : plan.selected_len], head_slice
-        )
+        rotated_k = None
+        rotated_k_is_valid = False
+        if _MINWM_CACHE_ROTATED_K:
+            rotated_k = self._head_view(
+                self._ensure_rotated_k()[:, : plan.selected_len], head_slice
+            )
+            rotated_k_is_valid = self.rotated_k_is_valid
         return MinWMCausalAttentionKVView(
             k=self._head_view(self.k[:, : plan.selected_len], head_slice),
             v=self._head_view(self.v[:, : plan.selected_len], head_slice),
             query_position_ids=plan.query_position_ids,
             key_position_ids=plan.key_position_ids,
             rotated_k=rotated_k,
-            rotated_k_is_valid=self.rotated_k_is_valid,
+            rotated_k_is_valid=rotated_k_is_valid,
             current_local_start=plan.current_local_start,
             current_local_end=plan.current_local_end,
             is_recompute=plan.is_recompute,
@@ -674,7 +693,11 @@ class MinWMCausalSelfAttentionKVCache(CausalSelfAttentionKVCache):
             None if other.rope_position_ids is None else other.rope_position_ids.clone()
         )
         self.token_ids = None if other.token_ids is None else other.token_ids.clone()
-        if other.rotated_k_is_valid and other.rotated_k is not None:
+        if (
+            _MINWM_CACHE_ROTATED_K
+            and other.rotated_k_is_valid
+            and other.rotated_k is not None
+        ):
             self._ensure_rotated_k()[:, :other_local_end].copy_(
                 other.rotated_k[:, :other_local_end]
             )

@@ -96,6 +96,31 @@ def create_app(
 
     @app.get("/health")
     async def health():
+        reservation_state = (
+            await reservation_registry.snapshot()
+            if reservation_registry is not None
+            else None
+        )
+        if (
+            reservation_state is not None
+            and reservation_state.get("lifecycle") == "failed"
+        ):
+            return JSONResponse(
+                {
+                    "status": "failed",
+                    "reason": "worker reservation watchdog failed",
+                    "oldest_consumed_age_s": reservation_state.get(
+                        "oldest_consumed_age_s", 0.0
+                    ),
+                    "stale_consumed_reservations": reservation_state.get(
+                        "stale_consumed_reservations", 0
+                    ),
+                    "last_progress_age_s": reservation_state.get(
+                        "last_progress_age_s", 0.0
+                    ),
+                },
+                status_code=503,
+            )
         return JSONResponse(
             {
                 "status": "ok",
@@ -546,6 +571,7 @@ def _add_worker_cli_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--max-message-mb", type=int, default=64)
     parser.add_argument("--shared-memory-dir")
     parser.add_argument("--worker-epoch")
+    parser.add_argument("--max-consumed-age-s", type=float, default=0.0)
     parser.add_argument("--direct-h264-output", action="store_true")
     parser.add_argument(
         "--direct-h264-trigger-output-format",
@@ -754,6 +780,7 @@ def _run_worker(args, exact_server_args) -> None:
     reservations = WorkerReservationRegistry(
         worker_epoch=resolve_worker_epoch(args.worker_epoch),
         capacity=max_sessions,
+        max_consumed_age_s=args.max_consumed_age_s,
     )
     app = create_app(
         worker,

@@ -8,7 +8,7 @@ import argparse
 import logging
 import time
 from contextlib import asynccontextmanager
-from dataclasses import asdict
+from dataclasses import asdict, fields
 from types import SimpleNamespace
 
 import uvicorn
@@ -34,6 +34,24 @@ from sglang.multimodal_gen.runtime.utils.realtime_trace import (
 )
 
 logger = logging.getLogger(__name__)
+_WORKER_HEARTBEAT_FIELDS = frozenset(field.name for field in fields(WorkerHeartbeat))
+_WORKER_SLOT_FIELDS = frozenset(field.name for field in fields(WorkerSlot))
+
+
+def _worker_slot_from_payload(payload: dict) -> WorkerSlot:
+    return WorkerSlot(
+        **{key: value for key, value in payload.items() if key in _WORKER_SLOT_FIELDS}
+    )
+
+
+def _worker_heartbeat_from_payload(payload: dict) -> WorkerHeartbeat:
+    return WorkerHeartbeat(
+        **{
+            key: value
+            for key, value in payload.items()
+            if key in _WORKER_HEARTBEAT_FIELDS
+        }
+    )
 
 
 def _assignment(payload: dict) -> SessionAssignment:
@@ -43,8 +61,8 @@ def _assignment(payload: dict) -> SessionAssignment:
         generation_id=payload["generation_id"],
         token=payload["token"],
         expires_at=float(payload["expires_at"]),
-        denoiser=WorkerSlot(**payload["denoiser"]),
-        vae=WorkerSlot(**payload["vae"]),
+        denoiser=_worker_slot_from_payload(payload["denoiser"]),
+        vae=_worker_slot_from_payload(payload["vae"]),
     )
 
 
@@ -88,7 +106,7 @@ def create_app(coordinator: RealtimeCoordinator) -> FastAPI:
     @app.post("/v1/workers/heartbeat", status_code=status.HTTP_204_NO_CONTENT)
     async def heartbeat(payload: dict):
         try:
-            await coordinator.heartbeat(WorkerHeartbeat(**payload))
+            await coordinator.heartbeat(_worker_heartbeat_from_payload(payload))
         except (CoordinatorRejected, TypeError, KeyError) as exc:
             if isinstance(exc, CoordinatorRejected):
                 _raise_http(exc)

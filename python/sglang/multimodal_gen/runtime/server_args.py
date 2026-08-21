@@ -293,6 +293,7 @@ class ServerArgs(DisaggServerArgsMixin):
     realtime_session_lease_ttl_s: float = 60.0
     realtime_session_idle_timeout_s: float = 60.0
     realtime_session_max_lifetime_s: float = 600.0
+    realtime_worker_max_consumed_age_s: float = 0.0
     realtime_admission_wait_s: float = 10.0
     realtime_session_lease_table: str | None = None
     realtime_require_authenticated_user: bool = False
@@ -1641,6 +1642,16 @@ class ServerArgs(DisaggServerArgsMixin):
             ),
         )
         parser.add_argument(
+            "--realtime-worker-max-consumed-age-s",
+            type=float,
+            default=ServerArgs.realtime_worker_max_consumed_age_s,
+            help=(
+                "Mark a realtime worker failed when a consumed reservation lives "
+                "longer than this many seconds. Set to 0 to disable the worker-local "
+                "stale reservation watchdog."
+            ),
+        )
+        parser.add_argument(
             "--realtime-admission-wait-s",
             type=float,
             default=ServerArgs.realtime_admission_wait_s,
@@ -2303,6 +2314,8 @@ class ServerArgs(DisaggServerArgsMixin):
             raise ValueError("realtime_session_idle_timeout_s must be >= 0")
         if self.realtime_session_max_lifetime_s < 0:
             raise ValueError("realtime_session_max_lifetime_s must be >= 0")
+        if self.realtime_worker_max_consumed_age_s < 0:
+            raise ValueError("realtime_worker_max_consumed_age_s must be >= 0")
         if self.realtime_admission_wait_s < 0:
             raise ValueError("realtime_admission_wait_s must be >= 0")
         if self.realtime_vae_backend not in REALTIME_VAE_BACKENDS:
