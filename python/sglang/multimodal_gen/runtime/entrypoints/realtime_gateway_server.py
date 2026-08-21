@@ -1347,9 +1347,13 @@ def create_app(
                     world_callbacks.ended(principal.run_id, trace_id, "completed")
                 else:
                     world_callbacks.ended(principal.run_id, trace_id, "user_left")
+            # 只有"内容没跑完就被时长掐断"才算腰斩。worker 已经正常收尾（跑满
+            # max_chunks）时哪怕 deadline 随后到点，也不能写这个理由 —— 业务侧
+            # 靠它区分"内容播完"与"被硬顶截断"，写错会把一次完整生成误判成事故。
             close_reason = (
                 "maximum session lifetime reached"
                 if world_session.get("deadline_hit")
+                and not world_session.get("worker_finished")
                 else ""
             )
             try:
