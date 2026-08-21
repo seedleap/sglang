@@ -46,6 +46,19 @@ function configuredModelString(key, name, fallback = "") {
   return String(value);
 }
 
+function ownConfiguredNumber(config, name) {
+  if (!Object.prototype.hasOwnProperty.call(config || {}, name)) return null;
+  const value = Number(config[name]);
+  return Number.isFinite(value) ? value : null;
+}
+
+function configuredRuntimeTargetFps(key) {
+  const modelFps = ownConfiguredNumber(DUAL_MODEL_CONFIG[key], "targetFps");
+  if (modelFps != null) return modelFps;
+  if (key === "minwm") return ownConfiguredNumber(UI_CONFIG, "targetFps");
+  return null;
+}
+
 function h264CompressionInit(init, key) {
   const bitrateKbps = Math.max(
     250,
@@ -2407,7 +2420,8 @@ function renderModelTelemetry(key, stats = {}) {
 }
 
 function requestedInputFps(key = "minwm") {
-  return Number(modelControl(key, "fps").value || DEFAULT_TARGET_FPS);
+  return configuredRuntimeTargetFps(key)
+    ?? Number(modelControl(key, "fps").value || DEFAULT_TARGET_FPS);
 }
 
 function frameInterpolationMultiplier(key = "minwm") {

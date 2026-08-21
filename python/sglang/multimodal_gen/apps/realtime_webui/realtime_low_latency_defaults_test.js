@@ -101,6 +101,16 @@ assert.match(
   /function applyRuntimeUiConfig\(\) \{[\s\S]*?configuredModelString\([\s\S]*?"size"[\s\S]*?modelControl\(key, "size"\)\.value = configuredSize/,
   "deployment runtime config should initialize hidden model Size controls before requests are sent",
 );
+assert.match(
+  appJs,
+  /function configuredRuntimeTargetFps\(key\) \{[\s\S]*?ownConfiguredNumber\(DUAL_MODEL_CONFIG\[key\], "targetFps"\)[\s\S]*?ownConfiguredNumber\(UI_CONFIG, "targetFps"\)/,
+  "deployment runtime config should provide a hard target FPS override for request payloads",
+);
+assert.match(
+  appJs,
+  /function requestedInputFps\(key = "minwm"\) \{[\s\S]*?configuredRuntimeTargetFps\(key\)[\s\S]*?modelControl\(key, "fps"\)\.value/,
+  "request payload FPS should not inherit stale browser controls when a deployment target is configured",
+);
 assert.doesNotMatch(
   appJs,
   /\$\("size"\)\.value\s*=\s*preset\.size/,
