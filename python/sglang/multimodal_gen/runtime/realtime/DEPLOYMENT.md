@@ -68,3 +68,44 @@ Filtering unknown fields avoids transient WebSocket init failures such as:
 ```text
 WorkerSlot.__init__() got an unexpected keyword argument 'oldest_consumed_age_s'
 ```
+
+## Live ConfigMap hotfix, 2026-08-21 (must be removed after the next image)
+
+The H.264 tail-drain fix in this commit is currently shipped to the B300 lab
+namespace as a ConfigMap overlay rather than a rebuilt image:
+
+- ConfigMap `realtime-h264-drain-fix-20260821` holds two files:
+  `h264_media_pipeline.py` and `realtime_gateway_server.py`.
+- `zing-vae` and `zing-vae-b200` mount the pipeline file over
+  `.../runtime/realtime/h264_media_pipeline.py` via `subPath`.
+- `gateway` mounts the server file over
+  `.../runtime/entrypoints/realtime_gateway_server.py` via `subPath`, and its
+  `--output-drain-timeout-s` was lowered from 90 to 8 in the same patch.
+
+This mirrors the pre-existing `realtime-watchdog-code-20260820` overlay and
+carries the same hazard, which is the reason for this note:
+
+**A `subPath` ConfigMap mount pins that file forever.** It survives pod
+restarts, scaling, and `kubectl set image` — which is what makes it a usable
+hotfix, but it also means a newer image's copy of the same file is silently
+shadowed by the 2026-08-21 snapshot. The overlay is an escape hatch, not an
+upgrade path.
+
+Required follow-up once an image containing this commit is rolled out:
+
+1. Remove the `h264-drain-fix` volume and its `volumeMounts` from `zing-vae`,
+   `zing-vae-b200`, and `gateway`.
+2. Keep `--output-drain-timeout-s=8`; 90 was the value that turned a missing
+   final-chunk marker into a 90-second seat hold.
+3. Delete ConfigMap `realtime-h264-drain-fix-20260821`.
+
+Verification that the overlay is gone and the image carries the fix:
+
+```sh
+kubectl -n minwm-zing-b300-sp1-20260819 exec deploy/zing-vae -c vae -- \
+  grep -c CLOSE_DRAIN_TIMEOUT_S \
+  /opt/sglang/python/sglang/multimodal_gen/runtime/realtime/h264_media_pipeline.py
+```
+
+The namespace has no manifest under version control; the live objects are the
+source of truth, so this note is the only record of the overlay.

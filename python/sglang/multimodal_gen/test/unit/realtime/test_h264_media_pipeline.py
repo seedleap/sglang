@@ -143,3 +143,53 @@ def test_h264_pipeline_bounds_rgb_before_encoding_and_emits_fmp4(monkeypatch):
         await pipeline.close()
 
     asyncio.run(run())
+
+
+def test_h264_pipeline_drains_final_chunk_before_close(monkeypatch):
+    """收尾必须把最后一块的帧和 media_chunk_complete 发出去。
+
+    回归的是线上真事故：VAE 收到 is_final_chunk 后立刻拆会话 → close() 直接
+    cancel+clear → 最后一块的完成标记被丢 → 网关等 chunk_index==max_chunks-1
+    的标记等不到，空转到 --output-drain-timeout-s（线上 90s）才收摊，一局白占
+    90 秒座位，还把正常跑完的生成误标成 "maximum session lifetime reached"。
+    """
+
+    async def run():
+        process = _FakeProcess()
+
+        async def create_subprocess(*_args, **_kwargs):
+            return process
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", create_subprocess)
+        wires = []
+
+        async def send(wire):
+            wires.append(wire)
+
+        pipeline = H264MediaPipeline(
+            session_id="session",
+            generation_id="generation",
+            send=send,
+            config=H264PipelineConfig(
+                enabled=True,
+                # 队列放得下整块，避免掉帧策略干扰本用例
+                max_queued_frames=8,
+                live_edge_frames=8,
+            ),
+        )
+        frame = bytes([1, 2, 3]) * 4
+        # 入队后不给事件循环任何喘息就 close()：模拟"解码完最后一块立刻收摊"
+        pipeline.enqueue(_header(), _batch(frame, frame))
+        pipeline.enqueue_completion(_header(), num_frames=2)
+        await pipeline.close()
+
+        messages = [decode_message(wire) for wire in wires]
+        types = [message["type"] for message in messages]
+        assert types.count("media_batch") == 2, f"尾帧被丢了: {types}"
+        completions = [m for m in messages if m["type"] == "media_chunk_complete"]
+        assert len(completions) == 1, f"最后一块的完成标记被丢了: {types}"
+        assert completions[0]["chunk_index"] == 0
+        assert completions[0]["media_transport"] == "h264"
+        assert process.stdin.frames == [frame, frame]
+
+    asyncio.run(run())

@@ -37,6 +37,10 @@ logger = logging.getLogger(__name__)
 
 MediaSender = Callable[[bytes], Awaitable[None]]
 
+# 收尾排空的安全上界。close() 必须把队列里剩下的帧与完成标记发完再拆编码器，
+# 但等待要有界 —— 万一 ffmpeg 卡住，拆除流程不能跟着挂死。
+CLOSE_DRAIN_TIMEOUT_S = 2.0
+
 
 @dataclass(frozen=True, slots=True)
 class H264PipelineConfig:
@@ -120,6 +124,13 @@ class _ChunkCompletion:
     is_final_chunk: bool
 
 
+@dataclass(frozen=True, slots=True)
+class _DrainMarker:
+    """收尾哨兵。队列严格 FIFO，哨兵被取到就说明它前面的都发完了。"""
+
+    event: asyncio.Event
+
+
 class H264MediaPipeline:
     """Bounded RGB-to-H.264 pipeline owned by one realtime session."""
 
@@ -136,7 +147,7 @@ class H264MediaPipeline:
         self.generation_id = generation_id
         self.send = send
         self.config = config
-        self._queue: deque[_QueuedFrame | _ChunkCompletion] = deque()
+        self._queue: deque[_QueuedFrame | _ChunkCompletion | _DrainMarker] = deque()
         self._queue_ready = asyncio.Event()
         self._queued_frames = 0
         self._closed = False
@@ -229,6 +240,7 @@ class H264MediaPipeline:
     async def close(self) -> None:
         if self._closed:
             return
+        await self._drain_pending()
         self._closed = True
         self._queue_ready.set()
         self._runner.cancel()
@@ -237,6 +249,33 @@ class H264MediaPipeline:
         self._queue.clear()
         self._queued_frames = 0
 
+    async def _drain_pending(self) -> None:
+        """把队列里剩余的帧与完成标记发完再拆管线。
+
+        最后一块的 media_chunk_complete 就是在会话拆除的同一刻才入队的
+        （realtime_vae_server 收到 is_final_chunk 的解码结果后立即收摊）。
+        旧实现直接 cancel + clear，把尾帧和这个标记一起丢掉；而网关要等
+        chunk_index == max_chunks-1 的标记才认为输出收尾，等不到就空转到
+        --output-drain-timeout-s 超时 —— 线上实测一局白占 90 秒座位，
+        并且期间会话 deadline 到点，把一次正常跑完的生成误标成
+        "maximum session lifetime reached"。
+        """
+        if self._runner.done():
+            return
+        marker = _DrainMarker(event=asyncio.Event())
+        self._queue.append(marker)
+        self._queue_ready.set()
+        try:
+            await asyncio.wait_for(marker.event.wait(), timeout=CLOSE_DRAIN_TIMEOUT_S)
+        except TimeoutError:
+            logger.warning(
+                "VAE H.264 pipeline drain timed out: session_id=%s "
+                "generation_id=%s queued_frames=%d",
+                self.session_id,
+                self.generation_id,
+                self._queued_frames,
+            )
+
     def _raise_if_failed(self) -> None:
         if not self._runner.done() or self._runner.cancelled():
             return
@@ -244,7 +283,7 @@ class H264MediaPipeline:
         if failure is not None:
             raise RuntimeError("VAE H.264 pipeline is unavailable") from failure
 
-    async def _next(self) -> _QueuedFrame | _ChunkCompletion | None:
+    async def _next(self) -> _QueuedFrame | _ChunkCompletion | _DrainMarker | None:
         while not self._closed:
             if self._queue:
                 item = self._queue.popleft()
@@ -262,6 +301,9 @@ class H264MediaPipeline:
     async def _run(self) -> None:
         try:
             while (item := await self._next()) is not None:
+                if isinstance(item, _DrainMarker):
+                    item.event.set()
+                    continue
                 if isinstance(item, _ChunkCompletion):
                     await self._send_completion(item)
                     continue
@@ -553,7 +595,7 @@ class H264MediaPipeline:
             )
 
     def _discard_queued_before(self, event_id: int) -> None:
-        retained: deque[_QueuedFrame | _ChunkCompletion] = deque()
+        retained: deque[_QueuedFrame | _ChunkCompletion | _DrainMarker] = deque()
         while self._queue:
             item = self._queue.popleft()
             if isinstance(item, _QueuedFrame) and item.event_id < event_id:
@@ -604,6 +646,14 @@ class H264MediaPipeline:
             if process.stdin is not None:
                 with contextlib.suppress(Exception):
                     process.stdin.close()
+            # 关掉 stdin 后 ffmpeg 会把缓冲里的帧冲出来，stdout 泵读到 EOF 自然退出。
+            # 不等它就等于把最后一个 GOP 的画面丢掉（正常收尾路径才等）。
+            if self._stdout_task is not None:
+                with contextlib.suppress(Exception):
+                    await asyncio.wait_for(
+                        asyncio.shield(self._stdout_task),
+                        timeout=CLOSE_DRAIN_TIMEOUT_S,
+                    )
             try:
                 await asyncio.wait_for(process.wait(), timeout=2)
             except TimeoutError:
