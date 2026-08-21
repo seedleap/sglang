@@ -2349,8 +2349,8 @@ function renderProtocolPerformance(key, stats = {}) {
     stats.bufferMs,
   );
   const inputUplinkMs = protocolMetric(
-    stats.lastInputUplinkMs,
     telemetry.input_uplink_ms,
+    stats.lastInputUplinkMs,
   );
   const e2eMs = protocolMetric(
     stats.lastPresentedControlToVideoMs,

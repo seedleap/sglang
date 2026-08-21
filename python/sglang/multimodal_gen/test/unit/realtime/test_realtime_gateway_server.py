@@ -90,6 +90,7 @@ def test_gateway_trace_events_use_the_independent_otlp_log_plane():
 
     assert "emit_realtime_trace_payload" in source
     assert "gateway.browser_send_complete" in source
+    assert "gateway_browser_send_slow" in source
     assert 'logger.info(\n        "realtime_trace %s"' not in source
 
 

@@ -14,8 +14,11 @@ const video = {
   readyState: 0,
   videoWidth: 0,
   videoHeight: 0,
+  currentTime: 0,
+  playbackRate: 1,
   addEventListener() {},
   cancelVideoFrameCallback() {},
+  play: () => Promise.resolve(),
 };
 const stats = [];
 const session = new H264WebSocketSession({
@@ -98,6 +101,27 @@ session.activeAppendItem.appendStartedAtMs -= 5;
 session._handleAppendEnd();
 assert.ok(stats.at(-1).lastMseQueueMs >= 7);
 assert.ok(stats.at(-1).lastMseAppendMs >= 5);
+
+session.liveEdgeTargetMs = 500;
+session.liveEdgeSeekThresholdMs = 900;
+video.currentTime = 10;
+session.sourceBuffer = {
+  updating: false,
+  buffered: {
+    length: 1,
+    start: () => 0,
+    end: () => 10.08,
+  },
+  remove() {},
+};
+session._maintainLiveEdge();
+assert.equal(video.playbackRate, 0.9);
+assert.equal(session.lastStats.playbackRate, 0.9);
+video.currentTime = 10;
+session.sourceBuffer.buffered.end = () => 11.2;
+session._maintainLiveEdge();
+assert.equal(Number(video.currentTime.toFixed(1)), 10.7);
+assert.equal(video.playbackRate, 1);
 
 const normalCloseStates = [];
 const normalCloseErrors = [];

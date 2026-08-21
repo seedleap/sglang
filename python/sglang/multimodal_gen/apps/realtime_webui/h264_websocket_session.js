@@ -28,6 +28,10 @@
     return "error";
   }
 
+  function clamp(value, min, max) {
+    return Math.min(max, Math.max(min, value));
+  }
+
   function closeDetails(event) {
     const code = Number(event?.code || 0);
     const reason = String(event?.reason || "");
@@ -145,6 +149,7 @@
       this.traceId = "";
       this.mediaFps = 24;
       this.playbackAckEnabled = false;
+      this.lastPlaybackRate = 1;
       this.lastStats = {};
       this.handlePlayable = () => this._markPlayable();
       for (const name of ["loadeddata", "playing", "resize", "timeupdate"]) {
@@ -183,6 +188,8 @@
       this.traceId = String(init.trace_id || "");
       this.mediaFps = Math.max(1, Number(init.fps || 24));
       this.playbackAckEnabled = init.playback_ack_enabled === true;
+      this.lastPlaybackRate = 1;
+      try { this.video.playbackRate = 1; } catch {}
       this.appendQueue = [];
       this.appendQueueBytes = 0;
       this.activeAppendItem = null;
@@ -456,6 +463,8 @@
       this.controlSentEpochByEvent.clear();
       this.playable = false;
       this.startupConnected = false;
+      this.lastPlaybackRate = 1;
+      try { this.video.playbackRate = 1; } catch {}
       if (emitState && hadSession) this._setState("closed", { reason });
     }
 
@@ -557,6 +566,7 @@
         this.video.currentTime = liveEdge;
         playbackBufferMs = Math.max(0, (end - liveEdge) * 1000);
       }
+      this._tuneLivePlaybackRate(playbackBufferMs);
       if (!sourceBuffer.updating && current > 6) {
         const removeEnd = current - 3;
         if (removeEnd > 0 && sourceBuffer.buffered.start(0) < removeEnd) {
@@ -568,8 +578,35 @@
       this._emitStats({
         mseBufferMs: playbackBufferMs,
         playbackBufferMs,
+        playbackRate: this.lastPlaybackRate,
         appendQueueBytes: this.appendQueueBytes,
       });
+    }
+
+    _tuneLivePlaybackRate(bufferMs) {
+      const targetMs = Math.max(0, Number(this.liveEdgeTargetMs || 0));
+      if (!targetMs || !Number.isFinite(bufferMs)) {
+        if (this.lastPlaybackRate !== 1) {
+          try { this.video.playbackRate = 1; } catch {}
+          this.lastPlaybackRate = 1;
+        }
+        return;
+      }
+      const ratio = bufferMs / Math.max(1, targetMs);
+      let desired = 1;
+      if (ratio < 0.35) {
+        desired = 0.9;
+      } else if (ratio < 0.65) {
+        desired = 0.95;
+      } else if (ratio > 1.45) {
+        desired = 1.08;
+      } else if (ratio > 1.2) {
+        desired = 1.04;
+      }
+      desired = clamp(desired, 0.9, 1.08);
+      if (Math.abs(desired - this.lastPlaybackRate) < 0.01) return;
+      try { this.video.playbackRate = desired; } catch {}
+      this.lastPlaybackRate = desired;
     }
 
     _handleMetadata(event) {
@@ -798,6 +835,7 @@
         const buffered = this.sourceBuffer?.buffered;
         const end = buffered?.length ? buffered.end(buffered.length - 1) : 0;
         const bufferMs = Math.max(0, (end - Number(this.video.currentTime || 0)) * 1000);
+        this._tuneLivePlaybackRate(bufferMs);
         this._emitStats({
           bytesReceived: this.bytesReceived,
           bytes: this.bytesReceived,
@@ -810,6 +848,7 @@
           sourceFps: this.mediaFps,
           serverFps: this.sourceSamples.length,
           deliveryFps: this.deliverySamples.length,
+          playbackRate: this.lastPlaybackRate,
           protocol: "websocket",
           codec: "h264",
         });

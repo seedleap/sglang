@@ -111,6 +111,11 @@ assert.match(
   /function requestedInputFps\(key = "minwm"\) \{[\s\S]*?configuredRuntimeTargetFps\(key\)[\s\S]*?modelControl\(key, "fps"\)\.value/,
   "request payload FPS should not inherit stale browser controls when a deployment target is configured",
 );
+assert.match(
+  appJs,
+  /const inputUplinkMs = protocolMetric\(\s*telemetry\.input_uplink_ms,\s*stats\.lastInputUplinkMs,\s*\);/,
+  "the uplink panel should prefer server-measured input timing over delayed control ACK timing",
+);
 assert.doesNotMatch(
   appJs,
   /\$\("size"\)\.value\s*=\s*preset\.size/,

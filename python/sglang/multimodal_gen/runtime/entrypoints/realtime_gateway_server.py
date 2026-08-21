@@ -1140,6 +1140,27 @@ def create_app(
                     **queue_fields,
                     **send_fields,
                 )
+                gateway_queue_messages = int(queue_fields.get("gateway_queue_messages") or 0)
+                gateway_queue_bytes = int(queue_fields.get("gateway_queue_bytes") or 0)
+                if (
+                    browser_send_ms >= 100.0
+                    or gateway_queue_messages >= 128
+                    or gateway_queue_bytes >= 8 * 1024 * 1024
+                ):
+                    logger.warning(
+                        "gateway_browser_send_slow trace_id=%s session_id=%s "
+                        "source=%s type=%s send_ms=%.3f queue_messages=%s "
+                        "queue_bytes=%s oldest_frame_age_ms=%s wire_bytes=%s",
+                        trace_id,
+                        session_id,
+                        send_source,
+                        send_fields.get("message_type"),
+                        browser_send_ms,
+                        gateway_queue_messages,
+                        gateway_queue_bytes,
+                        queue_fields.get("gateway_oldest_frame_age_ms", 0),
+                        send_fields.get("wire_bytes", 0),
+                    )
 
             async def renew_lease():
                 nonlocal assignment
