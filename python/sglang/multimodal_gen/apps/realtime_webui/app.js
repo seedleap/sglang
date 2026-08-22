@@ -1504,7 +1504,7 @@ function markWorldExperienceReady(modelKey) {
   setStatus("Live", "live");
   $("sessionNotice").hidden = true;
   renderRuntimeSkillBar();
-  addHistory(`world ready · ${modelLabel(modelKey)} visible · timer and dual recordings started`);
+  addHistory(`world ready · ${modelLabel(modelKey)} visible · timer and recording started`);
   return true;
 }
 
@@ -2610,13 +2610,17 @@ function updateRecordButton() {
 function updateRecordingDownloadButton() {
   const button = $("recordDownloadBtn");
   if (!button) return;
-  const ready = recordingDownloads.length === 2;
+  const ready = recordingDownloads.length > 0;
+  const label = button.querySelector("span");
   button.hidden = !ready;
   button.disabled = !ready || recordingSaving;
   button.setAttribute("aria-disabled", !ready || recordingSaving ? "true" : "false");
+  if (label) {
+    label.textContent = recordingDownloads.length > 1 ? "下载全部录像" : "下载录像";
+  }
   button.title = ready
-    ? `同步下载 ${recordingDownloads.map((item) => item.fileName).join("、")}`
-    : "两份录像生成后可下载";
+    ? `下载 ${recordingDownloads.map((item) => item.fileName).join("、")}`
+    : "录像生成后可下载";
 }
 
 function setRecordingDownloads(outputs = []) {
@@ -2633,7 +2637,7 @@ function setRecordingDownloads(outputs = []) {
 }
 
 function downloadGameplayRecordings(event) {
-  if (recordingDownloads.length !== 2 || recordingSaving) {
+  if (!recordingDownloads.length || recordingSaving) {
     event?.preventDefault?.();
     return;
   }
@@ -2646,7 +2650,7 @@ function downloadGameplayRecordings(event) {
     link.click();
     link.remove();
   }
-  addHistory(`downloaded both gameplay recordings · ${recordingDownloads.map((item) => item.fileName).join(" · ")}`);
+  addHistory(`downloaded gameplay recording · ${recordingDownloads.map((item) => item.fileName).join(" · ")}`);
 }
 
 function resetRecordingPromptOverlay() {
@@ -3239,22 +3243,34 @@ function jsonSafe(value, depth = 0) {
 }
 
 function createStageRecordingTracks() {
-  return [
-    createRecordingTrack({
+  const tracks = [];
+  if (shouldRecordComparison()) {
+    tracks.push(createRecordingTrack({
       key: "comparison",
       label: "Zing × LingBot2",
       variant: "comparison",
       canvas: recordingCanvas,
       ctx: recordingCtx,
-    }),
-    createRecordingTrack({
-      key: "zing",
-      label: "Zing",
-      variant: "zing",
-      canvas: zingRecordingCanvas,
-      ctx: zingRecordingCtx,
-    }),
-  ];
+    }));
+  }
+  tracks.push(createRecordingTrack({
+    key: "zing",
+    label: "Zing",
+    variant: "zing",
+    canvas: zingRecordingCanvas,
+    ctx: zingRecordingCtx,
+  }));
+  return tracks;
+}
+
+function shouldRecordComparison() {
+  if (UI_CONFIG.singleExperience === true) return false;
+  const keys = selectedModelKeys();
+  return keys.includes("minwm") && keys.includes("lingbot2");
+}
+
+function recordingTrackSummary(tracks = recordingTracks) {
+  return tracks.map((track) => track.label).join(" + ") || "Zing";
 }
 
 function startRecording({ source = "manual" } = {}) {
@@ -3312,7 +3328,7 @@ function startRecording({ source = "manual" } = {}) {
   recordingTimer = window.setInterval(updateRecordButton, 250);
   updateRecordButton();
   updateRecordFolderButton();
-  addHistory("dual recording started · comparison + Zing");
+  addHistory(`recording started · ${recordingTrackSummary(recordingTracks)}`);
   return true;
 }
 
@@ -3354,9 +3370,9 @@ async function stopRecording({ reason = "manual" } = {}) {
         : await buildMp4RecordingBlob(track),
     })));
     await saveRecordingArtifactFiles(outputs, { deferDownload: true });
-    addHistory(`both gameplay recordings ready · ${recordingFrameIndex} synchronized frames · ${extension}`);
+    addHistory(`gameplay recording ready · ${recordingFrameIndex} synchronized frames · ${extension} · ${recordingTrackSummary(recordingTracks)}`);
     if (["session_timeout", "session_closed", "primary_disconnected"].includes(reason)) {
-      showSessionNotice("两份游玩录像已生成，可点击右上角同步下载");
+      showSessionNotice("游玩录像已生成，可点击右上角下载");
       showRecordingReadyToast();
     }
   } catch (error) {
@@ -3633,7 +3649,7 @@ function drawRecordingStageFrame(image, track = recordingTracks[0] || {
     recordingCtx.imageSmoothingQuality = "high";
     recordingCtx.fillStyle = "#11140f";
     recordingCtx.fillRect(0, 0, RECORDING_STAGE_WIDTH, RECORDING_STAGE_HEIGHT);
-    drawRecordingTopbar(track.variant);
+    drawRecordingTopbar(track.variant, track.label);
     if (track.variant === "zing") drawRecordingZingPreview(minwmSource);
     else drawRecordingComparisonPreview(minwmSource, lingbot2Canvas);
     drawRecordingBottomGradient();
@@ -3667,7 +3683,7 @@ function recordingDrawableSource(image) {
   return image || canvas;
 }
 
-function drawRecordingTopbar(variant = "comparison") {
+function drawRecordingTopbar(variant = "comparison", label = "") {
   const y = 0;
   fillRecordingRect(0, y, RECORDING_STAGE_WIDTH, RECORDING_STAGE_TOPBAR_HEIGHT, "#0b1110");
   recordingCtx.fillStyle = "rgba(232, 234, 223, 0.12)";
@@ -3705,7 +3721,7 @@ function drawRecordingTopbar(variant = "comparison") {
     maxWidth: 60,
   });
 
-  drawRecordingLabel(variant === "zing" ? "Zing" : "Zing  ×  LingBot2", RECORDING_STAGE_WIDTH - RECORDING_STAGE_PADDING, y + 30, {
+  drawRecordingLabel(label || (variant === "zing" ? "Zing" : "Zing  ×  LingBot2"), RECORDING_STAGE_WIDTH - RECORDING_STAGE_PADDING, y + 30, {
     align: "right",
     color: "rgba(247, 250, 248, 0.72)",
     font: "600 14px ui-sans-serif, system-ui, sans-serif",
@@ -4063,7 +4079,11 @@ function finalizeRecordingArtifact(outputs) {
   const artifact = recordingArtifact || ensureSessionArtifact();
   const primary = outputs.find((output) => output.key === "comparison") || outputs[0];
   if (!primary) throw new Error("No recording outputs were generated");
-  const sidecarBaseName = primary.fileName.replace(/-comparison\.[^.]*$/, "");
+  const primaryStem = primary.fileName.replace(/\.[^.]*$/, "");
+  const primarySuffix = `-${primary.key}`;
+  const sidecarBaseName = primaryStem.endsWith(primarySuffix)
+    ? primaryStem.slice(0, -primarySuffix.length)
+    : primaryStem;
   const jsonFileName = `${sidecarBaseName}.json`;
   const htmlFileName = `${sidecarBaseName}.html`;
   const tracksByKey = Object.fromEntries(recordingTracks.map((track) => [track.key, track]));
@@ -4087,12 +4107,12 @@ function finalizeRecordingArtifact(outputs) {
     stopped_at: new Date().toISOString(),
     stopped_client_ms: artifactClientMs(artifact),
     mode: recordingMode,
-    mime_type: primary.videoBlob.type || tracksByKey.comparison?.mimeType || "video/mp4",
+    mime_type: primary.videoBlob.type || tracksByKey[primary.key]?.mimeType || "video/mp4",
     fps: recordingFps,
     frames: recordingFrameIndex,
     dropped_frames: recordingDroppedFrames,
     duration_ms: Math.round(recordingElapsedMs),
-    encoded_chunks: videos.comparison?.encoded_chunks || 0,
+    encoded_chunks: videos[primary.key]?.encoded_chunks || 0,
     video_file: primary.fileName,
     video_url: recordingAssetUrl(primary.fileName),
     video_bytes: primary.videoBlob.size,

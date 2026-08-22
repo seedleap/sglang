@@ -312,7 +312,8 @@ assert.match(
 assert.match(html, /id="voicePromptBtn"/, "runtime prompt composer should expose voice input");
 assert.match(html, /id="recordBtn"[^>]*class="gameplay-record-button"/, "gameplay recording must be visible");
 assert.match(html, /id="recordDownloadBtn"[^>]*class="gameplay-download-button"/, "finished gameplay must be downloadable");
-assert.match(html, /下载两份录像/, "one action should download comparison and Zing-only videos");
+assert.match(html, /下载录像/, "finished gameplay download should not assume a LingBot comparison recording");
+assert.doesNotMatch(html, /下载两份录像/, "single-model deployments should not advertise two recordings");
 assert.match(html, /id="recordingReadyToast"[^>]*role="status"[^>]*hidden/, "finished worlds should announce downloadable recordings");
 assert.match(html, /data-action="w"[^>]*>W<\/button>/, "movement controls should use compact keycaps");
 assert.match(html, /data-action="i"[^>]*>↑<\/button>/, "look-up should use an arrow keycap");
@@ -328,6 +329,31 @@ assert.match(
   app,
   /const connectionReport = await dualModelController\.connect\(init\);[\s\S]*?rememberEnteredWorld\(/,
   "custom worlds should only be saved after a model connection succeeds",
+);
+assert.match(
+  app,
+  /function shouldRecordComparison\(\) \{[\s\S]*?UI_CONFIG\.singleExperience === true[\s\S]*?return false[\s\S]*?selectedModelKeys\(\)[\s\S]*?keys\.includes\("minwm"\) && keys\.includes\("lingbot2"\)/,
+  "single-experience Zing deployments must not record an empty LingBot comparison pane",
+);
+assert.match(
+  app,
+  /function createStageRecordingTracks\(\) \{[\s\S]*?if \(shouldRecordComparison\(\)\) \{[\s\S]*?key: "comparison"[\s\S]*?tracks\.push\(createRecordingTrack\(\{[\s\S]*?key: "zing"[\s\S]*?return tracks;/,
+  "comparison recordings should be conditional while Zing-only recording remains available",
+);
+assert.doesNotMatch(
+  app,
+  /recordingDownloads\.length [!=]== 2/,
+  "download readiness should support either a single Zing recording or multiple comparison artifacts",
+);
+assert.match(
+  app,
+  /const RECORDING_STAGE_WIDTH = Math\.max\(\s*1280,[\s\S]*?configuredNumber\("gameplayRecordingWidth", 1920\)/,
+  "gameplay recordings should default to a high-resolution stage width",
+);
+assert.match(
+  app,
+  /const RECORDING_STAGE_HEIGHT = Math\.max\(\s*720,[\s\S]*?configuredNumber\([\s\S]*?"gameplayRecordingHeight"[\s\S]*?Math\.round\(RECORDING_STAGE_WIDTH \* 9 \/ 16\)/,
+  "gameplay recordings should default to a 16:9 high-resolution stage height",
 );
 assert.match(app, /function sendRuntimePromptUpdate\(\)/);
 assert.match(
