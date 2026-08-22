@@ -21,12 +21,13 @@ webui/proxy secrets, then applies:
   pre-GPU Beijing control plane.
 - `zing-gateway`: gateway on host port `18080`.
 - `zing-webui`: web UI on host port `80`.
-- `zing-denoiser-5090-sp2`: one DaemonSet Pod per 5090 worker node, with three
-  denoiser containers. Each container is pinned with `NVIDIA_VISIBLE_DEVICES`
-  to two GPUs and launches with `sp=2`, so five workers provide 15 denoiser
-  slots.
-- `zing-vae-5090-dual`: one DaemonSet Pod per 5090 worker node, with two VAE
-  containers. Each container is pinned to one GPU and registers capacity 16.
+- `zing-denoiser-5090-sp2`: one DaemonSet Pod per 5090 worker node. The name is
+  historical; the current pod runs seven single-GPU denoiser containers, each
+  pinned with `NVIDIA_VISIBLE_DEVICES` to GPUs 0-6 and launched with `sp=1`.
+  Five healthy workers provide 35 denoiser slots.
+- `zing-vae-5090-dual`: one DaemonSet Pod per 5090 worker node. The name is
+  historical; the current pod runs one VAE container pinned to GPU 7 and
+  registers capacity 16.
 
 `manifests/nvidia-device-plugin.yaml.tpl` is available for clusters where GPU
 workers have registry egress or the plugin image is preloaded. The default
@@ -84,11 +85,13 @@ Beijing 5090 hosts:
 
 The worker template preserves the current Zing constraints:
 
-- 720p UI (`1280x704`)
+- 480p UI (`832x480`)
 - default target FPS `24`
 - causal sink/window `8/32`
 - `--attention-backend fa`
 - `MINWM_ATTENTION_IMPL=packed`
-- `sp=2` worker profile for 5090 denoisers
-- 6+2 GPU split per worker: 6 GPUs for three denoisers, 2 GPUs for two VAE
+- `minwm_profile_launcher --profile auto` with single-GPU `sp=1` overrides for
+  5090 denoisers
+- fixed runtime images receive the launcher patch through `zing-runtime-tools-patch`
+- 7+1 GPU split per worker: 7 GPUs for seven denoisers, 1 GPU for one VAE
 - direct VAE-side H.264/fMP4 output for the browser playback path

@@ -18,12 +18,12 @@ CONTROL_IMAGE="${CONTROL_IMAGE:-${ACR_REGISTRY}/${ACR_REPOSITORY}:gateway-c7ae70
 WEBUI_IMAGE="${WEBUI_IMAGE:-${ACR_REGISTRY}/${ACR_REPOSITORY}:webui-c7ae70a65a2d}"
 NVIDIA_DEVICE_PLUGIN_IMAGE="${NVIDIA_DEVICE_PLUGIN_IMAGE:-nvcr.io/nvidia/k8s-device-plugin:v0.17.1}"
 REALTIME_TARGET_FPS="${REALTIME_TARGET_FPS:-24}"
-REALTIME_SIZE="${REALTIME_SIZE:-1280x704}"
+REALTIME_SIZE="${REALTIME_SIZE:-832x480}"
 H264_LIVE_EDGE_TARGET_MS="${H264_LIVE_EDGE_TARGET_MS:-500}"
 H264_LIVE_EDGE_SEEK_THRESHOLD_MS="${H264_LIVE_EDGE_SEEK_THRESHOLD_MS:-900}"
 UI_CONFIG_JSON="${UI_CONFIG_JSON:-{\"generationModes\":[\"i2v\"],\"defaultGenerationMode\":\"i2v\",\"modelSlots\":[\"minwm\"],\"lockModelSlots\":true,\"size\":\"${REALTIME_SIZE}\",\"targetFps\":${REALTIME_TARGET_FPS},\"sessionMaxLifetimeSeconds\":70,\"playbackAckEnabled\":false,\"h264WebSocketEnabled\":true,\"h264DirectGatewayEnabled\":true,\"h264WebSocketBaseUrl\":\"${PUBLIC_GATEWAY_BASE_URL}\",\"h264CompressedBitrateKbps\":3000,\"h264CompressedCrf\":20,\"h264CompressedPreset\":\"fast\",\"h264CompressedGopSeconds\":2,\"h264CompressedVbvBufferMs\":250,\"h264WebSocketLiveEdgeTargetMs\":${H264_LIVE_EDGE_TARGET_MS},\"h264WebSocketSeekThresholdMs\":${H264_LIVE_EDGE_SEEK_THRESHOLD_MS},\"singleExperience\":true,\"tabScopedUserIds\":true,\"smoothCatchupRateMax\":1.1,\"dualModels\":{\"minwm\":{\"label\":\"Zing\",\"size\":\"${REALTIME_SIZE}\",\"targetFps\":${REALTIME_TARGET_FPS},\"sinkSize\":8,\"windowFrames\":32,\"continuous\":true,\"h264StartupDropFrames\":0}}}}"
-DENOISER_CAPACITY_LIMIT="${DENOISER_CAPACITY_LIMIT:-15}"
-VAE_CAPACITY_LIMIT="${VAE_CAPACITY_LIMIT:-160}"
+DENOISER_CAPACITY_LIMIT="${DENOISER_CAPACITY_LIMIT:-35}"
+VAE_CAPACITY_LIMIT="${VAE_CAPACITY_LIMIT:-80}"
 WEBUI_PROMPT_REWRITER_PATH="${WEBUI_PROMPT_REWRITER_PATH:-/data/zing-realtime/secrets/prompt-rewriter-vertex.json}"
 HTTPS_PROXY_SECRET_VALUE="${HTTPS_PROXY_SECRET_VALUE:-${https_proxy:-${HTTPS_PROXY:-}}}"
 HTTP_PROXY_SECRET_VALUE="${HTTP_PROXY_SECRET_VALUE:-${http_proxy:-${HTTP_PROXY:-${HTTPS_PROXY_SECRET_VALUE}}}}"
@@ -47,6 +47,7 @@ RUNTIME_SOURCE_PATCH_VERSION="${RUNTIME_SOURCE_PATCH_VERSION:-runtime-v2-h264-20
 RUNTIME_REALTIME_SOURCE_DIR="${RUNTIME_REALTIME_SOURCE_DIR:-${REPO_ROOT}/python/sglang/multimodal_gen/runtime/realtime}"
 RUNTIME_ENTRYPOINT_SOURCE_DIR="${RUNTIME_ENTRYPOINT_SOURCE_DIR:-${REPO_ROOT}/python/sglang/multimodal_gen/runtime/entrypoints}"
 RUNTIME_UTILS_SOURCE_DIR="${RUNTIME_UTILS_SOURCE_DIR:-${REPO_ROOT}/python/sglang/multimodal_gen/runtime/utils}"
+MINWM_PROFILE_LAUNCHER_SOURCE="${MINWM_PROFILE_LAUNCHER_SOURCE:-${REPO_ROOT}/python/sglang/multimodal_gen/tools/minwm_profile_launcher.py}"
 RUNTIME_SHIMS_SOURCE_DIR="${RUNTIME_SHIMS_SOURCE_DIR:-${SCRIPT_DIR}/runtime-shims}"
 H264_FFMPEG_BIN="${H264_FFMPEG_BIN:-/usr/local/lib/python3.12/dist-packages/imageio_ffmpeg/binaries/ffmpeg-linux64-v4.2.2}"
 
@@ -284,6 +285,10 @@ apply_runtime_source_patch() {
       return 1
     fi
   done
+  if [[ ! -f "${MINWM_PROFILE_LAUNCHER_SOURCE}" ]]; then
+    printf 'missing MinWM profile launcher file: %s\n' "${MINWM_PROFILE_LAUNCHER_SOURCE}" >&2
+    return 1
+  fi
   for file in envs.py prometheus_client.py sitecustomize.py; do
     if [[ ! -f "${RUNTIME_SHIMS_SOURCE_DIR}/${file}" ]]; then
       printf 'missing runtime shim file: %s\n' "${RUNTIME_SHIMS_SOURCE_DIR}/${file}" >&2
@@ -292,7 +297,7 @@ apply_runtime_source_patch() {
   done
 
   ssh -o BatchMode=yes "${SSH_HOST}" \
-    "rm -rf '${remote_patch_dir}' && mkdir -p '${remote_patch_dir}/realtime' '${remote_patch_dir}/entrypoints' '${remote_patch_dir}/utils' '${remote_patch_dir}/shims'"
+    "rm -rf '${remote_patch_dir}' && mkdir -p '${remote_patch_dir}/realtime' '${remote_patch_dir}/entrypoints' '${remote_patch_dir}/utils' '${remote_patch_dir}/tools' '${remote_patch_dir}/shims'"
   scp -q "${RUNTIME_REALTIME_SOURCE_DIR}"/*.py "${SSH_HOST}:${remote_patch_dir}/realtime/"
   local entrypoint_sources=()
   for file in "${entrypoint_files[@]}"; do
@@ -304,6 +309,7 @@ apply_runtime_source_patch() {
     utils_sources+=("${RUNTIME_UTILS_SOURCE_DIR}/${file}")
   done
   scp -q "${utils_sources[@]}" "${SSH_HOST}:${remote_patch_dir}/utils/"
+  scp -q "${MINWM_PROFILE_LAUNCHER_SOURCE}" "${SSH_HOST}:${remote_patch_dir}/tools/"
   scp -q \
     "${RUNTIME_SHIMS_SOURCE_DIR}/envs.py" \
     "${RUNTIME_SHIMS_SOURCE_DIR}/prometheus_client.py" \
@@ -318,6 +324,7 @@ kubectl -n "${NAMESPACE}" delete configmap \
   zing-runtime-realtime-patch \
   zing-runtime-entrypoint-patch \
   zing-runtime-utils-patch \
+  zing-runtime-tools-patch \
   zing-runtime-envs-patch \
   zing-runtime-dep-shims \
   --ignore-not-found=true
@@ -329,6 +336,8 @@ kubectl -n "${NAMESPACE}" create configmap zing-runtime-entrypoint-patch \
   --from-file="${REMOTE_PATCH_DIR}/entrypoints/realtime_vae_server.py"
 kubectl -n "${NAMESPACE}" create configmap zing-runtime-utils-patch \
   --from-file="${REMOTE_PATCH_DIR}/utils"
+kubectl -n "${NAMESPACE}" create configmap zing-runtime-tools-patch \
+  --from-file="${REMOTE_PATCH_DIR}/tools/minwm_profile_launcher.py"
 kubectl -n "${NAMESPACE}" create configmap zing-runtime-envs-patch \
   --from-file="${REMOTE_PATCH_DIR}/shims/envs.py"
 kubectl -n "${NAMESPACE}" create configmap zing-runtime-dep-shims \

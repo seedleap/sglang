@@ -150,6 +150,7 @@
       this.mediaFps = 24;
       this.playbackAckEnabled = false;
       this.lastPlaybackRate = 1;
+      this.lastChunkTelemetry = null;
       this.lastStats = {};
       this.handlePlayable = () => this._markPlayable();
       for (const name of ["loadeddata", "playing", "resize", "timeupdate"]) {
@@ -204,6 +205,7 @@
       this.sourceSamples = [];
       this.deliverySamples = [];
       this.networkSample = null;
+      this.lastChunkTelemetry = null;
       this.lastStats = {};
       this.lastRenderedChunk = null;
       this._clearMetricFlushTimer();
@@ -648,7 +650,7 @@
           startupDroppedFrames: Number(event.startup_dropped_frames || 0),
           serverFps: this.sourceSamples.length,
           deliveryFps: this.deliverySamples.length,
-          sourceFps: this.mediaFps,
+          targetFps: this.mediaFps,
         });
       } else if (event.type === "media_encode_timing") {
         const frameIndex = Number(event.first_frame_index || 0);
@@ -674,7 +676,8 @@
           this.pendingPayloadTimings.shift();
         }
       } else if (event.type === "chunk_telemetry") {
-        this._emitStats({ chunkTelemetry: { ...event } });
+        this.lastChunkTelemetry = { ...event };
+        this._emitStats({ chunkTelemetry: this.lastChunkTelemetry });
       } else if (event.type === "control_ack") {
         const clientSentEpochMs = Number(event.client_sent_epoch_ms || 0);
         const serverReceivedEpochMs = Number(event.server_received_epoch_ms || 0);
@@ -845,7 +848,7 @@
           appendQueueBytes: this.appendQueueBytes,
           queueFrames: this.mediaBatches.length,
           renderFps: this.presentedSamples.length,
-          sourceFps: this.mediaFps,
+          targetFps: this.mediaFps,
           serverFps: this.sourceSamples.length,
           deliveryFps: this.deliverySamples.length,
           playbackRate: this.lastPlaybackRate,
@@ -880,7 +883,13 @@
     }
 
     _emitStats(partial) {
-      this.lastStats = { ...this.lastStats, ...partial };
+      this.lastStats = {
+        ...this.lastStats,
+        ...(this.lastChunkTelemetry && partial.chunkTelemetry === undefined
+          ? { chunkTelemetry: this.lastChunkTelemetry }
+          : {}),
+        ...partial,
+      };
       this.onStats({ ...this.lastStats });
     }
 

@@ -16,6 +16,16 @@ from sglang.multimodal_gen.tools.minwm_profile_launcher import (
 )
 
 
+def _last_option_value(command: list[str], option: str) -> str | None:
+    value = None
+    for index, argument in enumerate(command):
+        if argument == option:
+            value = command[index + 1] if index + 1 < len(command) else None
+        elif argument.startswith(f"{option}="):
+            value = argument.split("=", 1)[1]
+    return value
+
+
 @pytest.mark.parametrize(
     ("gpu", "expected"),
     [
@@ -83,6 +93,37 @@ def test_32g_contract_offloads_only_text_encoder():
     assert contract["environment"]["MINWM_ATTENTION_IMPL"] == "packed"
     assert contract["environment"]["MINWM_PACKED_ATTENTION_DETERMINISTIC"] == "false"
     assert contract["environment"]["SGLANG_MINWM_REQUIRE_SM120_FA4"] == "1"
+
+
+def test_profile_allows_parallelism_overrides_for_sp2():
+    contract = build_launch_contract(
+        requested_profile="auto",
+        gpu=GPUInfo("GeForce RTX 5090", (12, 0), 32768, visible_device_count=2),
+        taehv_path=Path("/models/taehv/taew2_2.pth"),
+        server_args=[
+            "--model-path",
+            "/models/minwm",
+            "--num-gpus",
+            "2",
+            "--sp-degree",
+            "2",
+            "--ulysses-degree",
+            "2",
+            "--ring-degree",
+            "1",
+            "--enable-cuda-graph",
+            "true",
+        ],
+        validate_artifacts=False,
+    )
+
+    command = contract["command"]
+    assert contract["gpu"]["visible_device_count"] == 2
+    assert _last_option_value(command, "--num-gpus") == "2"
+    assert _last_option_value(command, "--sp-degree") == "2"
+    assert _last_option_value(command, "--ulysses-degree") == "2"
+    assert _last_option_value(command, "--ring-degree") == "1"
+    assert _last_option_value(command, "--enable-cuda-graph") == "true"
 
 
 def test_profile_rejects_managed_override():

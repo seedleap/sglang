@@ -195,6 +195,14 @@ The explicit `sm120-32g-speed` policy may be selected on a larger SM120 GPU to
 qualify the exact low-memory policy; `auto` still chooses the high-memory policy
 on RTX PRO 6000.
 
+The topology defaults are intentionally conservative for one visible GPU.
+Deployments may still pass parallelism overrides after `--`, such as
+`--num-gpus 2 --sp-degree 2 --ulysses-degree 2`, while the profile keeps
+attention/backend/runtime policy and Tianpeng's `8/32` causal window fixed.
+For a 5090 worker that dedicates one GPU per denoiser, leave those overrides at
+`--num-gpus 1 --sp-degree 1 --ulysses-degree 1` and run one launcher per
+visible GPU.
+
 The Jobs do not mount S3/PVCs or install anything at startup. Archive their raw
 logs, complete Pod JSON, requested top-level image digest, and kubelet `imageID`.
 Do not submit the B200 Job while the warm p6 node is full unless provisioning a

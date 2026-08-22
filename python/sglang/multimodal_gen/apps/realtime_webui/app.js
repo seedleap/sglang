@@ -2330,15 +2330,24 @@ function protocolMetricText(value) {
   return value === null ? "-" : performanceMs(value);
 }
 
+function protocolFpsText(value) {
+  return value === null ? "-" : Number(value).toFixed(1);
+}
+
 function renderProtocolPerformance(key, stats = {}) {
   const telemetry = stats.chunkTelemetry || {};
   const isH264 = stats.transport === "h264" || stats.codec === "h264";
   const receiveMbps = protocolMetric(stats.receiveMbps);
   const bytesReceived = Number(stats.bytesReceived ?? stats.bytes ?? 0);
-  const sourceFps = Number(stats.serverFps || stats.sourceFps || 0);
-  const deliveryFps = Number(stats.deliveryFps || 0);
-  const renderFps = Number(stats.renderFps || 0);
-  const vaeQueueMs = protocolMetric(telemetry.vae_queue_wait_ms);
+  const sourceFps = protocolMetric(stats.serverFps, stats.sourceFps);
+  const deliveryFps = protocolMetric(stats.deliveryFps);
+  const renderFps = protocolMetric(stats.renderFps);
+  const targetFps = protocolMetric(stats.targetFps);
+  const vaeQueueMs = protocolMetric(
+    telemetry.vae_queue_wait_ms,
+    telemetry.vae_queue_ms,
+    telemetry.vae_wait_ms,
+  );
   const vaeDecodeMs = protocolMetric(
     telemetry.vae_decode_ms,
     telemetry.model_vae_decode_ms,
@@ -2358,7 +2367,20 @@ function renderProtocolPerformance(key, stats = {}) {
   );
   const inputUplinkMs = protocolMetric(
     telemetry.input_uplink_ms,
+    telemetry.client_uplink_ms,
+    telemetry.uplink_ms,
     stats.lastInputUplinkMs,
+  );
+  const schedulerMs = protocolMetric(
+    telemetry.scheduler_forward_ms,
+    telemetry.scheduler_ms,
+    telemetry.schedulerForwardMs,
+  );
+  const denoiseMs = protocolMetric(
+    telemetry.model_denoise_ms,
+    telemetry.denoise_ms,
+    telemetry.denoiser_ms,
+    telemetry.modelDenoiseMs,
   );
   const e2eMs = protocolMetric(
     stats.lastPresentedControlToVideoMs,
@@ -2367,16 +2389,22 @@ function renderProtocolPerformance(key, stats = {}) {
   $(`${key}PerfData`).textContent = bytesReceived > 0
     ? `${Number(receiveMbps || 0).toFixed(1)} Mb/s`
     : "-";
-  $(`${key}PerfFps`).textContent = sourceFps > 0 || deliveryFps > 0 || renderFps > 0
-    ? `源 ${sourceFps.toFixed(1)} · 收 ${deliveryFps.toFixed(1)} · 显 ${renderFps.toFixed(1)}`
+  $(`${key}PerfFps`).textContent = (
+    sourceFps !== null
+    || deliveryFps !== null
+    || renderFps !== null
+    || targetFps !== null
+  )
+    ? [
+        `源 ${protocolFpsText(sourceFps)}`,
+        `收 ${protocolFpsText(deliveryFps)}`,
+        `显 ${protocolFpsText(renderFps)}`,
+        ...(targetFps !== null ? [`目标 ${protocolFpsText(targetFps)}`] : []),
+      ].join(" · ")
     : "-";
   $(`${key}PerfUplink`).textContent = protocolMetricText(inputUplinkMs);
-  $(`${key}PerfScheduler`).textContent = telemetry.scheduler_forward_ms != null
-    ? performanceMs(telemetry.scheduler_forward_ms)
-    : "-";
-  $(`${key}PerfDenoise`).textContent = telemetry.model_denoise_ms != null
-    ? performanceMs(telemetry.model_denoise_ms)
-    : "-";
+  $(`${key}PerfScheduler`).textContent = protocolMetricText(schedulerMs);
+  $(`${key}PerfDenoise`).textContent = protocolMetricText(denoiseMs);
   $(`${key}PerfVae`).textContent = vaeQueueMs !== null || vaeDecodeMs !== null
     ? `q ${protocolMetricText(vaeQueueMs)} · dec ${protocolMetricText(vaeDecodeMs)}`
     : "-";
@@ -2399,10 +2427,10 @@ function renderProtocolPerformance(key, stats = {}) {
 
 function renderModelTelemetry(key, stats = {}) {
   const prefix = key === "lingbot2" ? "lingbot2" : "minwm";
-  const renderFps = Number(stats.renderFps || 0);
-  const sourceFps = Number(stats.sourceFps || 0);
-  const serverFps = Number(stats.serverFps || sourceFps);
-  const deliveryFps = Number(stats.deliveryFps || sourceFps);
+  const renderFps = protocolMetric(stats.renderFps);
+  const sourceFps = protocolMetric(stats.serverFps, stats.sourceFps);
+  const deliveryFps = protocolMetric(stats.deliveryFps);
+  const targetFps = protocolMetric(stats.targetFps);
   const bufferMs = Number(stats.bufferMs || 0);
   const queueFrames = Number(stats.queueFrames ?? stats.queueLength ?? 0);
   const droppedFrames = Number(stats.droppedFrames || 0);
@@ -2414,8 +2442,18 @@ function renderModelTelemetry(key, stats = {}) {
   if (droppedFrames) bufferParts.push(`drop ${droppedFrames}`);
   if (frameBatchGapCount) bufferParts.push(`gap ${frameBatchGapCount}`);
   $(`${prefix}ChunkText`).textContent = stats.lastChunk == null ? "-" : `#${stats.lastChunk}`;
-  $(`${prefix}RateText`).textContent = serverFps > 0 || deliveryFps > 0 || renderFps > 0
-    ? `${serverFps.toFixed(1)} source · ${deliveryFps.toFixed(1)} recv · ${renderFps} render`
+  $(`${prefix}RateText`).textContent = (
+    sourceFps !== null
+    || deliveryFps !== null
+    || renderFps !== null
+    || targetFps !== null
+  )
+    ? [
+        `${protocolFpsText(sourceFps)} source`,
+        `${protocolFpsText(deliveryFps)} recv`,
+        `${protocolFpsText(renderFps)} render`,
+        ...(targetFps !== null ? [`${protocolFpsText(targetFps)} target`] : []),
+      ].join(" · ")
     : "-";
   $(`${prefix}BufferText`).textContent = bufferParts.join(" · ");
   $(`${prefix}FramesText`).textContent = `${totalFrames} · ${(Number(stats.bytes || 0) / 1048576).toFixed(1)} MB`;

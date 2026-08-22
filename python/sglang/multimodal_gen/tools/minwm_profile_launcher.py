@@ -52,6 +52,17 @@ COMMON_SERVER_ARGS = (
     ("--realtime-causal-kv-cache-num-frames", "32"),
 )
 
+PROFILE_OVERRIDABLE_SERVER_ARGS = frozenset(
+    {
+        "--num-gpus",
+        "--tp-size",
+        "--sp-degree",
+        "--ulysses-degree",
+        "--ring-degree",
+        "--enable-cuda-graph",
+    }
+)
+
 PROFILE_SERVER_ARGS = {
     PROFILE_SM120_32G_SPEED: (
         ("--text-encoder-cpu-offload", "true"),
@@ -89,6 +100,7 @@ class GPUInfo:
     name: str
     capability: tuple[int, int]
     total_memory_mib: int
+    visible_device_count: int = 1
 
 
 def resolve_profile(requested: str, gpu: GPUInfo) -> str:
@@ -184,6 +196,7 @@ def _reject_managed_overrides(server_args: list[str]) -> None:
         + PROFILE_SERVER_ARGS[PROFILE_SM120_32G_SPEED]
         + PROFILE_SERVER_ARGS[PROFILE_SM120_HIGHMEM_SPEED]
     }
+    managed.difference_update(PROFILE_OVERRIDABLE_SERVER_ARGS)
     managed.add("--vae-config.taehv-checkpoint-path")
     conflicts = sorted(
         option
@@ -233,13 +246,27 @@ def build_launch_contract(
 def _detect_gpu() -> GPUInfo:
     import torch
 
-    if not torch.cuda.is_available() or torch.cuda.device_count() != 1:
-        raise ValueError("MinWM hardware profiles require exactly one visible CUDA GPU")
-    properties = torch.cuda.get_device_properties(0)
+    if not torch.cuda.is_available() or torch.cuda.device_count() < 1:
+        raise ValueError("MinWM hardware profiles require at least one visible CUDA GPU")
+    device_count = torch.cuda.device_count()
+    capabilities = {
+        tuple(torch.cuda.get_device_capability(index)) for index in range(device_count)
+    }
+    if len(capabilities) != 1:
+        raise ValueError(
+            "MinWM hardware profiles require homogeneous visible CUDA GPUs, got "
+            f"{sorted(capabilities)}"
+        )
+    memory_mib = [
+        int(torch.cuda.get_device_properties(index).total_memory // (1024**2))
+        for index in range(device_count)
+    ]
+    names = sorted({torch.cuda.get_device_name(index) for index in range(device_count)})
     return GPUInfo(
-        name=torch.cuda.get_device_name(0),
-        capability=tuple(torch.cuda.get_device_capability(0)),
-        total_memory_mib=int(properties.total_memory // (1024**2)),
+        name=names[0] if len(names) == 1 else ",".join(names),
+        capability=capabilities.pop(),
+        total_memory_mib=min(memory_mib),
+        visible_device_count=device_count,
     )
 
 

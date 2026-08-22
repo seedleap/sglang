@@ -113,7 +113,7 @@ assert.match(
 );
 assert.match(
   appJs,
-  /const inputUplinkMs = protocolMetric\(\s*telemetry\.input_uplink_ms,\s*stats\.lastInputUplinkMs,\s*\);/,
+  /const inputUplinkMs = protocolMetric\(\s*telemetry\.input_uplink_ms,[\s\S]*?stats\.lastInputUplinkMs,\s*\);/,
   "the uplink panel should prefer server-measured input timing over delayed control ACK timing",
 );
 assert.doesNotMatch(

@@ -56,7 +56,7 @@ session._handleMetadata({
   startup_dropped_frames: 8,
 });
 session._handleMetadata({ type: "media_batch", num_frames: 1, repeated_frame: true });
-assert.equal(stats.at(-1).sourceFps, 24);
+assert.equal(stats.at(-1).targetFps, 24);
 assert.equal(stats.at(-1).serverFps, 1);
 assert.equal(stats.at(-1).deliveryFps, 2);
 assert.equal(stats.at(-1).startupDroppedFrames, 0);
@@ -68,6 +68,15 @@ session._handleMetadata({
   num_frames: 1,
   h264_encoder_feed_ms: 0,
 });
+session._handleMetadata({
+  type: "chunk_telemetry",
+  chunk_index: 3,
+  scheduler_forward_ms: 512,
+  model_denoise_ms: 480,
+});
+assert.equal(stats.at(-1).chunkTelemetry.scheduler_forward_ms, 512);
+session._emitStats({ renderFps: 1 });
+assert.equal(stats.at(-1).chunkTelemetry.model_denoise_ms, 480);
 session._handleMetadata({
   type: "media_encode_timing",
   first_frame_index: 7,
