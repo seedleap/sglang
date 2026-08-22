@@ -68,6 +68,8 @@ spec:
       app.kubernetes.io/name: zing-coordinator
   template:
     metadata:
+      annotations:
+        seedleap.ai/runtime-source-patch: ${RUNTIME_SOURCE_PATCH_VERSION}
       labels:
         app.kubernetes.io/name: zing-coordinator
         app.kubernetes.io/part-of: minwm-realtime
@@ -96,6 +98,7 @@ spec:
           env:
             - {name: PYTHONUNBUFFERED, value: "1"}
             - {name: PYTHONPATH, value: /opt/sglang/python}
+            - {name: SGLANG_LIGHTWEIGHT_RUNTIME, value: "1"}
             - {name: OTEL_SERVICE_NAME, value: zing-coordinator}
           ports:
             - {name: http, containerPort: 18081}
@@ -112,6 +115,19 @@ spec:
           resources:
             requests: {cpu: 250m, memory: 256Mi}
             limits: {cpu: "2", memory: 2Gi}
+          volumeMounts:
+            - {name: runtime-realtime-patch, mountPath: /opt/sglang/python/sglang/multimodal_gen/runtime/realtime, readOnly: true}
+            - {name: runtime-entrypoint-patch, mountPath: /opt/sglang/python/sglang/multimodal_gen/runtime/entrypoints/realtime_coordinator_server.py, subPath: realtime_coordinator_server.py, readOnly: true}
+            - {name: runtime-utils-patch, mountPath: /opt/sglang/python/sglang/multimodal_gen/runtime/utils, readOnly: true}
+            - {name: runtime-envs-patch, mountPath: /opt/sglang/python/sglang/multimodal_gen/envs.py, subPath: envs.py, readOnly: true}
+            - {name: runtime-dep-shims, mountPath: /opt/sglang/python/prometheus_client.py, subPath: prometheus_client.py, readOnly: true}
+            - {name: runtime-dep-shims, mountPath: /opt/sglang/python/sitecustomize.py, subPath: sitecustomize.py, readOnly: true}
+      volumes:
+        - {name: runtime-realtime-patch, configMap: {name: zing-runtime-realtime-patch}}
+        - {name: runtime-entrypoint-patch, configMap: {name: zing-runtime-entrypoint-patch}}
+        - {name: runtime-utils-patch, configMap: {name: zing-runtime-utils-patch}}
+        - {name: runtime-envs-patch, configMap: {name: zing-runtime-envs-patch}}
+        - {name: runtime-dep-shims, configMap: {name: zing-runtime-dep-shims}}
 ---
 apiVersion: v1
 kind: Service
@@ -145,6 +161,8 @@ spec:
       app.kubernetes.io/name: zing-gateway
   template:
     metadata:
+      annotations:
+        seedleap.ai/runtime-source-patch: ${RUNTIME_SOURCE_PATCH_VERSION}
       labels:
         app.kubernetes.io/name: zing-gateway
         app.kubernetes.io/part-of: minwm-realtime
@@ -177,6 +195,7 @@ spec:
           env:
             - {name: PYTHONUNBUFFERED, value: "1"}
             - {name: PYTHONPATH, value: /opt/sglang/python}
+            - {name: SGLANG_LIGHTWEIGHT_RUNTIME, value: "1"}
             - {name: OTEL_SERVICE_NAME, value: zing-gateway}
             - name: POD_IP
               valueFrom:
@@ -201,6 +220,19 @@ spec:
           resources:
             requests: {cpu: 500m, memory: 512Mi}
             limits: {cpu: "4", memory: 4Gi}
+          volumeMounts:
+            - {name: runtime-realtime-patch, mountPath: /opt/sglang/python/sglang/multimodal_gen/runtime/realtime, readOnly: true}
+            - {name: runtime-entrypoint-patch, mountPath: /opt/sglang/python/sglang/multimodal_gen/runtime/entrypoints/realtime_gateway_server.py, subPath: realtime_gateway_server.py, readOnly: true}
+            - {name: runtime-utils-patch, mountPath: /opt/sglang/python/sglang/multimodal_gen/runtime/utils, readOnly: true}
+            - {name: runtime-envs-patch, mountPath: /opt/sglang/python/sglang/multimodal_gen/envs.py, subPath: envs.py, readOnly: true}
+            - {name: runtime-dep-shims, mountPath: /opt/sglang/python/prometheus_client.py, subPath: prometheus_client.py, readOnly: true}
+            - {name: runtime-dep-shims, mountPath: /opt/sglang/python/sitecustomize.py, subPath: sitecustomize.py, readOnly: true}
+      volumes:
+        - {name: runtime-realtime-patch, configMap: {name: zing-runtime-realtime-patch}}
+        - {name: runtime-entrypoint-patch, configMap: {name: zing-runtime-entrypoint-patch}}
+        - {name: runtime-utils-patch, configMap: {name: zing-runtime-utils-patch}}
+        - {name: runtime-envs-patch, configMap: {name: zing-runtime-envs-patch}}
+        - {name: runtime-dep-shims, configMap: {name: zing-runtime-dep-shims}}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -246,10 +278,10 @@ spec:
             - {name: PYTHONUNBUFFERED, value: "1"}
             - {name: PYTHONPATH, value: /opt/sglang/python}
             - {name: WEBUI_PORT, value: "18080"}
-            - {name: REALTIME_UPSTREAM_HTTP, value: http://zing-gateway:18080}
-            - {name: REALTIME_UPSTREAM_WS, value: ws://zing-gateway:18080}
-            - {name: MINWM_UPSTREAM_HTTP, value: http://zing-gateway:18080/backends/minwm}
-            - {name: MINWM_UPSTREAM_WS, value: ws://zing-gateway:18080/backends/minwm}
+            - {name: REALTIME_UPSTREAM_HTTP, value: "http://zing-gateway:18080"}
+            - {name: REALTIME_UPSTREAM_WS, value: "ws://zing-gateway:18080"}
+            - {name: MINWM_UPSTREAM_HTTP, value: "http://zing-gateway:18080/backends/minwm"}
+            - {name: MINWM_UPSTREAM_WS, value: "ws://zing-gateway:18080/backends/minwm"}
             - {name: LINGBOT2_UPSTREAM_HTTP, value: ""}
             - {name: LINGBOT2_UPSTREAM_WS, value: ""}
             - {name: VIDEO_PROMPT_REWRITE_PROVIDER, value: local}

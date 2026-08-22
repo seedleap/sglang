@@ -250,6 +250,7 @@ const GAMEPLAY_RECORDING_FPS = Math.max(
   Math.min(30, Math.trunc(configuredNumber("gameplayRecordingFps", DEFAULT_TARGET_FPS))),
 );
 const BROWSER_USER_ID_STORAGE_KEY = "sglang-realtime-user-id";
+const TAB_SCOPED_USER_IDS = UI_CONFIG.tabScopedUserIds === true;
 const MIN_RENDER_TIMER_FPS = 30;
 const MAX_RENDER_TIMER_FPS = 60;
 const CONTROL_KEY_ACTIONS = new Map([
@@ -1777,19 +1778,23 @@ function stableBrowserUserId() {
 }
 
 const browserUserId = stableBrowserUserId();
+const pageUserId = createTraceId();
 
 function traceWebSocketUrl(baseUrl) {
+  const traceUserId = TAB_SCOPED_USER_IDS
+    ? `${browserUserId}:${pageUserId}`
+    : browserUserId;
   try {
     const url = new URL(baseUrl, window.location.href);
     if (currentTrace) url.searchParams.set("trace_id", currentTrace.traceId);
-    url.searchParams.set("user_id", browserUserId);
+    url.searchParams.set("user_id", traceUserId);
     return url.toString();
   } catch {
     const separator = baseUrl.includes("?") ? "&" : "?";
     const trace = currentTrace
       ? `trace_id=${encodeURIComponent(currentTrace.traceId)}&`
       : "";
-    return `${baseUrl}${separator}${trace}user_id=${encodeURIComponent(browserUserId)}`;
+    return `${baseUrl}${separator}${trace}user_id=${encodeURIComponent(traceUserId)}`;
   }
 }
 
@@ -1797,9 +1802,12 @@ function backendWebSocketUrl(key, traceId) {
   const configuredUrl = DUAL_MODEL_CONFIG[key]?.wsUrl;
   const baseUrl = configuredUrl || $("serverUrl").value;
   const configuredUserId = UI_CONFIG.singleExperienceUserIds?.[key];
+  const defaultBackendUserId = TAB_SCOPED_USER_IDS
+    ? `${browserUserId}:${pageUserId}:${key}`
+    : `${browserUserId}:${key}`;
   const backendUserId = UI_CONFIG.singleExperience && configuredUserId
     ? String(configuredUserId)
-    : `${browserUserId}:${key}`;
+    : defaultBackendUserId;
   try {
     const url = new URL(baseUrl, window.location.href);
     if (!configuredUrl) {

@@ -46,6 +46,18 @@ mounts the current source-tree WebUI static assets through the
 Wulanchabu UI behavior without relying on the control ECS pulling another large
 WebUI image tag. Set `APPLY_WEBUI_STATIC_PATCH=false` only when the selected
 `WEBUI_IMAGE` already contains the desired static assets.
+The default Beijing UI config also sets `tabScopedUserIds=true`, so separate
+browser tabs or hard refreshes do not collide on the coordinator's
+one-session-per-user admission fence.
+
+The same pattern is used for realtime runtime code. `APPLY_RUNTIME_SOURCE_PATCH`
+defaults to `true` and creates ConfigMaps for the current `runtime/realtime`
+package, realtime entrypoints, and small compatibility shims. This keeps the
+gateway/coordinator/VAE protocol at v2 with direct H.264 output even when the
+cached runtime image lacks those source files or Python packages. The VAE uses
+the `imageio-ffmpeg` binary bundled in the runtime image through
+`H264_FFMPEG_BIN`; override it only when the selected image provides another
+working FFmpeg path.
 
 The UI is reachable at:
 
@@ -79,3 +91,4 @@ The worker template preserves the current Zing constraints:
 - `MINWM_ATTENTION_IMPL=packed`
 - `sp=2` worker profile for 5090 denoisers
 - 6+2 GPU split per worker: 6 GPUs for three denoisers, 2 GPUs for two VAE
+- direct VAE-side H.264/fMP4 output for the browser playback path

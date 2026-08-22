@@ -196,7 +196,7 @@ spec:
             - {name: PYTHONPATH, value: /opt/sglang/python}
             - {name: NVIDIA_VISIBLE_DEVICES, value: "0,1"}
             - {name: NVIDIA_DRIVER_CAPABILITIES, value: "compute,utility"}
-            - {name: PYTORCH_CUDA_ALLOC_CONF, value: expandable_segments:True}
+            - {name: PYTORCH_CUDA_ALLOC_CONF, value: "expandable_segments:True"}
             - {name: SGLANG_DISABLE_PDEATHSIG, value: "1"}
             - {name: OMP_NUM_THREADS, value: "4"}
             - {name: MKL_NUM_THREADS, value: "4"}
@@ -305,7 +305,7 @@ spec:
             - {name: PYTHONPATH, value: /opt/sglang/python}
             - {name: NVIDIA_VISIBLE_DEVICES, value: "2,3"}
             - {name: NVIDIA_DRIVER_CAPABILITIES, value: "compute,utility"}
-            - {name: PYTORCH_CUDA_ALLOC_CONF, value: expandable_segments:True}
+            - {name: PYTORCH_CUDA_ALLOC_CONF, value: "expandable_segments:True"}
             - {name: SGLANG_DISABLE_PDEATHSIG, value: "1"}
             - {name: OMP_NUM_THREADS, value: "4"}
             - {name: MKL_NUM_THREADS, value: "4"}
@@ -414,7 +414,7 @@ spec:
             - {name: PYTHONPATH, value: /opt/sglang/python}
             - {name: NVIDIA_VISIBLE_DEVICES, value: "4,5"}
             - {name: NVIDIA_DRIVER_CAPABILITIES, value: "compute,utility"}
-            - {name: PYTORCH_CUDA_ALLOC_CONF, value: expandable_segments:True}
+            - {name: PYTORCH_CUDA_ALLOC_CONF, value: "expandable_segments:True"}
             - {name: SGLANG_DISABLE_PDEATHSIG, value: "1"}
             - {name: OMP_NUM_THREADS, value: "4"}
             - {name: MKL_NUM_THREADS, value: "4"}
@@ -495,6 +495,8 @@ spec:
       maxUnavailable: 1
   template:
     metadata:
+      annotations:
+        seedleap.ai/runtime-source-patch: ${RUNTIME_SOURCE_PATCH_VERSION}
       labels:
         app.kubernetes.io/name: zing-vae-5090-dual
         app.kubernetes.io/part-of: minwm-realtime
@@ -597,9 +599,20 @@ spec:
             - --max-message-mb=64
             - --host=0.0.0.0
             - --port=18082
+            - --direct-h264-output
+            - --direct-h264-trigger-output-format=jpeg
+            - --h264-ffmpeg-bin=${H264_FFMPEG_BIN}
+            - --h264-fps=24
+            - --h264-bitrate-kbps=3000
+            - --h264-crf=20
+            - --h264-preset=fast
+            - --h264-gop-seconds=2
+            - --h264-vbv-buffer-ms=250
+            - --h264-max-frame-age-ms=250
           env:
             - {name: PYTHONUNBUFFERED, value: "1"}
             - {name: PYTHONPATH, value: /opt/sglang/python}
+            - {name: SGLANG_LIGHTWEIGHT_RUNTIME, value: "1"}
             - {name: NVIDIA_VISIBLE_DEVICES, value: "6"}
             - {name: NVIDIA_DRIVER_CAPABILITIES, value: "compute,utility"}
             - {name: WORKER_EPOCH_FILE, value: /var/run/minwm-worker/epoch}
@@ -627,6 +640,12 @@ spec:
           volumeMounts:
             - {name: worker-epoch-vae-0, mountPath: /var/run/minwm-worker}
             - {name: taehv, mountPath: /models/taehv, readOnly: true}
+            - {name: runtime-realtime-patch, mountPath: /opt/sglang/python/sglang/multimodal_gen/runtime/realtime, readOnly: true}
+            - {name: runtime-entrypoint-patch, mountPath: /opt/sglang/python/sglang/multimodal_gen/runtime/entrypoints/realtime_vae_server.py, subPath: realtime_vae_server.py, readOnly: true}
+            - {name: runtime-utils-patch, mountPath: /opt/sglang/python/sglang/multimodal_gen/runtime/utils, readOnly: true}
+            - {name: runtime-envs-patch, mountPath: /opt/sglang/python/sglang/multimodal_gen/envs.py, subPath: envs.py, readOnly: true}
+            - {name: runtime-dep-shims, mountPath: /opt/sglang/python/prometheus_client.py, subPath: prometheus_client.py, readOnly: true}
+            - {name: runtime-dep-shims, mountPath: /opt/sglang/python/sitecustomize.py, subPath: sitecustomize.py, readOnly: true}
         - name: vae-1
           image: ${GPU_RUNTIME_IMAGE}
           imagePullPolicy: IfNotPresent
@@ -644,9 +663,20 @@ spec:
             - --max-message-mb=64
             - --host=0.0.0.0
             - --port=18083
+            - --direct-h264-output
+            - --direct-h264-trigger-output-format=jpeg
+            - --h264-ffmpeg-bin=${H264_FFMPEG_BIN}
+            - --h264-fps=24
+            - --h264-bitrate-kbps=3000
+            - --h264-crf=20
+            - --h264-preset=fast
+            - --h264-gop-seconds=2
+            - --h264-vbv-buffer-ms=250
+            - --h264-max-frame-age-ms=250
           env:
             - {name: PYTHONUNBUFFERED, value: "1"}
             - {name: PYTHONPATH, value: /opt/sglang/python}
+            - {name: SGLANG_LIGHTWEIGHT_RUNTIME, value: "1"}
             - {name: NVIDIA_VISIBLE_DEVICES, value: "7"}
             - {name: NVIDIA_DRIVER_CAPABILITIES, value: "compute,utility"}
             - {name: WORKER_EPOCH_FILE, value: /var/run/minwm-worker/epoch}
@@ -674,9 +704,20 @@ spec:
           volumeMounts:
             - {name: worker-epoch-vae-1, mountPath: /var/run/minwm-worker}
             - {name: taehv, mountPath: /models/taehv, readOnly: true}
+            - {name: runtime-realtime-patch, mountPath: /opt/sglang/python/sglang/multimodal_gen/runtime/realtime, readOnly: true}
+            - {name: runtime-entrypoint-patch, mountPath: /opt/sglang/python/sglang/multimodal_gen/runtime/entrypoints/realtime_vae_server.py, subPath: realtime_vae_server.py, readOnly: true}
+            - {name: runtime-utils-patch, mountPath: /opt/sglang/python/sglang/multimodal_gen/runtime/utils, readOnly: true}
+            - {name: runtime-envs-patch, mountPath: /opt/sglang/python/sglang/multimodal_gen/envs.py, subPath: envs.py, readOnly: true}
+            - {name: runtime-dep-shims, mountPath: /opt/sglang/python/prometheus_client.py, subPath: prometheus_client.py, readOnly: true}
+            - {name: runtime-dep-shims, mountPath: /opt/sglang/python/sitecustomize.py, subPath: sitecustomize.py, readOnly: true}
       volumes:
         - {name: worker-epoch-vae-0, emptyDir: {}}
         - {name: worker-epoch-vae-1, emptyDir: {}}
+        - {name: runtime-realtime-patch, configMap: {name: zing-runtime-realtime-patch}}
+        - {name: runtime-entrypoint-patch, configMap: {name: zing-runtime-entrypoint-patch}}
+        - {name: runtime-utils-patch, configMap: {name: zing-runtime-utils-patch}}
+        - {name: runtime-envs-patch, configMap: {name: zing-runtime-envs-patch}}
+        - {name: runtime-dep-shims, configMap: {name: zing-runtime-dep-shims}}
         - name: taehv
           hostPath:
             path: /data/zing-realtime/taehv

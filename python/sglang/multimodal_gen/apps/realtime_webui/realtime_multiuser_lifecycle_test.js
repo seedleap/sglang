@@ -7,8 +7,18 @@ const indexHtml = fs.readFileSync(path.join(__dirname, "index.html"), "utf8");
 
 assert.match(
   appJs,
-  /url\.searchParams\.set\("user_id", browserUserId\)/,
+  /const TAB_SCOPED_USER_IDS = UI_CONFIG\.tabScopedUserIds === true;/,
+  "deployments may opt into page-scoped user identities",
+);
+assert.match(
+  appJs,
+  /const traceUserId = TAB_SCOPED_USER_IDS[\s\S]*?: browserUserId;[\s\S]*?url\.searchParams\.set\("user_id", traceUserId\)/,
   "webui should carry a stable browser identity for per-user admission",
+);
+assert.match(
+  appJs,
+  /const defaultBackendUserId = TAB_SCOPED_USER_IDS[\s\S]*?\$\{browserUserId\}:\$\{pageUserId\}:\$\{key\}/,
+  "page-scoped identities should avoid stale leases across browser tabs",
 );
 assert.match(
   appJs,
