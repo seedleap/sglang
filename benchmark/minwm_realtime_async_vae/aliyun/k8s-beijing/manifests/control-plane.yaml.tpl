@@ -14,6 +14,28 @@ metadata:
 imagePullSecrets:
   - name: acr-pull
 ---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: zing-realtime-node-reader
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: zing-realtime-node-reader
+subjects:
+  - kind: ServiceAccount
+    name: zing-realtime
+    namespace: ${NAMESPACE}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: zing-realtime-node-reader
+---
 apiVersion: v1
 kind: Service
 metadata:
@@ -51,6 +73,8 @@ spec:
         app.kubernetes.io/part-of: minwm-realtime
     spec:
       serviceAccountName: zing-realtime
+      nodeSelector:
+        kubernetes.io/hostname: zing-beijing-control
       terminationGracePeriodSeconds: 30
       containers:
         - name: coordinator
@@ -67,8 +91,8 @@ spec:
               --worker-ttl-s=15
               --wait-timeout-s=10
               --candidate-limit=64
-              --denoiser-capacity-limit=7
-              --vae-capacity-limit=16
+              --denoiser-capacity-limit=${DENOISER_CAPACITY_LIMIT}
+              --vae-capacity-limit=${VAE_CAPACITY_LIMIT}
           env:
             - {name: PYTHONUNBUFFERED, value: "1"}
             - {name: PYTHONPATH, value: /opt/sglang/python}
@@ -126,6 +150,8 @@ spec:
         app.kubernetes.io/part-of: minwm-realtime
     spec:
       serviceAccountName: zing-realtime
+      nodeSelector:
+        kubernetes.io/hostname: zing-beijing-control
       terminationGracePeriodSeconds: 30
       containers:
         - name: gateway
@@ -199,6 +225,8 @@ spec:
         app.kubernetes.io/part-of: minwm-realtime
     spec:
       serviceAccountName: zing-realtime
+      nodeSelector:
+        kubernetes.io/hostname: zing-beijing-control
       automountServiceAccountToken: false
       terminationGracePeriodSeconds: 10
       securityContext:
@@ -222,6 +250,8 @@ spec:
             - {name: REALTIME_UPSTREAM_WS, value: ws://zing-gateway:18080}
             - {name: MINWM_UPSTREAM_HTTP, value: http://zing-gateway:18080/backends/minwm}
             - {name: MINWM_UPSTREAM_WS, value: ws://zing-gateway:18080/backends/minwm}
+            - {name: LINGBOT2_UPSTREAM_HTTP, value: ""}
+            - {name: LINGBOT2_UPSTREAM_WS, value: ""}
             - {name: VIDEO_PROMPT_REWRITE_PROVIDER, value: local}
             - {name: VIDEO_PROMPT_REWRITE_CREDENTIALS, value: /run/secrets/realtime-webui/prompt-rewriter-vertex.json}
             - name: REALTIME_UI_CONFIG_JSON

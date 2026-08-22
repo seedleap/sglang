@@ -2,6 +2,7 @@
 set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../../../.." && pwd)"
 SSH_HOST="${SSH_HOST:?set SSH_HOST=root@<beijing-control-host>}"
 REMOTE_DIR="${REMOTE_DIR:-/root/zing-k8s-beijing}"
 NAMESPACE="${NAMESPACE:-minwm-realtime}"
@@ -15,10 +16,14 @@ ACR_REPOSITORY="${ACR_REPOSITORY:-minwm/sglang-minwm-realtime}"
 GPU_RUNTIME_IMAGE="${GPU_RUNTIME_IMAGE:-${RUNTIME_IMAGE:-${ACR_REGISTRY}/${ACR_REPOSITORY}:minwm-r3-20260820-amd64}}"
 CONTROL_IMAGE="${CONTROL_IMAGE:-${ACR_REGISTRY}/${ACR_REPOSITORY}:gateway-c7ae70a65a2d}"
 WEBUI_IMAGE="${WEBUI_IMAGE:-${ACR_REGISTRY}/${ACR_REPOSITORY}:webui-c7ae70a65a2d}"
+NVIDIA_DEVICE_PLUGIN_IMAGE="${NVIDIA_DEVICE_PLUGIN_IMAGE:-nvcr.io/nvidia/k8s-device-plugin:v0.17.1}"
 REALTIME_TARGET_FPS="${REALTIME_TARGET_FPS:-24}"
+REALTIME_SIZE="${REALTIME_SIZE:-1280x704}"
 H264_LIVE_EDGE_TARGET_MS="${H264_LIVE_EDGE_TARGET_MS:-500}"
 H264_LIVE_EDGE_SEEK_THRESHOLD_MS="${H264_LIVE_EDGE_SEEK_THRESHOLD_MS:-900}"
-UI_CONFIG_JSON="${UI_CONFIG_JSON:-{\"generationModes\":[\"i2v\"],\"defaultGenerationMode\":\"i2v\",\"modelSlots\":[\"minwm\"],\"lockModelSlots\":true,\"size\":\"832x480\",\"targetFps\":${REALTIME_TARGET_FPS},\"sessionMaxLifetimeSeconds\":70,\"playbackAckEnabled\":false,\"h264WebSocketEnabled\":true,\"h264DirectGatewayEnabled\":true,\"h264WebSocketBaseUrl\":\"${PUBLIC_GATEWAY_BASE_URL}\",\"h264CompressedBitrateKbps\":3000,\"h264CompressedCrf\":20,\"h264CompressedPreset\":\"fast\",\"h264CompressedGopSeconds\":2,\"h264CompressedVbvBufferMs\":250,\"h264WebSocketLiveEdgeTargetMs\":${H264_LIVE_EDGE_TARGET_MS},\"h264WebSocketSeekThresholdMs\":${H264_LIVE_EDGE_SEEK_THRESHOLD_MS},\"singleExperience\":false,\"smoothCatchupRateMax\":1.1,\"dualModels\":{\"minwm\":{\"label\":\"Zing\",\"size\":\"832x480\",\"targetFps\":${REALTIME_TARGET_FPS},\"sinkSize\":8,\"windowFrames\":32,\"continuous\":true,\"h264StartupDropFrames\":0}}}}"
+UI_CONFIG_JSON="${UI_CONFIG_JSON:-{\"generationModes\":[\"i2v\"],\"defaultGenerationMode\":\"i2v\",\"modelSlots\":[\"minwm\"],\"lockModelSlots\":true,\"size\":\"${REALTIME_SIZE}\",\"targetFps\":${REALTIME_TARGET_FPS},\"sessionMaxLifetimeSeconds\":70,\"playbackAckEnabled\":false,\"h264WebSocketEnabled\":true,\"h264DirectGatewayEnabled\":true,\"h264WebSocketBaseUrl\":\"${PUBLIC_GATEWAY_BASE_URL}\",\"h264CompressedBitrateKbps\":3000,\"h264CompressedCrf\":20,\"h264CompressedPreset\":\"fast\",\"h264CompressedGopSeconds\":2,\"h264CompressedVbvBufferMs\":250,\"h264WebSocketLiveEdgeTargetMs\":${H264_LIVE_EDGE_TARGET_MS},\"h264WebSocketSeekThresholdMs\":${H264_LIVE_EDGE_SEEK_THRESHOLD_MS},\"singleExperience\":true,\"smoothCatchupRateMax\":1.1,\"dualModels\":{\"minwm\":{\"label\":\"Zing\",\"size\":\"${REALTIME_SIZE}\",\"targetFps\":${REALTIME_TARGET_FPS},\"sinkSize\":8,\"windowFrames\":32,\"continuous\":true,\"h264StartupDropFrames\":0}}}}"
+DENOISER_CAPACITY_LIMIT="${DENOISER_CAPACITY_LIMIT:-15}"
+VAE_CAPACITY_LIMIT="${VAE_CAPACITY_LIMIT:-160}"
 WEBUI_PROMPT_REWRITER_PATH="${WEBUI_PROMPT_REWRITER_PATH:-/data/zing-realtime/secrets/prompt-rewriter-vertex.json}"
 HTTPS_PROXY_SECRET_VALUE="${HTTPS_PROXY_SECRET_VALUE:-${https_proxy:-${HTTPS_PROXY:-}}}"
 HTTP_PROXY_SECRET_VALUE="${HTTP_PROXY_SECRET_VALUE:-${http_proxy:-${HTTP_PROXY:-${HTTPS_PROXY_SECRET_VALUE}}}}"
@@ -31,7 +36,12 @@ K3S_METRICS_SERVER_IMAGE="${K3S_METRICS_SERVER_IMAGE:-registry.cn-hangzhou.aliyu
 K3S_LOCAL_PATH_PROVISIONER_IMAGE="${K3S_LOCAL_PATH_PROVISIONER_IMAGE:-registry.cn-hangzhou.aliyuncs.com/rancher/local-path-provisioner:v0.0.36}"
 K3S_BUSYBOX_IMAGE="${K3S_BUSYBOX_IMAGE:-registry.cn-hangzhou.aliyuncs.com/rancher/mirrored-library-busybox:1.37.0}"
 ROLLOUT_TIMEOUT="${ROLLOUT_TIMEOUT:-1800s}"
+APPLY_NVIDIA_DEVICE_PLUGIN="${APPLY_NVIDIA_DEVICE_PLUGIN:-false}"
 APPLY_GPU_WORKER_TEMPLATES="${APPLY_GPU_WORKER_TEMPLATES:-true}"
+APPLY_WEBUI_STATIC_PATCH="${APPLY_WEBUI_STATIC_PATCH:-true}"
+WEBUI_STATIC_PATCH_NAME="${WEBUI_STATIC_PATCH_NAME:-zing-webui-static-patch}"
+WEBUI_STATIC_PATCH_VERSION="${WEBUI_STATIC_PATCH_VERSION:-single-zing-v7-20260822}"
+WEBUI_STATIC_SOURCE_DIR="${WEBUI_STATIC_SOURCE_DIR:-${REPO_ROOT}/python/sglang/multimodal_gen/apps/realtime_webui}"
 
 log() {
   printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"
@@ -44,8 +54,13 @@ render_template() {
   CONTROL_IMAGE="${CONTROL_IMAGE}" \
   GPU_RUNTIME_IMAGE="${GPU_RUNTIME_IMAGE}" \
   WEBUI_IMAGE="${WEBUI_IMAGE}" \
+  NVIDIA_DEVICE_PLUGIN_IMAGE="${NVIDIA_DEVICE_PLUGIN_IMAGE}" \
+  REALTIME_TARGET_FPS="${REALTIME_TARGET_FPS}" \
+  REALTIME_SIZE="${REALTIME_SIZE}" \
+  DENOISER_CAPACITY_LIMIT="${DENOISER_CAPACITY_LIMIT}" \
+  VAE_CAPACITY_LIMIT="${VAE_CAPACITY_LIMIT}" \
   UI_CONFIG_JSON="${UI_CONFIG_JSON}" \
-  envsubst '${NAMESPACE} ${CONTROL_IMAGE} ${GPU_RUNTIME_IMAGE} ${WEBUI_IMAGE} ${UI_CONFIG_JSON}' \
+  envsubst '${NAMESPACE} ${CONTROL_IMAGE} ${GPU_RUNTIME_IMAGE} ${WEBUI_IMAGE} ${NVIDIA_DEVICE_PLUGIN_IMAGE} ${REALTIME_TARGET_FPS} ${REALTIME_SIZE} ${DENOISER_CAPACITY_LIMIT} ${VAE_CAPACITY_LIMIT} ${UI_CONFIG_JSON}' \
     <"${template}" >"${output}"
 }
 
@@ -237,14 +252,132 @@ apply_manifests() {
   scp -q "${rendered}" "${SSH_HOST}:${REMOTE_DIR}/control-plane.yaml"
   rm -f "${rendered}"
   ssh -o BatchMode=yes "${SSH_HOST}" "kubectl apply -f '${REMOTE_DIR}/control-plane.yaml'"
+  if [[ "${APPLY_NVIDIA_DEVICE_PLUGIN}" == "true" ]]; then
+    log "rendering and applying NVIDIA device plugin"
+    rendered="$(mktemp)"
+    render_template "${SCRIPT_DIR}/manifests/nvidia-device-plugin.yaml.tpl" "${rendered}"
+    scp -q "${rendered}" "${SSH_HOST}:${REMOTE_DIR}/nvidia-device-plugin.yaml"
+    rm -f "${rendered}"
+    ssh -o BatchMode=yes "${SSH_HOST}" "kubectl apply -f '${REMOTE_DIR}/nvidia-device-plugin.yaml'"
+  fi
   if [[ "${APPLY_GPU_WORKER_TEMPLATES}" == "true" ]]; then
-    log "rendering and applying zero-replica GPU worker templates"
+    log "rendering and applying GPU worker templates"
     rendered="$(mktemp)"
     render_template "${SCRIPT_DIR}/manifests/gpu-workers-5090.yaml.tpl" "${rendered}"
     scp -q "${rendered}" "${SSH_HOST}:${REMOTE_DIR}/gpu-workers-5090.yaml"
     rm -f "${rendered}"
+    ssh -o BatchMode=yes "${SSH_HOST}" "kubectl -n '${NAMESPACE}' delete deploy/zing-vae-5090 sts/zing-denoiser-5090 svc/zing-denoiser-5090 --ignore-not-found=true"
     ssh -o BatchMode=yes "${SSH_HOST}" "kubectl apply -f '${REMOTE_DIR}/gpu-workers-5090.yaml'"
   fi
+}
+
+apply_webui_static_patch() {
+  if [[ "${APPLY_WEBUI_STATIC_PATCH}" != "true" ]]; then
+    log "webui static patch disabled"
+    return
+  fi
+
+  log "uploading single-Zing webui static patch"
+  local remote_patch_dir="${REMOTE_DIR}/webui-static-patch"
+  local files=(
+    index.html
+    styles.css
+    playback_controller.js
+    model_session.js
+    dual_model_controller.js
+    h264_websocket_session.js
+    happy_oyster_session.js
+    session_lifetime.js
+    prompt_rewrite_controller.js
+    world_rules_controller.js
+    fullscreen_controller.js
+    trace_topology.js
+    trace_transport.js
+    app.js
+  )
+  local sources=()
+  local file
+  for file in "${files[@]}"; do
+    if [[ ! -f "${WEBUI_STATIC_SOURCE_DIR}/${file}" ]]; then
+      printf 'missing webui static file: %s\n' "${WEBUI_STATIC_SOURCE_DIR}/${file}" >&2
+      return 1
+    fi
+    sources+=("${WEBUI_STATIC_SOURCE_DIR}/${file}")
+  done
+
+  ssh -o BatchMode=yes "${SSH_HOST}" "rm -rf '${remote_patch_dir}' && mkdir -p '${remote_patch_dir}'"
+  scp -q "${sources[@]}" "${SSH_HOST}:${remote_patch_dir}/"
+  ssh -o BatchMode=yes "${SSH_HOST}" \
+    "NAMESPACE='${NAMESPACE}' REMOTE_PATCH_DIR='${remote_patch_dir}' PATCH_NAME='${WEBUI_STATIC_PATCH_NAME}' bash -s" <<'REMOTE'
+set -Eeuo pipefail
+printf '%s\n' 'globalThis.HappyOysterSDK = globalThis.HappyOysterSDK || {};' \
+  >"${REMOTE_PATCH_DIR}/happy_oyster_sdk.js"
+kubectl -n "${NAMESPACE}" delete configmap "${PATCH_NAME}" --ignore-not-found=true
+kubectl -n "${NAMESPACE}" create configmap "${PATCH_NAME}" --from-file="${REMOTE_PATCH_DIR}"
+REMOTE
+
+  WEBUI_STATIC_PATCH_NAME="${WEBUI_STATIC_PATCH_NAME}" \
+  WEBUI_STATIC_PATCH_VERSION="${WEBUI_STATIC_PATCH_VERSION}" \
+  WEBUI_IMAGE="${WEBUI_IMAGE}" \
+  python3 - <<'PY' | ssh -o BatchMode=yes "${SSH_HOST}" \
+    "kubectl -n '${NAMESPACE}' patch deploy zing-webui --type=strategic --patch-file /dev/stdin"
+import json
+import os
+
+base = "/opt/sglang/python/sglang/multimodal_gen/apps/realtime_webui"
+files = [
+    "index.html",
+    "styles.css",
+    "playback_controller.js",
+    "model_session.js",
+    "dual_model_controller.js",
+    "h264_websocket_session.js",
+    "happy_oyster_sdk.js",
+    "happy_oyster_session.js",
+    "session_lifetime.js",
+    "prompt_rewrite_controller.js",
+    "world_rules_controller.js",
+    "fullscreen_controller.js",
+    "trace_topology.js",
+    "trace_transport.js",
+    "app.js",
+]
+patch = {
+    "spec": {
+        "template": {
+            "metadata": {
+                "annotations": {
+                    "seedleap.ai/webui-static-patch": os.environ["WEBUI_STATIC_PATCH_VERSION"]
+                }
+            },
+            "spec": {
+                "volumes": [
+                    {
+                        "name": "webui-static-patch",
+                        "configMap": {"name": os.environ["WEBUI_STATIC_PATCH_NAME"]},
+                    }
+                ],
+                "containers": [
+                    {
+                        "name": "webui",
+                        "image": os.environ["WEBUI_IMAGE"],
+                        "volumeMounts": [
+                            {
+                                "name": "webui-static-patch",
+                                "mountPath": f"{base}/{name}",
+                                "subPath": name,
+                                "readOnly": True,
+                            }
+                            for name in files
+                        ],
+                    }
+                ],
+            },
+        }
+    }
+}
+print(json.dumps(patch, separators=(",", ":")))
+PY
 }
 
 wait_rollout() {
@@ -273,6 +406,7 @@ main() {
   create_optional_webui_secret
   create_optional_proxy_secret
   apply_manifests
+  apply_webui_static_patch
   wait_rollout
   print_status
 }
